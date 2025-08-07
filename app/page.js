@@ -100,7 +100,7 @@ export default function Page() {
     const [visible2, setVisible2] = useState(true)
     const [visible3, setVisible3] = useState(true)
     const [lightIntensity, setLightIntensity] = useState(1)
-    const [lightPos1, setLightPos1] = useState({ x: 5, y: 5, z: 5 })
+    const [lightPos1, setLightPos1] = useState({ x: -3, y: 5, z: 5 })
     const [lightPos2, setLightPos2] = useState({ x: -5, y: -5, z: -5 })
     const [showLights, setShowLights] = useState(false)
 
