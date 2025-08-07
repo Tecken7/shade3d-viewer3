@@ -119,17 +119,17 @@ export default function Page() {
                 <div>Upper:</div>
                 <input type="color" value={color1} onChange={(e) => setColor1(e.target.value)} />
                 <input className="slider" type="range" min={0} max={1} step={0.01} value={opacity1} onChange={(e) => setOpacity1(parseFloat(e.target.value))} />
-                <button className="toggle">{visible1 ? '👁️' : '🚫'}</button>
+                <button className="toggle" onClick={() => setVisible1(!visible1)}>{visible1 ? '👁️' : '🚫'}</button>
 
                 <div style={{ marginTop: '10px' }}>Lower:</div>
                 <input type="color" value={color2} onChange={(e) => setColor2(e.target.value)} />
                 <input className="slider" type="range" min={0} max={1} step={0.01} value={opacity2} onChange={(e) => setOpacity2(parseFloat(e.target.value))} />
-                <button className="toggle">{visible2 ? '👁️' : '🚫'}</button>
+                <button className="toggle" onClick={() => setVisible2(!visible2)}>{visible2 ? '👁️' : '🚫'}</button>
 
                 <div style={{ marginTop: '10px' }}>Waxup:</div>
                 <input type="color" value={color3} onChange={(e) => setColor3(e.target.value)} />
                 <input className="slider" type="range" min={0} max={1} step={0.01} value={opacity3} onChange={(e) => setOpacity3(parseFloat(e.target.value))} />
-                <button className="toggle">{visible3 ? '👁️' : '🚫'}</button>
+                <button className="toggle" onClick={() => setVisible3(!visible3)}>{visible3 ? '👁️' : '🚫'}</button>
 
                 <div style={{ marginTop: '10px' }}>💡 Light Intensity:</div>
                 <input className="slider" type="range" min={0} max={2} step={0.01} value={lightIntensity} onChange={(e) => setLightIntensity(parseFloat(e.target.value))} />
@@ -140,32 +140,31 @@ export default function Page() {
 
                 {showLights && (
                     <div style={{ marginTop: '5px' }}>
-                        {['lightPos1', 'lightPos2', 'lightPos3'].map((key, index) => {
-                            const label = `Light ${index + 1} Position:`
-                            const pos = index === 0 ? lightPos1 : index === 1 ? lightPos2 : lightPos3
-                            const setPos = index === 0 ? setLightPos1 : index === 1 ? setLightPos2 : setLightPos3
-                            return (
-                                <div key={key} style={{ marginTop: '10px' }}>
-                                    <div>🔦 {label}</div>
-                                    {['x', 'y', 'z'].map(axis => (
-                                        <div key={axis}>
-                                            <div>{axis.toUpperCase()}:</div>
-                                            <input
-                                                className="slider"
-                                                type="range"
-                                                min={-10}
-                                                max={10}
-                                                step={0.1}
-                                                value={pos[axis]}
-                                                onChange={(e) =>
-                                                    setPos({ ...pos, [axis]: parseFloat(e.target.value) })
-                                                }
-                                            />
-                                        </div>
-                                    ))}
-                                </div>
-                            )
-                        })}
+                        {[
+                            { label: 'Light 1 Position', pos: lightPos1, setPos: setLightPos1 },
+                            { label: 'Light 2 Position', pos: lightPos2, setPos: setLightPos2 },
+                            { label: 'Light 3 Position', pos: lightPos3, setPos: setLightPos3 },
+                        ].map((light, idx) => (
+                            <div key={idx} style={{ marginTop: '10px' }}>
+                                <div>🔦 {light.label}:</div>
+                                {['x', 'y', 'z'].map(axis => (
+                                    <div key={axis}>
+                                        <div>{axis.toUpperCase()}:</div>
+                                        <input
+                                            className="slider"
+                                            type="range"
+                                            min={-10}
+                                            max={10}
+                                            step={0.1}
+                                            value={light.pos[axis]}
+                                            onChange={(e) =>
+                                                light.setPos({ ...light.pos, [axis]: parseFloat(e.target.value) })
+                                            }
+                                        />
+                                    </div>
+                                ))}
+                            </div>
+                        ))}
                     </div>
                 )}
             </div>
@@ -185,7 +184,7 @@ export default function Page() {
                 <TouchTrackballControls />
             </Canvas>
 
-            {/* Globální CSS stylování pro slider a tlačítka */}
+            {/* Stylování */}
             <style jsx global>{`
                 .slider {
                     -webkit-appearance: none;
