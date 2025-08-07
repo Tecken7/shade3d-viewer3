@@ -7,6 +7,12 @@ import * as THREE from 'three'
 import { Suspense, useEffect, useRef, useState } from 'react'
 import { Html, useProgress } from '@react-three/drei'
 
+function extractNameFromURL(url) {
+    const parts = url.split('/')
+    const filename = parts[parts.length - 1]
+    return filename.replace('.obj', '')
+}
+
 function Model({ url, color, opacity, visible }) {
     const obj = useLoader(OBJLoader, url)
 
@@ -89,6 +95,19 @@ function Loader() {
     )
 }
 
+function ModelControls({ url, color, setColor, opacity, setOpacity, visible, setVisible }) {
+    const label = extractNameFromURL(url)
+
+    return (
+        <div style={{ marginTop: '10px' }}>
+            <div>{label}:</div>
+            <input type="color" value={color} onChange={(e) => setColor(e.target.value)} />
+            <input type="range" min={0} max={1} step={0.01} value={opacity} onChange={(e) => setOpacity(parseFloat(e.target.value))} />
+            <button onClick={() => setVisible(!visible)}>{visible ? '👁️' : '🚫'}</button>
+        </div>
+    )
+}
+
 export default function Page() {
     const [color1, setColor1] = useState('#f5f5dc')
     const [color2, setColor2] = useState('#f5f5dc')
@@ -102,8 +121,12 @@ export default function Page() {
     const [lightIntensity, setLightIntensity] = useState(1)
     const [lightPos1, setLightPos1] = useState({ x: 0, y: 5, z: 5 })
     const [lightPos2, setLightPos2] = useState({ x: -5, y: -5, z: -5 })
-    const [lightPos3, setLightPos3] = useState({ x: 10, y: 0, z: 0 }) // světlo zprava
+    const [lightPos3, setLightPos3] = useState({ x: 10, y: 0, z: 0 })
     const [showLights, setShowLights] = useState(false)
+
+    const upperUrl = "/models/Upper.obj"
+    const lowerUrl = "/models/Lower.obj"
+    const crownUrl = "/models/Crown21.obj"
 
     return (
         <div style={{ width: '100vw', height: '100vh' }}>
@@ -111,20 +134,35 @@ export default function Page() {
                 position: 'absolute', top: 10, left: 10, zIndex: 1,
                 color: 'white', fontFamily: 'sans-serif'
             }}>
-                <div>Upper:</div>
-                <input type="color" value={color1} onChange={(e) => setColor1(e.target.value)} />
-                <input type="range" min={0} max={1} step={0.01} value={opacity1} onChange={(e) => setOpacity1(parseFloat(e.target.value))} />
-                <button onClick={() => setVisible1(!visible1)}>{visible1 ? '👁️' : '🚫'}</button>
+                <ModelControls
+                    url={upperUrl}
+                    color={color1}
+                    setColor={setColor1}
+                    opacity={opacity1}
+                    setOpacity={setOpacity1}
+                    visible={visible1}
+                    setVisible={setVisible1}
+                />
 
-                <div style={{ marginTop: '10px' }}>Lower:</div>
-                <input type="color" value={color2} onChange={(e) => setColor2(e.target.value)} />
-                <input type="range" min={0} max={1} step={0.01} value={opacity2} onChange={(e) => setOpacity2(parseFloat(e.target.value))} />
-                <button onClick={() => setVisible2(!visible2)}>{visible2 ? '👁️' : '🚫'}</button>
+                <ModelControls
+                    url={lowerUrl}
+                    color={color2}
+                    setColor={setColor2}
+                    opacity={opacity2}
+                    setOpacity={setOpacity2}
+                    visible={visible2}
+                    setVisible={setVisible2}
+                />
 
-                <div style={{ marginTop: '10px' }}>Crown21:</div>
-                <input type="color" value={color3} onChange={(e) => setColor3(e.target.value)} />
-                <input type="range" min={0} max={1} step={0.01} value={opacity3} onChange={(e) => setOpacity3(parseFloat(e.target.value))} />
-                <button onClick={() => setVisible3(!visible3)}>{visible3 ? '👁️' : '🚫'}</button>
+                <ModelControls
+                    url={crownUrl}
+                    color={color3}
+                    setColor={setColor3}
+                    opacity={opacity3}
+                    setOpacity={setOpacity3}
+                    visible={visible3}
+                    setVisible={setVisible3}
+                />
 
                 <div style={{ marginTop: '10px' }}>💡 Light Intensity:</div>
                 <input type="range" min={0} max={2} step={0.01} value={lightIntensity} onChange={(e) => setLightIntensity(parseFloat(e.target.value))} />
@@ -169,9 +207,9 @@ export default function Page() {
                 <directionalLight position={[lightPos3.x, lightPos3.y, lightPos3.z]} intensity={lightIntensity * 1.2} />
 
                 <Suspense fallback={<Loader />}>
-                    <Model url="/models/Upper.obj" color={color1} opacity={opacity1} visible={visible1} />
-                    <Model url="/models/Lower.obj" color={color2} opacity={opacity2} visible={visible2} />
-                    <Model url="/models/Crown21.obj" color={color3} opacity={opacity3} visible={visible3} />
+                    <Model url={upperUrl} color={color1} opacity={opacity1} visible={visible1} />
+                    <Model url={lowerUrl} color={color2} opacity={opacity2} visible={visible2} />
+                    <Model url={crownUrl} color={color3} opacity={opacity3} visible={visible3} />
                 </Suspense>
 
                 <TouchTrackballControls />
