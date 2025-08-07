@@ -187,20 +187,19 @@ export default function Page() {
             <style jsx global>{`
                 .slider {
                     -webkit-appearance: none;
-                    width: 100px;
+                    -moz-appearance: none;
+                    appearance: none;
+                    width: 140px;
                     height: 14px;
                     background: transparent;
                     margin: 5px 0;
-                    position: relative;
+                    display: inline-block;
                 }
 
                 .slider::-webkit-slider-runnable-track {
                     height: 4px;
                     background: white;
                     border-radius: 2px;
-                    position: absolute;
-                    top: 50%;
-                    transform: translateY(-50%);
                 }
 
                 .slider::-webkit-slider-thumb {
@@ -212,8 +211,7 @@ export default function Page() {
                     background: white;
                     cursor: pointer;
                     box-shadow: 0 0 2px black;
-                    position: relative;
-                    z-index: 2;
+                    margin-top: -5px;
                 }
 
                 .slider::-moz-range-track {
@@ -223,6 +221,29 @@ export default function Page() {
                 }
 
                 .slider::-moz-range-thumb {
+                    width: 14px;
+                    height: 14px;
+                    border-radius: 50%;
+                    background: white;
+                    cursor: pointer;
+                    box-shadow: 0 0 2px black;
+                    border: none;
+                }
+
+                .slider::-ms-track {
+                    height: 4px;
+                    background: transparent;
+                    border-color: transparent;
+                    color: transparent;
+                }
+
+                .slider::-ms-fill-lower,
+                .slider::-ms-fill-upper {
+                    background: white;
+                    border-radius: 2px;
+                }
+
+                .slider::-ms-thumb {
                     width: 14px;
                     height: 14px;
                     border-radius: 50%;
