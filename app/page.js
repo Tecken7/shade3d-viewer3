@@ -102,6 +102,7 @@ export default function Page() {
     const [lightIntensity, setLightIntensity] = useState(1)
     const [lightPos1, setLightPos1] = useState({ x: 0, y: 5, z: 5 })
     const [lightPos2, setLightPos2] = useState({ x: -5, y: -5, z: -5 })
+    const [lightPos3, setLightPos3] = useState({ x: 10, y: 0, z: 0 }) // světlo zprava
     const [showLights, setShowLights] = useState(false)
 
     return (
@@ -149,6 +150,14 @@ export default function Page() {
                         <input type="range" min={-10} max={10} step={0.1} value={lightPos2.y} onChange={(e) => setLightPos2({ ...lightPos2, y: parseFloat(e.target.value) })} />
                         <div>Z:</div>
                         <input type="range" min={-10} max={10} step={0.1} value={lightPos2.z} onChange={(e) => setLightPos2({ ...lightPos2, z: parseFloat(e.target.value) })} />
+
+                        <div style={{ marginTop: '10px' }}>🔦 Light 3 Position (Right):</div>
+                        <div>X:</div>
+                        <input type="range" min={-10} max={10} step={0.1} value={lightPos3.x} onChange={(e) => setLightPos3({ ...lightPos3, x: parseFloat(e.target.value) })} />
+                        <div>Y:</div>
+                        <input type="range" min={-10} max={10} step={0.1} value={lightPos3.y} onChange={(e) => setLightPos3({ ...lightPos3, y: parseFloat(e.target.value) })} />
+                        <div>Z:</div>
+                        <input type="range" min={-10} max={10} step={0.1} value={lightPos3.z} onChange={(e) => setLightPos3({ ...lightPos3, z: parseFloat(e.target.value) })} />
                     </div>
                 )}
             </div>
@@ -157,6 +166,7 @@ export default function Page() {
                 <ambientLight intensity={lightIntensity * 0.4} />
                 <directionalLight position={[lightPos1.x, lightPos1.y, lightPos1.z]} intensity={lightIntensity * 1.5} />
                 <directionalLight position={[lightPos2.x, lightPos2.y, lightPos2.z]} intensity={lightIntensity * 1.0} />
+                <directionalLight position={[lightPos3.x, lightPos3.y, lightPos3.z]} intensity={lightIntensity * 1.2} />
 
                 <Suspense fallback={<Loader />}>
                     <Model url="/models/Upper.obj" color={color1} opacity={opacity1} visible={visible1} />
