@@ -184,16 +184,23 @@ export default function Page() {
                 <TouchTrackballControls />
             </Canvas>
 
-            {/* Stylování */}
             <style jsx global>{`
                 .slider {
                     -webkit-appearance: none;
                     width: 100px;
+                    height: 14px;
+                    background: transparent;
+                    margin: 5px 0;
+                    position: relative;
+                }
+
+                .slider::-webkit-slider-runnable-track {
                     height: 4px;
                     background: white;
                     border-radius: 2px;
-                    outline: none;
-                    margin: 5px 0;
+                    position: absolute;
+                    top: 50%;
+                    transform: translateY(-50%);
                 }
 
                 .slider::-webkit-slider-thumb {
@@ -204,8 +211,15 @@ export default function Page() {
                     border-radius: 50%;
                     background: white;
                     cursor: pointer;
-                    margin-top: -5px;
                     box-shadow: 0 0 2px black;
+                    position: relative;
+                    z-index: 2;
+                }
+
+                .slider::-moz-range-track {
+                    height: 4px;
+                    background: white;
+                    border-radius: 2px;
                 }
 
                 .slider::-moz-range-thumb {
