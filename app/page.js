@@ -9,13 +9,15 @@ import { Html, useProgress } from '@react-three/drei'
 
 function Model({ url, color, opacity, visible }) {
     const obj = useLoader(OBJLoader, url)
+
     const material = new THREE.MeshStandardMaterial({
         color: new THREE.Color(color),
-        transparent: true,
+        transparent: opacity < 1,
         opacity,
         metalness: 0.5,
         roughness: 0.5,
         side: THREE.DoubleSide,
+        depthWrite: opacity === 1,
     })
 
     obj.traverse((child) => {
@@ -153,14 +155,8 @@ export default function Page() {
 
             <Canvas orthographic camera={{ position: [0, 0, 100], zoom: 15 }}>
                 <ambientLight intensity={lightIntensity * 0.4} />
-                <directionalLight
-                    position={[lightPos1.x, lightPos1.y, lightPos1.z]}
-                    intensity={lightIntensity * 1.5}
-                />
-                <directionalLight
-                    position={[lightPos2.x, lightPos2.y, lightPos2.z]}
-                    intensity={lightIntensity * 1.0}
-                />
+                <directionalLight position={[lightPos1.x, lightPos1.y, lightPos1.z]} intensity={lightIntensity * 1.5} />
+                <directionalLight position={[lightPos2.x, lightPos2.y, lightPos2.z]} intensity={lightIntensity * 1.0} />
 
                 <Suspense fallback={<Loader />}>
                     <Model url="/models/Upper.obj" color={color1} opacity={opacity1} visible={visible1} />
