@@ -121,7 +121,7 @@ export default function Page() {
                 <input type="range" min={0} max={1} step={0.01} value={opacity2} onChange={(e) => setOpacity2(parseFloat(e.target.value))} />
                 <button onClick={() => setVisible2(!visible2)}>{visible2 ? '👁️' : '🚫'}</button>
 
-                <div style={{ marginTop: '10px' }}>Crown21:</div>
+                <div style={{ marginTop: '10px' }}>Waxup:</div>
                 <input type="color" value={color3} onChange={(e) => setColor3(e.target.value)} />
                 <input type="range" min={0} max={1} step={0.01} value={opacity3} onChange={(e) => setOpacity3(parseFloat(e.target.value))} />
                 <button onClick={() => setVisible3(!visible3)}>{visible3 ? '👁️' : '🚫'}</button>
@@ -151,7 +151,7 @@ export default function Page() {
                         <div>Z:</div>
                         <input type="range" min={-10} max={10} step={0.1} value={lightPos2.z} onChange={(e) => setLightPos2({ ...lightPos2, z: parseFloat(e.target.value) })} />
 
-                        <div style={{ marginTop: '10px' }}>🔦 Light 3 Position (Right):</div>
+                        <div style={{ marginTop: '10px' }}>🔦 Light 3 Position:</div>
                         <div>X:</div>
                         <input type="range" min={-10} max={10} step={0.1} value={lightPos3.x} onChange={(e) => setLightPos3({ ...lightPos3, x: parseFloat(e.target.value) })} />
                         <div>Y:</div>
