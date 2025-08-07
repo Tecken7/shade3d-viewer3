@@ -1,242 +1,175 @@
 'use client'
 
-import {
-  Canvas,
-  useLoader,
-  useFrame,
-  extend,
-} from '@react-three/fiber'
-import {
-  TrackballControls,
-  Html,
-} from '@react-three/drei'
-import * as THREE from 'three'
-import { Suspense, useRef, useState, useEffect } from 'react'
+import { Canvas, useLoader, useThree, useFrame } from '@react-three/fiber'
+import { TrackballControls } from 'three/examples/jsm/controls/TrackballControls'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader'
-import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader'
-
-extend({ TrackballControls })
+import * as THREE from 'three'
+import { Suspense, useEffect, useRef, useState } from 'react'
+import { Html, useProgress } from '@react-three/drei'
 
 function Model({ url, color, opacity, visible }) {
-  const obj = useLoader(OBJLoader, url)
-  const ref = useRef()
-
-  const material = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(color),
-    transparent: true,
-    opacity: opacity,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  })
-
-  useEffect(() => {
-    obj.traverse((child) => {
-      if (child.isMesh) {
-        child.material = material
-      }
+    const obj = useLoader(OBJLoader, url)
+    const material = new THREE.MeshStandardMaterial({
+        color: new THREE.Color(color),
+        transparent: true,
+        opacity,
+        metalness: 0.5,
+        roughness: 0.5,
+        side: THREE.DoubleSide,
     })
-  }, [opacity, color])
 
-  useFrame(({ camera }) => {
-    if (ref.current) {
-      ref.current.children.sort((a, b) => {
-        const aDist = camera.position.distanceTo(a.position)
-        const bDist = camera.position.distanceTo(b.position)
-        return bDist - aDist
-      })
-    }
-  })
+    obj.traverse((child) => {
+        if (child.isMesh) {
+            child.material = material
+        }
+    })
 
-  return visible ? <group ref={ref}><primitive object={obj} /></group> : null
+    return visible ? <primitive object={obj} /> : null
 }
 
-function Lights({ intensity, position1, position2 }) {
-  return (
-    <>
-      <directionalLight
-        position={position1}
-        intensity={intensity}
-        castShadow
-      />
-      <directionalLight
-        position={position2}
-        intensity={intensity * 0.6}
-      />
-    </>
-  )
+function TouchTrackballControls() {
+    const { camera, gl } = useThree()
+    const controlsRef = useRef()
+
+    useEffect(() => {
+        const controls = new TrackballControls(camera, gl.domElement)
+        controls.rotateSpeed = 5.0
+        controls.zoomSpeed = 1.2
+        controls.panSpeed = 1.0
+        controls.staticMoving = true
+        controlsRef.current = controls
+
+        const handleTouchStart = (event) => {
+            event.preventDefault()
+            controls.handleTouchStart(event)
+        }
+
+        const handleTouchMove = (event) => {
+            event.preventDefault()
+            controls.handleTouchMove(event)
+        }
+
+        gl.domElement.addEventListener('touchstart', handleTouchStart, { passive: false })
+        gl.domElement.addEventListener('touchmove', handleTouchMove, { passive: false })
+
+        return () => {
+            gl.domElement.removeEventListener('touchstart', handleTouchStart)
+            gl.domElement.removeEventListener('touchmove', handleTouchMove)
+            controls.dispose()
+        }
+    }, [camera, gl])
+
+    useFrame(() => {
+        if (controlsRef.current && camera.isOrthographicCamera) {
+            controlsRef.current.panSpeed = camera.zoom * 0.4
+            controlsRef.current.update()
+        }
+    })
+
+    return null
 }
 
-function Controls() {
-  const ref = useRef()
-  useFrame(() => ref.current?.update())
-  return <trackballControls ref={ref} args={[null, document]} panSpeed={30} />
+function Loader() {
+    const { progress } = useProgress()
+    return (
+        <Html center>
+            <div style={{
+                background: 'rgba(0,0,0,0.7)',
+                padding: '20px 40px',
+                borderRadius: '10px',
+                color: 'white',
+                fontFamily: 'sans-serif',
+                fontSize: '18px'
+            }}>
+                ⏳ Načítání modelů: {Math.round(progress)} %
+            </div>
+        </Html>
+    )
 }
 
 export default function Page() {
-  const [colorUpper, setColorUpper] = useState('#f5f5dc')
-  const [colorLower, setColorLower] = useState('#f5f5dc')
-  const [colorCrown, setColorCrown] = useState('#ffffff')
+    const [color1, setColor1] = useState('#f5f5dc')
+    const [color2, setColor2] = useState('#f5f5dc')
+    const [color3, setColor3] = useState('#ffffff')
+    const [opacity1, setOpacity1] = useState(1)
+    const [opacity2, setOpacity2] = useState(1)
+    const [opacity3, setOpacity3] = useState(1)
+    const [visible1, setVisible1] = useState(true)
+    const [visible2, setVisible2] = useState(true)
+    const [visible3, setVisible3] = useState(true)
+    const [lightIntensity, setLightIntensity] = useState(1)
+    const [lightPos1, setLightPos1] = useState({ x: 5, y: 5, z: 5 })
+    const [lightPos2, setLightPos2] = useState({ x: -5, y: -5, z: -5 })
+    const [showLights, setShowLights] = useState(false)
 
-  const [opacityUpper, setOpacityUpper] = useState(1)
-  const [opacityLower, setOpacityLower] = useState(1)
-  const [opacityCrown, setOpacityCrown] = useState(1)
+    return (
+        <div style={{ width: '100vw', height: '100vh' }}>
+            <div style={{
+                position: 'absolute', top: 10, left: 10, zIndex: 1,
+                color: 'white', fontFamily: 'sans-serif'
+            }}>
+                <div>Upper:</div>
+                <input type="color" value={color1} onChange={(e) => setColor1(e.target.value)} />
+                <input type="range" min={0} max={1} step={0.01} value={opacity1} onChange={(e) => setOpacity1(parseFloat(e.target.value))} />
+                <button onClick={() => setVisible1(!visible1)}>{visible1 ? '👁️' : '🚫'}</button>
 
-  const [visibleUpper, setVisibleUpper] = useState(true)
-  const [visibleLower, setVisibleLower] = useState(true)
-  const [visibleCrown, setVisibleCrown] = useState(true)
+                <div style={{ marginTop: '10px' }}>Lower:</div>
+                <input type="color" value={color2} onChange={(e) => setColor2(e.target.value)} />
+                <input type="range" min={0} max={1} step={0.01} value={opacity2} onChange={(e) => setOpacity2(parseFloat(e.target.value))} />
+                <button onClick={() => setVisible2(!visible2)}>{visible2 ? '👁️' : '🚫'}</button>
 
-  const [lightIntensity, setLightIntensity] = useState(1)
-  const [light1Position, setLight1Position] = useState([10, 10, 10])
-  const [light2Position, setLight2Position] = useState([-10, -10, -10])
+                <div style={{ marginTop: '10px' }}>Crown21:</div>
+                <input type="color" value={color3} onChange={(e) => setColor3(e.target.value)} />
+                <input type="range" min={0} max={1} step={0.01} value={opacity3} onChange={(e) => setOpacity3(parseFloat(e.target.value))} />
+                <button onClick={() => setVisible3(!visible3)}>{visible3 ? '👁️' : '🚫'}</button>
 
-  const [showLightControls, setShowLightControls] = useState(false)
-  const [loadingProgress, setLoadingProgress] = useState(0)
+                <div style={{ marginTop: '10px' }}>💡 Light Intensity:</div>
+                <input type="range" min={0} max={2} step={0.01} value={lightIntensity} onChange={(e) => setLightIntensity(parseFloat(e.target.value))} />
 
-  return (
-    <>
-      <div style={{ position: 'absolute', top: 10, left: 10, zIndex: 1 }}>
-        <label>Upper:</label>
-        <input type="color" value={colorUpper} onChange={(e) => setColorUpper(e.target.value)} />
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={opacityUpper}
-          onChange={(e) => setOpacityUpper(parseFloat(e.target.value))}
-        />
-        <button onClick={() => setVisibleUpper(!visibleUpper)}>
-          {visibleUpper ? '👁️' : '🚫'}
-        </button>
-        <br />
-        <label>Lower:</label>
-        <input type="color" value={colorLower} onChange={(e) => setColorLower(e.target.value)} />
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={opacityLower}
-          onChange={(e) => setOpacityLower(parseFloat(e.target.value))}
-        />
-        <button onClick={() => setVisibleLower(!visibleLower)}>
-          {visibleLower ? '👁️' : '🚫'}
-        </button>
-        <br />
-        <label>Crown21:</label>
-        <input type="color" value={colorCrown} onChange={(e) => setColorCrown(e.target.value)} />
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={opacityCrown}
-          onChange={(e) => setOpacityCrown(parseFloat(e.target.value))}
-        />
-        <button onClick={() => setVisibleCrown(!visibleCrown)}>
-          {visibleCrown ? '👁️' : '🚫'}
-        </button>
-        <br />
-        <label>💡 Light Intensity:</label>
-        <input
-          type="range"
-          min={0}
-          max={5}
-          step={0.1}
-          value={lightIntensity}
-          onChange={(e) => setLightIntensity(parseFloat(e.target.value))}
-        />
-        <br />
-        <label>
-          <input
-            type="checkbox"
-            checked={showLightControls}
-            onChange={() => setShowLightControls(!showLightControls)}
-          />
-          Světla
-        </label>
-        {showLightControls && (
-          <div>
-            <p>🔦 Light 1 Position:</p>
-            {['X', 'Y', 'Z'].map((axis, i) => (
-              <div key={`l1-${axis}`}>
-                {axis}:
-                <input
-                  type="range"
-                  min={-20}
-                  max={20}
-                  step={0.1}
-                  value={light1Position[i]}
-                  onChange={(e) =>
-                    setLight1Position((prev) => {
-                      const newPos = [...prev]
-                      newPos[i] = parseFloat(e.target.value)
-                      return newPos
-                    })
-                  }
+                <div style={{ marginTop: '10px', cursor: 'pointer' }} onClick={() => setShowLights(!showLights)}>
+                    {showLights ? '⬇️ Světla' : '➡️ Světla'}
+                </div>
+
+                {showLights && (
+                    <div style={{ marginTop: '5px' }}>
+                        <div>🔦 Light 1 Position:</div>
+                        <div>X:</div>
+                        <input type="range" min={-10} max={10} step={0.1} value={lightPos1.x} onChange={(e) => setLightPos1({ ...lightPos1, x: parseFloat(e.target.value) })} />
+                        <div>Y:</div>
+                        <input type="range" min={-10} max={10} step={0.1} value={lightPos1.y} onChange={(e) => setLightPos1({ ...lightPos1, y: parseFloat(e.target.value) })} />
+                        <div>Z:</div>
+                        <input type="range" min={-10} max={10} step={0.1} value={lightPos1.z} onChange={(e) => setLightPos1({ ...lightPos1, z: parseFloat(e.target.value) })} />
+
+                        <div style={{ marginTop: '10px' }}>🔦 Light 2 Position:</div>
+                        <div>X:</div>
+                        <input type="range" min={-10} max={10} step={0.1} value={lightPos2.x} onChange={(e) => setLightPos2({ ...lightPos2, x: parseFloat(e.target.value) })} />
+                        <div>Y:</div>
+                        <input type="range" min={-10} max={10} step={0.1} value={lightPos2.y} onChange={(e) => setLightPos2({ ...lightPos2, y: parseFloat(e.target.value) })} />
+                        <div>Z:</div>
+                        <input type="range" min={-10} max={10} step={0.1} value={lightPos2.z} onChange={(e) => setLightPos2({ ...lightPos2, z: parseFloat(e.target.value) })} />
+                    </div>
+                )}
+            </div>
+
+            <Canvas orthographic camera={{ position: [0, 0, 100], zoom: 15 }}>
+                <ambientLight intensity={lightIntensity * 0.4} />
+                <directionalLight
+                    position={[lightPos1.x, lightPos1.y, lightPos1.z]}
+                    intensity={lightIntensity * 1.5}
                 />
-              </div>
-            ))}
-            <p>🔦 Light 2 Position:</p>
-            {['X', 'Y', 'Z'].map((axis, i) => (
-              <div key={`l2-${axis}`}>
-                {axis}:
-                <input
-                  type="range"
-                  min={-20}
-                  max={20}
-                  step={0.1}
-                  value={light2Position[i]}
-                  onChange={(e) =>
-                    setLight2Position((prev) => {
-                      const newPos = [...prev]
-                      newPos[i] = parseFloat(e.target.value)
-                      return newPos
-                    })
-                  }
+                <directionalLight
+                    position={[lightPos2.x, lightPos2.y, lightPos2.z]}
+                    intensity={lightIntensity * 1.0}
                 />
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-      <Canvas
-        camera={{ position: [0, 0, 50], fov: 30 }}
-        onCreated={({ gl }) => {
-          gl.setClearColor(new THREE.Color('#000000'))
-        }}
-      >
-        <Suspense fallback={<Html center><progress value={loadingProgress} max={100} /></Html>}>
-          <Lights
-            intensity={lightIntensity}
-            position1={light1Position}
-            position2={light2Position}
-          />
-          <Model
-            url="/models/Upper.obj"
-            color={colorUpper}
-            opacity={opacityUpper}
-            visible={visibleUpper}
-            setLoadingProgress={setLoadingProgress}
-          />
-          <Model
-            url="/models/Lower.obj"
-            color={colorLower}
-            opacity={opacityLower}
-            visible={visibleLower}
-            setLoadingProgress={setLoadingProgress}
-          />
-          <Model
-            url="/models/Crown21.obj"
-            color={colorCrown}
-            opacity={opacityCrown}
-            visible={visibleCrown}
-            setLoadingProgress={setLoadingProgress}
-          />
-        </Suspense>
-        <ambientLight intensity={0.2} />
-        <Controls />
-      </Canvas>
-    </>
-  )
+
+                <Suspense fallback={<Loader />}>
+                    <Model url="/models/Upper.obj" color={color1} opacity={opacity1} visible={visible1} />
+                    <Model url="/models/Lower.obj" color={color2} opacity={opacity2} visible={visible2} />
+                    <Model url="/models/Crown21.obj" color={color3} opacity={opacity3} visible={visible3} />
+                </Suspense>
+
+                <TouchTrackballControls />
+            </Canvas>
+        </div>
+    )
 }
