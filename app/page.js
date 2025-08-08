@@ -21,9 +21,7 @@ function Model({ url, color, opacity, visible }) {
     })
 
     obj.traverse((child) => {
-        if (child.isMesh) {
-            child.material = material
-        }
+        if (child.isMesh) child.material = material
     })
 
     return visible ? <primitive object={obj} /> : null
@@ -31,24 +29,23 @@ function Model({ url, color, opacity, visible }) {
 
 function TouchTrackballControls() {
     const { camera, gl } = useThree()
-    const controlsRef = useRef()
+    const controlsRef = useRef<any>()
 
     useEffect(() => {
-        const controls = new TrackballControls(camera, gl.domElement)
+        const controls = new TrackballControls(camera as any, gl.domElement)
         controls.rotateSpeed = 5.0
         controls.zoomSpeed = 1.2
         controls.panSpeed = 1.0
         controls.staticMoving = true
         controlsRef.current = controls
 
-        const handleTouchStart = (event) => {
+        const handleTouchStart = (event: TouchEvent) => {
             event.preventDefault()
-            controls.handleTouchStart(event)
+            ;(controls as any).handleTouchStart(event)
         }
-
-        const handleTouchMove = (event) => {
+        const handleTouchMove = (event: TouchEvent) => {
             event.preventDefault()
-            controls.handleTouchMove(event)
+            ;(controls as any).handleTouchMove(event)
         }
 
         gl.domElement.addEventListener('touchstart', handleTouchStart, { passive: false })
@@ -62,8 +59,8 @@ function TouchTrackballControls() {
     }, [camera, gl])
 
     useFrame(() => {
-        if (controlsRef.current && camera.isOrthographicCamera) {
-            controlsRef.current.panSpeed = camera.zoom * 0.4
+        if (controlsRef.current && (camera as any).isOrthographicCamera) {
+            controlsRef.current.panSpeed = (camera as any).zoom * 0.4
             controlsRef.current.update()
         }
     })
@@ -90,6 +87,7 @@ function Loader() {
 }
 
 export default function Page() {
+    // UI stavy
     const [color1, setColor1] = useState('#f5f5dc')
     const [color2, setColor2] = useState('#f5f5dc')
     const [color3, setColor3] = useState('#ffffff')
@@ -101,9 +99,22 @@ export default function Page() {
     const [visible3, setVisible3] = useState(true)
     const [lightIntensity, setLightIntensity] = useState(1)
     const [lightPos1, setLightPos1] = useState({ x: 0, y: 5, z: 5 })
-    const [lightPos2, setLightPos2] = useState({ x: -10, y: 0, z: 0 })
+    const [lightPos2, setLightPos2] = useState({ x: -5, y: -5, z: -5 })
     const [lightPos3, setLightPos3] = useState({ x: 10, y: 0, z: 0 })
     const [showLights, setShowLights] = useState(false)
+
+    // Detekce mobilu a volba kamery
+    const [isMobile, setIsMobile] = useState(false)
+    useEffect(() => {
+        const uaMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+        const coarse = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(pointer: coarse)').matches
+        const narrow = typeof window !== 'undefined' && window.innerWidth < 768
+        setIsMobile(uaMobile || coarse || narrow)
+    }, [])
+
+    const cameraProps = isMobile
+        ? { position: [0, 0, 150] as [number, number, number], zoom: 10 } // mobil: oddálené
+        : { position: [0, 0, 100] as [number, number, number], zoom: 15 } // desktop: beze změny
 
     return (
         <div style={{ width: '100vw', height: '100vh' }}>
@@ -169,7 +180,7 @@ export default function Page() {
                 )}
             </div>
 
-            <Canvas orthographic camera={{ position: [0, 0, 100], zoom: 15 }}>
+            <Canvas orthographic camera={cameraProps}>
                 <ambientLight intensity={lightIntensity * 0.4} />
                 <directionalLight position={[lightPos1.x, lightPos1.y, lightPos1.z]} intensity={lightIntensity * 1.5} />
                 <directionalLight position={[lightPos2.x, lightPos2.y, lightPos2.z]} intensity={lightIntensity * 1.0} />
@@ -184,6 +195,7 @@ export default function Page() {
                 <TouchTrackballControls />
             </Canvas>
 
+            {/* Globální styl pro sjednocené slidery a tlačítka */}
             <style jsx global>{`
                 .slider {
                     -webkit-appearance: none;
@@ -236,13 +248,11 @@ export default function Page() {
                     border-color: transparent;
                     color: transparent;
                 }
-
                 .slider::-ms-fill-lower,
                 .slider::-ms-fill-upper {
                     background: white;
                     border-radius: 2px;
                 }
-
                 .slider::-ms-thumb {
                     width: 14px;
                     height: 14px;
