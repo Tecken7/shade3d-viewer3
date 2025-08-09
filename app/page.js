@@ -92,16 +92,13 @@ function Loader() {
   )
 }
 
-/**
- * Auto-fit kamery: jednou po načtení všech objektů.
- * Zoom z velikosti canvasu a bounding boxu. Desktop trochu „odzoomován“.
- */
+/** Auto-fit kamery jednou po načtení všech objektů. */
 function FitCameraOnLoad({
   objects,
   expectedCount = 3,
   margin = 1.2,
   isMobile = false,
-  desktopScale = 0.40, // <= můžeš klidně dál ladit
+  desktopScale = 0.40,
   mobileScale = 1.0,
 }) {
   const { camera, size } = useThree()
@@ -120,10 +117,8 @@ function FitCameraOnLoad({
     box.getCenter(center)
     box.getSize(dims)
 
-    // srovnat na střed (XY), Z necháme
     camera.position.set(center.x, center.y, camera.position.z)
 
-    // ortho zoom z viewportu
     const objW = Math.max(dims.x, 1e-6)
     const objH = Math.max(dims.y, 1e-6)
     const zoomX = size.width / (objW * margin)
@@ -158,7 +153,7 @@ export default function Page() {
 
   const [loadedObjects, setLoadedObjects] = useState([])
 
-  // mobil/desktop detekce kvůli scale v auto-fitu
+  // mobil/desktop kvůli scale v auto-fitu
   const [isMobile, setIsMobile] = useState(false)
   useEffect(() => {
     const uaMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
@@ -230,23 +225,26 @@ export default function Page() {
           {visible3 ? '👁️' : '🚫'}
         </button>
 
-        <div style={{ marginTop: '10px' }}>💡 Light Intensity:</div>
-        <input
-          className="slider"
-          type="range"
-          min={0}
-          max={2}
-          step={0.01}
-          value={lightIntensity}
-          onChange={(e) => setLightIntensity(parseFloat(e.target.value))}
-        />
-
+        {/* Toggle pro menu světel */}
         <div style={{ marginTop: '10px', cursor: 'pointer' }} onClick={() => setShowLights(!showLights)}>
           {showLights ? '⬇️ Světla' : '➡️ Světla'}
         </div>
 
         {showLights && (
-          <div style={{ marginTop: '5px' }}>
+          <div style={{ marginTop: '8px' }}>
+            {/* Přesunuto sem: Light Intensity */}
+            <div style={{ marginBottom: '6px' }}>💡 Light Intensity:</div>
+            <input
+              className="slider"
+              type="range"
+              min={0}
+              max={2}
+              step={0.01}
+              value={lightIntensity}
+              onChange={(e) => setLightIntensity(parseFloat(e.target.value))}
+            />
+
+            {/* Pozice světel */}
             {[
               { label: 'Light 1 Position', pos: lightPos1, setPos: setLightPos1 },
               { label: 'Light 2 Position', pos: lightPos2, setPos: setLightPos2 },
