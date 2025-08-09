@@ -92,6 +92,7 @@ function Loader() {
   )
 }
 
+/** Auto-fit kamery jednou po načtení všech objektů. */
 function FitCameraOnLoad({
   objects,
   expectedCount = 3,
@@ -149,7 +150,7 @@ export default function Page() {
   const [lightPos1, setLightPos1] = useState({ x: 0, y: 5, z: 5 })
   const [lightPos2, setLightPos2] = useState({ x: -10, y: 0, z: 0 })
   const [lightPos3, setLightPos3] = useState({ x: 10, y: 0, z: 0 })
-  const [lightPos4, setLightPos4] = useState({ x: 0, y: -5, z: -5 }) // nové světlo
+  const [lightPos4, setLightPos4] = useState({ x: 0, y: -5, z: -5 }) // nové světlo zezadu/zespodu
 
   const [showLights, setShowLights] = useState(false)
   const [loadedObjects, setLoadedObjects] = useState([])
@@ -205,7 +206,7 @@ export default function Page() {
             <div style={{ marginBottom: '6px' }}>💡 Light Intensity:</div>
             <input className="slider" type="range" min={0} max={2} step={0.01} value={lightIntensity} onChange={(e) => setLightIntensity(parseFloat(e.target.value))} />
 
-            {[ 
+            {[
               { label: 'Light 1 Position', pos: lightPos1, setPos: setLightPos1 },
               { label: 'Light 2 Position', pos: lightPos2, setPos: setLightPos2 },
               { label: 'Light 3 Position', pos: lightPos3, setPos: setLightPos3 },
@@ -213,7 +214,7 @@ export default function Page() {
             ].map((light, idx) => (
               <div key={idx} style={{ marginTop: '10px' }}>
                 <div>🔦 {light.label}:</div>
-                {(['x','y','z'] as const).map((axis) => (
+                {['x','y','z'].map((axis) => (
                   <div className="axis-row" key={axis}>
                     <span className="axis-label">{axis.toUpperCase()}:</span>
                     <input
