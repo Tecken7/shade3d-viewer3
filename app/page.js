@@ -115,7 +115,7 @@ export default function Page() {
   }, [])
 
   const cameraProps = isMobile
-    ? { position: [0, 0, 150], zoom: 7 } // mobil: lehce oddálené
+    ? { position: [0, 0, 150], zoom: 6 } // mobil: lehce oddálené
     : { position: [0, 0, 100], zoom: 15 } // desktop: jako dřív
 
   return (
