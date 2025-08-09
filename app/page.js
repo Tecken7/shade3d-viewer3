@@ -93,21 +93,20 @@ function Loader() {
 }
 
 /**
- * Auto-fit kamery: provede se JEDNOU po načtení všech očekávaných objektů.
- * Zoom je spočítaný z velikosti viewportu (canvasu) a rozměru bounding boxu.
+ * Auto-fit kamery: jednou po načtení všech objektů.
+ * Zoom je spočten z velikosti canvasu a rozměrů bounding boxu.
+ * Na desktopu se aplikuje škálovací faktor (desktopScale) pro menší model.
  */
-function FitCameraOnLoad({ objects, expectedCount = 3, margin = 1.2 }) {
-  const { camera, size } = useThree() // size = { width, height } v px
+function FitCameraOnLoad({ objects, expectedCount = 3, margin = 1.2, isMobile = false, desktopScale = 0.85, mobileScale = 1.0 }) {
+  const { camera, size } = useThree()
   const fitted = useRef(false)
 
   useEffect(() => {
     if (fitted.current) return
     if (!objects || objects.length < expectedCount) return
 
-    // Bounding box všech objektů
     const box = new THREE.Box3()
     objects.forEach((obj) => box.expandByObject(obj))
-
     if (box.isEmpty()) return
 
     const center = new THREE.Vector3()
@@ -115,25 +114,24 @@ function FitCameraOnLoad({ objects, expectedCount = 3, margin = 1.2 }) {
     box.getCenter(center)
     box.getSize(dims)
 
-    // Zarovnat kameru na střed objektů (XY); Z necháme jak je
+    // střed na XY
     camera.position.set(center.x, center.y, camera.position.z)
 
-    // Výpočet zoomu pro ortho kameru:
-    // viditelná šířka = width / zoom, viditelná výška = height / zoom
-    // => zoomX = width  / (objWidth  * margin)
-    //    zoomY = height / (objHeight * margin)
+    // výpočet zoomu pro ortho kameru dle viewportu
     const objW = Math.max(dims.x, 1e-6)
     const objH = Math.max(dims.y, 1e-6)
-
     const zoomX = size.width / (objW * margin)
     const zoomY = size.height / (objH * margin)
-    const newZoom = Math.max(Math.min(zoomX, zoomY), 0.01) // ochrana
+    let newZoom = Math.min(zoomX, zoomY)
 
-    camera.zoom = newZoom
+    // jemné zmenšení na desktopu
+    newZoom *= isMobile ? mobileScale : desktopScale
+
+    camera.zoom = Math.max(newZoom, 0.01)
     camera.updateProjectionMatrix()
 
     fitted.current = true
-  }, [objects, expectedCount, margin, camera, size.width, size.height])
+  }, [objects, expectedCount, margin, isMobile, desktopScale, mobileScale, camera, size.width, size.height])
 
   return null
 }
@@ -156,8 +154,16 @@ export default function Page() {
 
   const [loadedObjects, setLoadedObjects] = useState([])
 
+  // detekce mobilu/desktopu
+  const [isMobile, setIsMobile] = useState(false)
+  useEffect(() => {
+    const uaMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+    const coarse = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(pointer: coarse)').matches
+    const narrow = typeof window !== 'undefined' && window.innerWidth < 768
+    setIsMobile(uaMobile || coarse || narrow)
+  }, [])
+
   const handleModelLoaded = (obj) => {
-    // přidáme objekt jen jednou
     setLoadedObjects((prev) => (prev.includes(obj) ? prev : [...prev, obj]))
   }
 
@@ -175,49 +181,21 @@ export default function Page() {
       >
         <div>Upper:</div>
         <input type="color" value={color1} onChange={(e) => setColor1(e.target.value)} />
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={opacity1}
-          onChange={(e) => setOpacity1(parseFloat(e.target.value))}
-        />
+        <input type="range" min={0} max={1} step={0.01} value={opacity1} onChange={(e) => setOpacity1(parseFloat(e.target.value))} />
         <button onClick={() => setVisible1(!visible1)}>{visible1 ? '👁️' : '🚫'}</button>
 
         <div style={{ marginTop: '10px' }}>Lower:</div>
         <input type="color" value={color2} onChange={(e) => setColor2(e.target.value)} />
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={opacity2}
-          onChange={(e) => setOpacity2(parseFloat(e.target.value))}
-        />
+        <input type="range" min={0} max={1} step={0.01} value={opacity2} onChange={(e) => setOpacity2(parseFloat(e.target.value))} />
         <button onClick={() => setVisible2(!visible2)}>{visible2 ? '👁️' : '🚫'}</button>
 
         <div style={{ marginTop: '10px' }}>Waxup:</div>
         <input type="color" value={color3} onChange={(e) => setColor3(e.target.value)} />
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={opacity3}
-          onChange={(e) => setOpacity3(parseFloat(e.target.value))}
-        />
+        <input type="range" min={0} max={1} step={0.01} value={opacity3} onChange={(e) => setOpacity3(parseFloat(e.target.value))} />
         <button onClick={() => setVisible3(!visible3)}>{visible3 ? '👁️' : '🚫'}</button>
 
         <div style={{ marginTop: '10px' }}>💡 Light Intensity:</div>
-        <input
-          type="range"
-          min={0}
-          max={2}
-          step={0.01}
-          value={lightIntensity}
-          onChange={(e) => setLightIntensity(parseFloat(e.target.value))}
-        />
+        <input type="range" min={0} max={2} step={0.01} value={lightIntensity} onChange={(e) => setLightIntensity(parseFloat(e.target.value))} />
 
         <div style={{ marginTop: '10px', cursor: 'pointer' }} onClick={() => setShowLights(!showLights)}>
           {showLights ? '⬇️ Světla' : '➡️ Světla'}
@@ -227,95 +205,31 @@ export default function Page() {
           <div style={{ marginTop: '5px' }}>
             <div>🔦 Light 1 Position:</div>
             <div>X:</div>
-            <input
-              type="range"
-              min={-10}
-              max={10}
-              step={0.1}
-              value={lightPos1.x}
-              onChange={(e) => setLightPos1({ ...lightPos1, x: parseFloat(e.target.value) })}
-            />
+            <input type="range" min={-10} max={10} step={0.1} value={lightPos1.x} onChange={(e) => setLightPos1({ ...lightPos1, x: parseFloat(e.target.value) })} />
             <div>Y:</div>
-            <input
-              type="range"
-              min={-10}
-              max={10}
-              step={0.1}
-              value={lightPos1.y}
-              onChange={(e) => setLightPos1({ ...lightPos1, y: parseFloat(e.target.value) })}
-            />
+            <input type="range" min={-10} max={10} step={0.1} value={lightPos1.y} onChange={(e) => setLightPos1({ ...lightPos1, y: parseFloat(e.target.value) })} />
             <div>Z:</div>
-            <input
-              type="range"
-              min={-10}
-              max={10}
-              step={0.1}
-              value={lightPos1.z}
-              onChange={(e) => setLightPos1({ ...lightPos1, z: parseFloat(e.target.value) })}
-            />
+            <input type="range" min={-10} max={10} step={0.1} value={lightPos1.z} onChange={(e) => setLightPos1({ ...lightPos1, z: parseFloat(e.target.value) })} />
 
             <div style={{ marginTop: '10px' }}>🔦 Light 2 Position:</div>
             <div>X:</div>
-            <input
-              type="range"
-              min={-10}
-              max={10}
-              step={0.1}
-              value={lightPos2.x}
-              onChange={(e) => setLightPos2({ ...lightPos2, x: parseFloat(e.target.value) })}
-            />
+            <input type="range" min={-10} max={10} step={0.1} value={lightPos2.x} onChange={(e) => setLightPos2({ ...lightPos2, x: parseFloat(e.target.value) })} />
             <div>Y:</div>
-            <input
-              type="range"
-              min={-10}
-              max={10}
-              step={0.1}
-              value={lightPos2.y}
-              onChange={(e) => setLightPos2({ ...lightPos2, y: parseFloat(e.target.value) })}
-            />
+            <input type="range" min={-10} max={10} step={0.1} value={lightPos2.y} onChange={(e) => setLightPos2({ ...lightPos2, y: parseFloat(e.target.value) })} />
             <div>Z:</div>
-            <input
-              type="range"
-              min={-10}
-              max={10}
-              step={0.1}
-              value={lightPos2.z}
-              onChange={(e) => setLightPos2({ ...lightPos2, z: parseFloat(e.target.value) })}
-            />
+            <input type="range" min={-10} max={10} step={0.1} value={lightPos2.z} onChange={(e) => setLightPos2({ ...lightPos2, z: parseFloat(e.target.value) })} />
 
             <div style={{ marginTop: '10px' }}>🔦 Light 3 Position:</div>
             <div>X:</div>
-            <input
-              type="range"
-              min={-10}
-              max={10}
-              step={0.1}
-              value={lightPos3.x}
-              onChange={(e) => setLightPos3({ ...lightPos3, x: parseFloat(e.target.value) })}
-            />
+            <input type="range" min={-10} max={10} step={0.1} value={lightPos3.x} onChange={(e) => setLightPos3({ ...lightPos3, x: parseFloat(e.target.value) })} />
             <div>Y:</div>
-            <input
-              type="range"
-              min={-10}
-              max={10}
-              step={0.1}
-              value={lightPos3.y}
-              onChange={(e) => setLightPos3({ ...lightPos3, y: parseFloat(e.target.value) })}
-            />
+            <input type="range" min={-10} max={10} step={0.1} value={lightPos3.y} onChange={(e) => setLightPos3({ ...lightPos3, y: parseFloat(e.target.value) })} />
             <div>Z:</div>
-            <input
-              type="range"
-              min={-10}
-              max={10}
-              step={0.1}
-              value={lightPos3.z}
-              onChange={(e) => setLightPos3({ ...lightPos3, z: parseFloat(e.target.value) })}
-            />
+            <input type="range" min={-10} max={10} step={0.1} value={lightPos3.z} onChange={(e) => setLightPos3({ ...lightPos3, z: parseFloat(e.target.value) })} />
           </div>
         )}
       </div>
 
-      {/* Základní pozice kamery; zoom nastavíme až po načtení */}
       <Canvas orthographic camera={{ position: [0, 0, 100] }}>
         <ambientLight intensity={lightIntensity * 0.4} />
         <directionalLight position={[lightPos1.x, lightPos1.y, lightPos1.z]} intensity={lightIntensity * 1.5} />
@@ -328,7 +242,15 @@ export default function Page() {
           <Model url="/models/Crown21.obj" color={color3} opacity={opacity3} visible={visible3} onLoaded={handleModelLoaded} />
         </Suspense>
 
-        <FitCameraOnLoad objects={loadedObjects} expectedCount={3} margin={1.2} />
+        <FitCameraOnLoad
+          objects={loadedObjects}
+          expectedCount={3}
+          margin={1.2}
+          isMobile={isMobile}
+          desktopScale={0.85}   // <— uprav pro menší/větší model na desktopu (např. 0.75)
+          mobileScale={1.0}     // mobil necháváme tak, jak ti vyhovuje
+        />
+
         <TouchTrackballControls />
       </Canvas>
     </div>
