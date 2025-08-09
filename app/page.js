@@ -6,7 +6,78 @@ import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader'
 import * as THREE from 'three'
 import { Suspense, useEffect, useRef, useState } from 'react'
 import { Html, useProgress } from '@react-three/drei'
+import { HexColorPicker, HexColorInput } from 'react-colorful'
 
+/* ---------- Jednotný color picker (popover) ---------- */
+function ColorSwatch({ color, onChange, ariaLabel }) {
+  const [open, setOpen] = useState(false)
+  const containerRef = useRef(null)
+
+  useEffect(() => {
+    const onDocClick = (e) => {
+      if (open && containerRef.current && !containerRef.current.contains(e.target)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [open])
+
+  return (
+    <div ref={containerRef} style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        aria-label={ariaLabel || 'color picker'}
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: 36, height: 22,
+          borderRadius: 4,
+          border: '1px solid #fff',
+          background: color,
+          cursor: 'pointer',
+          boxShadow: '0 0 0 1px rgba(0,0,0,.25) inset',
+        }}
+      />
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            zIndex: 20,
+            top: 28,
+            left: 0,
+            background: 'rgba(0,0,0,.92)',
+            padding: 12,
+            borderRadius: 10,
+            border: '1px solid rgba(255,255,255,.18)',
+            backdropFilter: 'blur(4px)',
+            boxShadow: '0 6px 24px rgba(0,0,0,.35)',
+          }}
+        >
+          <HexColorPicker color={color} onChange={onChange} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+            <span style={{ color: '#fff', fontSize: 12 }}>#</span>
+            <HexColorInput
+              color={color}
+              onChange={onChange}
+              prefixed={false}
+              style={{
+                width: 90,
+                padding: '4px 6px',
+                borderRadius: 6,
+                border: '1px solid #444',
+                background: '#111',
+                color: '#fff',
+                fontFamily: 'monospace',
+                fontSize: 12,
+              }}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ---------- 3D model ---------- */
 function Model({ url, color, opacity, visible, onLoaded }) {
   const obj = useLoader(OBJLoader, url)
 
@@ -31,6 +102,7 @@ function Model({ url, color, opacity, visible, onLoaded }) {
   return visible ? <primitive object={obj} /> : null
 }
 
+/* ---------- Ovládání kamery ---------- */
 function TouchTrackballControls() {
   const { camera, gl } = useThree()
   const controlsRef = useRef(null)
@@ -72,6 +144,7 @@ function TouchTrackballControls() {
   return null
 }
 
+/* ---------- Loader ---------- */
 function Loader() {
   const { progress } = useProgress()
   return (
@@ -92,7 +165,7 @@ function Loader() {
   )
 }
 
-/** Auto-fit kamery jednou po načtení všech objektů. */
+/* ---------- Auto-fit kamery ---------- */
 function FitCameraOnLoad({
   objects,
   expectedCount = 3,
@@ -135,13 +208,16 @@ function FitCameraOnLoad({
   return null
 }
 
+/* ---------- Page ---------- */
 export default function Page() {
   const [color1, setColor1] = useState('#f5f5dc')
   const [color2, setColor2] = useState('#f5f5dc')
   const [color3, setColor3] = useState('#ffffff')
+
   const [opacity1, setOpacity1] = useState(1)
   const [opacity2, setOpacity2] = useState(1)
   const [opacity3, setOpacity3] = useState(1)
+
   const [visible1, setVisible1] = useState(true)
   const [visible2, setVisible2] = useState(true)
   const [visible3, setVisible3] = useState(true)
@@ -153,6 +229,7 @@ export default function Page() {
   const [lightPos4, setLightPos4] = useState({ x: 0, y: -5, z: -5 })
 
   const [showLights, setShowLights] = useState(false)
+
   const [loadedObjects, setLoadedObjects] = useState([])
 
   const [isMobile, setIsMobile] = useState(false)
@@ -179,26 +256,58 @@ export default function Page() {
           color: 'white',
           fontFamily: 'sans-serif',
           fontSize: '14px',
-          // jednotná šířka sliderů (změň podle chuti)
           ['--slider-width']: '180px',
         }}
       >
-        <div>Upper:</div>
-        <input type="color" value={color1} onChange={(e) => setColor1(e.target.value)} />
-        <input className="slider" type="range" min={0} max={1} step={0.01} value={opacity1} onChange={(e) => setOpacity1(parseFloat(e.target.value))} />
-        <button className="toggle" onClick={() => setVisible1(!visible1)}>{visible1 ? '👁️' : '🚫'}</button>
+        {/* Upper row */}
+        <div className="control-row">
+          <div className="row-label">Upper:</div>
+          <ColorSwatch color={color1} onChange={setColor1} ariaLabel="Upper color" />
+          <input
+            className="slider"
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={opacity1}
+            onChange={(e) => setOpacity1(parseFloat(e.target.value))}
+          />
+          <button className="toggle" onClick={() => setVisible1(!visible1)}>{visible1 ? '👁️' : '🚫'}</button>
+        </div>
 
-        <div style={{ marginTop: '10px' }}>Lower:</div>
-        <input type="color" value={color2} onChange={(e) => setColor2(e.target.value)} />
-        <input className="slider" type="range" min={0} max={1} step={0.01} value={opacity2} onChange={(e) => setOpacity2(parseFloat(e.target.value))} />
-        <button className="toggle" onClick={() => setVisible2(!visible2)}>{visible2 ? '👁️' : '🚫'}</button>
+        {/* Lower row */}
+        <div className="control-row">
+          <div className="row-label">Lower:</div>
+          <ColorSwatch color={color2} onChange={setColor2} ariaLabel="Lower color" />
+          <input
+            className="slider"
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={opacity2}
+            onChange={(e) => setOpacity2(parseFloat(e.target.value))}
+          />
+          <button className="toggle" onClick={() => setVisible2(!visible2)}>{visible2 ? '👁️' : '🚫'}</button>
+        </div>
 
-        <div style={{ marginTop: '10px' }}>Waxup:</div>
-        <input type="color" value={color3} onChange={(e) => setColor3(e.target.value)} />
-        <input className="slider" type="range" min={0} max={1} step={0.01} value={opacity3} onChange={(e) => setOpacity3(parseFloat(e.target.value))} />
-        <button className="toggle" onClick={() => setVisible3(!visible3)}>{visible3 ? '👁️' : '🚫'}</button>
+        {/* Waxup row */}
+        <div className="control-row">
+          <div className="row-label">Waxup:</div>
+          <ColorSwatch color={color3} onChange={setColor3} ariaLabel="Waxup color" />
+          <input
+            className="slider"
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={opacity3}
+            onChange={(e) => setOpacity3(parseFloat(e.target.value))}
+          />
+          <button className="toggle" onClick={() => setVisible3(!visible3)}>{visible3 ? '👁️' : '🚫'}</button>
+        </div>
 
-        {/* Toggle pro menu světel */}
+        {/* Lights toggle */}
         <div style={{ marginTop: '10px', cursor: 'pointer' }} onClick={() => setShowLights(!showLights)}>
           {showLights ? '⬇️ Světla' : '➡️ Světla'}
         </div>
@@ -206,7 +315,6 @@ export default function Page() {
         {showLights && (
           <div style={{ marginTop: '8px' }}>
             <div style={{ marginBottom: '6px' }}>💡 Light Intensity:</div>
-            {/* zarovnání jako osy: prázdný label + slider stejné délky */}
             <div className="axis-row">
               <span className="axis-label" aria-hidden="true">&nbsp;</span>
               <input
@@ -273,6 +381,7 @@ export default function Page() {
         <TouchTrackballControls />
       </Canvas>
 
+      {/* Styly UI */}
       <style jsx global>{`
         .slider {
           -webkit-appearance: none;
@@ -322,7 +431,6 @@ export default function Page() {
           color: white;
           cursor: pointer;
           font-size: 14px;
-          margin-left: 5px;
         }
         .controls-panel {
           backdrop-filter: blur(3px);
@@ -330,8 +438,17 @@ export default function Page() {
           border: 1px solid rgba(255,255,255,.15);
           border-radius: 8px;
           padding: 10px 12px;
-          /* šířku slideru držíme zde jako proměnnou */
           --slider-width: 180px;
+          width: max-content;
+        }
+        .control-row {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin: 6px 0;
+        }
+        .row-label {
+          width: 60px;
         }
         .axis-row {
           display: flex;
@@ -343,10 +460,8 @@ export default function Page() {
           width: 18px;
           text-align: right;
           color: #fff;
-          font-family: sans-serif;
           opacity: .9;
         }
-        /* ať mají všechny posuvníky v řádcích stejnou pevnou délku a jsou zarovnané */
         .axis-row .slider {
           flex: 0 0 var(--slider-width, 140px);
           width: var(--slider-width, 140px);
