@@ -92,7 +92,6 @@ function Loader() {
   )
 }
 
-/** Auto-fit kamery jednou po načtení všech objektů. */
 function FitCameraOnLoad({
   objects,
   expectedCount = 3,
@@ -150,13 +149,11 @@ export default function Page() {
   const [lightPos1, setLightPos1] = useState({ x: 0, y: 5, z: 5 })
   const [lightPos2, setLightPos2] = useState({ x: -10, y: 0, z: 0 })
   const [lightPos3, setLightPos3] = useState({ x: 10, y: 0, z: 0 })
-  const [lightPos4, setLightPos4] = useState({ x: 0, y: -3, z: -8 }) // nové: zezadu a lehce zespodu
+  const [lightPos4, setLightPos4] = useState({ x: 0, y: -5, z: -5 }) // nové světlo
 
   const [showLights, setShowLights] = useState(false)
-
   const [loadedObjects, setLoadedObjects] = useState([])
 
-  // mobil/desktop kvůli scale v auto-fitu
   const [isMobile, setIsMobile] = useState(false)
   useEffect(() => {
     const uaMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
@@ -185,41 +182,17 @@ export default function Page() {
       >
         <div>Upper:</div>
         <input type="color" value={color1} onChange={(e) => setColor1(e.target.value)} />
-        <input
-          className="slider"
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={opacity1}
-          onChange={(e) => setOpacity1(parseFloat(e.target.value))}
-        />
+        <input className="slider" type="range" min={0} max={1} step={0.01} value={opacity1} onChange={(e) => setOpacity1(parseFloat(e.target.value))} />
         <button className="toggle" onClick={() => setVisible1(!visible1)}>{visible1 ? '👁️' : '🚫'}</button>
 
         <div style={{ marginTop: '10px' }}>Lower:</div>
         <input type="color" value={color2} onChange={(e) => setColor2(e.target.value)} />
-        <input
-          className="slider"
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={opacity2}
-          onChange={(e) => setOpacity2(parseFloat(e.target.value))}
-        />
+        <input className="slider" type="range" min={0} max={1} step={0.01} value={opacity2} onChange={(e) => setOpacity2(parseFloat(e.target.value))} />
         <button className="toggle" onClick={() => setVisible2(!visible2)}>{visible2 ? '👁️' : '🚫'}</button>
 
         <div style={{ marginTop: '10px' }}>Waxup:</div>
         <input type="color" value={color3} onChange={(e) => setColor3(e.target.value)} />
-        <input
-          className="slider"
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={opacity3}
-          onChange={(e) => setOpacity3(parseFloat(e.target.value))}
-        />
+        <input className="slider" type="range" min={0} max={1} step={0.01} value={opacity3} onChange={(e) => setOpacity3(parseFloat(e.target.value))} />
         <button className="toggle" onClick={() => setVisible3(!visible3)}>{visible3 ? '👁️' : '🚫'}</button>
 
         {/* Toggle pro menu světel */}
@@ -230,28 +203,19 @@ export default function Page() {
         {showLights && (
           <div style={{ marginTop: '8px' }}>
             <div style={{ marginBottom: '6px' }}>💡 Light Intensity:</div>
-            <input
-              className="slider"
-              type="range"
-              min={0}
-              max={2}
-              step={0.01}
-              value={lightIntensity}
-              onChange={(e) => setLightIntensity(parseFloat(e.target.value))}
-            />
+            <input className="slider" type="range" min={0} max={2} step={0.01} value={lightIntensity} onChange={(e) => setLightIntensity(parseFloat(e.target.value))} />
 
-            {/* Pozice světel */}
-            {[
+            {[ 
               { label: 'Light 1 Position', pos: lightPos1, setPos: setLightPos1 },
               { label: 'Light 2 Position', pos: lightPos2, setPos: setLightPos2 },
               { label: 'Light 3 Position', pos: lightPos3, setPos: setLightPos3 },
-              { label: 'Light 4 Position (back/bottom)', pos: lightPos4, setPos: setLightPos4 },
+              { label: 'Light 4 Position', pos: lightPos4, setPos: setLightPos4 },
             ].map((light, idx) => (
               <div key={idx} style={{ marginTop: '10px' }}>
                 <div>🔦 {light.label}:</div>
-                {['x', 'y', 'z'].map((axis) => (
-                  <div key={axis}>
-                    <div>{axis.toUpperCase()}:</div>
+                {(['x','y','z'] as const).map((axis) => (
+                  <div className="axis-row" key={axis}>
+                    <span className="axis-label">{axis.toUpperCase()}:</span>
                     <input
                       className="slider"
                       type="range"
@@ -274,8 +238,7 @@ export default function Page() {
         <directionalLight position={[lightPos1.x, lightPos1.y, lightPos1.z]} intensity={lightIntensity * 1.5} />
         <directionalLight position={[lightPos2.x, lightPos2.y, lightPos2.z]} intensity={lightIntensity * 1.0} />
         <directionalLight position={[lightPos3.x, lightPos3.y, lightPos3.z]} intensity={lightIntensity * 1.2} />
-        {/* nové 4. světlo (zezadu + zespodu) */}
-        <directionalLight position={[lightPos4.x, lightPos4.y, lightPos4.z]} intensity={lightIntensity * 0.9} />
+        <directionalLight position={[lightPos4.x, lightPos4.y, lightPos4.z]} intensity={lightIntensity * 0.8} />
 
         <Suspense fallback={<Loader />}>
           <Model url="/models/Upper.obj" color={color1} opacity={opacity1} visible={visible1} onLoaded={handleModelLoaded} />
@@ -295,7 +258,6 @@ export default function Page() {
         <TouchTrackballControls />
       </Canvas>
 
-      {/* Globální styl ovládacích prvků */}
       <style jsx global>{`
         .slider {
           -webkit-appearance: none;
@@ -353,6 +315,22 @@ export default function Page() {
           border: 1px solid rgba(255,255,255,.15);
           border-radius: 8px;
           padding: 10px 12px;
+        }
+        .axis-row {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin: 4px 0;
+        }
+        .axis-label {
+          width: 18px;
+          text-align: right;
+          color: #fff;
+          font-family: sans-serif;
+          opacity: .9;
+        }
+        .axis-row .slider {
+          flex: 1;
         }
       `}</style>
     </div>
