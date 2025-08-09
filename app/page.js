@@ -8,210 +8,329 @@ import { Suspense, useEffect, useRef, useState } from 'react'
 import { Html, useProgress } from '@react-three/drei'
 
 function Model({ url, color, opacity, visible, onLoaded }) {
-    const obj = useLoader(OBJLoader, url)
+  const obj = useLoader(OBJLoader, url)
 
-    useEffect(() => {
-        if (obj && onLoaded) onLoaded(obj)
-    }, [obj, onLoaded])
+  useEffect(() => {
+    if (obj && onLoaded) onLoaded(obj)
+  }, [obj, onLoaded])
 
-    const material = new THREE.MeshStandardMaterial({
-        color: new THREE.Color(color),
-        transparent: opacity < 1,
-        opacity,
-        metalness: 0.5,
-        roughness: 0.5,
-        side: THREE.DoubleSide,
-        depthWrite: opacity === 1,
-    })
+  const material = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(color),
+    transparent: opacity < 1,
+    opacity,
+    metalness: 0.5,
+    roughness: 0.5,
+    side: THREE.DoubleSide,
+    depthWrite: opacity === 1,
+  })
 
-    obj.traverse((child) => {
-        if (child.isMesh) {
-            child.material = material
-        }
-    })
+  obj.traverse((child) => {
+    if (child.isMesh) child.material = material
+  })
 
-    return visible ? <primitive object={obj} /> : null
+  return visible ? <primitive object={obj} /> : null
 }
 
 function TouchTrackballControls() {
-    const { camera, gl } = useThree()
-    const controlsRef = useRef()
+  const { camera, gl } = useThree()
+  const controlsRef = useRef(null)
 
-    useEffect(() => {
-        const controls = new TrackballControls(camera, gl.domElement)
-        controls.rotateSpeed = 5.0
-        controls.zoomSpeed = 1.2
-        controls.panSpeed = 1.0
-        controls.staticMoving = true
-        controlsRef.current = controls
+  useEffect(() => {
+    const controls = new TrackballControls(camera, gl.domElement)
+    controls.rotateSpeed = 5.0
+    controls.zoomSpeed = 1.2
+    controls.panSpeed = 1.0
+    controls.staticMoving = true
+    controlsRef.current = controls
 
-        const handleTouchStart = (event) => {
-            event.preventDefault()
-            controls.handleTouchStart(event)
-        }
+    const handleTouchStart = (event) => {
+      event.preventDefault()
+      controls.handleTouchStart(event)
+    }
+    const handleTouchMove = (event) => {
+      event.preventDefault()
+      controls.handleTouchMove(event)
+    }
 
-        const handleTouchMove = (event) => {
-            event.preventDefault()
-            controls.handleTouchMove(event)
-        }
+    gl.domElement.addEventListener('touchstart', handleTouchStart, { passive: false })
+    gl.domElement.addEventListener('touchmove', handleTouchMove, { passive: false })
 
-        gl.domElement.addEventListener('touchstart', handleTouchStart, { passive: false })
-        gl.domElement.addEventListener('touchmove', handleTouchMove, { passive: false })
+    return () => {
+      gl.domElement.removeEventListener('touchstart', handleTouchStart)
+      gl.domElement.removeEventListener('touchmove', handleTouchMove)
+      controls.dispose()
+    }
+  }, [camera, gl])
 
-        return () => {
-            gl.domElement.removeEventListener('touchstart', handleTouchStart)
-            gl.domElement.removeEventListener('touchmove', handleTouchMove)
-            controls.dispose()
-        }
-    }, [camera, gl])
+  useFrame(() => {
+    if (controlsRef.current && camera.isOrthographicCamera) {
+      controlsRef.current.panSpeed = camera.zoom * 0.4
+      controlsRef.current.update()
+    }
+  })
 
-    useFrame(() => {
-        if (controlsRef.current && camera.isOrthographicCamera) {
-            controlsRef.current.panSpeed = camera.zoom * 0.4
-            controlsRef.current.update()
-        }
-    })
-
-    return null
+  return null
 }
 
 function Loader() {
-    const { progress } = useProgress()
-    return (
-        <Html center>
-            <div style={{
-                background: 'rgba(0,0,0,0.7)',
-                padding: '20px 40px',
-                borderRadius: '10px',
-                color: 'white',
-                fontFamily: 'sans-serif',
-                fontSize: '18px'
-            }}>
-                ⏳ Načítání modelů: {Math.round(progress)} %
-            </div>
-        </Html>
-    )
+  const { progress } = useProgress()
+  return (
+    <Html center>
+      <div
+        style={{
+          background: 'rgba(0,0,0,0.7)',
+          padding: '20px 40px',
+          borderRadius: '10px',
+          color: 'white',
+          fontFamily: 'sans-serif',
+          fontSize: '18px',
+        }}
+      >
+        ⏳ Načítání modelů: {Math.round(progress)} %
+      </div>
+    </Html>
+  )
 }
 
-function FitCameraOnLoad({ objects }) {
-    const { camera } = useThree()
-    const fitted = useRef(false)
+/**
+ * Auto-fit kamery: provede se JEDNOU po načtení všech očekávaných objektů.
+ * Zoom je spočítaný z velikosti viewportu (canvasu) a rozměru bounding boxu.
+ */
+function FitCameraOnLoad({ objects, expectedCount = 3, margin = 1.2 }) {
+  const { camera, size } = useThree() // size = { width, height } v px
+  const fitted = useRef(false)
 
-    useEffect(() => {
-        if (objects.length > 0 && !fitted.current) {
-            const box = new THREE.Box3()
-            objects.forEach(obj => box.expandByObject(obj))
-            const center = new THREE.Vector3()
-            const size = new THREE.Vector3()
-            box.getCenter(center)
-            box.getSize(size)
+  useEffect(() => {
+    if (fitted.current) return
+    if (!objects || objects.length < expectedCount) return
 
-            camera.position.set(center.x, center.y, camera.position.z)
-            const maxDim = Math.max(size.x, size.y)
-            const margin = 1.2
-            camera.zoom = (camera.zoom || 1) * (15 / maxDim) / margin
-            camera.updateProjectionMatrix()
+    // Bounding box všech objektů
+    const box = new THREE.Box3()
+    objects.forEach((obj) => box.expandByObject(obj))
 
-            fitted.current = true
-        }
-    }, [objects, camera])
+    if (box.isEmpty()) return
 
-    return null
+    const center = new THREE.Vector3()
+    const dims = new THREE.Vector3()
+    box.getCenter(center)
+    box.getSize(dims)
+
+    // Zarovnat kameru na střed objektů (XY); Z necháme jak je
+    camera.position.set(center.x, center.y, camera.position.z)
+
+    // Výpočet zoomu pro ortho kameru:
+    // viditelná šířka = width / zoom, viditelná výška = height / zoom
+    // => zoomX = width  / (objWidth  * margin)
+    //    zoomY = height / (objHeight * margin)
+    const objW = Math.max(dims.x, 1e-6)
+    const objH = Math.max(dims.y, 1e-6)
+
+    const zoomX = size.width / (objW * margin)
+    const zoomY = size.height / (objH * margin)
+    const newZoom = Math.max(Math.min(zoomX, zoomY), 0.01) // ochrana
+
+    camera.zoom = newZoom
+    camera.updateProjectionMatrix()
+
+    fitted.current = true
+  }, [objects, expectedCount, margin, camera, size.width, size.height])
+
+  return null
 }
 
 export default function Page() {
-    const [color1, setColor1] = useState('#f5f5dc')
-    const [color2, setColor2] = useState('#f5f5dc')
-    const [color3, setColor3] = useState('#ffffff')
-    const [opacity1, setOpacity1] = useState(1)
-    const [opacity2, setOpacity2] = useState(1)
-    const [opacity3, setOpacity3] = useState(1)
-    const [visible1, setVisible1] = useState(true)
-    const [visible2, setVisible2] = useState(true)
-    const [visible3, setVisible3] = useState(true)
-    const [lightIntensity, setLightIntensity] = useState(1)
-    const [lightPos1, setLightPos1] = useState({ x: 0, y: 5, z: 5 })
-    const [lightPos2, setLightPos2] = useState({ x: -10, y: 0, z: 0 })
-    const [lightPos3, setLightPos3] = useState({ x: 10, y: 0, z: 0 })
-    const [showLights, setShowLights] = useState(false)
-    const [loadedObjects, setLoadedObjects] = useState([])
+  const [color1, setColor1] = useState('#f5f5dc')
+  const [color2, setColor2] = useState('#f5f5dc')
+  const [color3, setColor3] = useState('#ffffff')
+  const [opacity1, setOpacity1] = useState(1)
+  const [opacity2, setOpacity2] = useState(1)
+  const [opacity3, setOpacity3] = useState(1)
+  const [visible1, setVisible1] = useState(true)
+  const [visible2, setVisible2] = useState(true)
+  const [visible3, setVisible3] = useState(true)
+  const [lightIntensity, setLightIntensity] = useState(1)
+  const [lightPos1, setLightPos1] = useState({ x: 0, y: 5, z: 5 })
+  const [lightPos2, setLightPos2] = useState({ x: -5, y: -5, z: -5 })
+  const [lightPos3, setLightPos3] = useState({ x: 10, y: 0, z: 0 })
+  const [showLights, setShowLights] = useState(false)
 
-    const handleModelLoaded = (obj) => {
-        setLoadedObjects(prev => [...prev, obj])
-    }
+  const [loadedObjects, setLoadedObjects] = useState([])
 
-    return (
-        <div style={{ width: '100vw', height: '100vh' }}>
-            <div style={{
-                position: 'absolute', top: 10, left: 10, zIndex: 1,
-                color: 'white', fontFamily: 'sans-serif'
-            }}>
-                <div>Upper:</div>
-                <input type="color" value={color1} onChange={(e) => setColor1(e.target.value)} />
-                <input type="range" min={0} max={1} step={0.01} value={opacity1} onChange={(e) => setOpacity1(parseFloat(e.target.value))} />
-                <button onClick={() => setVisible1(!visible1)}>{visible1 ? '👁️' : '🚫'}</button>
+  const handleModelLoaded = (obj) => {
+    // přidáme objekt jen jednou
+    setLoadedObjects((prev) => (prev.includes(obj) ? prev : [...prev, obj]))
+  }
 
-                <div style={{ marginTop: '10px' }}>Lower:</div>
-                <input type="color" value={color2} onChange={(e) => setColor2(e.target.value)} />
-                <input type="range" min={0} max={1} step={0.01} value={opacity2} onChange={(e) => setOpacity2(parseFloat(e.target.value))} />
-                <button onClick={() => setVisible2(!visible2)}>{visible2 ? '👁️' : '🚫'}</button>
+  return (
+    <div style={{ width: '100vw', height: '100vh' }}>
+      <div
+        style={{
+          position: 'absolute',
+          top: 10,
+          left: 10,
+          zIndex: 1,
+          color: 'white',
+          fontFamily: 'sans-serif',
+        }}
+      >
+        <div>Upper:</div>
+        <input type="color" value={color1} onChange={(e) => setColor1(e.target.value)} />
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={opacity1}
+          onChange={(e) => setOpacity1(parseFloat(e.target.value))}
+        />
+        <button onClick={() => setVisible1(!visible1)}>{visible1 ? '👁️' : '🚫'}</button>
 
-                <div style={{ marginTop: '10px' }}>Waxup:</div>
-                <input type="color" value={color3} onChange={(e) => setColor3(e.target.value)} />
-                <input type="range" min={0} max={1} step={0.01} value={opacity3} onChange={(e) => setOpacity3(parseFloat(e.target.value))} />
-                <button onClick={() => setVisible3(!visible3)}>{visible3 ? '👁️' : '🚫'}</button>
+        <div style={{ marginTop: '10px' }}>Lower:</div>
+        <input type="color" value={color2} onChange={(e) => setColor2(e.target.value)} />
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={opacity2}
+          onChange={(e) => setOpacity2(parseFloat(e.target.value))}
+        />
+        <button onClick={() => setVisible2(!visible2)}>{visible2 ? '👁️' : '🚫'}</button>
 
-                <div style={{ marginTop: '10px' }}>💡 Light Intensity:</div>
-                <input type="range" min={0} max={2} step={0.01} value={lightIntensity} onChange={(e) => setLightIntensity(parseFloat(e.target.value))} />
+        <div style={{ marginTop: '10px' }}>Waxup:</div>
+        <input type="color" value={color3} onChange={(e) => setColor3(e.target.value)} />
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={opacity3}
+          onChange={(e) => setOpacity3(parseFloat(e.target.value))}
+        />
+        <button onClick={() => setVisible3(!visible3)}>{visible3 ? '👁️' : '🚫'}</button>
 
-                <div style={{ marginTop: '10px', cursor: 'pointer' }} onClick={() => setShowLights(!showLights)}>
-                    {showLights ? '⬇️ Světla' : '➡️ Světla'}
-                </div>
+        <div style={{ marginTop: '10px' }}>💡 Light Intensity:</div>
+        <input
+          type="range"
+          min={0}
+          max={2}
+          step={0.01}
+          value={lightIntensity}
+          onChange={(e) => setLightIntensity(parseFloat(e.target.value))}
+        />
 
-                {showLights && (
-                    <div style={{ marginTop: '5px' }}>
-                        <div>🔦 Light 1 Position:</div>
-                        <div>X:</div>
-                        <input type="range" min={-10} max={10} step={0.1} value={lightPos1.x} onChange={(e) => setLightPos1({ ...lightPos1, x: parseFloat(e.target.value) })} />
-                        <div>Y:</div>
-                        <input type="range" min={-10} max={10} step={0.1} value={lightPos1.y} onChange={(e) => setLightPos1({ ...lightPos1, y: parseFloat(e.target.value) })} />
-                        <div>Z:</div>
-                        <input type="range" min={-10} max={10} step={0.1} value={lightPos1.z} onChange={(e) => setLightPos1({ ...lightPos1, z: parseFloat(e.target.value) })} />
-
-                        <div style={{ marginTop: '10px' }}>🔦 Light 2 Position:</div>
-                        <div>X:</div>
-                        <input type="range" min={-10} max={10} step={0.1} value={lightPos2.x} onChange={(e) => setLightPos2({ ...lightPos2, x: parseFloat(e.target.value) })} />
-                        <div>Y:</div>
-                        <input type="range" min={-10} max={10} step={0.1} value={lightPos2.y} onChange={(e) => setLightPos2({ ...lightPos2, y: parseFloat(e.target.value) })} />
-                        <div>Z:</div>
-                        <input type="range" min={-10} max={10} step={0.1} value={lightPos2.z} onChange={(e) => setLightPos2({ ...lightPos2, z: parseFloat(e.target.value) })} />
-
-                        <div style={{ marginTop: '10px' }}>🔦 Light 3 Position:</div>
-                        <div>X:</div>
-                        <input type="range" min={-10} max={10} step={0.1} value={lightPos3.x} onChange={(e) => setLightPos3({ ...lightPos3, x: parseFloat(e.target.value) })} />
-                        <div>Y:</div>
-                        <input type="range" min={-10} max={10} step={0.1} value={lightPos3.y} onChange={(e) => setLightPos3({ ...lightPos3, y: parseFloat(e.target.value) })} />
-                        <div>Z:</div>
-                        <input type="range" min={-10} max={10} step={0.1} value={lightPos3.z} onChange={(e) => setLightPos3({ ...lightPos3, z: parseFloat(e.target.value) })} />
-                    </div>
-                )}
-            </div>
-
-            <Canvas orthographic camera={{ position: [0, 0, 100] }}>
-                <ambientLight intensity={lightIntensity * 0.4} />
-                <directionalLight position={[lightPos1.x, lightPos1.y, lightPos1.z]} intensity={lightIntensity * 1.5} />
-                <directionalLight position={[lightPos2.x, lightPos2.y, lightPos2.z]} intensity={lightIntensity * 1.0} />
-                <directionalLight position={[lightPos3.x, lightPos3.y, lightPos3.z]} intensity={lightIntensity * 1.2} />
-
-                <Suspense fallback={<Loader />}>
-                    <Model url="/models/Upper.obj" color={color1} opacity={opacity1} visible={visible1} onLoaded={handleModelLoaded} />
-                    <Model url="/models/Lower.obj" color={color2} opacity={opacity2} visible={visible2} onLoaded={handleModelLoaded} />
-                    <Model url="/models/Crown21.obj" color={color3} opacity={opacity3} visible={visible3} onLoaded={handleModelLoaded} />
-                </Suspense>
-
-                <FitCameraOnLoad objects={loadedObjects} />
-                <TouchTrackballControls />
-            </Canvas>
+        <div style={{ marginTop: '10px', cursor: 'pointer' }} onClick={() => setShowLights(!showLights)}>
+          {showLights ? '⬇️ Světla' : '➡️ Světla'}
         </div>
-    )
+
+        {showLights && (
+          <div style={{ marginTop: '5px' }}>
+            <div>🔦 Light 1 Position:</div>
+            <div>X:</div>
+            <input
+              type="range"
+              min={-10}
+              max={10}
+              step={0.1}
+              value={lightPos1.x}
+              onChange={(e) => setLightPos1({ ...lightPos1, x: parseFloat(e.target.value) })}
+            />
+            <div>Y:</div>
+            <input
+              type="range"
+              min={-10}
+              max={10}
+              step={0.1}
+              value={lightPos1.y}
+              onChange={(e) => setLightPos1({ ...lightPos1, y: parseFloat(e.target.value) })}
+            />
+            <div>Z:</div>
+            <input
+              type="range"
+              min={-10}
+              max={10}
+              step={0.1}
+              value={lightPos1.z}
+              onChange={(e) => setLightPos1({ ...lightPos1, z: parseFloat(e.target.value) })}
+            />
+
+            <div style={{ marginTop: '10px' }}>🔦 Light 2 Position:</div>
+            <div>X:</div>
+            <input
+              type="range"
+              min={-10}
+              max={10}
+              step={0.1}
+              value={lightPos2.x}
+              onChange={(e) => setLightPos2({ ...lightPos2, x: parseFloat(e.target.value) })}
+            />
+            <div>Y:</div>
+            <input
+              type="range"
+              min={-10}
+              max={10}
+              step={0.1}
+              value={lightPos2.y}
+              onChange={(e) => setLightPos2({ ...lightPos2, y: parseFloat(e.target.value) })}
+            />
+            <div>Z:</div>
+            <input
+              type="range"
+              min={-10}
+              max={10}
+              step={0.1}
+              value={lightPos2.z}
+              onChange={(e) => setLightPos2({ ...lightPos2, z: parseFloat(e.target.value) })}
+            />
+
+            <div style={{ marginTop: '10px' }}>🔦 Light 3 Position:</div>
+            <div>X:</div>
+            <input
+              type="range"
+              min={-10}
+              max={10}
+              step={0.1}
+              value={lightPos3.x}
+              onChange={(e) => setLightPos3({ ...lightPos3, x: parseFloat(e.target.value) })}
+            />
+            <div>Y:</div>
+            <input
+              type="range"
+              min={-10}
+              max={10}
+              step={0.1}
+              value={lightPos3.y}
+              onChange={(e) => setLightPos3({ ...lightPos3, y: parseFloat(e.target.value) })}
+            />
+            <div>Z:</div>
+            <input
+              type="range"
+              min={-10}
+              max={10}
+              step={0.1}
+              value={lightPos3.z}
+              onChange={(e) => setLightPos3({ ...lightPos3, z: parseFloat(e.target.value) })}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Základní pozice kamery; zoom nastavíme až po načtení */}
+      <Canvas orthographic camera={{ position: [0, 0, 100] }}>
+        <ambientLight intensity={lightIntensity * 0.4} />
+        <directionalLight position={[lightPos1.x, lightPos1.y, lightPos1.z]} intensity={lightIntensity * 1.5} />
+        <directionalLight position={[lightPos2.x, lightPos2.y, lightPos2.z]} intensity={lightIntensity * 1.0} />
+        <directionalLight position={[lightPos3.x, lightPos3.y, lightPos3.z]} intensity={lightIntensity * 1.2} />
+
+        <Suspense fallback={<Loader />}>
+          <Model url="/models/Upper.obj" color={color1} opacity={opacity1} visible={visible1} onLoaded={handleModelLoaded} />
+          <Model url="/models/Lower.obj" color={color2} opacity={opacity2} visible={visible2} onLoaded={handleModelLoaded} />
+          <Model url="/models/Crown21.obj" color={color3} opacity={opacity3} visible={visible3} onLoaded={handleModelLoaded} />
+        </Suspense>
+
+        <FitCameraOnLoad objects={loadedObjects} expectedCount={3} margin={1.2} />
+        <TouchTrackballControls />
+      </Canvas>
+    </div>
+  )
 }
