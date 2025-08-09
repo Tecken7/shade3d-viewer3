@@ -150,7 +150,7 @@ export default function Page() {
   const [lightPos1, setLightPos1] = useState({ x: 0, y: 5, z: 5 })
   const [lightPos2, setLightPos2] = useState({ x: -10, y: 0, z: 0 })
   const [lightPos3, setLightPos3] = useState({ x: 10, y: 0, z: 0 })
-  const [lightPos4, setLightPos4] = useState({ x: 0, y: -5, z: -5 }) // nové světlo zezadu/zespodu
+  const [lightPos4, setLightPos4] = useState({ x: 0, y: -5, z: -5 })
 
   const [showLights, setShowLights] = useState(false)
   const [loadedObjects, setLoadedObjects] = useState([])
@@ -179,6 +179,8 @@ export default function Page() {
           color: 'white',
           fontFamily: 'sans-serif',
           fontSize: '14px',
+          // jednotná šířka sliderů (změň podle chuti)
+          ['--slider-width']: '180px',
         }}
       >
         <div>Upper:</div>
@@ -204,7 +206,19 @@ export default function Page() {
         {showLights && (
           <div style={{ marginTop: '8px' }}>
             <div style={{ marginBottom: '6px' }}>💡 Light Intensity:</div>
-            <input className="slider" type="range" min={0} max={2} step={0.01} value={lightIntensity} onChange={(e) => setLightIntensity(parseFloat(e.target.value))} />
+            {/* zarovnání jako osy: prázdný label + slider stejné délky */}
+            <div className="axis-row">
+              <span className="axis-label" aria-hidden="true">&nbsp;</span>
+              <input
+                className="slider"
+                type="range"
+                min={0}
+                max={2}
+                step={0.01}
+                value={lightIntensity}
+                onChange={(e) => setLightIntensity(parseFloat(e.target.value))}
+              />
+            </div>
 
             {[
               { label: 'Light 1 Position', pos: lightPos1, setPos: setLightPos1 },
@@ -264,7 +278,7 @@ export default function Page() {
           -webkit-appearance: none;
           -moz-appearance: none;
           appearance: none;
-          width: 140px;
+          width: var(--slider-width, 140px);
           height: 14px;
           background: transparent;
           margin: 5px 0;
@@ -316,6 +330,8 @@ export default function Page() {
           border: 1px solid rgba(255,255,255,.15);
           border-radius: 8px;
           padding: 10px 12px;
+          /* šířku slideru držíme zde jako proměnnou */
+          --slider-width: 180px;
         }
         .axis-row {
           display: flex;
@@ -330,8 +346,10 @@ export default function Page() {
           font-family: sans-serif;
           opacity: .9;
         }
+        /* ať mají všechny posuvníky v řádcích stejnou pevnou délku a jsou zarovnané */
         .axis-row .slider {
-          flex: 1;
+          flex: 0 0 var(--slider-width, 140px);
+          width: var(--slider-width, 140px);
         }
       `}</style>
     </div>
