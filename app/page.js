@@ -247,7 +247,7 @@ export default function Page() {
           expectedCount={3}
           margin={1.2}
           isMobile={isMobile}
-          desktopScale={0.60}   // <— uprav pro menší/větší model na desktopu (např. 0.75)
+          desktopScale={0.40}   // <— uprav pro menší/větší model na desktopu (např. 0.75)
           mobileScale={1.0}     // mobil necháváme tak, jak ti vyhovuje
         />
 
