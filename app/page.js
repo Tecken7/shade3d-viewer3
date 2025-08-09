@@ -145,10 +145,13 @@ export default function Page() {
   const [visible1, setVisible1] = useState(true)
   const [visible2, setVisible2] = useState(true)
   const [visible3, setVisible3] = useState(true)
+
   const [lightIntensity, setLightIntensity] = useState(1)
   const [lightPos1, setLightPos1] = useState({ x: 0, y: 5, z: 5 })
   const [lightPos2, setLightPos2] = useState({ x: -10, y: 0, z: 0 })
   const [lightPos3, setLightPos3] = useState({ x: 10, y: 0, z: 0 })
+  const [lightPos4, setLightPos4] = useState({ x: 0, y: -3, z: -8 }) // nové: zezadu a lehce zespodu
+
   const [showLights, setShowLights] = useState(false)
 
   const [loadedObjects, setLoadedObjects] = useState([])
@@ -191,9 +194,7 @@ export default function Page() {
           value={opacity1}
           onChange={(e) => setOpacity1(parseFloat(e.target.value))}
         />
-        <button className="toggle" onClick={() => setVisible1(!visible1)}>
-          {visible1 ? '👁️' : '🚫'}
-        </button>
+        <button className="toggle" onClick={() => setVisible1(!visible1)}>{visible1 ? '👁️' : '🚫'}</button>
 
         <div style={{ marginTop: '10px' }}>Lower:</div>
         <input type="color" value={color2} onChange={(e) => setColor2(e.target.value)} />
@@ -206,9 +207,7 @@ export default function Page() {
           value={opacity2}
           onChange={(e) => setOpacity2(parseFloat(e.target.value))}
         />
-        <button className="toggle" onClick={() => setVisible2(!visible2)}>
-          {visible2 ? '👁️' : '🚫'}
-        </button>
+        <button className="toggle" onClick={() => setVisible2(!visible2)}>{visible2 ? '👁️' : '🚫'}</button>
 
         <div style={{ marginTop: '10px' }}>Waxup:</div>
         <input type="color" value={color3} onChange={(e) => setColor3(e.target.value)} />
@@ -221,9 +220,7 @@ export default function Page() {
           value={opacity3}
           onChange={(e) => setOpacity3(parseFloat(e.target.value))}
         />
-        <button className="toggle" onClick={() => setVisible3(!visible3)}>
-          {visible3 ? '👁️' : '🚫'}
-        </button>
+        <button className="toggle" onClick={() => setVisible3(!visible3)}>{visible3 ? '👁️' : '🚫'}</button>
 
         {/* Toggle pro menu světel */}
         <div style={{ marginTop: '10px', cursor: 'pointer' }} onClick={() => setShowLights(!showLights)}>
@@ -232,7 +229,6 @@ export default function Page() {
 
         {showLights && (
           <div style={{ marginTop: '8px' }}>
-            {/* Přesunuto sem: Light Intensity */}
             <div style={{ marginBottom: '6px' }}>💡 Light Intensity:</div>
             <input
               className="slider"
@@ -249,6 +245,7 @@ export default function Page() {
               { label: 'Light 1 Position', pos: lightPos1, setPos: setLightPos1 },
               { label: 'Light 2 Position', pos: lightPos2, setPos: setLightPos2 },
               { label: 'Light 3 Position', pos: lightPos3, setPos: setLightPos3 },
+              { label: 'Light 4 Position (back/bottom)', pos: lightPos4, setPos: setLightPos4 },
             ].map((light, idx) => (
               <div key={idx} style={{ marginTop: '10px' }}>
                 <div>🔦 {light.label}:</div>
@@ -277,6 +274,8 @@ export default function Page() {
         <directionalLight position={[lightPos1.x, lightPos1.y, lightPos1.z]} intensity={lightIntensity * 1.5} />
         <directionalLight position={[lightPos2.x, lightPos2.y, lightPos2.z]} intensity={lightIntensity * 1.0} />
         <directionalLight position={[lightPos3.x, lightPos3.y, lightPos3.z]} intensity={lightIntensity * 1.2} />
+        {/* nové 4. světlo (zezadu + zespodu) */}
+        <directionalLight position={[lightPos4.x, lightPos4.y, lightPos4.z]} intensity={lightIntensity * 0.9} />
 
         <Suspense fallback={<Loader />}>
           <Model url="/models/Upper.obj" color={color1} opacity={opacity1} visible={visible1} onLoaded={handleModelLoaded} />
