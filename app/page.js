@@ -94,10 +94,16 @@ function Loader() {
 
 /**
  * Auto-fit kamery: jednou po načtení všech objektů.
- * Zoom je spočten z velikosti canvasu a rozměrů bounding boxu.
- * Na desktopu se aplikuje škálovací faktor (desktopScale) pro menší model.
+ * Zoom z velikosti canvasu a bounding boxu. Desktop trochu „odzoomován“.
  */
-function FitCameraOnLoad({ objects, expectedCount = 3, margin = 1.2, isMobile = false, desktopScale = 0.85, mobileScale = 1.0 }) {
+function FitCameraOnLoad({
+  objects,
+  expectedCount = 3,
+  margin = 1.2,
+  isMobile = false,
+  desktopScale = 0.40, // <= můžeš klidně dál ladit
+  mobileScale = 1.0,
+}) {
   const { camera, size } = useThree()
   const fitted = useRef(false)
 
@@ -114,19 +120,17 @@ function FitCameraOnLoad({ objects, expectedCount = 3, margin = 1.2, isMobile = 
     box.getCenter(center)
     box.getSize(dims)
 
-    // střed na XY
+    // srovnat na střed (XY), Z necháme
     camera.position.set(center.x, center.y, camera.position.z)
 
-    // výpočet zoomu pro ortho kameru dle viewportu
+    // ortho zoom z viewportu
     const objW = Math.max(dims.x, 1e-6)
     const objH = Math.max(dims.y, 1e-6)
     const zoomX = size.width / (objW * margin)
     const zoomY = size.height / (objH * margin)
     let newZoom = Math.min(zoomX, zoomY)
 
-    // jemné zmenšení na desktopu
     newZoom *= isMobile ? mobileScale : desktopScale
-
     camera.zoom = Math.max(newZoom, 0.01)
     camera.updateProjectionMatrix()
 
@@ -154,7 +158,7 @@ export default function Page() {
 
   const [loadedObjects, setLoadedObjects] = useState([])
 
-  // detekce mobilu/desktopu
+  // mobil/desktop detekce kvůli scale v auto-fitu
   const [isMobile, setIsMobile] = useState(false)
   useEffect(() => {
     const uaMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
@@ -170,6 +174,7 @@ export default function Page() {
   return (
     <div style={{ width: '100vw', height: '100vh' }}>
       <div
+        className="controls-panel"
         style={{
           position: 'absolute',
           top: 10,
@@ -177,25 +182,64 @@ export default function Page() {
           zIndex: 1,
           color: 'white',
           fontFamily: 'sans-serif',
+          fontSize: '14px',
         }}
       >
         <div>Upper:</div>
         <input type="color" value={color1} onChange={(e) => setColor1(e.target.value)} />
-        <input type="range" min={0} max={1} step={0.01} value={opacity1} onChange={(e) => setOpacity1(parseFloat(e.target.value))} />
-        <button onClick={() => setVisible1(!visible1)}>{visible1 ? '👁️' : '🚫'}</button>
+        <input
+          className="slider"
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={opacity1}
+          onChange={(e) => setOpacity1(parseFloat(e.target.value))}
+        />
+        <button className="toggle" onClick={() => setVisible1(!visible1)}>
+          {visible1 ? '👁️' : '🚫'}
+        </button>
 
         <div style={{ marginTop: '10px' }}>Lower:</div>
         <input type="color" value={color2} onChange={(e) => setColor2(e.target.value)} />
-        <input type="range" min={0} max={1} step={0.01} value={opacity2} onChange={(e) => setOpacity2(parseFloat(e.target.value))} />
-        <button onClick={() => setVisible2(!visible2)}>{visible2 ? '👁️' : '🚫'}</button>
+        <input
+          className="slider"
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={opacity2}
+          onChange={(e) => setOpacity2(parseFloat(e.target.value))}
+        />
+        <button className="toggle" onClick={() => setVisible2(!visible2)}>
+          {visible2 ? '👁️' : '🚫'}
+        </button>
 
         <div style={{ marginTop: '10px' }}>Waxup:</div>
         <input type="color" value={color3} onChange={(e) => setColor3(e.target.value)} />
-        <input type="range" min={0} max={1} step={0.01} value={opacity3} onChange={(e) => setOpacity3(parseFloat(e.target.value))} />
-        <button onClick={() => setVisible3(!visible3)}>{visible3 ? '👁️' : '🚫'}</button>
+        <input
+          className="slider"
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={opacity3}
+          onChange={(e) => setOpacity3(parseFloat(e.target.value))}
+        />
+        <button className="toggle" onClick={() => setVisible3(!visible3)}>
+          {visible3 ? '👁️' : '🚫'}
+        </button>
 
         <div style={{ marginTop: '10px' }}>💡 Light Intensity:</div>
-        <input type="range" min={0} max={2} step={0.01} value={lightIntensity} onChange={(e) => setLightIntensity(parseFloat(e.target.value))} />
+        <input
+          className="slider"
+          type="range"
+          min={0}
+          max={2}
+          step={0.01}
+          value={lightIntensity}
+          onChange={(e) => setLightIntensity(parseFloat(e.target.value))}
+        />
 
         <div style={{ marginTop: '10px', cursor: 'pointer' }} onClick={() => setShowLights(!showLights)}>
           {showLights ? '⬇️ Světla' : '➡️ Světla'}
@@ -203,29 +247,29 @@ export default function Page() {
 
         {showLights && (
           <div style={{ marginTop: '5px' }}>
-            <div>🔦 Light 1 Position:</div>
-            <div>X:</div>
-            <input type="range" min={-10} max={10} step={0.1} value={lightPos1.x} onChange={(e) => setLightPos1({ ...lightPos1, x: parseFloat(e.target.value) })} />
-            <div>Y:</div>
-            <input type="range" min={-10} max={10} step={0.1} value={lightPos1.y} onChange={(e) => setLightPos1({ ...lightPos1, y: parseFloat(e.target.value) })} />
-            <div>Z:</div>
-            <input type="range" min={-10} max={10} step={0.1} value={lightPos1.z} onChange={(e) => setLightPos1({ ...lightPos1, z: parseFloat(e.target.value) })} />
-
-            <div style={{ marginTop: '10px' }}>🔦 Light 2 Position:</div>
-            <div>X:</div>
-            <input type="range" min={-10} max={10} step={0.1} value={lightPos2.x} onChange={(e) => setLightPos2({ ...lightPos2, x: parseFloat(e.target.value) })} />
-            <div>Y:</div>
-            <input type="range" min={-10} max={10} step={0.1} value={lightPos2.y} onChange={(e) => setLightPos2({ ...lightPos2, y: parseFloat(e.target.value) })} />
-            <div>Z:</div>
-            <input type="range" min={-10} max={10} step={0.1} value={lightPos2.z} onChange={(e) => setLightPos2({ ...lightPos2, z: parseFloat(e.target.value) })} />
-
-            <div style={{ marginTop: '10px' }}>🔦 Light 3 Position:</div>
-            <div>X:</div>
-            <input type="range" min={-10} max={10} step={0.1} value={lightPos3.x} onChange={(e) => setLightPos3({ ...lightPos3, x: parseFloat(e.target.value) })} />
-            <div>Y:</div>
-            <input type="range" min={-10} max={10} step={0.1} value={lightPos3.y} onChange={(e) => setLightPos3({ ...lightPos3, y: parseFloat(e.target.value) })} />
-            <div>Z:</div>
-            <input type="range" min={-10} max={10} step={0.1} value={lightPos3.z} onChange={(e) => setLightPos3({ ...lightPos3, z: parseFloat(e.target.value) })} />
+            {[
+              { label: 'Light 1 Position', pos: lightPos1, setPos: setLightPos1 },
+              { label: 'Light 2 Position', pos: lightPos2, setPos: setLightPos2 },
+              { label: 'Light 3 Position', pos: lightPos3, setPos: setLightPos3 },
+            ].map((light, idx) => (
+              <div key={idx} style={{ marginTop: '10px' }}>
+                <div>🔦 {light.label}:</div>
+                {['x', 'y', 'z'].map((axis) => (
+                  <div key={axis}>
+                    <div>{axis.toUpperCase()}:</div>
+                    <input
+                      className="slider"
+                      type="range"
+                      min={-10}
+                      max={10}
+                      step={0.1}
+                      value={light.pos[axis]}
+                      onChange={(e) => light.setPos({ ...light.pos, [axis]: parseFloat(e.target.value) })}
+                    />
+                  </div>
+                ))}
+              </div>
+            ))}
           </div>
         )}
       </div>
@@ -247,12 +291,73 @@ export default function Page() {
           expectedCount={3}
           margin={1.2}
           isMobile={isMobile}
-          desktopScale={0.40}   // <— uprav pro menší/větší model na desktopu (např. 0.75)
-          mobileScale={1.0}     // mobil necháváme tak, jak ti vyhovuje
+          desktopScale={0.40}
+          mobileScale={1.0}
         />
 
         <TouchTrackballControls />
       </Canvas>
+
+      {/* Globální styl ovládacích prvků */}
+      <style jsx global>{`
+        .slider {
+          -webkit-appearance: none;
+          -moz-appearance: none;
+          appearance: none;
+          width: 140px;
+          height: 14px;
+          background: transparent;
+          margin: 5px 0;
+          display: inline-block;
+        }
+        .slider::-webkit-slider-runnable-track {
+          height: 4px;
+          background: white;
+          border-radius: 2px;
+        }
+        .slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 14px;
+          height: 14px;
+          border-radius: 50%;
+          background: white;
+          cursor: pointer;
+          box-shadow: 0 0 2px black;
+          margin-top: -5px;
+        }
+        .slider::-moz-range-track {
+          height: 4px;
+          background: white;
+          border-radius: 2px;
+        }
+        .slider::-moz-range-thumb {
+          width: 14px;
+          height: 14px;
+          border-radius: 50%;
+          background: white;
+          cursor: pointer;
+          box-shadow: 0 0 2px black;
+          border: none;
+        }
+        .toggle {
+          background: transparent;
+          border: 1px solid white;
+          border-radius: 5px;
+          padding: 3px 8px;
+          color: white;
+          cursor: pointer;
+          font-size: 14px;
+          margin-left: 5px;
+        }
+        .controls-panel {
+          backdrop-filter: blur(3px);
+          background: rgba(0,0,0,.25);
+          border: 1px solid rgba(255,255,255,.15);
+          border-radius: 8px;
+          padding: 10px 12px;
+        }
+      `}</style>
     </div>
   )
 }
