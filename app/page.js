@@ -3,78 +3,73 @@
 import { Canvas, useLoader, useThree, useFrame } from '@react-three/fiber'
 import { TrackballControls } from 'three/examples/jsm/controls/TrackballControls'
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader'
+import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader'
 import * as THREE from 'three'
-import { Suspense, useEffect, useRef, useState } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { Html, useProgress } from '@react-three/drei'
 
-function Model({
-  url,
-  color,
-  opacity,
-  visible,
-  onLoaded,
-  edgesEnabled = false,
-  edgesColor = '#000000',
-  edgesAngle = 20,
-}) {
+/** === HDR ENVIRONMENT LOADER ===
+ * Načte HDR, vytvoří PMREM a nastaví scene.environment.
+ * Pokud chceš vidět HDR v pozadí, zapni showBackground (false = jen osvětlení).
+ */
+function EnvHDR({ url = '/hdr/studio_small_03_1k.hdr', showBackground = false }) {
+  const { scene, gl } = useThree()
+  const hdr = useLoader(RGBELoader, url)
+
+  useEffect(() => {
+    if (!hdr) return
+    hdr.mapping = THREE.EquirectangularReflectionMapping
+    const pmrem = new THREE.PMREMGenerator(gl)
+    pmrem.compileEquirectangularShader()
+    const rt = pmrem.fromEquirectangular(hdr)
+
+    // aplikace do scény
+    scene.environment = rt.texture
+    scene.background = showBackground ? rt.texture : null
+
+    // cleanup
+    return () => {
+      scene.environment = null
+      if (showBackground) scene.background = null
+      rt.texture?.dispose?.()
+      rt?.dispose?.()
+      pmrem?.dispose?.()
+      hdr?.dispose?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hdr, gl, scene, showBackground, url])
+
+  return null
+}
+
+function Model({ url, color, opacity, visible, onLoaded, envIntensity = 0.25 }) {
   const obj = useLoader(OBJLoader, url)
-  const edgesRef = useRef(null)
 
   useEffect(() => {
     if (obj && onLoaded) onLoaded(obj)
   }, [obj, onLoaded])
 
-  // materiál modelu
-  const material = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(color),
-    transparent: opacity < 1,
-    opacity,
-    metalness: 0.5,
-    roughness: 0.5,
-    side: THREE.DoubleSide,
-    depthWrite: opacity === 1,
-  })
+  // materiál s jemným odleskem z environmentu
+  const material = useMemo(
+    () =>
+      new THREE.MeshStandardMaterial({
+        color: new THREE.Color(color),
+        transparent: opacity < 1,
+        opacity,
+        metalness: 0.2,      // nižší metalness pro „dental“ vzhled
+        roughness: 0.45,     // trochu hladší povrch, ať env jemně hraje
+        side: THREE.DoubleSide,
+        depthWrite: opacity === 1,
+        envMapIntensity: envIntensity,
+      }),
+    [color, opacity, envIntensity]
+  )
 
-  obj.traverse((child) => {
-    if (child.isMesh) child.material = material
-  })
-
-  // --- EDGES (obrysové linie) ---
   useEffect(() => {
-    // cleanup starých linek
-    if (edgesRef.current) {
-      edgesRef.current.forEach((lines) => {
-        lines.geometry.dispose()
-        lines.material.dispose()
-        if (lines.parent) lines.parent.remove(lines)
-      })
-      edgesRef.current = null
-    }
-    if (!edgesEnabled || !obj) return
-
-    const created = []
     obj.traverse((child) => {
-      if (!child.isMesh || !child.geometry) return
-      const geom = new THREE.EdgesGeometry(child.geometry, edgesAngle) // threshold v ° (1–60)
-      const mat = new THREE.LineBasicMaterial({ color: new THREE.Color(edgesColor) })
-      const lines = new THREE.LineSegments(geom, mat)
-      // přidáme přímo na mesh → dědí transformace, sedí přesně na modelu
-      child.add(lines)
-      created.push(lines)
+      if (child.isMesh) child.material = material
     })
-    edgesRef.current = created
-
-    return () => {
-      if (edgesRef.current) {
-        edgesRef.current.forEach((lines) => {
-          lines.geometry.dispose()
-          lines.material.dispose()
-          if (lines.parent) lines.parent.remove(lines)
-        })
-        edgesRef.current = null
-      }
-    }
-  }, [obj, edgesEnabled, edgesColor, edgesAngle])
+  }, [obj, material])
 
   return visible ? <primitive object={obj} /> : null
 }
@@ -140,7 +135,7 @@ function Loader() {
   )
 }
 
-/** Auto-fit kamery po načtení všech objektů (jednorázově). */
+/** Auto-fit kamery (jednou po načtení všech objektů). */
 function FitCameraOnLoad({
   objects,
   expectedCount = 3,
@@ -165,10 +160,8 @@ function FitCameraOnLoad({
     box.getCenter(center)
     box.getSize(dims)
 
-    // vycentrovat XY (Z ponecháme)
     camera.position.set(center.x, center.y, camera.position.z)
 
-    // ortho zoom z viewportu
     const objW = Math.max(dims.x, 1e-6)
     const objH = Math.max(dims.y, 1e-6)
     const zoomX = size.width / (objW * margin)
@@ -189,26 +182,27 @@ export default function Page() {
   const [color1, setColor1] = useState('#f5f5dc')
   const [color2, setColor2] = useState('#f5f5dc')
   const [color3, setColor3] = useState('#ffffff')
+
   const [opacity1, setOpacity1] = useState(1)
   const [opacity2, setOpacity2] = useState(1)
   const [opacity3, setOpacity3] = useState(1)
+
   const [visible1, setVisible1] = useState(true)
   const [visible2, setVisible2] = useState(true)
   const [visible3, setVisible3] = useState(true)
+
   const [lightIntensity, setLightIntensity] = useState(1)
   const [lightPos1, setLightPos1] = useState({ x: 0, y: 5, z: 5 })
-  const [lightPos2, setLightPos2] = useState({ x: -10, y: 0, z: 0 }) // tvoje uprava
+  const [lightPos2, setLightPos2] = useState({ x: -10, y: 0, z: 0 }) // tvoje úprava
   const [lightPos3, setLightPos3] = useState({ x: 10, y: 0, z: 0 })
-  const [showLights, setShowLights] = useState(false)
 
-  // Edge highlight (jen pro Waxup/Crown)
-  const [edgesWax, setEdgesWax] = useState(true)
-  const [edgesColor, setEdgesColor] = useState('#000000')
-  const [edgesAngle, setEdgesAngle] = useState(20) // 1–60: menší = více hran
+  const [envIntensity, setEnvIntensity] = useState(0.25) // slider v "Světla" menu
+  const [showLights, setShowLights] = useState(false)
+  const [showHDRBackground, setShowHDRBackground] = useState(false) // volitelné zobrazení HDR v pozadí
 
   const [loadedObjects, setLoadedObjects] = useState([])
 
-  // mobil/desktop kvůli scale v auto-fitu
+  // mobil/desktop pro auto-fit scale
   const [isMobile, setIsMobile] = useState(false)
   useEffect(() => {
     const uaMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
@@ -280,26 +274,6 @@ export default function Page() {
           {visible3 ? '👁️' : '🚫'}
         </button>
 
-        {/* Edge highlight ovládání pro Waxup */}
-        <div style={{ marginTop: '8px' }}>
-          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-            <input type="checkbox" checked={edgesWax} onChange={(e) => setEdgesWax(e.target.checked)} />
-            Edge highlight
-          </label>
-          <div style={{ marginTop: '4px' }}>Barva:</div>
-          <input type="color" value={edgesColor} onChange={(e) => setEdgesColor(e.target.value)} />
-          <div>Citlivost (°):</div>
-          <input
-            className="slider"
-            type="range"
-            min={1}
-            max={60}
-            step={1}
-            value={edgesAngle}
-            onChange={(e) => setEdgesAngle(parseInt(e.target.value, 10))}
-          />
-        </div>
-
         {/* Toggle menu světel */}
         <div style={{ marginTop: '10px', cursor: 'pointer' }} onClick={() => setShowLights(!showLights)}>
           {showLights ? '⬇️ Světla' : '➡️ Světla'}
@@ -307,7 +281,6 @@ export default function Page() {
 
         {showLights && (
           <div style={{ marginTop: '8px' }}>
-            {/* Intenzita světel (přesunuta sem) */}
             <div style={{ marginBottom: '6px' }}>💡 Light Intensity:</div>
             <input
               className="slider"
@@ -318,6 +291,28 @@ export default function Page() {
               value={lightIntensity}
               onChange={(e) => setLightIntensity(parseFloat(e.target.value))}
             />
+
+            <div style={{ marginTop: '10px' }}>🌐 Env Intensity:</div>
+            <input
+              className="slider"
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={envIntensity}
+              onChange={(e) => setEnvIntensity(parseFloat(e.target.value))}
+            />
+
+            <div style={{ marginTop: '6px' }}>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={showHDRBackground}
+                  onChange={(e) => setShowHDRBackground(e.target.checked)}
+                />
+                Zobrazit HDR v pozadí
+              </label>
+            </div>
 
             {/* Pozice světel */}
             {[
@@ -348,24 +343,19 @@ export default function Page() {
       </div>
 
       <Canvas orthographic camera={{ position: [0, 0, 100] }}>
-        <ambientLight intensity={lightIntensity * 0.4} />
-        <directionalLight position={[lightPos1.x, lightPos1.y, lightPos1.z]} intensity={lightIntensity * 1.5} />
-        <directionalLight position={[lightPos2.x, lightPos2.y, lightPos2.z]} intensity={lightIntensity * 1.0} />
-        <directionalLight position={[lightPos3.x, lightPos3.y, lightPos3.z]} intensity={lightIntensity * 1.2} />
+        {/* HDR environment */}
+        <EnvHDR url="/hdr/studio_small_03_1k.hdr" showBackground={showHDRBackground} />
+
+        {/* Základní světla (jemné, protože env už dost nasvítí scénu) */}
+        <ambientLight intensity={lightIntensity * 0.3} />
+        <directionalLight position={[lightPos1.x, lightPos1.y, lightPos1.z]} intensity={lightIntensity * 1.2} />
+        <directionalLight position={[lightPos2.x, lightPos2.y, lightPos2.z]} intensity={lightIntensity * 0.9} />
+        <directionalLight position={[lightPos3.x, lightPos3.y, lightPos3.z]} intensity={lightIntensity * 1.0} />
 
         <Suspense fallback={<Loader />}>
-          <Model url="/models/Upper.obj" color={color1} opacity={opacity1} visible={visible1} onLoaded={handleModelLoaded} />
-          <Model url="/models/Lower.obj" color={color2} opacity={opacity2} visible={visible2} onLoaded={handleModelLoaded} />
-          <Model
-            url="/models/Crown21.obj"
-            color={color3}
-            opacity={opacity3}
-            visible={visible3}
-            onLoaded={handleModelLoaded}
-            edgesEnabled={edgesWax}
-            edgesColor={edgesColor}
-            edgesAngle={edgesAngle}
-          />
+          <Model url="/models/Upper.obj" color={color1} opacity={opacity1} visible={visible1} onLoaded={handleModelLoaded} envIntensity={envIntensity} />
+          <Model url="/models/Lower.obj" color={color2} opacity={opacity2} visible={visible2} onLoaded={handleModelLoaded} envIntensity={envIntensity} />
+          <Model url="/models/Crown21.obj" color={color3} opacity={opacity3} visible={visible3} onLoaded={handleModelLoaded} envIntensity={envIntensity} />
         </Suspense>
 
         <FitCameraOnLoad
