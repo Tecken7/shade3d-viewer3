@@ -10,13 +10,28 @@ import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader"
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader"
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader"
 
-/* ───────────────────────── constants ───────────────────────── */
+/* ---------- Konstanty ---------- */
 const LIVE_MSG_TYPES = new Set(["SHADE3D_LIVE", "SHADE3D_LIVE_V6", "SHADE3D_LIVE_V5"])
-const DEFAULT_LOGO = "/Arthetic_logo.png"
-const ICONS = { eye: "/icons/Eye.png", eyeOff: "/icons/Eye-off.png" }
 
-/* ───────────────────────── helpers ───────────────────────── */
-const stripExt = (s) => s?.replace(/\.[^.]+$/, "") || ""
+/* ---------- Ikony + preload ---------- */
+const ICONS = {
+  eye: "/icons/Eye.png",
+  eyeOff: "/icons/Eye-off.png",
+}
+function PreloadIcons() {
+  useEffect(() => {
+    Object.values(ICONS).forEach((src) => {
+      const img = new Image()
+      img.decoding = "async"
+      img.src = src
+    })
+  }, [])
+  return null
+}
+
+/* ---------- Helpers ---------- */
+const DEFAULT_LOGO = "/Arthetic_logo.png"
+const stripExt = (s) => (s ? s.replace(/\.[^.]+$/, "") : "")
 const clamp01 = (x) => Math.max(0, Math.min(1, x))
 const getParam = (name) => {
   if (typeof window === "undefined") return null
@@ -33,18 +48,8 @@ function inferExt(nameOrUrl) {
   const m = s.match(/\.([a-z0-9]+)$/i)
   return m ? m[1].toLowerCase() : ""
 }
-function PreloadIcons() {
-  useEffect(() => {
-    Object.values(ICONS).forEach((src) => {
-      const img = new Image()
-      img.decoding = "async"
-      img.src = src
-    })
-  }, [])
-  return null
-}
 
-/* ───────────────────────── geometry auto-smooth ───────────────────────── */
+/* ---------- Auto Smooth ---------- */
 function autoSmoothGeometry(geometry, angleDeg = 30) {
   const angle = Math.max(0, Math.min(89.9, angleDeg))
   const angleRad = (angle * Math.PI) / 180
@@ -106,7 +111,7 @@ function autoSmoothGeometry(geometry, angleDeg = 30) {
   return g
 }
 
-/* ───────────────────────── tiny UI bits ───────────────────────── */
+/* ---------- Loader (overlay) ---------- */
 function InlineLoader({ text }) {
   return (
     <Html center>
@@ -123,36 +128,8 @@ function InlineLoader({ text }) {
     </Html>
   )
 }
-function ColorSwatch({ color, onChange, ariaLabel }) {
-  const [open, setOpen] = useState(false)
-  const containerRef = useRef(null)
-  useEffect(() => {
-    const onDocClick = (e) => { if (open && containerRef.current && !containerRef.current.contains(e.target)) setOpen(false) }
-    document.addEventListener("mousedown", onDocClick)
-    return () => document.removeEventListener("mousedown", onDocClick)
-  }, [open])
-  return (
-    <div ref={containerRef} style={{ position: "relative", display: "inline-block" }}>
-      <button
-        aria-label={ariaLabel || "color picker"}
-        onClick={() => setOpen((v) => !v)}
-        style={{ width: 36, height: 22, borderRadius: 4, border: "1px solid #fff", background: color, cursor: "pointer", boxShadow: "0 0 0 1px rgba(0,0,0,.25) inset" }}
-      />
-      {open && (
-        <div style={{ position: "absolute", zIndex: 20, top: 28, left: 0, background: "rgba(0,0,0,.92)", padding: 12, borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", backdropFilter: "blur(4px)", boxShadow: "0 6px 24px rgba(0,0,0,.35)" }}>
-          <HexColorPicker color={color} onChange={onChange} />
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-            <span style={{ color: "#fff", fontSize: 12 }}>#</span>
-            <HexColorInput color={color} onChange={onChange} prefixed={false}
-              style={{ width: 90, padding: "4px 6px", borderRadius: 6, border: "1px solid #444", background: "#111", color: "#fff", fontFamily: "monospace", fontSize: 12 }} />
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
 
-/* ───────────────────────── loaders/model ───────────────────────── */
+/* ---------- AnyModel ---------- */
 function AnyModel({
   name, url,
   color, opacity, visible,
@@ -241,7 +218,7 @@ function AnyModel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, ext])
 
-  // re-apply autosmooth when toggled
+  // AutoSmooth re-aplikace při změně
   useEffect(() => {
     if (!object3D) return
     object3D.traverse((child) => {
@@ -264,7 +241,7 @@ function AnyModel({
     })
   }, [object3D, autoSmooth, smoothAngle])
 
-  // material updates
+  // Materiál a vzhled
   useEffect(() => {
     if (!object3D) return
     object3D.traverse((child) => {
@@ -297,13 +274,19 @@ function AnyModel({
   return visible ? <primitive object={object3D} /> : null
 }
 
-/* ───────────────────────── camera / controls ───────────────────────── */
+/* ---------- Headlight ---------- */
 function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
   const { camera } = useThree()
   const ref = useRef(null)
-  useFrame(() => { if (ref.current) ref.current.position.copy(camera.position) })
-  return <pointLight ref={ref} color={color} intensity={enabled ? intensity : 0} distance={0} decay={0} />
+  useFrame(() => {
+    if (ref.current) ref.current.position.copy(camera.position)
+  })
+  return (
+    <pointLight ref={ref} color={color} intensity={enabled ? intensity : 0} distance={0} decay={0} />
+  )
 }
+
+/* ---------- Trackball ---------- */
 function TouchTrackballControls({ target = [0, 0, 0] }) {
   const { camera, gl } = useThree()
   const controlsRef = useRef(null)
@@ -337,8 +320,11 @@ function TouchTrackballControls({ target = [0, 0, 0] }) {
     if (camera.isOrthographicCamera) controlsRef.current.panSpeed = camera.zoom * 0.4
     controlsRef.current.update()
   })
+
   return null
 }
+
+/* ---------- AutoCenter & AutoFrame ---------- */
 function AutoCenterAndFrame({
   rootRef, depsKey, setTarget,
   margin = 1.2, isMobile = false, desktopScale = 0.4, mobileScale = 1.0,
@@ -349,6 +335,7 @@ function AutoCenterAndFrame({
 
   useEffect(() => {
     if (!shouldFrame?.current) return
+
     const root = rootRef.current
     if (!root) return
 
@@ -402,14 +389,45 @@ function AutoCenterAndFrame({
     camera.updateProjectionMatrix()
 
     shouldFrame.current = false
-  }, [depsKey, size.width, size.height, isMobile, desktopScale, mobileScale, margin, centerMode]) // eslint-disable-line
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [depsKey, size.width, size.height, isMobile, desktopScale, mobileScale, margin, centerMode])
 
   return null
 }
 
-/* ───────────────────────── main component ───────────────────────── */
+/* ---------- Color popover (UI) ---------- */
+function ColorSwatch({ color, onChange, ariaLabel }) {
+  const [open, setOpen] = useState(false)
+  const containerRef = useRef(null)
+  useEffect(() => {
+    const onDocClick = (e) => { if (open && containerRef.current && !containerRef.current.contains(e.target)) setOpen(false) }
+    document.addEventListener("mousedown", onDocClick)
+    return () => document.removeEventListener("mousedown", onDocClick)
+  }, [open])
+  return (
+    <div ref={containerRef} className="swatch-wrap" style={{ position: "relative", display: "inline-block" }}>
+      <button
+        aria-label={ariaLabel || "color picker"}
+        onClick={() => setOpen((v) => !v)}
+        className="swatch-btn"
+        style={{ width: 36, height: 22, borderRadius: 4, border: "1px solid #fff", background: color, cursor: "pointer", boxShadow: "0 0 0 1px rgba(0,0,0,.25) inset" }}
+      />
+      {open && (
+        <div className="swatch-pop" style={{ position: "absolute", zIndex: 20, top: 28, left: 0, background: "rgba(0,0,0,.92)", padding: 12, borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", backdropFilter: "blur(4px)", boxShadow: "0 6px 24px rgba(0,0,0,.35)" }}>
+          <HexColorPicker color={color} onChange={onChange} />
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+            <span style={{ color: "#fff", fontSize: 12 }}>#</span>
+            <HexColorInput color={color} onChange={onChange} prefixed={false} style={{ width: 90, padding: "4px 6px", borderRadius: 6, border: "1px solid #444", background: "#111", color: "#fff", fontFamily: "monospace", fontSize: 12 }} />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ---------- ClientPage (Viewer) ---------- */
 export default function ClientPage() {
-  // lights
+  // světla – pevné, ovládání přes manifest/URL/live
   const [lightIntensity, setLightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
@@ -426,8 +444,8 @@ export default function ClientPage() {
 
   const [title, setTitle] = useState(null)
 
-  // models
-  const [files, setFiles] = useState([]) // {url,name,rawName,c,o,v,r,m,vc,km}
+  // modely
+  const [files, setFiles] = useState([])
   const [colors, setColors] = useState([])
   const [opacities, setOpacities] = useState([])
   const [visibles, setVisibles] = useState([])
@@ -435,18 +453,16 @@ export default function ClientPage() {
   const [metalnesses, setMetalnesses] = useState([])
   const [fatal, setFatal] = useState(null)
 
-  // smooth
+  // auto smooth
   const [autoSmooth, setAutoSmooth] = useState((getParam("smooth") ?? "1") !== "0")
   const [smoothAngle, setSmoothAngle] = useState(() => {
     const v = parseFloat(getParam("smoothAngle") ?? "30")
     return isFinite(v) ? Math.max(0, Math.min(80, v)) : 30
   })
 
-  // logo
   const [logoCfg, setLogoCfg] = useState({ url: DEFAULT_LOGO, opacity: 0.9, width: 160, pos: "bc" })
 
   // camera
-  const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
   const [loadedCount, setLoadedCount] = useState(0)
   const handleModelLoaded = () => setLoadedCount((n) => n + 1)
 
@@ -631,7 +647,7 @@ export default function ClientPage() {
     const onMsg = (e) => {
       const data = e.data
       if (data && LIVE_MSG_TYPES.has(data.type) && data.payload) {
-        // když Framer iframe načte, může poslat nejdřív „vyprázdni“:
+        // Pokud Framer po načtení pošle explicitně „vyprázdni“
         if (Array.isArray(data.payload.files) && data.payload.files.length === 0) {
           setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
           prevFileKeysRef.current = []
@@ -645,7 +661,7 @@ export default function ClientPage() {
     return () => window.removeEventListener("message", onMsg)
   }, [])
 
-  /* ───────── logo under canvas ───────── */
+  // LOGO – pod modelem (z-index 0, Canvas má 1, UI má 2)
   const logoEl = logoCfg.url && (
     <img
       src={logoCfg.url}
@@ -666,28 +682,39 @@ export default function ClientPage() {
     />
   )
 
+  // ref na root group v Canvasu
   const rootRef = useRef()
 
+  // klíč pro AutoCenterAndFrame (jen když opravdu rámujeme)
   const frameDepsKey = shouldFrameRef.current
     ? `frame-${files.length}-${loadedCount}`
     : `noframe-${files.length}-${loadedCount}`
 
-  const [cameraTargetState, setCameraTarget] = useState([0, 0, 0])
+  // jediný zdroj pravdy pro target kamery
+  const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
+
+  const fillDim = headlightCfg.enabled ? 0.5 : 1
 
   return (
-    <div style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
+    <div
+      className="stage"
+      style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}
+    >
       <PreloadIcons />
       {logoEl}
 
-      {/* minimalistická levá lišta (jen pro live „ladění“) */}
+      {/* Panel (jen titul + autosmooth pro demo UI) */}
       <div
+        className="controls-panel"
         style={{
-          position: "absolute", top: 10, left: 10, zIndex: 2,
-          color: "white", fontFamily: "sans-serif", fontSize: 14,
+          position: "absolute",
+          top: 10, left: 10, zIndex: 2,
+          color: "white", fontFamily: "sans-serif", fontSize: "14px",
           opacity: uiReady ? 1 : 0, transition: "opacity .12s ease",
           backdropFilter: "blur(3px)", background: "rgba(0,0,0,.25)",
           border: "1px solid rgba(255,255,255,.15)", borderRadius: 8,
-          padding: "8px 10px", width: "clamp(220px, 28vw, 380px)"
+          padding: "8px 10px", width: "clamp(240px, 30vw, 420px)",
+          maxWidth: "calc(100vw - 20px)", boxSizing: "border-box",
         }}
       >
         {fatal ? (
@@ -707,20 +734,21 @@ export default function ClientPage() {
                 {title}
               </div>
             )}
-            <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" }}>
+
+            {/* AutoSmooth */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, justifyContent: "flex-end" }}>
               <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
                 <input type="checkbox" checked={autoSmooth} onChange={(e) => setAutoSmooth(e.target.checked)} />
                 <span>Auto smooth</span>
               </label>
               <span style={{ opacity: 0.8, fontSize: 12 }}>Úhel: {Math.round(smoothAngle)}°</span>
+              <input className="slider" type="range" min={0} max={80} step={1} value={smoothAngle} onChange={(e) => setSmoothAngle(parseFloat(e.target.value))} style={{ width: 120 }} />
             </div>
-            <input type="range" min={0} max={80} step={1} value={smoothAngle}
-              onChange={(e) => setSmoothAngle(parseFloat(e.target.value))} style={{ width: "100%", marginTop: 6 }} />
           </>
         )}
       </div>
 
-      {/* canvas */}
+      {/* CANVAS */}
       <Canvas
         orthographic
         camera={{ position: [0, 0, 1000], near: 0.1, far: 1e7 }}
@@ -730,11 +758,11 @@ export default function ClientPage() {
       >
         {!fatal && (
           <>
-            <ambientLight intensity={lightIntensity * 0.2 * (headlightCfg.enabled ? 0.5 : 1)} />
-            <directionalLight position={[0, 5, 5]} intensity={lightIntensity * 1.3 * (headlightCfg.enabled ? 0.5 : 1)} />
-            <directionalLight position={[-10, 0, 0]} intensity={lightIntensity * 0.9 * (headlightCfg.enabled ? 0.5 : 1)} />
-            <directionalLight position={[10, 0, 0]} intensity={lightIntensity * 1.1 * (headlightCfg.enabled ? 0.5 : 1)} />
-            <directionalLight position={[0, -5, -5]} intensity={lightIntensity * 0.7 * (headlightCfg.enabled ? 0.5 : 1)} />
+            <ambientLight intensity={lightIntensity * 0.4 * (headlightCfg.enabled ? 0.5 : 1)} />
+            <directionalLight position={[0, 5, 5]} intensity={lightIntensity * 1.5 * (headlightCfg.enabled ? 0.5 : 1)} />
+            <directionalLight position={[-10, 0, 0]} intensity={lightIntensity * 1.0 * (headlightCfg.enabled ? 0.5 : 1)} />
+            <directionalLight position={[10, 0, 0]} intensity={lightIntensity * 1.2 * (headlightCfg.enabled ? 0.5 : 1)} />
+            <directionalLight position={[0, -5, -5]} intensity={lightIntensity * 0.8 * (headlightCfg.enabled ? 0.5 : 1)} />
 
             <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity} />
 
@@ -772,17 +800,27 @@ export default function ClientPage() {
               shouldFrame={shouldFrameRef}
             />
 
-            <TouchTrackballControls target={cameraTargetState} />
+            <TouchTrackballControls target={cameraTarget} />
           </>
         )}
       </Canvas>
 
+      {/* Globální styly */}
       <style jsx global>{`
-        input[type="range"] { appearance: none; height: 14px; background: transparent; margin: 5px 0; display: inline-block; }
-        input[type="range"]::-webkit-slider-runnable-track { height: 4px; background: white; border-radius: 2px; }
-        input[type="range"]::-webkit-slider-thumb { appearance: none; width: 14px; height: 14px; border-radius: 50%; background: white; cursor: pointer; box-shadow: 0 0 2px black; margin-top: -5px; }
-        input[type="range"]::-moz-range-track { height: 4px; background: white; border-radius: 2px; }
-        input[type="range"]::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: white; cursor: pointer; box-shadow: 0 0 2px black; border: none; }
+        .slider { appearance: none; height: 14px; background: transparent; margin: 5px 0; display: inline-block; }
+        .slider::-webkit-slider-runnable-track { height: 4px; background: white; border-radius: 2px; }
+        .slider::-webkit-slider-thumb { appearance: none; width: 14px; height: 14px; border-radius: 50%; background: white; cursor: pointer; box-shadow: 0 0 2px black; margin-top: -5px; }
+        .slider::-moz-range-track { height: 4px; background: white; border-radius: 2px; }
+        .slider::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: white; cursor: pointer; box-shadow: 0 0 2px black; border: none; }
+
+        @media (max-width: 720px) {
+          .controls-panel {
+            left: 8px !important;
+            right: 8px;
+            width: auto !important;
+            max-width: calc(100vw - 16px) !important;
+          }
+        }
       `}</style>
     </div>
   )
