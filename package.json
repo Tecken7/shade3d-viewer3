@@ -1,12 +1,4 @@
 {
-  "name": "shade3d-viewer-starter",
-  "version": "1.0.0",
-  "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start"
-  },
   "dependencies": {
     "@react-three/drei": "^9.102.7",
     "@react-three/fiber": "^8.16.1",
@@ -14,6 +6,7 @@
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "three": "^0.165.0",
-    "react-colorful": "^5.6.1"
+    "react-colorful": "^5.6.1",
+    "flubber": "^0.4.2"
   }
 }
