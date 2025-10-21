@@ -324,12 +324,12 @@ function TouchTrackballControls({ target = [0, 0, 0] }) {
   return null
 }
 
-/* ---------- AutoCenter & AutoFrame (opravené) ---------- */
+/* ---------- AutoCenter & AutoFrame (gated) ---------- */
 function AutoCenterAndFrame({
   rootRef, depsKey, setTarget,
   margin = 1.2, isMobile = false, desktopScale = 0.4, mobileScale = 1.0,
   centerMode = "combined",
-  shouldFrame, // ref z parentu – říká, jestli máme znovu rámovat
+  shouldFrame, // ref říká, jestli máme rámovat
 }) {
   const { camera, size } = useThree()
 
@@ -380,7 +380,7 @@ function AutoCenterAndFrame({
     let newZoom = Math.min(zoomX, zoomY)
     newZoom *= isMobile ? mobileScale : desktopScale
 
-    // bezpečná vzdálenost (aby near/far nic „neukusoval“)
+    // bezpečná vzdálenost
     const diag = Math.sqrt(dims2.x * dims2.x + dims2.y * dims2.y + dims2.z * dims2.z)
     const safeDist = Math.max(diag * 2.5, 1000)
 
@@ -390,7 +390,6 @@ function AutoCenterAndFrame({
     camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
     camera.updateProjectionMatrix()
 
-    // po dorámování zamknout, dokud se opravdu nezmění soubory
     shouldFrame.current = false
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [depsKey, size.width, size.height, isMobile, desktopScale, mobileScale, margin, centerMode])
@@ -430,9 +429,19 @@ function ColorSwatch({ color, onChange, ariaLabel }) {
 
 /* ---------- ClientPage (Viewer) ---------- */
 export default function ClientPage() {
-  // světla – pevné, ovládání přes manifest/URL, ne přes UI
-  const [lightIntensity, setLightIntensity] = useState(1)
-  const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
+  // světla – ovládání přes manifest/URL/live, ne přes UI
+  const [lightIntensity, setLightIntensity] = useState(() => {
+    const liQ = parseFloat(getParam("li") ?? "NaN")
+    return isFinite(liQ) ? liQ : 1
+  })
+  const [headlightCfg, setHeadlightCfg] = useState(() => {
+    const qOn = getParam("headlight")
+    const qI = parseFloat(getParam("headlightI") ?? "NaN")
+    return {
+      enabled: qOn == null ? true : qOn !== "0",
+      intensity: isFinite(qI) ? qI : 2.0,
+    }
+  })
 
   const [uiReady, setUiReady] = useState(false)
   useEffect(() => { const id = requestAnimationFrame(() => setUiReady(true)); return () => cancelAnimationFrame(id) }, [])
@@ -469,20 +478,22 @@ export default function ClientPage() {
   const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
   const [loadedCount, setLoadedCount] = useState(0)
   const handleModelLoaded = () => setLoadedCount((n) => n + 1)
+
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
-  // refy pro řízení re-centrování (opravuje „skákání“ při změně barvy atd.)
+  // řízení dorámování
   const shouldFrameRef = useRef(true)
   const prevFileKeysRef = useRef([])
   const cameraStateRef = useRef({ position: [0,0,1000], target: [0,0,0], zoom: 1 })
-
   const getFileKeys = (arr) => (arr || []).map(f => `${f.url}::${f.rawName || f.name}`)
 
-  // INIT: manifest / files param
+  // INIT: manifest / files param (bez demo fallbacku v live módu)
   useEffect(() => {
     ;(async () => {
       try {
+        const isLiveMode = ((getParam("mode") || "").toLowerCase() === "live") || getParam("noDemo") === "1"
+
         const manifestUrl = getParam("manifest")
         if (manifestUrl) {
           const m = await fetchJSON(manifestUrl)
@@ -516,20 +527,14 @@ export default function ClientPage() {
             pos: getParam("logoPos") || "bc",
           })
 
-          // Headlight
-          const hl = m?.lights?.headlight
-          if (hl && typeof hl === "object") {
-            setHeadlightCfg({
-              enabled: typeof hl.enabled === "boolean" ? hl.enabled : true,
-              intensity: typeof hl.intensity === "number" ? hl.intensity : 2.0,
-            })
-          } else {
-            const qOn = getParam('headlight')
-            const qI = parseFloat(getParam('headlightI') ?? 'NaN')
-            setHeadlightCfg({
-              enabled: qOn == null ? true : qOn !== '0',
-              intensity: isFinite(qI) ? qI : 2.0,
-            })
+          if (m?.lights) {
+            if (typeof m.lights.intensity === "number") setLightIntensity(m.lights.intensity)
+            if (m.lights.headlight) {
+              setHeadlightCfg({
+                enabled: typeof m.lights.headlight.enabled === "boolean" ? m.lights.headlight.enabled : true,
+                intensity: typeof m.lights.headlight.intensity === "number" ? m.lights.headlight.intensity : 2.0,
+              })
+            }
           }
 
           prevFileKeysRef.current = getFileKeys(Fs)
@@ -569,24 +574,30 @@ export default function ClientPage() {
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
             pos: getParam("logoPos") || "bc",
           })
-          const qOn = getParam('headlight')
-          const qI = parseFloat(getParam('headlightI') ?? 'NaN')
-          setHeadlightCfg({
-            enabled: qOn == null ? true : qOn !== '0',
-            intensity: isFinite(qI) ? qI : 2.0,
-          })
           prevFileKeysRef.current = getFileKeys(Fs)
           shouldFrameRef.current = true
           return
         }
 
-        // žádný default – čisté plátno
-        setFiles([])
-        setColors([])
-        setOpacities([])
-        setVisibles([])
-        setRoughnesses([])
-        setMetalnesses([])
+        // ------ ŽÁDNÝ DEMO FALLBACK V LIVE MÓDU ------
+        if (isLiveMode) {
+          setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
+          return
+        }
+
+        // (Volitelný) DEMO pouze mimo live, když si stránku otevřeš přímo
+        const Fs = [
+          { url: "/models/Upper.obj",  name: "Upper",  rawName: "Upper.obj",  r: 0.5, m: 0.5, v: true, vc: false, km: false },
+          { url: "/models/Lower.stl",  name: "Lower",  rawName: "Lower.stl",  r: 0.5, m: 0.5, v: true, vc: false, km: false },
+          { url: "/models/Crown21.ply",name: "Bridge", rawName: "Crown21.ply", r: 0.5, m: 0.5, v: true, vc: false, km: false },
+        ]
+        setFiles(Fs)
+        const palette = ["#f5f5dc", "#8e8e8e", "#ffffff"]
+        setColors(Fs.map((_, i) => palette[i % palette.length]))
+        setOpacities(Fs.map(() => 1))
+        setVisibles(Fs.map((f) => f.v))
+        setRoughnesses(Fs.map((f) => f.r))
+        setMetalnesses(Fs.map((f) => f.m))
       } catch (e) {
         console.error(e)
         setFatal("Tento náhled není dostupný (chyba při načtení dat).")
@@ -598,7 +609,6 @@ export default function ClientPage() {
   const applyLivePayload = (p) => {
     if (!p) return
 
-    // 1) Files jsou VOLITELNÉ – zpracuj jen když dorazí
     let filesActuallyChanged = false
     if (Array.isArray(p.files)) {
       const newFiles = p.files.map((x, i) => ({
@@ -631,7 +641,6 @@ export default function ClientPage() {
       setMetalnesses(newFiles.map((f) => f.m))
     }
 
-    // 2) Title / Logo – fungují i bez files
     if (typeof p.title === "string" || p.title === null) {
       setTitle(p.title ?? null)
     }
@@ -644,7 +653,6 @@ export default function ClientPage() {
       }))
     }
 
-    // 3) Lights – fungují i bez files
     if (p.lights) {
       if (typeof p.lights.intensity === "number") setLightIntensity(p.lights.intensity)
       if (p.lights.headlight) {
@@ -655,7 +663,7 @@ export default function ClientPage() {
       }
     }
 
-    // 4) Dorámování jen při změně modelů
+    // Dorámování jen při změně souborů
     shouldFrameRef.current = filesActuallyChanged
     if (filesActuallyChanged) setLoadedCount(0)
   }
@@ -671,7 +679,7 @@ export default function ClientPage() {
     return () => window.removeEventListener("message", onMsg)
   }, [])
 
-  // LOGO – pod modelem (z-index 0, Canvas má 1, UI má 2)
+  // LOGO – pod 3D scénou
   const logoEl = logoCfg.url && (
     <img
       src={logoCfg.url}
@@ -684,7 +692,7 @@ export default function ClientPage() {
         transform: logoCfg.pos === "bc" ? "translateX(-50%)" : "none",
         width: logoCfg.width,
         opacity: logoCfg.opacity,
-        zIndex: 0,               // <- důležité: pod 3D canvasem
+        zIndex: 0,
         pointerEvents: "none",
         userSelect: "none",
         filter: "drop-shadow(0 0 1px rgba(0,0,0,.25))",
@@ -692,17 +700,12 @@ export default function ClientPage() {
     />
   )
 
-  // ref na root group v Canvasu
   const rootRef = useRef()
 
-  // Udržuj stav kamery při běžných změnách UI (barva/opacity…)
   function CameraStateKeeper() {
     const { camera } = useThree()
     const targetRef = useRef(new THREE.Vector3(...cameraTarget))
-    useEffect(() => {
-      targetRef.current.set(...cameraTarget)
-    }, [cameraTarget])
-
+    useEffect(() => { targetRef.current.set(...cameraTarget) }, [cameraTarget])
     useFrame(() => {
       cameraStateRef.current = {
         position: [camera.position.x, camera.position.y, camera.position.z],
@@ -713,38 +716,19 @@ export default function ClientPage() {
     return null
   }
 
-  // když se domodelovalo vše, dovolíme první/další dorámování (pokud je povoleno)
-  useEffect(() => {
-    if (files.length > 0 && loadedCount === files.length) {
-      // pouze v případě, že o to někdo explicitně požádal (nové soubory)
-      // jinak necháváme uživatelskou pozici a zoom
-    }
-  }, [files.length, loadedCount])
-
-  // když přijde změna, která má rámovat, přepočítáme depsKey (použije se v AutoCenterAndFrame)
-  const frameDepsKey =
-    shouldFrameRef.current
-      ? `frame-${files.length}-${loadedCount}`
-      : `noframe-${files.length}-${loadedCount}`
-
-  // když uživatel posune kameru, Trackball si drží target interně; pro AutoCenterAndFrame mu posíláme náš cameraTarget.
-  // ten aktualizujeme pouze v AutoCenterAndFrame (po dorámování).
   const fillDim = headlightCfg.enabled ? 0.5 : 1
 
   return (
-    <div
-      className="stage"
-      style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}
-    >
+    <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
       <PreloadIcons />
       {logoEl}
 
-      {/* Ovládací panel (jen zobrazení title a AutoSmooth) */}
+      {/* Ovládací panel (demo: barva/opacity/visibility + AutoSmooth) */}
       <div
         className="controls-panel"
         style={{
           position: "absolute",
-          top: 10, left: 10, zIndex: 2, // <- nad 3D
+          top: 10, left: 10, zIndex: 2,
           color: "white", fontFamily: "sans-serif", fontSize: "14px",
           opacity: uiReady ? 1 : 0, transition: "opacity .12s ease",
           backdropFilter: "blur(3px)", background: "rgba(0,0,0,.25)",
@@ -771,7 +755,6 @@ export default function ClientPage() {
               </div>
             )}
 
-            {/* Přehled souborů (jen eye + barva + opacity slider, pro demo; realtime mění stav) */}
             {files.map((f, i) => (
               <div key={i} className="control-row" style={{
                 display: "grid", gridTemplateColumns: "36px 1fr 26px",
@@ -836,7 +819,7 @@ export default function ClientPage() {
         )}
       </div>
 
-      {/* CANVAS (z-index 1) */}
+      {/* CANVAS */}
       <Canvas
         orthographic
         camera={{ position: [0, 0, 1000], near: 0.1, far: 1e7 }}
@@ -847,16 +830,13 @@ export default function ClientPage() {
         {!fatal && (
           <>
             <ambientLight intensity={lightIntensity * 0.4 * (headlightCfg.enabled ? 0.5 : 1)} />
-            {/* Jednoduché fill/key směrovky */}
             <directionalLight position={[0, 5, 5]} intensity={lightIntensity * 1.5 * (headlightCfg.enabled ? 0.5 : 1)} />
             <directionalLight position={[-10, 0, 0]} intensity={lightIntensity * 1.0 * (headlightCfg.enabled ? 0.5 : 1)} />
             <directionalLight position={[10, 0, 0]} intensity={lightIntensity * 1.2 * (headlightCfg.enabled ? 0.5 : 1)} />
             <directionalLight position={[0, -5, -5]} intensity={lightIntensity * 0.8 * (headlightCfg.enabled ? 0.5 : 1)} />
 
-            {/* Headlight (u kamery) */}
             <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity} />
 
-            {/* Root group */}
             <group ref={rootRef}>
               <Suspense fallback={null}>
                 {files.map((f, i) => (
@@ -879,7 +859,6 @@ export default function ClientPage() {
               </Suspense>
             </group>
 
-            {/* Dorámování pouze pokud shouldFrameRef.current === true */}
             <AutoCenterAndFrame
               rootRef={rootRef}
               depsKey={shouldFrameRef.current ? `frame-${files.length}-${loadedCount}` : `noframe-${files.length}-${loadedCount}`}
