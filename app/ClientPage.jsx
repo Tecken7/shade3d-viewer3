@@ -347,7 +347,6 @@ function usePersistCamera(targetRef) {
     }
   }, [camera])
 }
-
 function PersistCameraBridge({ targetRef }) {
   usePersistCamera(targetRef)
   return null
@@ -423,37 +422,6 @@ function AutoCenterAndFrame({
 
   return null
 }
-
-/* ---------- Color popover (UI) ---------- */
-function ColorSwatch({ color, onChange, ariaLabel }) {
-  const [open, setOpen] = useState(false)
-  const containerRef = useRef(null)
-  useEffect(() => {
-    const onDocClick = (e) => { if (open && containerRef.current && !containerRef.current.contains(e.target)) setOpen(false) }
-    document.addEventListener("mousedown", onDocClick)
-    return () => document.removeEventListener("mousedown", onDocClick)
-  }, [open])
-  return (
-    <div ref={containerRef} className="swatch-wrap" style={{ position: "relative", display: "inline-block" }}>
-      <button
-        aria-label={ariaLabel || "color picker"}
-        onClick={() => setOpen((v) => !v)}
-        className="swatch-btn"
-        style={{ width: 36, height: 22, borderRadius: 4, border: "1px solid #fff", background: color, cursor: "pointer", boxShadow: "0 0 0 1px rgba(0,0,0,.25) inset" }}
-      />
-      {open && (
-        <div className="swatch-pop" style={{ position: "absolute", zIndex: 20, top: 28, left: 0, background: "rgba(0,0,0,.92)", padding: 12, borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", backdropFilter: "blur(4px)", boxShadow: "0 6px 24px rgba(0,0,0,.35)" }}>
-          <HexColorPicker color={color} onChange={onChange} />
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-            <span style={{ color: "#fff", fontSize: 12 }}>#</span>
-            <HexColorInput color={color} onChange={onChange} prefixed={false} style={{ width: 90, padding: "4px 6px", borderRadius: 6, border: "1px solid #444", background: "#111", color: "#fff", fontFamily: "monospace", fontSize: 12 }} />
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
 /* ---------- ClientPage (Viewer) ---------- */
 export default function ClientPage() {
   // světla – pevné, ovládání přes manifest/URL/live
@@ -502,6 +470,14 @@ export default function ClientPage() {
   const shouldFrameRef = useRef(true)
   const prevFileKeysRef = useRef([])
   const getFileKeys = (arr) => (arr || []).map(f => `${f.url}::${f.rawName || f.name}`)
+
+  // pomocné klíče & indexace
+  const keyOf = (f) => `${f.url}::${f.rawName || f.name}`
+  const buildIndexByKey = (arr) => {
+    const map = new Map()
+    arr.forEach((f, i) => map.set(keyOf(f), i))
+    return map
+  }
 
   // NEW: frame verze – reframe jen při změně files
   const frameVersionRef = useRef(0)
@@ -620,7 +596,6 @@ export default function ClientPage() {
           return
         }
 
-        // pokud opravdu chceš DEMO (nezadávej v produkci) → můžeš si sem ručně doplnit
         setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
       } catch (e) {
         console.error(e)
@@ -633,32 +608,117 @@ export default function ClientPage() {
   const applyLivePayload = (p) => {
     if (!p) return
 
+    // jen světla
+    if (p.onlyLights && p.lights) {
+      if (typeof p.lights.intensity === "number") setLightIntensity(p.lights.intensity)
+      if (p.lights.headlight) {
+        setHeadlightCfg((old) => ({
+          enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
+          intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
+        }))
+      }
+      return
+    }
+
+    // jen parametry (barvy/opacity/title/logo) – files se NEMĚNÍ
+    if (p.onlyParams) {
+      if (Array.isArray(p.files) && files.length) {
+        const idxByKey = buildIndexByKey(files)
+        const tmpColors = [...colors]
+        const tmpOpac = [...opacities]
+        const tmpVis = [...visibles]
+        const tmpRough = [...roughnesses]
+        const tmpMetal = [...metalnesses]
+
+        for (const x of p.files) {
+          const k = `${x.u}::${x.n || x.name || ""}`
+          const i = idxByKey.get(k)
+          if (i == null) continue
+          if (x.c != null) tmpColors[i] = x.c
+          if (typeof x.o === "number") tmpOpac[i] = clamp01(x.o)
+          if (typeof x.v === "boolean") tmpVis[i] = !!x.v
+          if (typeof x.r === "number") tmpRough[i] = clamp01(x.r)
+          if (typeof x.m === "number") tmpMetal[i] = clamp01(x.m)
+        }
+
+        setColors(tmpColors)
+        setOpacities(tmpOpac)
+        setVisibles(tmpVis)
+        setRoughnesses(tmpRough)
+        setMetalnesses(tmpMetal)
+      }
+
+      if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
+      if (p.logo) {
+        setLogoCfg((old) => ({
+          url: p.logo?.url ?? old.url,
+          opacity: typeof p.logo?.opacity === "number" ? clamp01(p.logo.opacity) : old.opacity,
+          width: typeof p.logo?.width === "number" ? p.logo.width : old.width,
+          pos: p.logo?.pos || old.pos,
+        }))
+      }
+      return
+    }
+
+    // plný payload – může změnit files
     let filesActuallyChanged = false
+
     if (Array.isArray(p.files)) {
       const newFiles = p.files.map((x, i) => ({
-        url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
-        c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
+        url: x.u,
+        name: stripExt(x.n || `Model ${i + 1}`),
+        rawName: x.n || `Model${i + 1}`,
+        c: x.c,
+        o: typeof x.o === "number" ? clamp01(x.o) : 1,
         v: typeof x.v === "boolean" ? x.v : true,
         r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
         m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-        vc: !!x.vc, km: !!x.km,
+        vc: !!x.vc,
+        km: !!x.km,
       }))
 
-      const newKeys = newFiles.map(f => `${f.url}::${f.rawName || f.name}`)
+      const newKeys = newFiles.map((f) => keyOf(f))
       const prevKeys = prevFileKeysRef.current
+
       filesActuallyChanged =
         newKeys.length !== prevKeys.length ||
         newKeys.some((k, i) => k !== prevKeys[i])
 
-      setFiles(newFiles)
-      prevFileKeysRef.current = newKeys
+      if (filesActuallyChanged) {
+        setFiles(newFiles)
+        prevFileKeysRef.current = newKeys
 
-      const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
-      setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
-      setOpacities(newFiles.map((f) => f.o))
-      setVisibles(newFiles.map((f) => f.v))
-      setRoughnesses(newFiles.map((f) => f.r))
-      setMetalnesses(newFiles.map((f) => f.m))
+        const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
+        setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
+        setOpacities(newFiles.map((f) => f.o))
+        setVisibles(newFiles.map((f) => f.v))
+        setRoughnesses(newFiles.map((f) => f.r))
+        setMetalnesses(newFiles.map((f) => f.m))
+      } else {
+        // seznam stejný → jen přepiš per-file parametry
+        const idxByKey = buildIndexByKey(files)
+        const tmpColors = [...colors]
+        const tmpOpac = [...opacities]
+        const tmpVis = [...visibles]
+        const tmpRough = [...roughnesses]
+        const tmpMetal = [...metalnesses]
+
+        for (const f of newFiles) {
+          const i = idxByKey.get(keyOf(f))
+          if (i == null) continue
+          if (f.c != null) tmpColors[i] = f.c
+          if (typeof f.o === "number") tmpOpac[i] = f.o
+          if (typeof f.v === "boolean") tmpVis[i] = f.v
+          if (typeof f.r === "number") tmpRough[i] = f.r
+          if (typeof f.m === "number") tmpMetal[i] = f.m
+        }
+
+        setColors(tmpColors)
+        setOpacities(tmpOpac)
+        setVisibles(tmpVis)
+        setRoughnesses(tmpRough)
+        setMetalnesses(tmpMetal)
+      }
     }
 
     if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
@@ -691,7 +751,6 @@ export default function ClientPage() {
     const onMsg = (e) => {
       const data = e.data
       if (data && LIVE_MSG_TYPES.has(data.type) && data.payload) {
-        // Pokud Framer po načtení pošle explicitně „vyprázdni“
         if (Array.isArray(data.payload.files) && data.payload.files.length === 0) {
           setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
           prevFileKeysRef.current = []
