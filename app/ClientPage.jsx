@@ -5,7 +5,7 @@ import * as THREE from "three"
 import { Canvas, useFrame, useThree } from "@react-three/fiber"
 import { OrbitControls, Environment, useProgress, Html } from "@react-three/drei"
 import { STLLoader, OBJLoader, PLYLoader } from "three-stdlib"
-import { mergeBufferGeometries } from "three-stdlib/utils/BufferGeometryUtils"
+import * as BufferGeometryUtils from "three/examples/jsm/utils/BufferGeometryUtils.js"
 
 // ---------- Helpers ----------
 const DEFAULT_LOGO = "/Arthetic_logo.png"
@@ -41,7 +41,6 @@ const loadGeometry = async (url) => {
     const geoms = []
     obj.traverse((c) => {
       if (c.isMesh && c.geometry) {
-        // zajisti mít bounding boxy/normály
         c.geometry.computeVertexNormals?.()
         geoms.push(c.geometry)
       }
@@ -51,7 +50,7 @@ const loadGeometry = async (url) => {
     if (geoms.length === 1) return geoms[0]
 
     try {
-      const merged = mergeBufferGeometries(geoms, true)
+      const merged = BufferGeometryUtils.mergeBufferGeometries(geoms, true)
       if (merged) return merged
     } catch (e) {
       console.warn("mergeBufferGeometries failed, using first geometry", e)
@@ -66,7 +65,6 @@ const loadGeometry = async (url) => {
     return geom
   }
 
-  // fallback
   return new THREE.BoxGeometry(1, 1, 1)
 }
 
@@ -267,7 +265,7 @@ export default function ClientPage() {
   const lastFrameBoxRef = useRef(null)
   const getFileKeys = (arr) => (arr || []).map((f) => `${f.url}::${f.rawName || f.name}`)
 
-  // INIT (manifest/params, bez demo fallbacku)
+  // INIT (manifest/params)
   useEffect(() => {
     ;(async () => {
       try {
