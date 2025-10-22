@@ -4,9 +4,8 @@ import React, { useEffect, useMemo, useRef, useState, Suspense } from "react"
 import * as THREE from "three"
 import { Canvas, useFrame, useThree } from "@react-three/fiber"
 import { OrbitControls, Environment, useProgress, Html } from "@react-three/drei"
-import { STLLoader } from "three-stdlib/loaders/STLLoader"
-import { OBJLoader } from "three-stdlib/loaders/OBJLoader"
-import { PLYLoader } from "three-stdlib/loaders/PLYLoader"
+import { STLLoader, OBJLoader, PLYLoader } from "three-stdlib"
+import { mergeBufferGeometries } from "three-stdlib/utils/BufferGeometryUtils"
 
 // ---------- Helpers ----------
 const DEFAULT_LOGO = "/Arthetic_logo.png"
@@ -28,37 +27,45 @@ const hdrPath = "/hdr/studio_small_03_1k.hdr"
 // ---------- Loaders ----------
 const loadGeometry = async (url) => {
   const lower = url.split("?")[0].toLowerCase()
+
   if (lower.endsWith(".stl")) {
     const loader = new STLLoader()
     const geom = await loader.loadAsync(url)
-    // STL → BufferGeometry
     return new THREE.BufferGeometry().copy(geom)
   }
+
   if (lower.endsWith(".obj")) {
     const loader = new OBJLoader()
     const obj = await loader.loadAsync(url)
-    // Sloučíme do jedné geometrie (BBox, draw je rychlejší)
-    const merged = new THREE.BufferGeometry()
-    const geometries = []
+
+    const geoms = []
     obj.traverse((c) => {
-      if (c.isMesh && c.geometry) geometries.push(c.geometry)
+      if (c.isMesh && c.geometry) {
+        // zajisti mít bounding boxy/normály
+        c.geometry.computeVertexNormals?.()
+        geoms.push(c.geometry)
+      }
     })
-    if (geometries.length === 1) return geometries[0]
-    if (geometries.length > 1) {
-      const g = THREE.BufferGeometryUtils
-      if (g && g.mergeBufferGeometries) return g.mergeBufferGeometries(geometries, true)
-      // fallback – vezmi první
-      return geometries[0]
+
+    if (geoms.length === 0) return new THREE.BoxGeometry(1, 1, 1)
+    if (geoms.length === 1) return geoms[0]
+
+    try {
+      const merged = mergeBufferGeometries(geoms, true)
+      if (merged) return merged
+    } catch (e) {
+      console.warn("mergeBufferGeometries failed, using first geometry", e)
     }
-    // nic nenašlo
-    return new THREE.BoxGeometry(1, 1, 1)
+    return geoms[0]
   }
+
   if (lower.endsWith(".ply")) {
     const loader = new PLYLoader()
     const geom = await loader.loadAsync(url)
     geom.computeVertexNormals()
     return geom
   }
+
   // fallback
   return new THREE.BoxGeometry(1, 1, 1)
 }
@@ -77,8 +84,16 @@ function LoaderOverlay() {
 }
 
 // ---------- Model mesh ----------
-function ModelItem({ file, color = "#ffffff", opacity = 1, visible = true, roughness = 0.5, metalness = 0.5, vertexColors = false, keepMat = false, onLoaded }) {
-  const meshRef = useRef()
+function ModelItem({
+  file,
+  color = "#ffffff",
+  opacity = 1,
+  visible = true,
+  roughness = 0.5,
+  metalness = 0.5,
+  vertexColors = false,
+  onLoaded,
+}) {
   const [geom, setGeom] = useState(null)
 
   useEffect(() => {
@@ -97,8 +112,7 @@ function ModelItem({ file, color = "#ffffff", opacity = 1, visible = true, rough
     return () => {
       mounted = false
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file.url])
+  }, [file.url, onLoaded])
 
   const mat = useMemo(() => {
     const m = new THREE.MeshStandardMaterial({
@@ -114,31 +128,35 @@ function ModelItem({ file, color = "#ffffff", opacity = 1, visible = true, rough
   }, [color, opacity, roughness, metalness, vertexColors])
 
   if (!geom) return null
-  return (
-    <mesh ref={meshRef} geometry={geom} material={mat} visible={visible} />
-  )
+  return <mesh geometry={geom} material={mat} visible={visible} />
 }
 
 // ---------- Scene & camera framing ----------
 function SceneContent({
-  files, colors, opacities, visibles, roughnesses, metalnesses, useVC, keepMTL,
-  logoCfg, lightIntensity, headlightCfg,
-  onModelLoaded, cameraShouldFrameRef, lastFrameBoxRef,
+  files,
+  colors,
+  opacities,
+  visibles,
+  roughnesses,
+  metalnesses,
+  useVC,
+  logoCfg,
+  lightIntensity,
+  headlightCfg,
+  onModelLoaded,
+  cameraShouldFrameRef,
+  lastFrameBoxRef,
 }) {
-  const { scene } = useThree()
+  const { scene, camera } = useThree()
   const controlsRef = useRef()
-  const cameraRef = useThree((s) => s.camera)
-
-  // Headlight
   const headlightRef = useRef()
+
   useEffect(() => {
     if (!headlightRef.current) return
-    headlightRef.current.intensity = headlightCfg?.enabled ? (headlightCfg.intensity || 2) : 0
+    headlightRef.current.intensity = headlightCfg?.enabled ? headlightCfg.intensity || 2 : 0
   }, [headlightCfg])
 
-  // OrbitControls target is preserved; frame only when asked
   const frameScene = () => {
-    // Compute bbox
     const box = new THREE.Box3()
     let hasGeometry = false
     scene.traverse((o) => {
@@ -159,19 +177,17 @@ function SceneContent({
     const center = new THREE.Vector3()
     box.getCenter(center)
 
-    // distance heuristika
     const maxDim = Math.max(size.x, size.y, size.z)
-    const fov = THREE.MathUtils.degToRad(cameraRef.fov || 50)
+    const fov = THREE.MathUtils.degToRad(camera.fov || 50)
     const dist = Math.max(maxDim / (2 * Math.tan(fov / 2)), 0.1) * 1.25
 
     const dir = new THREE.Vector3(1, 1, 1).normalize()
     const pos = center.clone().add(dir.multiplyScalar(dist))
 
-    // apply
-    cameraRef.position.copy(pos)
-    cameraRef.near = Math.max(dist / 100, 0.01)
-    cameraRef.far = dist * 100 + maxDim * 2
-    cameraRef.updateProjectionMatrix()
+    camera.position.copy(pos)
+    camera.near = Math.max(dist / 100, 0.01)
+    camera.far = dist * 100 + maxDim * 2
+    camera.updateProjectionMatrix()
 
     if (controlsRef.current) {
       controlsRef.current.target.copy(center)
@@ -179,23 +195,17 @@ function SceneContent({
     }
   }
 
-  // Re-frame effect (only when files change & load completes)
   useEffect(() => {
     if (!cameraShouldFrameRef.current) return
-    // frame after a tick (geoms present)
     const t = setTimeout(() => {
       frameScene()
       cameraShouldFrameRef.current = false
     }, 20)
     return () => clearTimeout(t)
-    // deps intentionally left empty; controlled by ref flag
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [files.length])
+  }, [files.length]) // eslint-disable-line
 
-  // Key light rig
   useFrame(() => {
-    if (!headlightRef.current) return
-    headlightRef.current.position.copy(cameraRef.position)
+    if (headlightRef.current) headlightRef.current.position.copy(camera.position)
   })
 
   return (
@@ -203,7 +213,7 @@ function SceneContent({
       <ambientLight intensity={Math.max(0, lightIntensity) * 0.25} />
       <directionalLight position={[3, 5, 2]} intensity={Math.max(0, lightIntensity) * 0.8} />
       <directionalLight position={[-3, 2, -2]} intensity={Math.max(0, lightIntensity) * 0.4} />
-      <pointLight ref={headlightRef} intensity={headlightCfg?.enabled ? (headlightCfg.intensity || 2) : 0} />
+      <pointLight ref={headlightRef} intensity={headlightCfg?.enabled ? headlightCfg.intensity || 2 : 0} />
 
       {files.map((f, i) => (
         <ModelItem
@@ -215,8 +225,7 @@ function SceneContent({
           roughness={roughnesses[i] ?? 0.5}
           metalness={metalnesses[i] ?? 0.5}
           vertexColors={!!useVC[i]}
-          keepMat={!!keepMTL[i]}
-          onLoaded={onModelLoaded}
+          onModelLoaded={onModelLoaded}
         />
       ))}
 
@@ -232,14 +241,13 @@ export default function ClientPage() {
   const [fatal, setFatal] = useState(null)
 
   // files + per-item params
-  const [files, setFiles] = useState([]) // [{url,name,rawName}]
+  const [files, setFiles] = useState([])
   const [colors, setColors] = useState([])
   const [opacities, setOpacities] = useState([])
   const [visibles, setVisibles] = useState([])
   const [roughnesses, setRoughnesses] = useState([])
   const [metalnesses, setMetalnesses] = useState([])
   const [useVC, setUseVC] = useState([])
-  const [keepMTL, setKeepMTL] = useState([])
 
   // header
   const [title, setTitle] = useState(null)
@@ -249,18 +257,17 @@ export default function ClientPage() {
   const [lightIntensity, setLightIntensity] = useState(1.0)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
-  // loading counters → frame when all loaded
+  // loading counters
   const [loadedCount, setLoadedCount] = useState(0)
   const handleModelLoaded = () => setLoadedCount((n) => n + 1)
 
   // frame control
-  const shouldFrameRef = useRef(true) // true only when files list actually changes
+  const shouldFrameRef = useRef(true)
   const prevFileKeysRef = useRef([])
   const lastFrameBoxRef = useRef(null)
-
   const getFileKeys = (arr) => (arr || []).map((f) => `${f.url}::${f.rawName || f.name}`)
 
-  /* ───────── init from params/manifest (NO DEMO FALLBACK) ───────── */
+  // INIT (manifest/params, bez demo fallbacku)
   useEffect(() => {
     ;(async () => {
       try {
@@ -277,7 +284,7 @@ export default function ClientPage() {
             v: typeof x.v === "boolean" ? x.v : true,
             r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: !!x.vc, km: !!x.km,
+            vc: !!x.vc,
           }))
           setFiles(Fs)
           const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
@@ -287,7 +294,6 @@ export default function ClientPage() {
           setRoughnesses(Fs.map((f) => f.r))
           setMetalnesses(Fs.map((f) => f.m))
           setUseVC(Fs.map((f) => !!f.vc))
-          setKeepMTL(Fs.map((f) => !!f.km))
 
           setTitle(typeof m?.title === "string" ? m.title : (getParam("title") ?? null))
           const logoUrl = m?.logo?.url || DEFAULT_LOGO
@@ -321,7 +327,7 @@ export default function ClientPage() {
             v: typeof x.v === "boolean" ? x.v : true,
             r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: !!x.vc, km: !!x.km,
+            vc: !!x.vc,
           }))
           setFiles(Fs)
           const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
@@ -331,7 +337,6 @@ export default function ClientPage() {
           setRoughnesses(Fs.map((f) => f.r))
           setMetalnesses(Fs.map((f) => f.m))
           setUseVC(Fs.map((f) => !!f.vc))
-          setKeepMTL(Fs.map((f) => !!f.km))
 
           setTitle(getParam("title") ?? null)
           setLogoCfg({
@@ -352,11 +357,10 @@ export default function ClientPage() {
           return
         }
 
-        // žádné manifest/parametry → v live režimu nebo s ?noDemo=1 necháváme prázdno
         const modeLive = mode === "live"
         const suppressDemo = noDemo || modeLive
         if (suppressDemo) {
-          setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([]); setUseVC([]); setKeepMTL([])
+          setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([]); setUseVC([])
           setTitle(getParam("title") ?? null)
           setLogoCfg({
             url: getParam("logo") === "none" ? null : (getParam("logo") || DEFAULT_LOGO),
@@ -364,12 +368,11 @@ export default function ClientPage() {
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
             pos: getParam("logoPos") || "bc",
           })
-          shouldFrameRef.current = false // počkáme na live payload
+          shouldFrameRef.current = false
           return
         }
 
-        // Bez demo obsahu:
-        setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([]); setUseVC([]); setKeepMTL([])
+        setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([]); setUseVC([])
       } catch (e) {
         console.error(e)
         setFatal("Tento náhled není dostupný (chyba při načtení dat).")
@@ -377,7 +380,7 @@ export default function ClientPage() {
     })()
   }, [])
 
-  /* ───────── LIVE MODE: postMessage listener ───────── */
+  // LIVE listener
   const applyLivePayload = (p) => {
     if (!p) return
     const onlyParams = !!p.onlyParams
@@ -385,14 +388,13 @@ export default function ClientPage() {
 
     if (Array.isArray(p.files)) {
       if (!onlyParams) {
-        // mění se soubory
         const newFiles = p.files.map((x, i) => ({
           url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
           c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
           v: typeof x.v === "boolean" ? x.v : true,
           r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
           m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-          vc: !!x.vc, km: !!x.km,
+          vc: !!x.vc,
         }))
 
         const newKeys = newFiles.map((f) => `${f.url}::${f.rawName || f.name}`)
@@ -409,16 +411,13 @@ export default function ClientPage() {
         setRoughnesses(newFiles.map((f) => f.r))
         setMetalnesses(newFiles.map((f) => f.m))
         setUseVC(newFiles.map((f) => !!f.vc))
-        setKeepMTL(newFiles.map((f) => !!f.km))
       } else {
-        // onlyParams: uprav jen hodnoty, files nech
         setColors((old) => old.map((v, i) => (p.files[i] && p.files[i].c != null ? p.files[i].c : v)))
         setOpacities((old) => old.map((v, i) => (typeof p.files[i]?.o === "number" ? clamp01(p.files[i].o) : v)))
         setVisibles((old) => old.map((v, i) => (typeof p.files[i]?.v === "boolean" ? p.files[i].v : v)))
         setRoughnesses((old) => old.map((v, i) => (typeof p.files[i]?.r === "number" ? clamp01(p.files[i].r) : v)))
         setMetalnesses((old) => old.map((v, i) => (typeof p.files[i]?.m === "number" ? clamp01(p.files[i].m) : v)))
         setUseVC((old) => old.map((v, i) => (typeof p.files[i]?.vc === "boolean" ? !!p.files[i].vc : v)))
-        setKeepMTL((old) => old.map((v, i) => (typeof p.files[i]?.km === "boolean" ? !!p.files[i].km : v)))
       }
     }
 
@@ -443,7 +442,6 @@ export default function ClientPage() {
       }
     }
 
-    // Reframe jen když se změnily soubory
     shouldFrameRef.current = filesActuallyChanged
     if (filesActuallyChanged) setLoadedCount(0)
   }
@@ -452,9 +450,8 @@ export default function ClientPage() {
     const onMsg = (e) => {
       const data = e.data
       if (data && LIVE_MSG_TYPES.has(data.type) && data.payload) {
-        // Framer může poslat „vyprázdni“:
         if (Array.isArray(data.payload.files) && data.payload.files.length === 0) {
-          setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([]); setUseVC([]); setKeepMTL([])
+          setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([]); setUseVC([])
           prevFileKeysRef.current = []
           shouldFrameRef.current = false
           return
@@ -464,16 +461,7 @@ export default function ClientPage() {
     }
     window.addEventListener("message", onMsg)
     return () => window.removeEventListener("message", onMsg)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // kdy frame? když se změní files & dohrají se gea
-  useEffect(() => {
-    // když počet načtených geometrií == files.length, povolíme případný frame
-    if (files.length > 0 && loadedCount >= files.length) {
-      // nic – samotný SceneContent se zaframeuje na základě shouldFrameRef
-    }
-  }, [files.length, loadedCount])
+  }, []) // eslint-disable-line
 
   const logoEl = logoCfg.url && (
     <img
@@ -497,7 +485,6 @@ export default function ClientPage() {
 
   return (
     <div style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
-      {/* title overlay */}
       {title && (
         <div
           style={{
@@ -516,10 +503,8 @@ export default function ClientPage() {
         </div>
       )}
 
-      {/* logo */}
       {logoEl}
 
-      {/* canvas */}
       <Canvas gl={{ antialias: true }} shadows camera={{ fov: 50, near: 0.1, far: 5000, position: [3, 2, 4] }}>
         <Suspense fallback={<LoaderOverlay />}>
           <SceneContent
@@ -530,18 +515,16 @@ export default function ClientPage() {
             roughnesses={roughnesses}
             metalnesses={metalnesses}
             useVC={useVC}
-            keepMTL={keepMTL}
             logoCfg={logoCfg}
             lightIntensity={lightIntensity}
             headlightCfg={headlightCfg}
-            onModelLoaded={handleModelLoaded}
+            onModelLoaded={() => setLoadedCount((n) => n + 1)}
             cameraShouldFrameRef={shouldFrameRef}
             lastFrameBoxRef={lastFrameBoxRef}
           />
         </Suspense>
       </Canvas>
 
-      {/* fatal error */}
       {fatal && (
         <div
           style={{
