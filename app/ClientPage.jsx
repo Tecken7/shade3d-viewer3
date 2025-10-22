@@ -324,6 +324,35 @@ function TouchTrackballControls({ target = [0, 0, 0] }) {
   return null
 }
 
+/* ---------- Persist camera (anti-reset) ---------- */
+function usePersistCamera(targetRef) {
+  const { camera } = useThree()
+  const saved = useRef(null)
+
+  useFrame(() => {
+    saved.current = {
+      pos: [camera.position.x, camera.position.y, camera.position.z],
+      zoom: camera.zoom ?? 1,
+      target: targetRef.current ?? [0, 0, 0],
+    }
+  })
+
+  useEffect(() => {
+    const s = saved.current
+    if (!s) return
+    camera.position.set(...s.pos)
+    if ("zoom" in camera) {
+      camera.zoom = s.zoom
+      camera.updateProjectionMatrix()
+    }
+  }, [camera])
+}
+
+function PersistCameraBridge({ targetRef }) {
+  usePersistCamera(targetRef)
+  return null
+}
+
 /* ---------- AutoCenter & AutoFrame ---------- */
 function AutoCenterAndFrame({
   rootRef, depsKey, setTarget,
@@ -474,6 +503,14 @@ export default function ClientPage() {
   const prevFileKeysRef = useRef([])
   const getFileKeys = (arr) => (arr || []).map(f => `${f.url}::${f.rawName || f.name}`)
 
+  // NEW: frame verze – reframe jen při změně files
+  const frameVersionRef = useRef(0)
+  const [frameDepsKey, setFrameDepsKey] = useState(`frame-0`)
+  const bumpFrameVersion = () => {
+    frameVersionRef.current += 1
+    setFrameDepsKey(`frame-${frameVersionRef.current}`)
+  }
+
   /* ───────── init from params/manifest (NO DEMO FALLBACK) ───────── */
   useEffect(() => {
     ;(async () => {
@@ -518,8 +555,10 @@ export default function ClientPage() {
           const scI = m?.lights?.intensity
           if (typeof scI === "number") setLightIntensity(scI)
 
-          prevFileKeysRef.current = getFileKeys(Fs)
+          const newKeys = getFileKeys(Fs)
+          prevFileKeysRef.current = newKeys
           shouldFrameRef.current = true
+          bumpFrameVersion()
           return
         }
 
@@ -558,8 +597,10 @@ export default function ClientPage() {
           const scI = parseFloat(getParam("li") ?? "NaN")
           if (isFinite(scI)) setLightIntensity(scI)
 
-          prevFileKeysRef.current = getFileKeys(Fs)
+          const newKeys = getFileKeys(Fs)
+          prevFileKeysRef.current = newKeys
           shouldFrameRef.current = true
+          bumpFrameVersion()
           return
         }
 
@@ -640,7 +681,10 @@ export default function ClientPage() {
     }
 
     shouldFrameRef.current = filesActuallyChanged
-    if (filesActuallyChanged) setLoadedCount(0)
+    if (filesActuallyChanged) {
+      setLoadedCount(0)
+      bumpFrameVersion()
+    }
   }
 
   useEffect(() => {
@@ -685,13 +729,10 @@ export default function ClientPage() {
   // ref na root group v Canvasu
   const rootRef = useRef()
 
-  // klíč pro AutoCenterAndFrame (jen když opravdu rámujeme)
-  const frameDepsKey = shouldFrameRef.current
-    ? `frame-${files.length}-${loadedCount}`
-    : `noframe-${files.length}-${loadedCount}`
-
   // jediný zdroj pravdy pro target kamery
   const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
+  const cameraTargetRef = useRef([0, 0, 0])
+  useEffect(() => { cameraTargetRef.current = cameraTarget }, [cameraTarget])
 
   const fillDim = headlightCfg.enabled ? 0.5 : 1
 
@@ -766,6 +807,9 @@ export default function ClientPage() {
 
             <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity} />
 
+            {/* perzistence kamery */}
+            <PersistCameraBridge targetRef={cameraTargetRef} />
+
             <group ref={rootRef}>
               <Suspense fallback={null}>
                 {files.map((f, i) => (
@@ -790,7 +834,7 @@ export default function ClientPage() {
 
             <AutoCenterAndFrame
               rootRef={rootRef}
-              depsKey={frameDepsKey}
+              depsKey={frameDepsKey}           {/* <- jen verze, žádný loadedCount ani files.length */}
               setTarget={setCameraTarget}
               margin={1.2}
               isMobile={isMobile}
