@@ -543,7 +543,7 @@ export default function ClientPage() {
           setLogoCfg({
             url: logoUrl || null,
             opacity: clamp01(parseFloat(getParam("logoOpacity") ?? "0.9")),
-            width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
+            width: parseInt(getParam("logoWidth") ?? (typeof window !== "undefined" && window.innerWidth < 768 ? "120" : "160"), 10),
             pos: getParam("logoPos") || "bc",
           })
 
@@ -586,7 +586,7 @@ export default function ClientPage() {
           setLogoCfg({
             url: getParam("logo") === "none" ? null : getParam("logo") || DEFAULT_LOGO,
             opacity: clamp01(parseFloat(getParam("logoOpacity") ?? "0.9")),
-            width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
+            width: parseInt(getParam("logoWidth") ?? (typeof window !== "undefined" && window.innerWidth < 768 ? "120" : "160"), 10),
             pos: getParam("logoPos") || "bc",
           })
 
@@ -613,7 +613,7 @@ export default function ClientPage() {
           setLogoCfg({
             url: getParam("logo") === "none" ? null : (getParam("logo") || DEFAULT_LOGO),
             opacity: clamp01(parseFloat(getParam("logoOpacity") ?? "0.9")),
-            width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
+            width: parseInt(getParam("logoWidth") ?? (typeof window !== "undefined" && window.innerWidth < 768 ? "120" : "160"), 10),
             pos: getParam("logoPos") || "bc",
           })
           shouldFrameRef.current = false // počkáme na live payload
@@ -832,9 +832,10 @@ export default function ClientPage() {
               </Suspense>
             </group>
 
+            {/* Reframe jen při změně seznamu files */}
             <AutoCenterAndFrame
               rootRef={rootRef}
-              depsKey={frameDepsKey}           {/* <- jen verze, žádný loadedCount ani files.length */}
+              depsKey={frameDepsKey}
               setTarget={setCameraTarget}
               margin={1.2}
               isMobile={isMobile}
