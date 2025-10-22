@@ -18,11 +18,16 @@ const clamp01 = (x) => Math.max(0, Math.min(1, x))
 const stripExt = (s) => (s ? s.replace(/\.[^.]+$/, "") : "")
 const inferExt = (s) => (s ? s.split("?")[0].split(".").pop()?.toLowerCase() || "" : "")
 const getParam = (name) => (typeof window === "undefined" ? null : new URL(window.location.href).searchParams.get(name))
+const isDebug = () => (getParam("debug") === "1")
 
 async function fetchJSON(url) {
   const r = await fetch(url, { cache: "no-store" })
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   return r.json()
+}
+
+function log(...args) {
+  if (isDebug()) console.debug("[viewer]", ...args)
 }
 
 /* ---------- UI ---------- */
@@ -45,7 +50,12 @@ function InlineLoader({ text }) {
   )
 }
 
-/* ---------- Auto smooth (rychlá verze) ---------- */
+function WaitingOverlay({ visible }) {
+  if (!visible) return null
+  return <InlineLoader text="Čekám na live data…" />
+}
+
+/* ---------- Auto smooth (bezpečná rychlá verze) ---------- */
 function autoSmoothGeometry(geometry) {
   const g = geometry.index ? geometry.toNonIndexed() : geometry.clone()
   g.computeVertexNormals()
@@ -70,12 +80,13 @@ function AnyModel({
   const [object3D, setObject3D] = useState(null)
   const [loading, setLoading] = useState(true)
 
-  // KLÍČOVÉ: vyber příponu primárně z názvu (Framer posílá data: URL bez přípony)
+  // pozn.: Framer posílá dataURL + máme k dispozici původní jméno (s příponou)
   const ext = useMemo(() => inferExt(name) || inferExt(url), [name, url])
 
   useEffect(() => {
     let cancelled = false
     setLoading(true)
+    log("Loading model:", { name, url: url?.slice(0, 32) + "…", ext })
 
     ;(async () => {
       try {
@@ -137,6 +148,7 @@ function AnyModel({
           setObject3D(obj)
           setLoading(false)
           onLoaded?.(obj)
+          log("Model loaded:", name)
         }
       } catch (e) {
         console.error("Model load error:", e)
@@ -147,7 +159,7 @@ function AnyModel({
     return () => {
       cancelled = true
     }
-    // re-load jen když se změní zdroj
+    // load jen při změně zdroje
   }, [url, name, ext])
 
   // živá změna materiálu
@@ -233,6 +245,7 @@ function AutoFrame({ rootRef, triggerRef, setTarget }) {
     camera.position.set(0, 0, Math.max(dims.z * 3, 1000))
     camera.zoom = newZoom
     camera.updateProjectionMatrix()
+    log("AutoFrame applied")
   }, [size.width, size.height])
   return null
 }
@@ -256,7 +269,7 @@ export default function ClientPage() {
   const [fatal, setFatal] = useState(null)
 
   // modely + per-file parametry
-  const [files, setFiles] = useState([]) // [{url, name, rawName}]
+  const [files, setFiles] = useState([]) // [{url, name, rawName, c,o,v,r,m,vc,km}]
   const [colors, setColors] = useState([])
   const [opacities, setOpacities] = useState([])
   const [visibles, setVisibles] = useState([])
@@ -285,11 +298,7 @@ export default function ClientPage() {
   useEffect(() => { metalRef.current = metalnesses }, [metalnesses])
 
   const keyOf = (f) => `${f.url}::${f.rawName || f.name}`
-  const buildIndexByKey = (arr) => {
-    const map = new Map()
-    arr.forEach((f, i) => map.set(keyOf(f), i))
-    return map
-  }
+  const keysFrom = (arr) => (arr || []).map(keyOf)
 
   // init z manifestu / query
   useEffect(() => {
@@ -299,6 +308,7 @@ export default function ClientPage() {
         const filesParam = getParam("files")
         const mode = (getParam("mode") || "").toLowerCase()
         const noDemo = (getParam("noDemo") ?? (mode === "live" ? "1" : "0")) !== "0"
+        log("Init", { manifestUrl, mode, noDemo })
 
         if (manifestUrl) {
           const m = await fetchJSON(manifestUrl)
@@ -351,14 +361,9 @@ export default function ClientPage() {
 
         if (filesParam) {
           let arr = null
-          try {
-            arr = JSON.parse(filesParam)
-          } catch {}
-          if (!arr) {
-            try {
-              arr = JSON.parse(decodeURIComponent(filesParam))
-            } catch {}
-          }
+          try { arr = JSON.parse(filesParam) } catch {}
+          if (!arr) { try { arr = JSON.parse(decodeURIComponent(filesParam)) } catch {} }
+
           const Fs = (Array.isArray(arr) ? arr : [])
             .filter((x) => x && x.u)
             .map((x, i) => ({
@@ -422,7 +427,6 @@ export default function ClientPage() {
             ),
             pos: getParam("logoPos") || "bc",
           })
-          // čekáme na live payload
           frameTriggerRef.current = false
         }
       } catch (e) {
@@ -438,6 +442,36 @@ export default function ClientPage() {
       const data = e.data
       if (!(data && LIVE_MSG_TYPES.has(data.type) && data.payload)) return
       const p = data.payload
+      log("Live msg:", { keys: Object.keys(p), files: Array.isArray(p.files) ? p.files.length : undefined })
+
+      const applySetFiles = (arr) => {
+        const newFiles = arr.map((x, i) => ({
+          url: x.u,
+          name: stripExt(x.n || `Model ${i + 1}`),
+          rawName: x.n || `Model${i + 1}`,
+          c: x.c,
+          o: typeof x.o === "number" ? clamp01(x.o) : 1,
+          v: typeof x.v === "boolean" ? x.v : true,
+          r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
+          m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
+          vc: !!x.vc,
+          km: !!x.km,
+        }))
+
+        const oldKeys = keysFrom(filesRef.current)
+        const newKeys = keysFrom(newFiles)
+        const changed = newKeys.length !== oldKeys.length || newKeys.some((k, i) => k !== oldKeys[i])
+
+        setFiles(newFiles)
+        const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
+        setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
+        setOpacities(newFiles.map((f) => f.o))
+        setVisibles(newFiles.map((f) => f.v))
+        setRoughnesses(newFiles.map((f) => f.r))
+        setMetalnesses(newFiles.map((f) => f.m))
+        frameTriggerRef.current = changed
+        log("Files applied. changed=", changed)
+      }
 
       // 1) pouze světla
       if (p.onlyLights && p.lights) {
@@ -451,34 +485,15 @@ export default function ClientPage() {
         return
       }
 
-      // 2) pouze parametry → když files ještě nemáme, povyš na plný payload
+      const hasFilesArray = Array.isArray(p.files) && p.files.length > 0
+
+      // 2) pouze parametry → pokud ještě nemáme žádné modely, převedeme to na plný payload
       if (p.onlyParams) {
-        const currFiles = filesRef.current
-        if ((!currFiles || currFiles.length === 0) && Array.isArray(p.files) && p.files.length > 0) {
-          // inicializace z onlyParams
-          const newFiles = p.files.map((x, i) => ({
-            url: x.u,
-            name: stripExt(x.n || `Model ${i + 1}`),
-            rawName: x.n || `Model${i + 1}`,
-            c: x.c,
-            o: typeof x.o === "number" ? clamp01(x.o) : 1,
-            v: typeof x.v === "boolean" ? x.v : true,
-            r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
-            m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: !!x.vc,
-            km: !!x.km,
-          }))
-          setFiles(newFiles)
-          const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
-          setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
-          setOpacities(newFiles.map((f) => f.o))
-          setVisibles(newFiles.map((f) => f.v))
-          setRoughnesses(newFiles.map((f) => f.r))
-          setMetalnesses(newFiles.map((f) => f.m))
-          frameTriggerRef.current = true // poprvé přerámuj
-        } else if (Array.isArray(p.files) && p.files.length > 0) {
+        if (hasFilesArray && (!filesRef.current || filesRef.current.length === 0)) {
+          applySetFiles(p.files)
+        } else if (hasFilesArray) {
           // máme files → jen přepiš parametry (bez přerámování)
-          const idxByKey = buildIndexByKey(filesRef.current)
+          const idxByKey = new Map(keysFrom(filesRef.current).map((k, i) => [k, i]))
           const C = [...colorsRef.current]
           const O = [...opacRef.current]
           const V = [...visRef.current]
@@ -494,11 +509,7 @@ export default function ClientPage() {
             if (typeof x.r === "number") R[i] = clamp01(x.r)
             if (typeof x.m === "number") M[i] = clamp01(x.m)
           }
-          setColors(C)
-          setOpacities(O)
-          setVisibles(V)
-          setRoughnesses(R)
-          setMetalnesses(M)
+          setColors(C); setOpacities(O); setVisibles(V); setRoughnesses(R); setMetalnesses(M)
         }
 
         if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
@@ -513,57 +524,8 @@ export default function ClientPage() {
         return
       }
 
-      // 3) plný payload (změna / doplnění modelů)
-      if (Array.isArray(p.files)) {
-        const newFiles = p.files.map((x, i) => ({
-          url: x.u,
-          name: stripExt(x.n || `Model ${i + 1}`),
-          rawName: x.n || `Model${i + 1}`,
-          c: x.c,
-          o: typeof x.o === "number" ? clamp01(x.o) : 1,
-          v: typeof x.v === "boolean" ? x.v : true,
-          r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
-          m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-          vc: !!x.vc,
-          km: !!x.km,
-        }))
-
-        const oldKeys = (filesRef.current || []).map(keyOf)
-        const newKeys = newFiles.map(keyOf)
-        const changed = newKeys.length !== oldKeys.length || newKeys.some((k, i) => k !== oldKeys[i])
-
-        if (changed) {
-          setFiles(newFiles)
-          const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
-          setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
-          setOpacities(newFiles.map((f) => f.o))
-          setVisibles(newFiles.map((f) => f.v))
-          setRoughnesses(newFiles.map((f) => f.r))
-          setMetalnesses(newFiles.map((f) => f.m))
-          frameTriggerRef.current = true
-        } else {
-          const idxByKey = buildIndexByKey(filesRef.current)
-          const C = [...colorsRef.current]
-          const O = [...opacRef.current]
-          const V = [...visRef.current]
-          const R = [...roughRef.current]
-          const M = [...metalRef.current]
-          for (const f of newFiles) {
-            const i = idxByKey.get(keyOf(f))
-            if (i == null) continue
-            if (f.c != null) C[i] = f.c
-            if (typeof f.o === "number") O[i] = f.o
-            if (typeof f.v === "boolean") V[i] = f.v
-            if (typeof f.r === "number") R[i] = f.r
-            if (typeof f.m === "number") M[i] = f.m
-          }
-          setColors(C)
-          setOpacities(O)
-          setVisibles(V)
-          setRoughnesses(R)
-          setMetalnesses(M)
-        }
-      }
+      // 3) plný payload / změna modelů
+      if (hasFilesArray) applySetFiles(p.files)
 
       if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
       if (p.logo) {
@@ -599,6 +561,10 @@ export default function ClientPage() {
     const id = requestAnimationFrame(() => setUiReady(true))
     return () => cancelAnimationFrame(id)
   }, [])
+
+  // Režim live → čekací overlay, dokud nepřijde první full/params s files
+  const isLive = (getParam("mode") || "").toLowerCase() === "live"
+  const showWaiting = isLive && files.length === 0 && !fatal
 
   return (
     <div style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
@@ -718,6 +684,7 @@ export default function ClientPage() {
               </Suspense>
             </group>
 
+            <WaitingOverlay visible={files.length === 0} />
             <AutoFrame rootRef={rootRef} triggerRef={frameTriggerRef} setTarget={setCameraTarget} />
             <TouchTrackballControls target={cameraTarget} />
           </>
