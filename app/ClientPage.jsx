@@ -425,12 +425,12 @@ function RightButtonPan({ setTarget }) {
   return null
 }
 
-/* ---------- AutoCenter & AutoFrame (upravené defaulty – blíž) ---------- */
+/* ---------- AutoCenter & AutoFrame (upravené přiblížení) ---------- */
 function AutoCenterAndFrame({
   rootRef, depsKey, setTarget,
-  margin = 1.02,            // jemně menší okraj -> větší objekt
+  margin = 0.95,            // menší okraj = větší model
   isMobile = false,
-  desktopScale = 1.35,      // větší zoom -> blíž
+  desktopScale = 1.0,
   mobileScale = 1.0,
   centerMode = "combined",
   shouldFrame, // volitelný ref z LIVE režimu
@@ -481,14 +481,19 @@ function AutoCenterAndFrame({
     const zoomX = size.width / (objW * margin)
     const zoomY = size.height / (objH * margin)
     let newZoom = Math.min(zoomX, zoomY)
-    newZoom *= isMobile ? mobileScale : desktopScale
 
+    // BOOST – model je při startu blíž (větší)
+    const FILL_BOOST = isMobile ? 1.45 : 1.85
+    newZoom *= (isMobile ? mobileScale : desktopScale) * FILL_BOOST
+
+    // Bezpečná hloubka – menší než dříve (2.2× místo 4×)
     const depth = Math.max(dims2.z, Math.max(dims2.x, dims2.y) * 0.75) || 1
-    const safeDist = depth * 4
+    const safeDist = depth * 2.2
+
     camera.near = Math.max(0.01, safeDist * 0.001)
     camera.far = safeDist * 50 + 100
     camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
-    camera.zoom = Math.max(newZoom, 0.01)
+    camera.zoom = Math.max(0.01, Math.min(newZoom, 2000))
     camera.updateProjectionMatrix()
 
     if (shouldFrame) shouldFrame.current = false
@@ -556,8 +561,8 @@ function Switch({ checked, onChange, label }) {
 
 /* ---------- Hlavní komponenta ---------- */
 export default function ClientPage() {
-  // světla – uděláme skutečný state, aby šel měnit z LIVE/URL/manifestu
-  const [lightIntensity, setLightIntensity] = useState(1)
+  // světla
+  const [lightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
   // detekce mobilu
@@ -636,7 +641,6 @@ export default function ClientPage() {
           setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
           setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
           setTitle(typeof m?.title === "string" ? m.title : (getParam("title") ?? null))
-
           const logoUrl = m?.logo?.url || DEFAULT_LOGO
           setLogoCfg({
             url: logoUrl || null,
@@ -644,18 +648,11 @@ export default function ClientPage() {
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
             pos: getParam("logoPos") || "bc",
           })
-
-          // ⬇ světla z manifestu (scéna + headlight)
-          if (m?.lights) {
-            if (typeof m.lights.intensity === "number") setLightIntensity(clamp01(m.lights.intensity))
-            if (m.lights.headlight) {
-              setHeadlightCfg({
-                enabled: typeof m.lights.headlight.enabled === "boolean" ? m.lights.headlight.enabled : true,
-                intensity: typeof m.lights.headlight.intensity === "number" ? m.lights.headlight.intensity : 2.0,
-              })
-            }
-          }
-
+          const hl = m?.lights?.headlight
+          setHeadlightCfg({
+            enabled: typeof hl?.enabled === "boolean" ? hl.enabled : true,
+            intensity: typeof hl?.intensity === "number" ? hl.intensity : 2.0,
+          })
           setPhotos(Array.isArray(m?.photos) ? m.photos.filter(p => p && p.u) : [])
           prevFileKeysRef.current = getFileKeys(Fs)
           shouldFrameRef.current = true
@@ -689,18 +686,12 @@ export default function ClientPage() {
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
             pos: getParam("logoPos") || "bc",
           })
-          // ⬇ světla: z URL query nadřazené, ale když chybí, vezmeme z manifestu
-          const qLi = parseFloat(getParam("li") ?? "NaN")
-          if (isFinite(qLi)) setLightIntensity(clamp01(qLi))
-          else if (typeof m?.lights?.intensity === "number") setLightIntensity(clamp01(m.lights.intensity))
-
           const qOn = getParam("headlight")
           const qI = parseFloat(getParam("headlightI") ?? "NaN")
           setHeadlightCfg({
-            enabled: qOn == null ? (typeof m?.lights?.headlight?.enabled === "boolean" ? m.lights.headlight.enabled : true) : qOn !== "0",
-            intensity: isFinite(qI) ? qI : (typeof m?.lights?.headlight?.intensity === "number" ? m.lights.headlight.intensity : 2.0),
+            enabled: qOn == null ? true : qOn !== "0",
+            intensity: isFinite(qI) ? qI : 2.0,
           })
-
           setPhotos(Array.isArray(m?.photos) ? m.photos.filter(p => p && p.u) : [])
           prevFileKeysRef.current = getFileKeys(Fs)
           shouldFrameRef.current = true
@@ -735,16 +726,6 @@ export default function ClientPage() {
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
             pos: getParam("logoPos") || "bc",
           })
-          // ⬇ světla z URL
-          const qLi = parseFloat(getParam("li") ?? "NaN")
-          if (isFinite(qLi)) setLightIntensity(clamp01(qLi))
-          const qOn = getParam("headlight")
-          const qI = parseFloat(getParam("headlightI") ?? "NaN")
-          setHeadlightCfg({
-            enabled: qOn == null ? true : qOn !== "0",
-            intensity: isFinite(qI) ? qI : 2.0,
-          })
-
           prevFileKeysRef.current = getFileKeys(Fs)
           shouldFrameRef.current = true
           setPhotos([])
@@ -754,10 +735,6 @@ export default function ClientPage() {
         // žádné vstupy: necháme prázdné (v live režimu dorazí payload)
         setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
         shouldFrameRef.current = false
-
-        // default scéna může respektovat ?li i bez souborů
-        const qLi = parseFloat(getParam("li") ?? "NaN")
-        if (isFinite(qLi)) setLightIntensity(clamp01(qLi))
       } catch (e) {
         console.error(e)
         setFatal("Tento náhled není dostupný (chyba při načtení dat).")
@@ -804,16 +781,11 @@ export default function ClientPage() {
         pos: p.logo?.pos || old.pos,
       }))
     }
-    if (p.lights) {
-      if (typeof p.lights.intensity === "number") {
-        setLightIntensity(clamp01(p.lights.intensity))
-      }
-      if (p.lights.headlight) {
-        setHeadlightCfg((old) => ({
-          enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
-          intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
-        }))
-      }
+    if (p.lights?.headlight) {
+      setHeadlightCfg((old) => ({
+        enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
+        intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
+      }))
     }
 
     shouldFrameRef.current = filesActuallyChanged
@@ -1059,7 +1031,6 @@ export default function ClientPage() {
         style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
       >
         <>
-          {/* světla scény – reagují na lightIntensity (URL, manifest, LIVE) */}
           <ambientLight intensity={lightIntensity * 0.4 * (headlightCfg.enabled ? 0.5 : 1)} />
           <directionalLight position={[0, 5, 5]} intensity={lightIntensity * 1.5 * (headlightCfg.enabled ? 0.5 : 1)} />
           <directionalLight position={[-10, 0, 0]} intensity={lightIntensity * 1.0 * (headlightCfg.enabled ? 0.5 : 1)} />
@@ -1094,15 +1065,14 @@ export default function ClientPage() {
             rootRef={rootRef}
             depsKey={frameDepsKey}
             setTarget={setCameraTarget}
-            margin={1.02}            // blíž, ale s malým okrajem
+            margin={0.95}
             isMobile={isMobile}
-            desktopScale={1.35}      // větší zoom = blíž
+            desktopScale={1.0}
             mobileScale={1.0}
             centerMode={centerMode}
             shouldFrame={shouldFrameRef}
           />
           <TouchTrackballControls target={cameraTarget} />
-          {/* Pokud budeš chtít separátní pan mimo Trackball: <RightButtonPan setTarget={setCameraTarget} /> */}
         </>
       </Canvas>
 
