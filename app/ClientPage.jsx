@@ -9,11 +9,15 @@ import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader"
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader"
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader"
 
-/* ---------- LIVE typy ---------- */
+/* ---------- Konst + konfigurace ---------- */
 const LIVE_MSG_TYPES = new Set(["SHADE3D_LIVE", "SHADE3D_LIVE_V6", "SHADE3D_LIVE_V5"])
 
-/* ---------- Helpers ---------- */
+const SUPABASE_URL = "https://jqnkdjgmenerioodqcpa.supabase.co"
+const PUBLIC_BUCKET = "shade3d-viewer2"
+
 const DEFAULT_LOGO = "/Arthetic_logo.png"
+
+/* ---------- Helpers ---------- */
 const stripExt = (s) => (s ? s.replace(/\.[^.]+$/, "") : "")
 const clamp01 = (x) => Math.max(0, Math.min(1, x))
 const getParam = (name) => {
@@ -32,7 +36,7 @@ function inferExt(nameOrUrl) {
   return m ? m[1].toLowerCase() : ""
 }
 
-/* ---------- Ikony (s konfigurovatelnou základní cestou) ---------- */
+/* ---------- Ikony (konfigurovatelný base) + preload ---------- */
 const ICON_BASE = (() => {
   const q = getParam("iconBase")
   if (q && /^(https?:)?\/\//i.test(q)) return q.replace(/\/+$/, "") + "/"
@@ -126,11 +130,11 @@ function InlineLoader({ text }) {
   )
 }
 
-/* ---------- AnyModel (včetně volitelného wireframe overlay) ---------- */
+/* ---------- AnyModel (wireframe overlay) ---------- */
 function AnyModel({
   name, url,
   color, opacity, visible,
-  onLoaded, autoSmooth,
+  onLoaded, autoSmooth, smoothAngle = DEFAULT_SMOOTH_ANGLE,
   roughness = 0.5, metalness = 0.5,
   useVertexColors = false,
   keepMaterials = false,
@@ -152,7 +156,9 @@ function AnyModel({
       ...opts,
     })
 
-  const forEachMesh = (obj, cb) => obj?.traverse?.((child) => { if (child.isMesh) cb(child) })
+  const forEachMesh = (obj, cb) => {
+    obj?.traverse?.((child) => { if (child.isMesh) cb(child) })
+  }
 
   const rebuildWireOverlay = (mesh) => {
     if (mesh.userData._edges) {
@@ -162,10 +168,18 @@ function AnyModel({
       mesh.userData._edges = null
     }
     if (!wireframe) return
-    const wfGeom = new THREE.WireframeGeometry(mesh.geometry)
+    const geom = mesh.geometry
+    if (!geom) return
+    const wfGeom = new THREE.WireframeGeometry(geom)
     const wfMat = new THREE.LineBasicMaterial({
-      color: 0x000000, depthTest: true, depthWrite: false, transparent: true, opacity: 0.95,
-      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+      color: 0x000000,
+      depthTest: true,
+      depthWrite: false,
+      transparent: true,
+      opacity: 0.95,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
     })
     const lines = new THREE.LineSegments(wfGeom, wfMat)
     lines.renderOrder = (mesh.renderOrder || 0) + 10
@@ -182,7 +196,7 @@ function AnyModel({
         if (ext === "stl") {
           const geom = await new STLLoader().loadAsync(url)
           if (!geom.attributes.normal) geom.computeVertexNormals()
-          const base = autoSmooth ? autoSmoothGeometry(geom) : (geom.computeVertexNormals(), geom)
+          const base = autoSmooth ? autoSmoothGeometry(geom, smoothAngle) : (geom.computeVertexNormals(), geom)
           const mat = makeMat()
           obj = new THREE.Mesh(base, mat)
           obj.userData._baseGeom = geom
@@ -190,8 +204,12 @@ function AnyModel({
         } else if (ext === "ply") {
           const geom = await new PLYLoader().loadAsync(url)
           const hasVC = !!geom.getAttribute("color")
-          let base = autoSmooth ? autoSmoothGeometry(geom) : (geom.attributes.normal ? geom : (geom.computeVertexNormals(), geom))
-          const mat = hasVC && useVertexColors ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") }) : makeMat()
+          let base = geom
+          if (autoSmooth) base = autoSmoothGeometry(geom, smoothAngle)
+          else if (!geom.attributes.normal) geom.computeVertexNormals()
+          const mat = hasVC && useVertexColors
+            ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") })
+            : makeMat()
           obj = new THREE.Mesh(base, mat)
           obj.userData._baseGeom = geom
           obj.userData._derivedGeom = base
@@ -199,12 +217,14 @@ function AnyModel({
           const loaded = await new OBJLoader().loadAsync(url)
           if (keepMaterials) {
             loaded.traverse((child) => {
-              if (child.isMesh && child.material) {
+              if (child.isMesh) {
                 const mat = child.material
-                if ("transparent" in mat) mat.transparent = opacity < 1
-                if ("opacity" in mat) mat.opacity = opacity
-                if ("roughness" in mat && typeof roughness === "number") mat.roughness = roughness
-                if ("metalness" in mat && typeof metalness === "number") mat.metalness = metalness
+                if (mat) {
+                  if ("transparent" in mat) mat.transparent = opacity < 1
+                  if ("opacity" in mat) mat.opacity = opacity
+                  if ("roughness" in mat && typeof roughness === "number") mat.roughness = roughness
+                  if ("metalness" in mat && typeof metalness === "number") mat.metalness = metalness
+                }
               }
             })
             obj = loaded
@@ -216,7 +236,7 @@ function AnyModel({
         }
 
         if (!cancelled) {
-          forEachMesh(obj, (m) => rebuildWireOverlay(m))
+          forEachMesh(obj, (mesh) => rebuildWireOverlay(mesh))
           setObject3D(obj)
           setLoading(false)
           onLoaded && onLoaded(obj)
@@ -229,28 +249,30 @@ function AnyModel({
     return () => { cancelled = true }
   }, [url, ext])
 
+  // Re-smooth + rebuild overlay on change
   useEffect(() => {
     if (!object3D) return
-    object3D.traverse((child) => {
-      if (!child.isMesh) return
+    forEachMesh(object3D, (child) => {
       if (!child.userData._baseGeom) child.userData._baseGeom = child.geometry
       const base = child.userData._baseGeom
       let newGeom = base
-      if (autoSmooth) newGeom = autoSmoothGeometry(base)
+      if (autoSmooth) newGeom = autoSmoothGeometry(base, smoothAngle)
       else { newGeom = base.clone(); newGeom.computeVertexNormals() }
+
       if (child.userData._derivedGeom && child.userData._derivedGeom !== base) {
         child.userData._derivedGeom.dispose()
       }
       child.geometry = newGeom
       child.userData._derivedGeom = newGeom
+
       rebuildWireOverlay(child)
     })
-  }, [object3D, autoSmooth])
+  }, [object3D, autoSmooth, smoothAngle])
 
+  // Materials + wireframe visibility toggle
   useEffect(() => {
     if (!object3D) return
-    object3D.traverse((child) => {
-      if (!child.isMesh) return
+    forEachMesh(object3D, (child) => {
       if (keepMaterials) {
         const mat = child.material
         if (mat) {
@@ -289,8 +311,8 @@ function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
   return <pointLight ref={ref} color={color} intensity={enabled ? intensity : 0} distance={0} decay={0} />
 }
 
-/* ---------- Trackball (bez pravého tlačítka) ---------- */
-function TouchTrackballControls({ target = [0, 0, 0], onReady }) {
+/* ---------- Trackball (lepší myš tlačítka) ---------- */
+function TouchTrackballControls({ target = [0, 0, 0] }) {
   const { camera, gl, size } = useThree()
   const controlsRef = useRef(null)
 
@@ -301,11 +323,14 @@ function TouchTrackballControls({ target = [0, 0, 0], onReady }) {
     controls.panSpeed = 1.0
     controls.staticMoving = true
     controls.dynamicDampingFactor = 0.15
-    controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.ZOOM }
+    controls.mouseButtons = {
+      LEFT: THREE.MOUSE.ROTATE,
+      MIDDLE: THREE.MOUSE.ZOOM,
+      RIGHT: THREE.MOUSE.PAN,
+    }
     controlsRef.current = controls
-    onReady?.(controls)
     return () => { controls.dispose() }
-  }, [camera, gl, onReady])
+  }, [camera, gl])
 
   useEffect(() => {
     const c = controlsRef.current
@@ -321,13 +346,15 @@ function TouchTrackballControls({ target = [0, 0, 0], onReady }) {
     c.update()
   })
 
-  useEffect(() => { controlsRef.current?.handleResize() }, [size.width, size.height])
+  useEffect(() => {
+    controlsRef.current?.handleResize()
+  }, [size.width, size.height])
 
   return null
 }
 
-/* ---------- Pravé tlačítko = stabilní pan ---------- */
-function RightButtonPan({ setTarget, controlsRef }) {
+/* ---------- Vlastní pan (pravé tlačítko nebo Ctrl+levé) ---------- */
+function RightButtonPan({ setTarget }) {
   const { camera, gl, size } = useThree()
   const isPanning = useRef(false)
   const last = useRef({ x: 0, y: 0 })
@@ -340,9 +367,7 @@ function RightButtonPan({ setTarget, controlsRef }) {
 
   useEffect(() => {
     const el = gl.domElement
-
-    const onContext = (e) => e.preventDefault()
-
+    const onContext = (e) => { e.preventDefault() }
     const onDown = (e) => {
       if ((e.button !== 2) && !(e.button === 0 && e.ctrlKey)) return
       e.preventDefault(); e.stopPropagation()
@@ -350,9 +375,7 @@ function RightButtonPan({ setTarget, controlsRef }) {
       last.current = { x: e.clientX, y: e.clientY }
       pointerIdRef.current = e.pointerId
       try { el.setPointerCapture?.(e.pointerId) } catch {}
-      if (controlsRef?.current) controlsRef.current.enabled = false
     }
-
     const onMove = (e) => {
       if (!isPanning.current) return
       e.preventDefault(); e.stopPropagation()
@@ -380,44 +403,44 @@ function RightButtonPan({ setTarget, controlsRef }) {
         setTarget?.((t) => [t[0] + deltaWorld.x, t[1] + deltaWorld.y, t[2] + deltaWorld.z])
       }
     }
-
-    const endPan = () => {
+    const onUp = (e) => {
       if (!isPanning.current) return
+      e.preventDefault(); e.stopPropagation()
       isPanning.current = false
       try { el.releasePointerCapture?.(pointerIdRef.current) } catch {}
       pointerIdRef.current = null
-      if (controlsRef?.current) controlsRef.current.enabled = true
     }
-
-    const onUp = (e) => { e.preventDefault(); e.stopPropagation(); endPan() }
-    const onLeave = () => endPan()
 
     el.addEventListener("contextmenu", onContext)
     el.addEventListener("pointerdown", onDown)
     window.addEventListener("pointermove", onMove, { capture: true })
     window.addEventListener("pointerup", onUp, { capture: true })
-    window.addEventListener("pointercancel", onLeave, { capture: true })
     return () => {
       el.removeEventListener("contextmenu", onContext)
       el.removeEventListener("pointerdown", onDown)
       window.removeEventListener("pointermove", onMove, { capture: true })
       window.removeEventListener("pointerup", onUp, { capture: true })
-      window.removeEventListener("pointercancel", onLeave, { capture: true })
     }
-  }, [camera, gl, size.width, size.height, setTarget, controlsRef])
+  }, [camera, gl, size.width, size.height, setTarget])
 
   return null
 }
 
-/* ---------- AutoCenter & AutoFrame ---------- */
+/* ---------- AutoCenter & AutoFrame (nové defaulty) ---------- */
 function AutoCenterAndFrame({
   rootRef, depsKey, setTarget,
-  margin = 1.15, isMobile = false, desktopScale = 0.5, mobileScale = 1.1,
+  margin = 1.05,            // dříve 1.2
+  isMobile = false,
+  desktopScale = 1.0,       // dříve 0.4
+  mobileScale = 1.0,
   centerMode = "combined",
+  shouldFrame, // volitelný ref z LIVE režimu
 }) {
   const { camera, size } = useThree()
 
   useEffect(() => {
+    if (shouldFrame && !shouldFrame.current) return
+
     const root = rootRef.current
     if (!root) return
 
@@ -426,7 +449,9 @@ function AutoCenterAndFrame({
     if (boxAll.isEmpty()) return
 
     const centerAll = new THREE.Vector3()
+    const dims = new THREE.Vector3()
     boxAll.getCenter(centerAll)
+    boxAll.getSize(dims)
 
     if (centerMode === "per") {
       root.children.forEach((child) => {
@@ -447,8 +472,10 @@ function AutoCenterAndFrame({
     }
 
     const after = new THREE.Box3().setFromObject(root)
-    const dims2 = new THREE.Vector3(); after.getSize(dims2)
-    const ctr = new THREE.Vector3(); after.getCenter(ctr)
+    const dims2 = new THREE.Vector3()
+    const ctr = new THREE.Vector3()
+    after.getSize(dims2)
+    after.getCenter(ctr)
 
     const objW = Math.max(dims2.x, 1e-6)
     const objH = Math.max(dims2.y, 1e-6)
@@ -457,22 +484,37 @@ function AutoCenterAndFrame({
     let newZoom = Math.min(zoomX, zoomY)
     newZoom *= isMobile ? mobileScale : desktopScale
 
-    const depth = Math.max(dims2.z || 1, Math.max(dims2.x, dims2.y) * 0.75)
+    const depth = Math.max(dims2.z, Math.max(dims2.x, dims2.y) * 0.75) || 1
     const safeDist = depth * 4
     camera.near = Math.max(0.01, safeDist * 0.001)
     camera.far = safeDist * 50 + 100
     camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
     camera.zoom = Math.max(newZoom, 0.01)
     camera.updateProjectionMatrix()
-  }, [depsKey, size.width, size.height, isMobile, desktopScale, mobileScale, margin, centerMode, setTarget])
+
+    if (shouldFrame) shouldFrame.current = false
+  }, [depsKey, size.width, size.height, isMobile, desktopScale, mobileScale, margin, centerMode])
 
   return null
 }
 
-/* ---------- Switch UI (pro Auto smooth, Wireframe) ---------- */
+/* ---------- Lightbox pro fotky ---------- */
+function Lightbox({ open, onClose, src, alt }) {
+  if (!open || !src) return null
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
+      <img src={src} alt={alt || ""} style={{ maxWidth: "96vw", maxHeight: "92vh", objectFit: "contain", borderRadius: 12, boxShadow: "0 10px 40px rgba(0,0,0,.6)", border: "1px solid rgba(255,255,255,.15)" }} />
+    </div>
+  )
+}
+
+/* ---------- Switch (kompaktní) ---------- */
 function Switch({ checked, onChange, label }) {
   const handleKey = (e) => {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onChange(!checked) }
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault()
+      onChange(!checked)
+    }
   }
   const TRACK_W = 38, TRACK_H = 22, KNOB = 18
   return (
@@ -490,29 +532,38 @@ function Switch({ checked, onChange, label }) {
           borderRadius: 999,
           border: "1px solid rgba(255,255,255,.22)",
           background: checked ? "rgba(59,130,246,.45)" : "rgba(255,255,255,.10)",
-          cursor: "pointer", transition: "background .15s ease, border-color .15s ease",
+          cursor: "pointer",
+          transition: "background .15s ease, border-color .15s ease",
           outline: "none", padding: 0,
         }}
         title={label}
       >
-        <span aria-hidden style={{
-          position: "absolute", top: "50%", transform: "translateY(-50%)",
-          left: checked ? TRACK_W - KNOB - 3 : 3,
-          width: KNOB, height: KNOB, borderRadius: "50%", background: "#fff",
-          boxShadow: "0 1px 3px rgba(0,0,0,.35)", transition: "left .15s ease",
-        }} />
+        <span
+          aria-hidden
+          style={{
+            position: "absolute",
+            top: "50%", transform: "translateY(-50%)",
+            left: checked ? TRACK_W - KNOB - 3 : 3,
+            width: KNOB, height: KNOB,
+            borderRadius: "50%", background: "#fff",
+            boxShadow: "0 1px 3px rgba(0,0,0,.35)",
+            transition: "left .15s ease",
+          }}
+        />
       </button>
     </div>
   )
 }
 
-/* ---------- Hlavní stránka ---------- */
+/* ===== ČÁST 2/2 bude pokračovat definicí hlavní komponenty:
+   export default function ClientPage() { ... } a style block ===== */
+/* ---------- Hlavní komponenta ---------- */
 export default function ClientPage() {
-  // lights
-  const [lightIntensity, setLightIntensity] = useState(1)
+  // světla
+  const [lightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
-  // responsivita
+  // detekce mobilu
   const [isMobile, setIsMobile] = useState(false)
   useEffect(() => {
     try {
@@ -523,7 +574,9 @@ export default function ClientPage() {
     } catch {}
   }, [])
 
+  // titulek, logo
   const [title, setTitle] = useState(null)
+  const [logoCfg, setLogoCfg] = useState({ url: DEFAULT_LOGO, opacity: 0.9, width: 160, pos: "bc" })
 
   // modely
   const [files, setFiles] = useState([])
@@ -536,28 +589,39 @@ export default function ClientPage() {
 
   // vzhled
   const [autoSmooth, setAutoSmooth] = useState((getParam("smooth") ?? "1") !== "0")
+  const [smoothAngle] = useState(30)
   const [wireframe, setWireframe] = useState(false)
-  const [logoCfg, setLogoCfg] = useState({ url: DEFAULT_LOGO, opacity: 0.9, width: 160, pos: "bc" })
-  const [photos, setPhotos] = useState([])
 
-  // kamera + rámování
-  const rootRef = useRef()
+  // fotky (z manifestu)
+  const [photos, setPhotos] = useState([])
+  const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
+
+  // UI – sekce na mobilu sbalené
+  const [photosOpen, setPhotosOpen] = useState(!isMobile)
+  useEffect(() => { setPhotosOpen(!isMobile) }, [isMobile])
+  const [slidersOpen, setSlidersOpen] = useState(!isMobile)
+  useEffect(() => { setSlidersOpen(!isMobile) }, [isMobile])
+
+  // camera/centrování
   const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
   const [loadedCount, setLoadedCount] = useState(0)
   const handleModelLoaded = () => setLoadedCount((n) => n + 1)
-  const shouldFrameRef = useRef(true) // řízení kdy rámovat
-  const prevFileKeysRef = useRef([])
+  const centerParam = (getParam("center") || "combined").toLowerCase()
+  const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
+  // LIVE režim: rozhodování, kdy skutečně přerámovat
+  const shouldFrameRef = useRef(true)
+  const prevFileKeysRef = useRef([])
   const getFileKeys = (arr) => (arr || []).map(f => `${f.url}::${f.rawName || f.name}`)
 
-  /* ---------- INIT: manifest / files param / dev fallback ---------- */
+  // init z URL/manifestu/m
   useEffect(() => {
     ;(async () => {
       try {
         const mId = getParam("m")
         if (mId) {
-          const url = `https://jqnkdjgmenerioodqcpa.supabase.co/storage/v1/object/public/shade3d-viewer2/manifests/${encodeURIComponent(mId)}.json`
-          const m = await fetchJSON(url)
+          const manifestUrl = `${SUPABASE_URL}/storage/v1/object/public/${PUBLIC_BUCKET}/manifests/${encodeURIComponent(mId)}.json`
+          const m = await fetchJSON(manifestUrl)
           const Fs = (m?.files || []).map((x, i) => ({
             url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
             c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
@@ -575,8 +639,9 @@ export default function ClientPage() {
           setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
           setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
           setTitle(typeof m?.title === "string" ? m.title : (getParam("title") ?? null))
+          const logoUrl = m?.logo?.url || DEFAULT_LOGO
           setLogoCfg({
-            url: (m?.logo?.url || DEFAULT_LOGO) || null,
+            url: logoUrl || null,
             opacity: clamp01(parseFloat(getParam("logoOpacity") ?? "0.9")),
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
             pos: getParam("logoPos") || "bc",
@@ -612,18 +677,22 @@ export default function ClientPage() {
           setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
           setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
           setTitle(typeof m?.title === "string" ? m.title : (getParam("title") ?? null))
+          const logoUrl = m?.logo?.url || DEFAULT_LOGO
           setLogoCfg({
-            url: (m?.logo?.url || DEFAULT_LOGO) || null,
+            url: logoUrl || null,
             opacity: clamp01(parseFloat(getParam("logoOpacity") ?? "0.9")),
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
             pos: getParam("logoPos") || "bc",
           })
           const qOn = getParam("headlight")
           const qI = parseFloat(getParam("headlightI") ?? "NaN")
-          setHeadlightCfg({ enabled: qOn == null ? true : qOn !== "0", intensity: isFinite(qI) ? qI : 2.0 })
+          setHeadlightCfg({
+            enabled: qOn == null ? true : qOn !== "0",
+            intensity: isFinite(qI) ? qI : 2.0,
+          })
+          setPhotos(Array.isArray(m?.photos) ? m.photos.filter(p => p && p.u) : [])
           prevFileKeysRef.current = getFileKeys(Fs)
           shouldFrameRef.current = true
-          setPhotos(Array.isArray(m?.photos) ? m.photos.filter(p => p && p.u) : [])
           return
         }
 
@@ -655,14 +724,15 @@ export default function ClientPage() {
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
             pos: getParam("logoPos") || "bc",
           })
-          setPhotos([])
           prevFileKeysRef.current = getFileKeys(Fs)
           shouldFrameRef.current = true
+          setPhotos([])
           return
         }
 
-        // dev fallback (bez live)
+        // žádné vstupy: necháme prázdné (v live režimu dorazí payload)
         setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
+        shouldFrameRef.current = false
       } catch (e) {
         console.error(e)
         setFatal("Tento náhled není dostupný (chyba při načtení dat).")
@@ -670,22 +740,11 @@ export default function ClientPage() {
     })()
   }, [])
 
-  /* ---------- LIVE MODE: postMessage listener ---------- */
+  // LIVE payload aplikace (z Frameru)
   const applyLivePayload = (p) => {
     if (!p) return
 
-    // lights-only
-    if (p.onlyLights && p.lights) {
-      if (typeof p.lights.intensity === "number") setLightIntensity(p.lights.intensity)
-      if (p.lights.headlight) {
-        setHeadlightCfg((old) => ({
-          enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
-          intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
-        }))
-      }
-    }
-
-    let filesChanged = false
+    let filesActuallyChanged = false
     if (Array.isArray(p.files) && !(p.onlyParams && p.files.length === 0)) {
       const newFiles = p.files.map((x, i) => ({
         url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
@@ -695,19 +754,20 @@ export default function ClientPage() {
         m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
         vc: !!x.vc, km: !!x.km,
       }))
-      const newKeys = getFileKeys(newFiles)
+
+      const newKeys = newFiles.map(f => `${f.url}::${f.rawName || f.name}`)
       const prevKeys = prevFileKeysRef.current
-      filesChanged = newKeys.length !== prevKeys.length || newKeys.some((k, i) => k !== prevKeys[i])
+      filesActuallyChanged = newKeys.length !== prevKeys.length || newKeys.some((k, i) => k !== prevKeys[i])
 
       setFiles(newFiles)
       prevFileKeysRef.current = newKeys
 
       const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
       setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
-      setOpacities(newFiles.map((f) => f.o))
-      setVisibles(newFiles.map((f) => f.v))
-      setRoughnesses(newFiles.map((f) => f.r))
-      setMetalnesses(newFiles.map((f) => f.m))
+      setOpacities(newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
+      setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
+      setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
+      setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
     }
 
     if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
@@ -719,8 +779,7 @@ export default function ClientPage() {
         pos: p.logo?.pos || old.pos,
       }))
     }
-    if (p.lights && !p.onlyLights) {
-      if (typeof p.lights.intensity === "number") setLightIntensity(p.lights.intensity)
+    if (p.lights) {
       if (p.lights.headlight) {
         setHeadlightCfg((old) => ({
           enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
@@ -729,8 +788,8 @@ export default function ClientPage() {
       }
     }
 
-    shouldFrameRef.current = filesChanged
-    if (filesChanged) setLoadedCount(0)
+    shouldFrameRef.current = filesActuallyChanged
+    if (filesActuallyChanged) setLoadedCount(0)
   }
 
   useEffect(() => {
@@ -738,7 +797,6 @@ export default function ClientPage() {
       const data = e.data
       if (data && LIVE_MSG_TYPES.has(data.type) && data.payload) {
         if (!data.payload.onlyParams && Array.isArray(data.payload.files) && data.payload.files.length === 0) {
-          // explicitní vyčištění
           setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
           prevFileKeysRef.current = []
           shouldFrameRef.current = false
@@ -751,7 +809,7 @@ export default function ClientPage() {
     return () => window.removeEventListener("message", onMsg)
   }, [])
 
-  // LOGO
+  // logo overlay
   const logoEl = logoCfg.url && (
     <img
       src={logoCfg.url}
@@ -772,12 +830,10 @@ export default function ClientPage() {
     />
   )
 
-  // klíč pro rámování – rámujeme jen, když se opravdu změnily files a všechny se načetly
-  const frameDepsKey = shouldFrameRef.current
-    ? (loadedCount === files.length ? `ready-${files.length}-${loadedCount}` : `loading-${loadedCount}`)
-    : `noframe-${files.length}-${loadedCount}`
+  // ref na root group v Canvasu
+  const rootRef = useRef()
 
-  // UI panel – zkráceno jen na přepínače (barevné slidery atd. si držíte ve Frameru)
+  // obsah sliderů
   const slidersContent = fatal ? (
     <div style={{ color: "#ff8b8b" }}>{fatal}</div>
   ) : (
@@ -818,11 +874,18 @@ export default function ClientPage() {
               border: "1px solid #fff", borderRadius: 4, cursor: "pointer",
             }}
           >
-            <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }} />
+            <img
+              src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff}
+              alt=""
+              width={14}
+              height={14}
+              style={{ display: "block", pointerEvents: "none", userSelect: "none" }}
+            />
           </button>
         </div>
       ))}
 
+      {/* Auto smooth + Wireframe */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
         <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
         <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
@@ -849,23 +912,110 @@ export default function ClientPage() {
         <div
           title={title}
           style={{
-            marginBottom: 10, padding: "10px 12px",
-            borderRadius: 10, border: "1px solid rgba(255,255,255,.18)",
-            background: "rgba(255,255,255,.08)", fontSize: 13, fontWeight: 700,
-            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+            marginBottom: 10,
+            padding: "10px 12px",
+            borderRadius: 10,
+            border: "1px solid rgba(255,255,255,.18)",
+            background: "rgba(255,255,255,.08)",
+            fontSize: 13,
+            fontWeight: 700,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
           }}
         >
           {title}
         </div>
       )}
 
-      <div style={{ border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>
-        {slidersContent}
+      <div>
+        {isMobile ? (
+          <>
+            <button
+              onClick={() => setSlidersOpen((o) => !o)}
+              aria-expanded={slidersOpen}
+              style={{
+                width: "100%",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 10,
+                padding: "10px 12px",
+                background: "rgba(255,255,255,.08)",
+                border: "1px solid rgba(255,255,255,.18)",
+                borderRadius: 10,
+                color: "#fff",
+                cursor: "pointer",
+                fontWeight: 700,
+                fontSize: 13,
+              }}
+            >
+              <span>Nastavení modelu</span>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ transform: slidersOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform .15s ease" }} aria-hidden>
+                <path d="M8 5l8 7-8 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </button>
+
+            {slidersOpen && (
+              <div style={{ marginTop: 8, border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, background: "rgba(255,255,255,.06)", padding: 10 }}>
+                {slidersContent}
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>
+            {slidersContent}
+          </div>
+        )}
       </div>
+
+      {photos && photos.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <button
+            onClick={() => setPhotosOpen((o) => !o)}
+            aria-expanded={photosOpen}
+            style={{
+              width: "100%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 10,
+              padding: "10px 12px",
+              background: "rgba(255,255,255,.08)",
+              border: "1px solid rgba(255,255,255,.18)",
+              borderRadius: 10,
+              color: "#fff",
+              cursor: "pointer",
+              fontWeight: 700,
+              fontSize: 13,
+            }}
+          >
+            <span>Fotky ({photos.length})</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ transform: photosOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform .15s ease" }} aria-hidden>
+              <path d="M8 5l8 7-8 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </button>
+
+          {photosOpen && (
+            <div style={{ marginTop: 8, border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, background: "rgba(255,255,255,.06)", padding: 8 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(72px, 1fr))", gap: 8 }}>
+                {photos.map((p, i) => (
+                  <button key={i} onClick={() => setLightbox({ open: true, src: p.u, alt: p.n || `Photo ${i+1}` })} style={{ padding: 0, margin: 0, border: "none", background: "transparent", cursor: "pointer", borderRadius: 8, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,.35)", border: "1px solid rgba(255,255,255,.12)" }} title={p.n || ""}>
+                    <img src={p.u} alt={p.n || ""} loading="lazy" style={{ display: "block", width: "100%", height: 72, objectFit: "cover" }} />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 
-  const controlsRef = useRef(null)
+  // frame klíč: když máme rámovat, bereme files+loadedCount; jinak „noframe“
+  const frameDepsKey = shouldFrameRef.current
+    ? `frame-${files.length}-${loadedCount}`
+    : `noframe-${files.length}-${loadedCount}`
 
   return (
     <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
@@ -873,7 +1023,13 @@ export default function ClientPage() {
       {logoEl}
       {sidebar}
 
-      <Canvas orthographic camera={{ position: [0, 0, 100], near: 0.01, far: 100000 }} gl={{ alpha: true }} onCreated={({ gl }) => gl.setClearAlpha(0)} style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}>
+      <Canvas
+        orthographic
+        camera={{ position: [0, 0, 100], near: 0.01, far: 100000 }}
+        gl={{ alpha: true }}
+        onCreated={({ gl }) => gl.setClearAlpha(0)}
+        style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
+      >
         <>
           <ambientLight intensity={lightIntensity * 0.4 * (headlightCfg.enabled ? 0.5 : 1)} />
           <directionalLight position={[0, 5, 5]} intensity={lightIntensity * 1.5 * (headlightCfg.enabled ? 0.5 : 1)} />
@@ -894,6 +1050,7 @@ export default function ClientPage() {
                   visible={visibles[i] ?? true}
                   onLoaded={handleModelLoaded}
                   autoSmooth={autoSmooth}
+                  smoothAngle={smoothAngle}
                   wireframe={wireframe}
                   roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.5)}
                   metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
@@ -908,16 +1065,18 @@ export default function ClientPage() {
             rootRef={rootRef}
             depsKey={frameDepsKey}
             setTarget={setCameraTarget}
-            margin={1.15}
+            margin={1.05}             // ← menší okraj
             isMobile={isMobile}
-            desktopScale={0.5}
-            mobileScale={1.1}
-            centerMode={"combined"}
+            desktopScale={1.0}        // ← zvětšené přiblížení
+            mobileScale={1.0}
+            centerMode={centerMode}
+            shouldFrame={shouldFrameRef}
           />
-          <TouchTrackballControls target={cameraTarget} onReady={(c) => (controlsRef.current = c)} />
-          <RightButtonPan setTarget={setCameraTarget} controlsRef={controlsRef} />
+          <TouchTrackballControls target={cameraTarget} />
         </>
       </Canvas>
+
+      <Lightbox open={lightbox.open} onClose={() => setLightbox({ open: false, src: null, alt: "" })} src={lightbox.src} alt={lightbox.alt} />
 
       <style jsx global>{`
         .slider { appearance: none; height: 14px; background: transparent; margin: 5px 0; display: inline-block; }
@@ -925,12 +1084,18 @@ export default function ClientPage() {
         .slider::-webkit-slider-thumb { appearance: none; width: 14px; height: 14px; border-radius: 50%; background: white; cursor: pointer; box-shadow: 0 0 2px black; margin-top: -5px; }
         .slider::-moz-range-track { height: 4px; background: white; border-radius: 2px; }
         .slider::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: white; cursor: pointer; box-shadow: 0 0 2px black; border: none; }
+
         .color-input { -webkit-appearance: none; appearance: none; }
         .color-input::-webkit-color-swatch-wrapper { padding: 0; }
         .color-input::-webkit-color-swatch { border: none; border-radius: 2px; }
         .color-input::-moz-color-swatch { border: none; }
+
         @media (max-width: 720px) {
-          .sidebar { left: 8px !important; width: calc(100vw - 16px) !important; max-width: calc(100vw - 16px) !important; }
+          .sidebar {
+            left: 8px !important;
+            width: calc(100vw - 16px) !important;
+            max-width: calc(100vw - 16px) !important;
+          }
         }
       `}</style>
     </div>
