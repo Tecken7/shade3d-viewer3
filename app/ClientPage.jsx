@@ -15,6 +15,7 @@ const PUBLIC_BUCKET = "shade3d-viewer2"
 
 const LIVE_MSG_TYPES = new Set(["SHADE3D_LIVE", "SHADE3D_LIVE_V6", "SHADE3D_LIVE_V5"])
 
+/* ---------- Helpers ---------- */
 const DEFAULT_LOGO = "/Arthetic_logo.png"
 const stripExt = (s) => (s ? s.replace(/\.[^.]+$/, "") : "")
 const clamp01 = (x) => Math.max(0, Math.min(1, x))
@@ -124,6 +125,53 @@ function InlineLoader({ text }) {
         ⏳ {text || "Načítám…"}
       </div>
     </Html>
+  )
+}
+
+/* ---------- Toggle Switch (pro Auto smooth / Wireframe) ---------- */
+function Switch({ checked, onChange, label }) {
+  const handleKey = (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault()
+      onChange(!checked)
+    }
+  }
+  const TRACK_W = 38, TRACK_H = 22, KNOB = 18
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      {label && <span style={{ opacity: 0.85 }}>{label}</span>}
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        onKeyDown={handleKey}
+        style={{
+          position: "relative",
+          width: TRACK_W, height: TRACK_H,
+          borderRadius: 999,
+          border: "1px solid rgba(255,255,255,.22)",
+          background: checked ? "rgba(59,130,246,.45)" : "rgba(255,255,255,.10)",
+          cursor: "pointer",
+          transition: "background .15s ease, border-color .15s ease",
+          outline: "none", padding: 0,
+        }}
+        title={label}
+      >
+        <span
+          aria-hidden
+          style={{
+            position: "absolute",
+            top: "50%", transform: "translateY(-50%)",
+            left: checked ? TRACK_W - KNOB - 3 : 3,
+            width: KNOB, height: KNOB,
+            borderRadius: "50%", background: "#fff",
+            boxShadow: "0 1px 3px rgba(0,0,0,.35)",
+            transition: "left .15s ease",
+          }}
+        />
+      </button>
+    </div>
   )
 }
 
@@ -462,7 +510,6 @@ function Lightbox({ open, onClose, src, alt }) {
 
 /* ---------- Hlavní komponenta ---------- */
 export default function ClientPage() {
-  // světla – nově ovladatelné z Frameru
   const [sceneLightIntensity, setSceneLightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
@@ -486,7 +533,6 @@ export default function ClientPage() {
   const [metalnesses, setMetalnesses] = useState([])
   const [fatal, setFatal] = useState(null)
 
-  // jen přepínač Auto smooth
   const [autoSmooth, setAutoSmooth] = useState((getParam("smooth") ?? "1") !== "0")
   const [wireframe, setWireframe] = useState(false)
 
@@ -876,7 +922,7 @@ export default function ClientPage() {
     </div>
   )
 
-  // Re-frame klíč: rámuj vždy po dočtení všech modelů
+  const rootRef = useRef()
   const frameDepsKey = `ready-${files.length}-${loadedCount}`
 
   return (
@@ -893,7 +939,6 @@ export default function ClientPage() {
         style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
       >
         <>
-          {/* Scénické světlo ovládané z Frameru (lights.intensity) */}
           <ambientLight intensity={sceneLightIntensity * 0.4 * (headlightCfg.enabled ? 0.5 : 1)} />
           <directionalLight position={[0, 5, 5]} intensity={sceneLightIntensity * 1.5 * (headlightCfg.enabled ? 0.5 : 1)} />
           <directionalLight position={[-10, 0, 0]} intensity={sceneLightIntensity * 1.0 * (headlightCfg.enabled ? 0.5 : 1)} />
