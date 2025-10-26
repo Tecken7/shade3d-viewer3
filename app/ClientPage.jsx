@@ -9,12 +9,14 @@ import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader"
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader"
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader"
 
+/* ---------------------------------- consts ---------------------------------- */
 const LIVE_MSG_TYPES = new Set(["SHADE3D_LIVE", "SHADE3D_LIVE_V6", "SHADE3D_LIVE_V5"])
 const SUPABASE_URL = "https://jqnkdjgmenerioodqcpa.supabase.co"
 const PUBLIC_BUCKET = "shade3d-viewer2"
 const DEFAULT_LOGO = "/Arthetic_logo.png"
+const DEFAULT_SMOOTH_ANGLE = 30
 
-/* helpers */
+/* --------------------------------- helpers ---------------------------------- */
 const stripExt = (s) => (s ? s.replace(/\.[^.]+$/, "") : "")
 const clamp01 = (x) => Math.max(0, Math.min(1, x))
 const clamp = (x, a, b) => Math.max(a, Math.min(b, x))
@@ -25,7 +27,7 @@ const getParam = (name) => {
 async function fetchJSON(url) { const r = await fetch(url, { cache: "no-store" }); if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() }
 function inferExt(s) { if (!s) return ""; const m = s.split("?")[0].match(/\.([a-z0-9]+)$/i); return m ? m[1].toLowerCase() : "" }
 
-/* icons */
+/* --------------------------------- icons ------------------------------------ */
 const ICON_BASE = (() => {
   const q = getParam("iconBase")
   if (q && /^(https?:)?\/\//i.test(q)) return q.replace(/\/+$/, "") + "/"
@@ -35,15 +37,18 @@ const ICON_BASE = (() => {
 const ICONS = { eye: `${ICON_BASE}Eye.png`, eyeOff: `${ICON_BASE}Eye-off.png` }
 function PreloadIcons(){ useEffect(()=>{ try{ Object.values(ICONS).forEach(src=>{ const i=new Image(); i.decoding="async"; i.src=src }) }catch{} },[]); return null }
 
-/* autosmooth */
-const DEFAULT_SMOOTH_ANGLE = 30
+/* ------------------------------ auto-smooth --------------------------------- */
 function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
   const angle = clamp(angleDeg, 0, 89.9) * Math.PI / 180
   const g = geometry.index ? geometry.toNonIndexed() : geometry.clone()
-  const pos = g.getAttribute("position"); const tri = pos.count/3
+  const pos = g.getAttribute("position")
+  const tri = pos.count / 3
   const faceNormals = new Array(tri)
   const a=new THREE.Vector3(), b=new THREE.Vector3(), c=new THREE.Vector3(), cb=new THREE.Vector3(), ab=new THREE.Vector3()
-  for (let f=0; f<tri; f++){ const i=f*3; a.fromBufferAttribute(pos,i); b.fromBufferAttribute(pos,i+1); c.fromBufferAttribute(pos,i+2); cb.subVectors(c,b); ab.subVectors(a,b); cb.cross(ab).normalize(); faceNormals[f]=cb.clone() }
+  for (let f=0; f<tri; f++){
+    const i=f*3; a.fromBufferAttribute(pos,i); b.fromBufferAttribute(pos,i+1); c.fromBufferAttribute(pos,i+2)
+    cb.subVectors(c,b); ab.subVectors(a,b); cb.cross(ab).normalize(); faceNormals[f]=cb.clone()
+  }
   const groups=new Map(), key=(i)=>`${pos.getX(i).toFixed(5)},${pos.getY(i).toFixed(5)},${pos.getZ(i).toFixed(5)}`
   for (let i=0;i<pos.count;i++){ const k=key(i); (groups.get(k) || (groups.set(k,[]),groups.get(k))).push(i) }
   const normals=new Float32Array(pos.count*3), tmp=new THREE.Vector3(), cosT=Math.cos(angle)
@@ -61,7 +66,7 @@ function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
   return g
 }
 
-/* small UI bits */
+/* ------------------------------- tiny UI ------------------------------------ */
 function InlineLoader({ text }) {
   return (
     <Html center>
@@ -88,7 +93,7 @@ function Switch({ checked, onChange, label }) {
   )
 }
 
-/* AnyModel (wireframe overlay) */
+/* ------------------------------- AnyModel ----------------------------------- */
 function AnyModel({
   name, url,
   color, opacity, visible,
@@ -99,8 +104,10 @@ function AnyModel({
   const [object3D, setObject3D] = useState(null)
   const [loading, setLoading] = useState(true)
   const ext = useMemo(() => inferExt(name || url), [name, url])
-  const makeMat = (opts={}) => new THREE.MeshStandardMaterial({ color:new THREE.Color(color||"#fff"),
-    roughness, metalness, transparent: opacity<1, opacity, side:THREE.DoubleSide, depthWrite: opacity===1, ...opts })
+  const makeMat = (opts={}) => new THREE.MeshStandardMaterial({
+    color:new THREE.Color(color||"#fff"), roughness, metalness,
+    transparent: opacity<1, opacity, side:THREE.DoubleSide, depthWrite: opacity===1, ...opts
+  })
   const forEachMesh=(obj,cb)=>obj?.traverse?.(c=>{ if(c.isMesh) cb(c) })
   const rebuildWire = (mesh) => {
     if (mesh.userData._edges){ mesh.userData._edges.geometry?.dispose?.(); mesh.userData._edges.material?.dispose?.(); mesh.remove(mesh.userData._edges); mesh.userData._edges=null }
@@ -169,7 +176,7 @@ function AnyModel({
   return visible ? <primitive object={object3D}/> : null
 }
 
-/* lights */
+/* --------------------------------- lights ----------------------------------- */
 function Headlight({ enabled=true, intensity=2, color="#ffffff" }) {
   const { camera } = useThree()
   const ref=useRef(null)
@@ -177,7 +184,7 @@ function Headlight({ enabled=true, intensity=2, color="#ffffff" }) {
   return <pointLight ref={ref} color={color} intensity={enabled?intensity:0} distance={0} decay={0}/>
 }
 
-/* controls */
+/* ------------------------------- controls ----------------------------------- */
 function TouchTrackballControls({ target=[0,0,0] }) {
   const { camera, gl, size } = useThree()
   const ref=useRef(null)
@@ -219,11 +226,11 @@ function RightButtonPan({ setTarget }) {
   return null
 }
 
-/* framing */
+/* --------------------------- auto center & frame ----------------------------- */
 function AutoCenterAndFrame({
   rootRef, depsKey, setTarget,
-  margin=0.9, isMobile=false, desktopScale=1.0, mobileScale=1.0,
-  centerMode="combined", shouldFrame,
+  margin=0.85, isMobile=false, desktopScale=1.0, mobileScale=1.0,
+  centerMode="combined", shouldFrame, fitBoostFromProps,
 }) {
   const { camera, size } = useThree()
   useEffect(()=> {
@@ -242,24 +249,25 @@ function AutoCenterAndFrame({
     const zoomX=size.width/(objW*margin), zoomY=size.height/(objH*margin)
     let newZoom=Math.min(zoomX,zoomY)
 
-    const FILL_BOOST = isMobile ? 2.0 : 3.0
+    const urlFit = parseFloat(getParam("fit") ?? "NaN")
+    const FILL_BOOST = isFinite(urlFit) ? urlFit : (fitBoostFromProps ?? (isMobile ? 3.2 : 5.0))
     newZoom *= (isMobile?mobileScale:desktopScale) * FILL_BOOST
 
     const depth=Math.max(d.z, Math.max(d.x,d.y)*0.5) || 1
-    const safeDist = Math.max(depth*1.4, Math.max(d.x,d.y)*0.6)
+    const safeDist = Math.max(depth*1.1, Math.max(d.x,d.y)*0.5)
 
     camera.near = Math.max(0.01, safeDist*0.001)
     camera.far  = safeDist*60 + 100
     camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
-    camera.zoom = clamp(newZoom, 0.01, 5000)
+    camera.zoom = clamp(newZoom, 0.01, 10000)
     camera.updateProjectionMatrix()
 
     if (shouldFrame) shouldFrame.current=false
-  },[depsKey,size.width,size.height,isMobile,desktopScale,mobileScale,margin,centerMode])
+  },[depsKey,size.width,size.height,isMobile,desktopScale,mobileScale,margin,centerMode,fitBoostFromProps])
   return null
 }
 
-/* lightbox */
+/* -------------------------------- lightbox ---------------------------------- */
 function Lightbox({ open, onClose, src, alt }) {
   if (!open || !src) return null
   return (
@@ -269,20 +277,20 @@ function Lightbox({ open, onClose, src, alt }) {
   )
 }
 
-/* ============ MAIN ============ */
+/* ================================= MAIN ===================================== */
 export default function ClientPage() {
-  /* světla – teď OBOJE ovladatelné */
+  /* scene lights — ovládá „Světla scéna“ */
   const [sceneIntensity, setSceneIntensity] = useState(() => {
     const q = parseFloat(getParam("scene") ?? "NaN")
-    return isFinite(q) ? clamp(q, 0, 5) : 1
+    return isFinite(q) ? clamp(q, 0, 8) : 1
   })
-  const [highlightIntensity, setHighlightIntensity] = useState(() => {
-    const q = parseFloat(getParam("highlight") ?? "NaN")
-    return isFinite(q) ? clamp(q, 0, 10) : 2.0
+  /* highlight */
+  const [headlightCfg, setHeadlightCfg] = useState(() => {
+    const hi = parseFloat(getParam("highlight") ?? "NaN")
+    return { enabled: true, intensity: isFinite(hi) ? clamp(hi, 0, 10) : 2.0 }
   })
-  const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: highlightIntensity })
 
-  /* mobil */
+  /* device */
   const [isMobile, setIsMobile] = useState(false)
   useEffect(()=>{ try{
     const ua=/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
@@ -290,7 +298,7 @@ export default function ClientPage() {
     const narrow=window.innerWidth<768; setIsMobile(ua||coarse||narrow)
   }catch{} },[])
 
-  /* titulek, logo, modely ... (beze změn) */
+  /* base state */
   const [title, setTitle] = useState(null)
   const [logoCfg, setLogoCfg] = useState({ url: DEFAULT_LOGO, opacity: 0.9, width: 160, pos: "bc" })
   const [files, setFiles] = useState([]), [colors, setColors] = useState([]), [opacities, setOpacities] = useState([])
@@ -312,70 +320,76 @@ export default function ClientPage() {
   const shouldFrameRef = useRef(true)
   const prevFileKeysRef = useRef([]); const keyArr=(arr)=> (arr||[]).map(f=>`${f.url}::${f.rawName||f.name}`)
 
+  /* init from manifest/URL (zkráceně – stejné mapování jako dřív) */
   useEffect(()=>{ (async()=>{
     try{
-      const mId=getParam("m")
-      const fromManifest = async (m) => {
-        const Fs=(m?.files||[]).map((x,i)=>({ url:x.u, name:stripExt(x.n)||`Model ${i+1}`, rawName:x.n,
-          c:x.c, o: typeof x.o==="number"?clamp01(x.o):1, v: typeof x.v==="boolean"?x.v:true,
-          r: typeof x.r==="number"?clamp01(x.r):0.5, m: typeof x.m==="number"?clamp01(x.m):0.5, vc:!!x.vc, km:!!x.km }))
-        if(!Fs.length) throw new Error("Manifest je prázdný.")
-        setFiles(Fs)
+      const fillCommon = (Fs, meta={})=>{
         const pal=["#f5f5dc","#8e8e8e","#ffffff","#ffd7a8","#c0c0c0","#e6f0ff","#ffeedd"]
-        setColors(Fs.map((f,i)=>f.c||pal[i%pal.length])); setOpacities(Fs.map(f=>typeof f.o==="number"?clamp01(f.o):1))
-        setVisibles(Fs.map(f=>typeof f.v==="boolean"?f.v:true)); setRoughnesses(Fs.map(f=>typeof f.r==="number"?clamp01(f.r):0.5))
+        setFiles(Fs)
+        setColors(Fs.map((f,i)=>f.c||pal[i%pal.length]))
+        setOpacities(Fs.map(f=>typeof f.o==="number"?clamp01(f.o):1))
+        setVisibles(Fs.map(f=>typeof f.v==="boolean"?f.v:true))
+        setRoughnesses(Fs.map(f=>typeof f.r==="number"?clamp01(f.r):0.5))
         setMetalnesses(Fs.map(f=>typeof f.m==="number"?clamp01(f.m):0.5))
-        setTitle(typeof m?.title==="string"?m.title:(getParam("title")??null))
-        const logoUrl=m?.logo?.url || DEFAULT_LOGO
-        setLogoCfg({ url:logoUrl||null, opacity:clamp01(parseFloat(getParam("logoOpacity")??"0.9")),
-          width:parseInt(getParam("logoWidth") ?? (window.innerWidth<768?"120":"160"),10), pos:getParam("logoPos")||"bc" })
-        /* světla z manifestu */
-        const sc = parseFloat(m?.lights?.scene ?? getParam("scene") ?? "NaN")
-        if (isFinite(sc)) setSceneIntensity(clamp(sc,0,5))
-        const hl = m?.lights?.headlight, hi = parseFloat(m?.lights?.highlight ?? getParam("highlight") ?? "NaN")
-        setHeadlightCfg({
-          enabled: typeof hl?.enabled==="boolean"?hl.enabled:true,
-          intensity: isFinite(hi) ? clamp(hi,0,10) : (typeof hl?.intensity==="number"?hl.intensity:highlightIntensity),
+        prevFileKeysRef.current=keyArr(Fs)
+        setTitle(typeof meta.title==="string"?meta.title:(getParam("title")??null))
+        const logoUrl = meta.logo?.url || DEFAULT_LOGO
+        setLogoCfg({
+          url: logoUrl || null,
+          opacity: clamp01(parseFloat(getParam("logoOpacity") ?? "0.9")),
+          width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
+          pos: getParam("logoPos") || "bc",
         })
-        setPhotos(Array.isArray(m?.photos)?m.photos.filter(p=>p&&p.u):[])
-        prevFileKeysRef.current=keyArr(Fs); shouldFrameRef.current=true
+        /* scene & highlight z meta/URL */
+        const sc = parseFloat(meta?.lights?.scene ?? getParam("scene") ?? "NaN")
+        if (isFinite(sc)) setSceneIntensity(clamp(sc, 0, 8))
+        const hi = parseFloat(meta?.lights?.highlight ?? getParam("highlight") ?? "NaN")
+        if (isFinite(hi)) setHeadlightCfg(h=>({ ...h, intensity: clamp(hi, 0, 10) }))
+        shouldFrameRef.current=true
       }
 
+      const mId=getParam("m")
       if (mId){
         const mu=`${SUPABASE_URL}/storage/v1/object/public/${PUBLIC_BUCKET}/manifests/${encodeURIComponent(mId)}.json`
-        const m=await fetchJSON(mu); await fromManifest(m); return
+        const m=await fetchJSON(mu)
+        const Fs=(m?.files||[]).map((x,i)=>({ url:x.u, name:stripExt(x.n)||`Model ${i+1}`, rawName:x.n, c:x.c,
+          o: typeof x.o==="number"?clamp01(x.o):1, v: typeof x.v==="boolean"?x.v:true,
+          r: typeof x.r==="number"?clamp01(x.r):0.5, m: typeof x.m==="number"?clamp01(x.m):0.5, vc:!!x.vc, km:!!x.km }))
+        if (!Fs.length) throw new Error("Manifest je prázdný.")
+        fillCommon(Fs, m); setPhotos(Array.isArray(m?.photos)?m.photos.filter(p=>p&&p.u):[])
+        return
       }
-      const manifestUrl=getParam("manifest")
-      if (manifestUrl){ const m=await fetchJSON(manifestUrl); await fromManifest(m); return }
+
+      const manifestUrl = getParam("manifest")
+      if (manifestUrl){
+        const m=await fetchJSON(manifestUrl)
+        const Fs=(m?.files||[]).map((x,i)=>({ url:x.u, name:stripExt(x.n)||`Model ${i+1}`, rawName:x.n, c:x.c,
+          o: typeof x.o==="number"?clamp01(x.o):1, v: typeof x.v==="boolean"?x.v:true,
+          r: typeof x.r==="number"?clamp01(x.r):0.5, m: typeof x.m==="number"?clamp01(x.m):0.5, vc:!!x.vc, km:!!x.km }))
+        if (!Fs.length) throw new Error("Manifest je prázdný.")
+        fillCommon(Fs, m); setPhotos(Array.isArray(m?.photos)?m.photos.filter(p=>p&&p.u):[])
+        return
+      }
 
       const f=getParam("files")
       if (f){
         let arr=null; try{ arr=JSON.parse(f) }catch{}; if(!arr){ try{ arr=JSON.parse(decodeURIComponent(f)) }catch{} }
         if(!Array.isArray(arr)) throw new Error("Neplatný formát parametru ?files=")
-        const Fs=arr.filter(x=>x&&x.u).map((x,i)=>({ url:x.u, name:stripExt(x.n)||`Model ${i+1}`, rawName:x.n,
-          c:x.c, o: typeof x.o==="number"?clamp01(x.o):1, v: typeof x.v==="boolean"?x.v:true,
+        const Fs=arr.filter(x=>x&&x.u).map((x,i)=>({ url:x.u, name:stripExt(x.n)||`Model ${i+1}`, rawName:x.n, c:x.c,
+          o: typeof x.o==="number"?clamp01(x.o):1, v: typeof x.v==="boolean"?x.v:true,
           r: typeof x.r==="number"?clamp01(x.r):0.5, m: typeof x.m==="number"?clamp01(x.m):0.5, vc:!!x.vc, km:!!x.km }))
-        setFiles(Fs)
-        const pal=["#f5f5dc","#8e8e8e","#ffffff","#ffd7a8","#c0c0c0","#e6f0ff","#ffeedd"]
-        setColors(Fs.map((f,i)=>f.c||pal[i%pal.length])); setOpacities(Fs.map(f=>typeof f.o==="number"?clamp01(f.o):1))
-        setVisibles(Fs.map(f=>typeof f.v==="boolean"?f.v:true)); setRoughnesses(Fs.map(f=>typeof f.r==="number"?clamp01(f.r):0.5))
-        setMetalnesses(Fs.map(f=>typeof f.m==="number"?clamp01(f.m):0.5))
-        setTitle(getParam("title") ?? null)
-        setLogoCfg({ url: getParam("logo")==="none"?null:getParam("logo")||DEFAULT_LOGO,
-          opacity:clamp01(parseFloat(getParam("logoOpacity") ?? "0.9")),
-          width:parseInt(getParam("logoWidth") ?? (window.innerWidth<768?"120":"160"),10), pos:getParam("logoPos")||"bc" })
-        /* světla z URL */
-        const sc=parseFloat(getParam("scene") ?? "NaN"); if (isFinite(sc)) setSceneIntensity(clamp(sc,0,5))
-        const hi=parseFloat(getParam("highlight") ?? "NaN"); if (isFinite(hi)) setHeadlightCfg(h=>({ ...h, intensity:clamp(hi,0,10) }))
-        prevFileKeysRef.current=keyArr(Fs); shouldFrameRef.current=true; setPhotos([]); return
+        fillCommon(Fs, {})
+        setPhotos([])
+        return
       }
 
+      // default: čekáme na LIVE
       setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
       shouldFrameRef.current=false
     }catch(e){ console.error(e); setFatal("Tento náhled není dostupný (chyba při načtení dat).") }
   })() },[])
 
-  /* LIVE: nyní přijímám lights.scene / lights.highlight i headlight */
+  /* LIVE payload (včetně lights.scene a lights.highlight) */
   const applyLivePayload=(p)=>{
     if(!p) return
     let changed=false
@@ -397,12 +411,14 @@ export default function ClientPage() {
     if (p.logo){ setLogoCfg(old=>({ url:p.logo?.url ?? old.url, opacity: typeof p.logo?.opacity==="number"?clamp01(p.logo.opacity):old.opacity,
       width: typeof p.logo?.width==="number"?p.logo.width:old.width, pos:p.logo?.pos||old.pos })) }
     if (p.lights){
-      if (typeof p.lights.scene==="number") setSceneIntensity(clamp(p.lights.scene,0,5))
+      if (typeof p.lights.scene==="number") setSceneIntensity(clamp(p.lights.scene,0,8))
       if (typeof p.lights.highlight==="number") setHeadlightCfg(h=>({ ...h, intensity:clamp(p.lights.highlight,0,10) }))
       if (p.lights.headlight){ setHeadlightCfg(h=>({ enabled: typeof p.lights.headlight.enabled==="boolean"?p.lights.headlight.enabled:h.enabled,
         intensity: typeof p.lights.headlight.intensity==="number"?clamp(p.lights.headlight.intensity,0,10):h.intensity })) }
     }
-    shouldFrameRef.current=changed; if(changed) setLoadedCount(0)
+    if (typeof p.scene==="number") setSceneIntensity(clamp(p.scene,0,8)) // fallback, kdyby slider posílal přímo scene
+    if (p.view && typeof p.view.fit==="number") { /* okamžité přerámování při změně fitu */ shouldFrameRef.current=true }
+    shouldFrameRef.current=shouldFrameRef.current || changed; if(changed) setLoadedCount(0)
   }
   useEffect(()=>{ const onMsg=(e)=>{ const d=e.data; if(d && LIVE_MSG_TYPES.has(d.type) && d.payload){
       if(!d.payload.onlyParams && Array.isArray(d.payload.files) && d.payload.files.length===0){
@@ -424,7 +440,7 @@ export default function ClientPage() {
 
   const rootRef=useRef()
 
-  /* levý panel – část s přepínači modelů; přidáno nic, vše původně */
+  /* levý panel – stejné ovládání jako v tvé „nejlepší verzi“ */
   const slidersContent = fatal ? (
     <div style={{ color:"#ff8b8b" }}>{fatal}</div>
   ) : (
@@ -451,7 +467,7 @@ export default function ClientPage() {
     </>
   )
 
-  const sidebar=(/* ... beze změny, jen render slidersContent ... */ 
+  const sidebar=(
     <div className="sidebar" style={{ position:"absolute", top:10, left:10, zIndex:2, width:"clamp(260px, 28vw, 420px)", maxWidth:"calc(100vw - 20px)",
       color:"white", fontFamily:"sans-serif", fontSize:14, backdropFilter:"blur(3px)", background:"rgba(0,0,0,.25)", border:"1px solid rgba(255,255,255,.15)",
       borderRadius:10, padding:10, boxSizing:"border-box", maxHeight:"calc(100vh - 20px)", overflowY:"auto" }}>
@@ -498,7 +514,6 @@ export default function ClientPage() {
     </div>
   )
 
-  /* deps key pro frame */
   const frameDepsKey = shouldFrameRef.current ? `frame-${files.length}-${loadedCount}` : `noframe-${files.length}-${loadedCount}`
 
   return (
@@ -511,12 +526,12 @@ export default function ClientPage() {
         gl={{ alpha:true }} onCreated={({gl})=>gl.setClearAlpha(0)}
         style={{ position:"absolute", inset:0, zIndex:1, background:"transparent" }}>
         <>
-          {/* „Světla scéna“ => sceneIntensity; „Světlo highlight“ => highlightIntensity */}
-          <ambientLight intensity={0.4 * sceneIntensity * (headlightCfg.enabled ? 0.5 : 1)} />
-          <directionalLight position={[0, 5, 5]}  intensity={1.5 * sceneIntensity * (headlightCfg.enabled ? 0.5 : 1)} />
-          <directionalLight position={[-10, 0, 0]} intensity={1.0 * sceneIntensity * (headlightCfg.enabled ? 0.5 : 1)} />
-          <directionalLight position={[10, 0, 0]}  intensity={1.2 * sceneIntensity * (headlightCfg.enabled ? 0.5 : 1)} />
-          <directionalLight position={[0, -5, -5]} intensity={0.8 * sceneIntensity * (headlightCfg.enabled ? 0.5 : 1)} />
+          {/* Světla scéna = sceneIntensity (bez umělého tlumení) */}
+          <ambientLight intensity={0.4 * sceneIntensity} />
+          <directionalLight position={[0, 5, 5]}  intensity={1.5 * sceneIntensity} />
+          <directionalLight position={[-10, 0, 0]} intensity={1.0 * sceneIntensity} />
+          <directionalLight position={[10, 0, 0]}  intensity={1.2 * sceneIntensity} />
+          <directionalLight position={[0, -5, -5]} intensity={0.8 * sceneIntensity} />
           <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity} />
 
           <group ref={rootRef}>
@@ -535,7 +550,7 @@ export default function ClientPage() {
             rootRef={rootRef}
             depsKey={frameDepsKey}
             setTarget={setCameraTarget}
-            margin={0.9}
+            margin={0.85}
             isMobile={isMobile}
             desktopScale={1.0}
             mobileScale={1.0}
