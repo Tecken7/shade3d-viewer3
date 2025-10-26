@@ -9,15 +9,15 @@ import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader"
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader"
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader"
 
-/* ---------- Konst + konfigurace ---------- */
-const LIVE_MSG_TYPES = new Set(["SHADE3D_LIVE", "SHADE3D_LIVE_V6", "SHADE3D_LIVE_V5"])
-
+/* ---------- Konfigurace ---------- */
 const SUPABASE_URL = "https://jqnkdjgmenerioodqcpa.supabase.co"
 const PUBLIC_BUCKET = "shade3d-viewer2"
 
-const DEFAULT_LOGO = "/Arthetic_logo.png"
+/* ---------- postMessage typy z Frameru ---------- */
+const LIVE_MSG_TYPES = new Set(["SHADE3D_LIVE", "SHADE3D_LIVE_V6", "SHADE3D_LIVE_V5"])
 
 /* ---------- Helpers ---------- */
+const DEFAULT_LOGO = "/Arthetic_logo.png"
 const stripExt = (s) => (s ? s.replace(/\.[^.]+$/, "") : "")
 const clamp01 = (x) => Math.max(0, Math.min(1, x))
 const getParam = (name) => {
@@ -130,15 +130,16 @@ function InlineLoader({ text }) {
   )
 }
 
-/* ---------- AnyModel (wireframe overlay) ---------- */
+/* ---------- AnyModel ---------- */
 function AnyModel({
   name, url,
   color, opacity, visible,
-  onLoaded, autoSmooth, smoothAngle = DEFAULT_SMOOTH_ANGLE,
+  onLoaded, autoSmooth,
+  smoothAngle = DEFAULT_SMOOTH_ANGLE,
   roughness = 0.5, metalness = 0.5,
   useVertexColors = false,
   keepMaterials = false,
-  wireframe = false,
+  wireframe = false,            // overlay hran
 }) {
   const [object3D, setObject3D] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -249,7 +250,7 @@ function AnyModel({
     return () => { cancelled = true }
   }, [url, ext])
 
-  // Re-smooth + rebuild overlay on change
+  // Re-smoothing – po změně přegeneruj i overlay
   useEffect(() => {
     if (!object3D) return
     forEachMesh(object3D, (child) => {
@@ -264,15 +265,15 @@ function AnyModel({
       }
       child.geometry = newGeom
       child.userData._derivedGeom = newGeom
-
       rebuildWireOverlay(child)
     })
   }, [object3D, autoSmooth, smoothAngle])
 
-  // Materials + wireframe visibility toggle
+  // Materiály + overlay viditelnost
   useEffect(() => {
     if (!object3D) return
-    forEachMesh(object3D, (child) => {
+    object3D.traverse((child) => {
+      if (!child.isMesh) return
       if (keepMaterials) {
         const mat = child.material
         if (mat) {
@@ -303,7 +304,7 @@ function AnyModel({
   return visible ? <primitive object={object3D} /> : null
 }
 
-/* ---------- Headlight ---------- */
+/* ---------- Headlight (PointLight následující kameru) ---------- */
 function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
   const { camera } = useThree()
   const ref = useRef(null)
@@ -311,7 +312,7 @@ function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
   return <pointLight ref={ref} color={color} intensity={enabled ? intensity : 0} distance={0} decay={0} />
 }
 
-/* ---------- Trackball (lepší myš tlačítka) ---------- */
+/* ---------- Trackball (bez pravého tlačítka) ---------- */
 function TouchTrackballControls({ target = [0, 0, 0] }) {
   const { camera, gl, size } = useThree()
   const controlsRef = useRef(null)
@@ -326,7 +327,6 @@ function TouchTrackballControls({ target = [0, 0, 0] }) {
     controls.mouseButtons = {
       LEFT: THREE.MOUSE.ROTATE,
       MIDDLE: THREE.MOUSE.ZOOM,
-      RIGHT: THREE.MOUSE.PAN,
     }
     controlsRef.current = controls
     return () => { controls.dispose() }
@@ -353,162 +353,7 @@ function TouchTrackballControls({ target = [0, 0, 0] }) {
   return null
 }
 
-/* ---------- Vlastní pan (pravé tlačítko nebo Ctrl+levé) ---------- */
-function RightButtonPan({ setTarget }) {
-  const { camera, gl, size } = useThree()
-  const isPanning = useRef(false)
-  const last = useRef({ x: 0, y: 0 })
-  const pointerIdRef = useRef(null)
-
-  const PAN_SENSITIVITY = 0.85
-  const right = new THREE.Vector3()
-  const up = new THREE.Vector3()
-  const deltaWorld = new THREE.Vector3()
-
-  useEffect(() => {
-    const el = gl.domElement
-    const onContext = (e) => { e.preventDefault() }
-    const onDown = (e) => {
-      if ((e.button !== 2) && !(e.button === 0 && e.ctrlKey)) return
-      e.preventDefault(); e.stopPropagation()
-      isPanning.current = true
-      last.current = { x: e.clientX, y: e.clientY }
-      pointerIdRef.current = e.pointerId
-      try { el.setPointerCapture?.(e.pointerId) } catch {}
-    }
-    const onMove = (e) => {
-      if (!isPanning.current) return
-      e.preventDefault(); e.stopPropagation()
-      const dx = e.clientX - last.current.x
-      const dy = e.clientY - last.current.y
-      last.current = { x: e.clientX, y: e.clientY }
-
-      right.setFromMatrixColumn(camera.matrixWorld, 0).normalize()
-      up.setFromMatrixColumn(camera.matrixWorld, 1).normalize()
-
-      if (camera.isOrthographicCamera) {
-        const wppX = ((camera.right - camera.left) / (size.width * camera.zoom))
-        const wppY = ((camera.top - camera.bottom) / (size.height * camera.zoom))
-        const moveRight = -dx * wppX * PAN_SENSITIVITY
-        const moveUp    =  dy * wppY * PAN_SENSITIVITY
-        deltaWorld.copy(right).multiplyScalar(moveRight).addScaledVector(up, moveUp)
-        camera.position.add(deltaWorld)
-        setTarget?.((t) => [t[0] + deltaWorld.x, t[1] + deltaWorld.y, t[2] + deltaWorld.z])
-        camera.updateProjectionMatrix()
-      } else {
-        const dist = camera.position.length()
-        const scale = (dist / Math.max(size.width, size.height)) * PAN_SENSITIVITY
-        deltaWorld.copy(right).multiplyScalar(-dx * scale).addScaledVector(up, dy * scale)
-        camera.position.add(deltaWorld)
-        setTarget?.((t) => [t[0] + deltaWorld.x, t[1] + deltaWorld.y, t[2] + deltaWorld.z])
-      }
-    }
-    const onUp = (e) => {
-      if (!isPanning.current) return
-      e.preventDefault(); e.stopPropagation()
-      isPanning.current = false
-      try { el.releasePointerCapture?.(pointerIdRef.current) } catch {}
-      pointerIdRef.current = null
-    }
-
-    el.addEventListener("contextmenu", onContext)
-    el.addEventListener("pointerdown", onDown)
-    window.addEventListener("pointermove", onMove, { capture: true })
-    window.addEventListener("pointerup", onUp, { capture: true })
-    return () => {
-      el.removeEventListener("contextmenu", onContext)
-      el.removeEventListener("pointerdown", onDown)
-      window.removeEventListener("pointermove", onMove, { capture: true })
-      window.removeEventListener("pointerup", onUp, { capture: true })
-    }
-  }, [camera, gl, size.width, size.height, setTarget])
-
-  return null
-}
-
-/* ---------- AutoCenter & AutoFrame (nové defaulty) ---------- */
-function AutoCenterAndFrame({
-  rootRef, depsKey, setTarget,
-  margin = 1.05,            // dříve 1.2
-  isMobile = false,
-  desktopScale = 1.0,       // dříve 0.4
-  mobileScale = 1.0,
-  centerMode = "combined",
-  shouldFrame, // volitelný ref z LIVE režimu
-}) {
-  const { camera, size } = useThree()
-
-  useEffect(() => {
-    if (shouldFrame && !shouldFrame.current) return
-
-    const root = rootRef.current
-    if (!root) return
-
-    root.updateMatrixWorld(true)
-    const boxAll = new THREE.Box3().setFromObject(root)
-    if (boxAll.isEmpty()) return
-
-    const centerAll = new THREE.Vector3()
-    const dims = new THREE.Vector3()
-    boxAll.getCenter(centerAll)
-    boxAll.getSize(dims)
-
-    if (centerMode === "per") {
-      root.children.forEach((child) => {
-        const b = new THREE.Box3().setFromObject(child)
-        if (b.isEmpty()) return
-        const cWorld = new THREE.Vector3()
-        b.getCenter(cWorld)
-        child.position.sub(cWorld)
-      })
-      root.updateMatrixWorld(true)
-      setTarget([0, 0, 0])
-    } else if (centerMode === "combined") {
-      root.position.sub(centerAll)
-      root.updateMatrixWorld(true)
-      setTarget([0, 0, 0])
-    } else {
-      setTarget([centerAll.x, centerAll.y, centerAll.z])
-    }
-
-    const after = new THREE.Box3().setFromObject(root)
-    const dims2 = new THREE.Vector3()
-    const ctr = new THREE.Vector3()
-    after.getSize(dims2)
-    after.getCenter(ctr)
-
-    const objW = Math.max(dims2.x, 1e-6)
-    const objH = Math.max(dims2.y, 1e-6)
-    const zoomX = size.width / (objW * margin)
-    const zoomY = size.height / (objH * margin)
-    let newZoom = Math.min(zoomX, zoomY)
-    newZoom *= isMobile ? mobileScale : desktopScale
-
-    const depth = Math.max(dims2.z, Math.max(dims2.x, dims2.y) * 0.75) || 1
-    const safeDist = depth * 4
-    camera.near = Math.max(0.01, safeDist * 0.001)
-    camera.far = safeDist * 50 + 100
-    camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
-    camera.zoom = Math.max(newZoom, 0.01)
-    camera.updateProjectionMatrix()
-
-    if (shouldFrame) shouldFrame.current = false
-  }, [depsKey, size.width, size.height, isMobile, desktopScale, mobileScale, margin, centerMode])
-
-  return null
-}
-
-/* ---------- Lightbox pro fotky ---------- */
-function Lightbox({ open, onClose, src, alt }) {
-  if (!open || !src) return null
-  return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
-      <img src={src} alt={alt || ""} style={{ maxWidth: "96vw", maxHeight: "92vh", objectFit: "contain", borderRadius: 12, boxShadow: "0 10px 40px rgba(0,0,0,.6)", border: "1px solid rgba(255,255,255,.15)" }} />
-    </div>
-  )
-}
-
-/* ---------- Switch (kompaktní) ---------- */
+/* ---------- Slim Switch ---------- */
 function Switch({ checked, onChange, label }) {
   const handleKey = (e) => {
     if (e.key === "Enter" || e.key === " ") {
@@ -555,15 +400,139 @@ function Switch({ checked, onChange, label }) {
   )
 }
 
-/* ===== ČÁST 2/2 bude pokračovat definicí hlavní komponenty:
-   export default function ClientPage() { ... } a style block ===== */
+/* ---------- AutoCenter & AutoFrame + auto-normalizace měřítka ---------- */
+function AutoCenterAndFrame({
+  rootRef,
+  depsKey,
+  setTarget,
+  margin = 1.05,
+  isMobile = false,
+  desktopScale = 1.0,
+  mobileScale = 1.0,
+  centerMode = "combined",
+  shouldFrame,                // {current:boolean} – řízení z LIVE režimu
+  normalizeSmall = true,      // automatické zvětšení malých modelů
+  idealSize = 150,            // cílová nejdelší hrana po normalizaci
+  minMaxBeforeScale = 10,     // pod tímto rozměrem považujeme model za „malý“
+  maxAutoScale = 200,         // strop pro auto-scale (bezpečnost)
+}) {
+  const { camera, size } = useThree()
+
+  useEffect(() => {
+    if (!rootRef.current) return
+    if (shouldFrame && !shouldFrame.current) return
+
+    const root = rootRef.current
+    root.updateMatrixWorld(true)
+
+    // 1) bbox originál
+    const boxBefore = new THREE.Box3().setFromObject(root)
+    if (boxBefore.isEmpty()) return
+
+    const dimsBefore = new THREE.Vector3()
+    const centerBefore = new THREE.Vector3()
+    boxBefore.getSize(dimsBefore)
+    boxBefore.getCenter(centerBefore)
+
+    // 2) vycentrovat
+    if (centerMode === "per") {
+      root.children.forEach((child) => {
+        const b = new THREE.Box3().setFromObject(child)
+        if (b.isEmpty()) return
+        const cWorld = new THREE.Vector3()
+        b.getCenter(cWorld)
+        child.position.sub(cWorld)
+      })
+      root.updateMatrixWorld(true)
+      setTarget([0, 0, 0])
+    } else if (centerMode === "combined") {
+      root.position.sub(centerBefore)
+      root.updateMatrixWorld(true)
+      setTarget([0, 0, 0])
+    } else {
+      setTarget([centerBefore.x, centerBefore.y, centerBefore.z])
+    }
+
+    // 3) případná auto-normalizace měřítka (pro „mm“ modely)
+    if (normalizeSmall) {
+      const boxNow = new THREE.Box3().setFromObject(root)
+      const dimsNow = new THREE.Vector3()
+      boxNow.getSize(dimsNow)
+      const maxDim = Math.max(dimsNow.x, dimsNow.y, dimsNow.z)
+
+      if (isFinite(maxDim) && maxDim > 0 && maxDim < minMaxBeforeScale) {
+        const scale1 = (idealSize * 0.9) / maxDim
+        const scale = Math.min(scale1, maxAutoScale)
+        root.scale.multiplyScalar(scale)
+        root.updateMatrixWorld(true)
+      }
+    }
+
+    // 4) výsledný bbox po centraci/škálování
+    const after = new THREE.Box3().setFromObject(root)
+    if (after.isEmpty()) return
+
+    const dims = new THREE.Vector3()
+    const ctr = new THREE.Vector3()
+    after.getSize(dims)
+    after.getCenter(ctr)
+
+    // 5) ortho zoom
+    const objW = Math.max(dims.x, 1e-6)
+    const objH = Math.max(dims.y, 1e-6)
+    const zoomX = size.width / (objW * margin)
+    const zoomY = size.height / (objH * margin)
+    let newZoom = Math.min(zoomX, zoomY)
+    newZoom *= isMobile ? mobileScale : desktopScale
+
+    // 6) bezpečná vzdálenost + clipping
+    const depth = Math.max(dims.z, Math.max(dims.x, dims.y) * 0.75) || 1
+    const safeDist = depth * 4
+    camera.near = Math.max(0.01, safeDist * 0.001)
+    camera.far = safeDist * 50 + 100
+    camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
+    camera.zoom = Math.max(newZoom, 0.01)
+    camera.updateProjectionMatrix()
+
+    if (shouldFrame) shouldFrame.current = false
+  }, [
+    rootRef,
+    depsKey,
+    size.width,
+    size.height,
+    isMobile,
+    desktopScale,
+    mobileScale,
+    margin,
+    centerMode,
+    normalizeSmall,
+    idealSize,
+    minMaxBeforeScale,
+    maxAutoScale,
+    setTarget,
+    shouldFrame,
+  ])
+
+  return null
+}
+
+/* ---------- Lightbox ---------- */
+function Lightbox({ open, onClose, src, alt }) {
+  if (!open || !src) return null
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
+      <img src={src} alt={alt || ""} style={{ maxWidth: "96vw", maxHeight: "92vh", objectFit: "contain", borderRadius: 12, boxShadow: "0 10px 40px rgba(0,0,0,.6)", border: "1px solid rgba(255,255,255,.15)" }} />
+    </div>
+  )
+}
+
 /* ---------- Hlavní komponenta ---------- */
 export default function ClientPage() {
   // světla
   const [lightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
-  // detekce mobilu
+  // mobil
   const [isMobile, setIsMobile] = useState(false)
   useEffect(() => {
     try {
@@ -589,14 +558,14 @@ export default function ClientPage() {
 
   // vzhled
   const [autoSmooth, setAutoSmooth] = useState((getParam("smooth") ?? "1") !== "0")
-  const [smoothAngle] = useState(30)
+  const [smoothAngle, setSmoothAngle] = useState(DEFAULT_SMOOTH_ANGLE)
   const [wireframe, setWireframe] = useState(false)
 
   // fotky (z manifestu)
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
 
-  // UI – sekce na mobilu sbalené
+  // UI sekce
   const [photosOpen, setPhotosOpen] = useState(!isMobile)
   useEffect(() => { setPhotosOpen(!isMobile) }, [isMobile])
   const [slidersOpen, setSlidersOpen] = useState(!isMobile)
@@ -609,7 +578,7 @@ export default function ClientPage() {
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
-  // LIVE režim: rozhodování, kdy skutečně přerámovat
+  // LIVE rámování
   const shouldFrameRef = useRef(true)
   const prevFileKeysRef = useRef([])
   const getFileKeys = (arr) => (arr || []).map(f => `${f.url}::${f.rawName || f.name}`)
@@ -730,7 +699,7 @@ export default function ClientPage() {
           return
         }
 
-        // žádné vstupy: necháme prázdné (v live režimu dorazí payload)
+        // žádné vstupy: nechej prázdné, live payload dorazí z Frameru
         setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
         shouldFrameRef.current = false
       } catch (e) {
@@ -779,13 +748,11 @@ export default function ClientPage() {
         pos: p.logo?.pos || old.pos,
       }))
     }
-    if (p.lights) {
-      if (p.lights.headlight) {
-        setHeadlightCfg((old) => ({
-          enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
-          intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
-        }))
-      }
+    if (p.lights?.headlight) {
+      setHeadlightCfg((old) => ({
+        enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
+        intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
+      }))
     }
 
     shouldFrameRef.current = filesActuallyChanged
@@ -833,7 +800,7 @@ export default function ClientPage() {
   // ref na root group v Canvasu
   const rootRef = useRef()
 
-  // obsah sliderů
+  // UI: per-file slidery
   const slidersContent = fatal ? (
     <div style={{ color: "#ff8b8b" }}>{fatal}</div>
   ) : (
@@ -885,10 +852,26 @@ export default function ClientPage() {
         </div>
       ))}
 
-      {/* Auto smooth + Wireframe */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
-        <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
-        <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
+      {/* Auto smooth + Wireframe + úhel */}
+      <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
+          <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ opacity: 0.8, fontSize: 12 }}>Úhel: {Math.round(smoothAngle)}°</span>
+          <input
+            className="slider"
+            type="range"
+            min={0}
+            max={80}
+            step={1}
+            value={smoothAngle}
+            onChange={(e) => setSmoothAngle(parseFloat(e.target.value) || 30)}
+            style={{ width: 180 }}
+            aria-label="Smooth angle"
+          />
+        </div>
       </div>
     </>
   )
@@ -1065,13 +1048,18 @@ export default function ClientPage() {
             rootRef={rootRef}
             depsKey={frameDepsKey}
             setTarget={setCameraTarget}
-            margin={1.05}             // ← menší okraj
+            margin={1.05}
             isMobile={isMobile}
-            desktopScale={1.0}        // ← zvětšené přiblížení
+            desktopScale={1.0}
             mobileScale={1.0}
             centerMode={centerMode}
             shouldFrame={shouldFrameRef}
+            normalizeSmall={true}   // ← klíčové: zvětší malé modely
+            idealSize={150}
+            minMaxBeforeScale={10}
+            maxAutoScale={200}
           />
+
           <TouchTrackballControls target={cameraTarget} />
         </>
       </Canvas>
