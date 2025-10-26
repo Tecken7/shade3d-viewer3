@@ -403,9 +403,8 @@ function RightButtonPan({ setTarget }) {
         setTarget?.((t) => [t[0] + deltaWorld.x, t[1] + deltaWorld.y, t[2] + deltaWorld.z])
       }
     }
-    const onUp = (e) => {
+    const onUp = () => {
       if (!isPanning.current) return
-      e.preventDefault(); e.stopPropagation()
       isPanning.current = false
       try { el.releasePointerCapture?.(pointerIdRef.current) } catch {}
       pointerIdRef.current = null
@@ -426,12 +425,12 @@ function RightButtonPan({ setTarget }) {
   return null
 }
 
-/* ---------- AutoCenter & AutoFrame (nové defaulty) ---------- */
+/* ---------- AutoCenter & AutoFrame (upravené defaulty – blíž) ---------- */
 function AutoCenterAndFrame({
   rootRef, depsKey, setTarget,
-  margin = 1.05,            // dříve 1.2
+  margin = 1.02,            // jemně menší okraj -> větší objekt
   isMobile = false,
-  desktopScale = 1.0,       // dříve 0.4
+  desktopScale = 1.35,      // větší zoom -> blíž
   mobileScale = 1.0,
   centerMode = "combined",
   shouldFrame, // volitelný ref z LIVE režimu
@@ -555,12 +554,10 @@ function Switch({ checked, onChange, label }) {
   )
 }
 
-/* ===== ČÁST 2/2 bude pokračovat definicí hlavní komponenty:
-   export default function ClientPage() { ... } a style block ===== */
 /* ---------- Hlavní komponenta ---------- */
 export default function ClientPage() {
-  // světla
-  const [lightIntensity] = useState(1)
+  // světla – uděláme skutečný state, aby šel měnit z LIVE/URL/manifestu
+  const [lightIntensity, setLightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
   // detekce mobilu
@@ -639,6 +636,7 @@ export default function ClientPage() {
           setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
           setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
           setTitle(typeof m?.title === "string" ? m.title : (getParam("title") ?? null))
+
           const logoUrl = m?.logo?.url || DEFAULT_LOGO
           setLogoCfg({
             url: logoUrl || null,
@@ -646,11 +644,18 @@ export default function ClientPage() {
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
             pos: getParam("logoPos") || "bc",
           })
-          const hl = m?.lights?.headlight
-          setHeadlightCfg({
-            enabled: typeof hl?.enabled === "boolean" ? hl.enabled : true,
-            intensity: typeof hl?.intensity === "number" ? hl.intensity : 2.0,
-          })
+
+          // ⬇ světla z manifestu (scéna + headlight)
+          if (m?.lights) {
+            if (typeof m.lights.intensity === "number") setLightIntensity(clamp01(m.lights.intensity))
+            if (m.lights.headlight) {
+              setHeadlightCfg({
+                enabled: typeof m.lights.headlight.enabled === "boolean" ? m.lights.headlight.enabled : true,
+                intensity: typeof m.lights.headlight.intensity === "number" ? m.lights.headlight.intensity : 2.0,
+              })
+            }
+          }
+
           setPhotos(Array.isArray(m?.photos) ? m.photos.filter(p => p && p.u) : [])
           prevFileKeysRef.current = getFileKeys(Fs)
           shouldFrameRef.current = true
@@ -684,12 +689,18 @@ export default function ClientPage() {
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
             pos: getParam("logoPos") || "bc",
           })
+          // ⬇ světla: z URL query nadřazené, ale když chybí, vezmeme z manifestu
+          const qLi = parseFloat(getParam("li") ?? "NaN")
+          if (isFinite(qLi)) setLightIntensity(clamp01(qLi))
+          else if (typeof m?.lights?.intensity === "number") setLightIntensity(clamp01(m.lights.intensity))
+
           const qOn = getParam("headlight")
           const qI = parseFloat(getParam("headlightI") ?? "NaN")
           setHeadlightCfg({
-            enabled: qOn == null ? true : qOn !== "0",
-            intensity: isFinite(qI) ? qI : 2.0,
+            enabled: qOn == null ? (typeof m?.lights?.headlight?.enabled === "boolean" ? m.lights.headlight.enabled : true) : qOn !== "0",
+            intensity: isFinite(qI) ? qI : (typeof m?.lights?.headlight?.intensity === "number" ? m.lights.headlight.intensity : 2.0),
           })
+
           setPhotos(Array.isArray(m?.photos) ? m.photos.filter(p => p && p.u) : [])
           prevFileKeysRef.current = getFileKeys(Fs)
           shouldFrameRef.current = true
@@ -724,6 +735,16 @@ export default function ClientPage() {
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
             pos: getParam("logoPos") || "bc",
           })
+          // ⬇ světla z URL
+          const qLi = parseFloat(getParam("li") ?? "NaN")
+          if (isFinite(qLi)) setLightIntensity(clamp01(qLi))
+          const qOn = getParam("headlight")
+          const qI = parseFloat(getParam("headlightI") ?? "NaN")
+          setHeadlightCfg({
+            enabled: qOn == null ? true : qOn !== "0",
+            intensity: isFinite(qI) ? qI : 2.0,
+          })
+
           prevFileKeysRef.current = getFileKeys(Fs)
           shouldFrameRef.current = true
           setPhotos([])
@@ -733,6 +754,10 @@ export default function ClientPage() {
         // žádné vstupy: necháme prázdné (v live režimu dorazí payload)
         setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
         shouldFrameRef.current = false
+
+        // default scéna může respektovat ?li i bez souborů
+        const qLi = parseFloat(getParam("li") ?? "NaN")
+        if (isFinite(qLi)) setLightIntensity(clamp01(qLi))
       } catch (e) {
         console.error(e)
         setFatal("Tento náhled není dostupný (chyba při načtení dat).")
@@ -780,6 +805,9 @@ export default function ClientPage() {
       }))
     }
     if (p.lights) {
+      if (typeof p.lights.intensity === "number") {
+        setLightIntensity(clamp01(p.lights.intensity))
+      }
       if (p.lights.headlight) {
         setHeadlightCfg((old) => ({
           enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
@@ -1031,6 +1059,7 @@ export default function ClientPage() {
         style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
       >
         <>
+          {/* světla scény – reagují na lightIntensity (URL, manifest, LIVE) */}
           <ambientLight intensity={lightIntensity * 0.4 * (headlightCfg.enabled ? 0.5 : 1)} />
           <directionalLight position={[0, 5, 5]} intensity={lightIntensity * 1.5 * (headlightCfg.enabled ? 0.5 : 1)} />
           <directionalLight position={[-10, 0, 0]} intensity={lightIntensity * 1.0 * (headlightCfg.enabled ? 0.5 : 1)} />
@@ -1065,14 +1094,15 @@ export default function ClientPage() {
             rootRef={rootRef}
             depsKey={frameDepsKey}
             setTarget={setCameraTarget}
-            margin={1.05}             // ← menší okraj
+            margin={1.02}            // blíž, ale s malým okrajem
             isMobile={isMobile}
-            desktopScale={1.0}        // ← zvětšené přiblížení
+            desktopScale={1.35}      // větší zoom = blíž
             mobileScale={1.0}
             centerMode={centerMode}
             shouldFrame={shouldFrameRef}
           />
           <TouchTrackballControls target={cameraTarget} />
+          {/* Pokud budeš chtít separátní pan mimo Trackball: <RightButtonPan setTarget={setCameraTarget} /> */}
         </>
       </Canvas>
 
