@@ -3,33 +3,33 @@
 import { Canvas, useThree, useFrame } from "@react-three/fiber"
 import * as THREE from "three"
 import { Suspense, useEffect, useMemo, useRef, useState } from "react"
-import { HexColorPicker, HexColorInput } from "react-colorful"
 import { Html } from "@react-three/drei"
 import { TrackballControls } from "three/examples/jsm/controls/TrackballControls"
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader"
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader"
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader"
 
-/* ---------- Live protokol ---------- */
+/* ---------- Konst + konfigurace ---------- */
 const LIVE_MSG_TYPES = new Set(["SHADE3D_LIVE", "SHADE3D_LIVE_V6", "SHADE3D_LIVE_V5"])
 
-/* ---------- Helpers ---------- */
-const DEFAULT_LOGO = "/Arthetic_logo.png"
 const SUPABASE_URL = "https://jqnkdjgmenerioodqcpa.supabase.co"
 const PUBLIC_BUCKET = "shade3d-viewer2"
 
-const stripExt = (s: string) => (s ? s.replace(/\.[^.]+$/, "") : "")
-const clamp01 = (x: number) => Math.max(0, Math.min(1, x))
-const getParam = (name: string) => {
+const DEFAULT_LOGO = "/Arthetic_logo.png"
+
+/* ---------- Helpers ---------- */
+const stripExt = (s) => (s ? s.replace(/\.[^.]+$/, "") : "")
+const clamp01 = (x) => Math.max(0, Math.min(1, x))
+const getParam = (name) => {
   if (typeof window === "undefined") return null
   try { return new URL(window.location.href).searchParams.get(name) } catch { return null }
 }
-async function fetchJSON(url: string) {
+async function fetchJSON(url) {
   const r = await fetch(url, { cache: "no-store" })
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   return r.json()
 }
-function inferExt(nameOrUrl?: string | null) {
+function inferExt(nameOrUrl) {
   if (!nameOrUrl) return ""
   const s = nameOrUrl.split("?")[0]
   const m = s.match(/\.([a-z0-9]+)$/i)
@@ -58,16 +58,17 @@ function PreloadIcons() {
 }
 
 /* ---------- Auto Smooth ---------- */
-function autoSmoothGeometry(geometry: THREE.BufferGeometry, angleDeg = 30) {
+const DEFAULT_SMOOTH_ANGLE = 30
+function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
   const angle = Math.max(0, Math.min(89.9, angleDeg))
   const angleRad = (angle * Math.PI) / 180
 
   const g = geometry.index ? geometry.toNonIndexed() : geometry.clone()
-  const pos = g.getAttribute("position") as THREE.BufferAttribute
+  const pos = g.getAttribute("position")
   const vCount = pos.count
   const triCount = vCount / 3
 
-  const faceNormals: THREE.Vector3[] = new Array(triCount)
+  const faceNormals = new Array(triCount)
   const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
   const cb = new THREE.Vector3(), ab = new THREE.Vector3()
   for (let f = 0; f < triCount; f++) {
@@ -81,9 +82,8 @@ function autoSmoothGeometry(geometry: THREE.BufferGeometry, angleDeg = 30) {
     faceNormals[f] = cb.clone()
   }
 
-  const groups = new Map<string, number[]>()
-  const keyOf = (ix: number) =>
-    `${pos.getX(ix).toFixed(5)},${pos.getY(ix).toFixed(5)},${pos.getZ(ix).toFixed(5)}`
+  const groups = new Map()
+  const keyOf = (ix) => `${pos.getX(ix).toFixed(5)},${pos.getY(ix).toFixed(5)},${pos.getZ(ix).toFixed(5)}`
   for (let i = 0; i < vCount; i++) {
     const k = keyOf(i)
     let arr = groups.get(k)
@@ -120,44 +120,31 @@ function autoSmoothGeometry(geometry: THREE.BufferGeometry, angleDeg = 30) {
 }
 
 /* ---------- Loader (overlay) ---------- */
-function InlineLoader({ text }: { text?: string }) {
+function InlineLoader({ text }) {
   return (
     <Html center>
-      <div style={{
-        background: "rgba(0,0,0,0.7)",
-        padding: "16px 28px",
-        borderRadius: 10,
-        color: "white",
-        fontFamily: "sans-serif",
-        fontSize: 16
-      }}>
+      <div style={{ background: "rgba(0,0,0,0.7)", padding: "16px 28px", borderRadius: 10, color: "white", fontFamily: "sans-serif", fontSize: 16 }}>
         ⏳ {text || "Načítám…"}
       </div>
     </Html>
   )
 }
 
-/* ---------- AnyModel + FULL wireframe overlay ---------- */
+/* ---------- AnyModel (wireframe overlay) ---------- */
 function AnyModel({
   name, url,
   color, opacity, visible,
-  onLoaded, autoSmooth, smoothAngle = 30,
+  onLoaded, autoSmooth, smoothAngle = DEFAULT_SMOOTH_ANGLE,
   roughness = 0.5, metalness = 0.5,
   useVertexColors = false,
   keepMaterials = false,
   wireframe = false,
-}: {
-  name?: string, url: string,
-  color?: string, opacity: number, visible: boolean,
-  onLoaded?: (obj: THREE.Object3D) => void, autoSmooth: boolean, smoothAngle?: number,
-  roughness?: number, metalness?: number,
-  useVertexColors?: boolean, keepMaterials?: boolean, wireframe?: boolean
 }) {
-  const [object3D, setObject3D] = useState<THREE.Object3D | null>(null)
+  const [object3D, setObject3D] = useState(null)
   const [loading, setLoading] = useState(true)
   const ext = useMemo(() => inferExt(name || url), [name, url])
 
-  const makeMat = (opts: THREE.MeshStandardMaterialParameters = {}) =>
+  const makeMat = (opts = {}) =>
     new THREE.MeshStandardMaterial({
       color: new THREE.Color(color || "#ffffff"),
       roughness: typeof roughness === "number" ? roughness : 0.5,
@@ -169,11 +156,11 @@ function AnyModel({
       ...opts,
     })
 
-  const forEachMesh = (obj: THREE.Object3D | null, cb: (m: THREE.Mesh) => void) => {
-    obj?.traverse?.((child: any) => { if (child.isMesh) cb(child) })
+  const forEachMesh = (obj, cb) => {
+    obj?.traverse?.((child) => { if (child.isMesh) cb(child) })
   }
 
-  const rebuildWireOverlay = (mesh: any) => {
+  const rebuildWireOverlay = (mesh) => {
     if (mesh.userData._edges) {
       mesh.userData._edges.geometry?.dispose?.()
       mesh.userData._edges.material?.dispose?.()
@@ -181,7 +168,7 @@ function AnyModel({
       mesh.userData._edges = null
     }
     if (!wireframe) return
-    const geom = mesh.geometry as THREE.BufferGeometry
+    const geom = mesh.geometry
     if (!geom) return
     const wfGeom = new THREE.WireframeGeometry(geom)
     const wfMat = new THREE.LineBasicMaterial({
@@ -205,7 +192,7 @@ function AnyModel({
     setLoading(true)
     ;(async () => {
       try {
-        let obj: any
+        let obj
         if (ext === "stl") {
           const geom = await new STLLoader().loadAsync(url)
           if (!geom.attributes.normal) geom.computeVertexNormals()
@@ -229,7 +216,7 @@ function AnyModel({
         } else {
           const loaded = await new OBJLoader().loadAsync(url)
           if (keepMaterials) {
-            loaded.traverse((child: any) => {
+            loaded.traverse((child) => {
               if (child.isMesh) {
                 const mat = child.material
                 if (mat) {
@@ -243,7 +230,7 @@ function AnyModel({
             obj = loaded
           } else {
             const mat = makeMat()
-            loaded.traverse((child: any) => { if (child.isMesh) child.material = mat })
+            loaded.traverse((child) => { if (child.isMesh) child.material = mat })
             obj = loaded
           }
         }
@@ -262,11 +249,12 @@ function AnyModel({
     return () => { cancelled = true }
   }, [url, ext])
 
+  // Re-smooth + rebuild overlay on change
   useEffect(() => {
     if (!object3D) return
-    forEachMesh(object3D, (child: any) => {
+    forEachMesh(object3D, (child) => {
       if (!child.userData._baseGeom) child.userData._baseGeom = child.geometry
-      const base = child.userData._baseGeom as THREE.BufferGeometry
+      const base = child.userData._baseGeom
       let newGeom = base
       if (autoSmooth) newGeom = autoSmoothGeometry(base, smoothAngle)
       else { newGeom = base.clone(); newGeom.computeVertexNormals() }
@@ -276,13 +264,15 @@ function AnyModel({
       }
       child.geometry = newGeom
       child.userData._derivedGeom = newGeom
+
       rebuildWireOverlay(child)
     })
   }, [object3D, autoSmooth, smoothAngle])
 
+  // Materials + wireframe visibility toggle
   useEffect(() => {
     if (!object3D) return
-    forEachMesh(object3D, (child: any) => {
+    forEachMesh(object3D, (child) => {
       if (keepMaterials) {
         const mat = child.material
         if (mat) {
@@ -316,24 +306,28 @@ function AnyModel({
 /* ---------- Headlight ---------- */
 function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
   const { camera } = useThree()
-  const ref = useRef<THREE.PointLight | null>(null)
-  useFrame(() => { if (ref.current) ref.current.position.copy((camera as any).position) })
+  const ref = useRef(null)
+  useFrame(() => { if (ref.current) ref.current.position.copy(camera.position) })
   return <pointLight ref={ref} color={color} intensity={enabled ? intensity : 0} distance={0} decay={0} />
 }
 
-/* ---------- Trackball (lepší ovládání + resize) ---------- */
-function TouchTrackballControls({ target = [0, 0, 0] }: { target?: [number, number, number] }) {
+/* ---------- Trackball (lepší myš tlačítka) ---------- */
+function TouchTrackballControls({ target = [0, 0, 0] }) {
   const { camera, gl, size } = useThree()
-  const controlsRef = useRef<any>(null)
+  const controlsRef = useRef(null)
 
   useEffect(() => {
-    const controls = new (TrackballControls as any)(camera, gl.domElement)
+    const controls = new TrackballControls(camera, gl.domElement)
     controls.rotateSpeed = 5.0
     controls.zoomSpeed = 1.2
     controls.panSpeed = 1.0
     controls.staticMoving = true
     controls.dynamicDampingFactor = 0.15
-    controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.ZOOM }
+    controls.mouseButtons = {
+      LEFT: THREE.MOUSE.ROTATE,
+      MIDDLE: THREE.MOUSE.ZOOM,
+      RIGHT: THREE.MOUSE.PAN, // pan vypneme, vlastní pan níže, ale není na škodu mít i zde
+    }
     controlsRef.current = controls
     return () => { controls.dispose() }
   }, [camera, gl])
@@ -345,24 +339,26 @@ function TouchTrackballControls({ target = [0, 0, 0] }: { target?: [number, numb
     c.update()
   }, [target])
 
-  useEffect(() => { controlsRef.current?.handleResize?.() }, [size.width, size.height])
-
   useFrame(() => {
     const c = controlsRef.current
     if (!c) return
-    if ((camera as any).isOrthographicCamera) c.panSpeed = (camera as any).zoom * 0.4
+    if (camera.isOrthographicCamera) c.panSpeed = camera.zoom * 0.4
     c.update()
   })
+
+  useEffect(() => {
+    controlsRef.current?.handleResize()
+  }, [size.width, size.height])
 
   return null
 }
 
-/* ---------- Vlastní PAN (pravé tlačítko / Ctrl+levé) ---------- */
-function RightButtonPan({ setTarget }: { setTarget: React.Dispatch<React.SetStateAction<[number, number, number]>> }) {
+/* ---------- Vlastní pan (pravé tlačítko nebo Ctrl+levé) ---------- */
+function RightButtonPan({ setTarget }) {
   const { camera, gl, size } = useThree()
   const isPanning = useRef(false)
   const last = useRef({ x: 0, y: 0 })
-  const pointerIdRef = useRef<number | null>(null)
+  const pointerIdRef = useRef(null)
 
   const PAN_SENSITIVITY = 0.85
   const right = new THREE.Vector3()
@@ -370,50 +366,46 @@ function RightButtonPan({ setTarget }: { setTarget: React.Dispatch<React.SetStat
   const deltaWorld = new THREE.Vector3()
 
   useEffect(() => {
-    const el = gl.domElement as any
-
-    const onContext = (e: PointerEvent) => { e.preventDefault() }
-    const onDown = (e: any) => {
+    const el = gl.domElement
+    const onContext = (e) => { e.preventDefault() }
+    const onDown = (e) => {
       if ((e.button !== 2) && !(e.button === 0 && e.ctrlKey)) return
-      e.preventDefault()
-      e.stopPropagation()
+      e.preventDefault(); e.stopPropagation()
       isPanning.current = true
       last.current = { x: e.clientX, y: e.clientY }
       pointerIdRef.current = e.pointerId
       try { el.setPointerCapture?.(e.pointerId) } catch {}
     }
-    const onMove = (e: any) => {
+    const onMove = (e) => {
       if (!isPanning.current) return
-      e.preventDefault()
-      e.stopPropagation()
+      e.preventDefault(); e.stopPropagation()
       const dx = e.clientX - last.current.x
       const dy = e.clientY - last.current.y
       last.current = { x: e.clientX, y: e.clientY }
 
-      right.setFromMatrixColumn((camera as any).matrixWorld, 0).normalize()
-      up.setFromMatrixColumn((camera as any).matrixWorld, 1).normalize()
+      right.setFromMatrixColumn(camera.matrixWorld, 0).normalize()
+      up.setFromMatrixColumn(camera.matrixWorld, 1).normalize()
 
-      if ((camera as any).isOrthographicCamera) {
-        const wppX = (((camera as any).right - (camera as any).left) / (size.width * (camera as any).zoom))
-        const wppY = (((camera as any).top - (camera as any).bottom) / (size.height * (camera as any).zoom))
+      if (camera.isOrthographicCamera) {
+        const wppX = ((camera.right - camera.left) / (size.width * camera.zoom))
+        const wppY = ((camera.top - camera.bottom) / (size.height * camera.zoom))
         const moveRight = -dx * wppX * PAN_SENSITIVITY
         const moveUp    =  dy * wppY * PAN_SENSITIVITY
         deltaWorld.copy(right).multiplyScalar(moveRight).addScaledVector(up, moveUp)
-        ;(camera as any).position.add(deltaWorld)
+        camera.position.add(deltaWorld)
         setTarget?.((t) => [t[0] + deltaWorld.x, t[1] + deltaWorld.y, t[2] + deltaWorld.z])
-        ;(camera as any).updateProjectionMatrix()
+        camera.updateProjectionMatrix()
       } else {
-        const dist = (camera as any).position.length()
+        const dist = camera.position.length()
         const scale = (dist / Math.max(size.width, size.height)) * PAN_SENSITIVITY
         deltaWorld.copy(right).multiplyScalar(-dx * scale).addScaledVector(up, dy * scale)
-        ;(camera as any).position.add(deltaWorld)
+        camera.position.add(deltaWorld)
         setTarget?.((t) => [t[0] + deltaWorld.x, t[1] + deltaWorld.y, t[2] + deltaWorld.z])
       }
     }
-    const onUp = (e: any) => {
+    const onUp = (e) => {
       if (!isPanning.current) return
-      e.preventDefault()
-      e.stopPropagation()
+      e.preventDefault(); e.stopPropagation()
       isPanning.current = false
       try { el.releasePointerCapture?.(pointerIdRef.current) } catch {}
       pointerIdRef.current = null
@@ -434,63 +426,19 @@ function RightButtonPan({ setTarget }: { setTarget: React.Dispatch<React.SetStat
   return null
 }
 
-/* ---------- Color popover (UI re-use) ---------- */
-function ColorSwatch({ color, onChange, ariaLabel }: { color: string, onChange: (v: string) => void, ariaLabel?: string }) {
-  const [open, setOpen] = useState(false)
-  const containerRef = useRef<HTMLDivElement | null>(null)
-  useEffect(() => {
-    const onDocClick = (e: any) => { if (open && containerRef.current && !containerRef.current.contains(e.target)) setOpen(false) }
-    document.addEventListener("mousedown", onDocClick)
-    return () => document.removeEventListener("mousedown", onDocClick)
-  }, [open])
-  return (
-    <div ref={containerRef} className="swatch-wrap" style={{ position: "relative", display: "inline-block" }}>
-      <button
-        aria-label={ariaLabel || "color picker"}
-        onClick={() => setOpen((v) => !v)}
-        className="swatch-btn"
-        style={{ width: 36, height: 22, borderRadius: 4, border: "1px solid #fff", background: color, cursor: "pointer", boxShadow: "0 0 0 1px rgba(0,0,0,.25) inset" }}
-      />
-      {open && (
-        <div className="swatch-pop" style={{ position: "absolute", zIndex: 20, top: 28, left: 0, background: "rgba(0,0,0,.92)", padding: 12, borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", backdropFilter: "blur(4px)", boxShadow: "0 6px 24px rgba(0,0,0,.35)" }}>
-          <HexColorPicker color={color} onChange={onChange} />
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-            <span style={{ color: "#fff", fontSize: 12 }}>#</span>
-            <HexColorInput color={color} onChange={onChange} prefixed={false} style={{ width: 90, padding: "4px 6px", borderRadius: 6, border: "1px solid #444", background: "#111", color: "#fff", fontFamily: "monospace", fontSize: 12 }} />
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-/* ---------- Lightbox pro fotky ---------- */
-function Lightbox({ open, onClose, src, alt }: { open: boolean, onClose: () => void, src: string | null, alt?: string }) {
-  if (!open || !src) return null
-  return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
-      <img src={src} alt={alt || ""} style={{ maxWidth: "96vw", maxHeight: "92vh", objectFit: "contain", borderRadius: 12, boxShadow: "0 10px 40px rgba(0,0,0,.6)", border: "1px solid rgba(255,255,255,.15)" }} />
-    </div>
-  )
-}
-
-/* ---------- AutoCenter & AutoFrame (zachováno pro live) ---------- */
+/* ---------- AutoCenter & AutoFrame ---------- */
 function AutoCenterAndFrame({
   rootRef, depsKey, setTarget,
   margin = 1.2, isMobile = false, desktopScale = 0.4, mobileScale = 1.0,
-  centerMode = "combined", shouldFrame,
-}: {
-  rootRef: React.RefObject<THREE.Group>
-  depsKey: string
-  setTarget: React.Dispatch<React.SetStateAction<[number, number, number]>>
-  margin?: number, isMobile?: boolean, desktopScale?: number, mobileScale?: number
-  centerMode?: "per" | "combined" | "none"
-  shouldFrame: React.MutableRefObject<boolean>
+  centerMode = "combined",
+  shouldFrame, // volitelný ref z LIVE režimu
 }) {
   const { camera, size } = useThree()
+
   useEffect(() => {
-    if (!shouldFrame?.current) return
-    const root = rootRef.current as any
+    if (shouldFrame && !shouldFrame.current) return
+
+    const root = rootRef.current
     if (!root) return
 
     root.updateMatrixWorld(true)
@@ -503,7 +451,7 @@ function AutoCenterAndFrame({
     boxAll.getSize(dims)
 
     if (centerMode === "per") {
-      root.children.forEach((child: any) => {
+      root.children.forEach((child) => {
         const b = new THREE.Box3().setFromObject(child)
         if (b.isEmpty()) return
         const cWorld = new THREE.Vector3()
@@ -533,28 +481,84 @@ function AutoCenterAndFrame({
     let newZoom = Math.min(zoomX, zoomY)
     newZoom *= isMobile ? mobileScale : desktopScale
 
-    const diag = Math.sqrt(dims2.x * dims2.x + dims2.y * dims2.y + dims2.z * dims2.z)
-    const safeDist = Math.max(diag * 2.5, 1000)
+    const depth = Math.max(dims2.z, Math.max(dims2.x, dims2.y) * 0.75) || 1
+    const safeDist = depth * 4
+    camera.near = Math.max(0.01, safeDist * 0.001)
+    camera.far = safeDist * 50 + 100
+    camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
+    camera.zoom = Math.max(newZoom, 0.01)
+    camera.updateProjectionMatrix()
 
-    ;(camera as any).near = 0.1
-    ;(camera as any).far = Math.max(safeDist * 10, 1e6)
-    ;(camera as any).zoom = Math.max(newZoom, 0.01)
-    ;(camera as any).position.set(ctr.x, ctr.y, ctr.z + safeDist)
-    ;(camera as any).updateProjectionMatrix()
-
-    shouldFrame.current = false
+    if (shouldFrame) shouldFrame.current = false
   }, [depsKey, size.width, size.height, isMobile, desktopScale, mobileScale, margin, centerMode])
+
   return null
 }
 
-/* ---------- Hlavní komponenta (LIVE + nové featury) ---------- */
+/* ---------- Lightbox pro fotky ---------- */
+function Lightbox({ open, onClose, src, alt }) {
+  if (!open || !src) return null
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
+      <img src={src} alt={alt || ""} style={{ maxWidth: "96vw", maxHeight: "92vh", objectFit: "contain", borderRadius: 12, boxShadow: "0 10px 40px rgba(0,0,0,.6)", border: "1px solid rgba(255,255,255,.15)" }} />
+    </div>
+  )
+}
+
+/* ---------- Switch (kompaktní) ---------- */
+function Switch({ checked, onChange, label }) {
+  const handleKey = (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault()
+      onChange(!checked)
+    }
+  }
+  const TRACK_W = 38, TRACK_H = 22, KNOB = 18
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      {label && <span style={{ opacity: 0.85 }}>{label}</span>}
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        onKeyDown={handleKey}
+        style={{
+          position: "relative",
+          width: TRACK_W, height: TRACK_H,
+          borderRadius: 999,
+          border: "1px solid rgba(255,255,255,.22)",
+          background: checked ? "rgba(59,130,246,.45)" : "rgba(255,255,255,.10)",
+          cursor: "pointer",
+          transition: "background .15s ease, border-color .15s ease",
+          outline: "none", padding: 0,
+        }}
+        title={label}
+      >
+        <span
+          aria-hidden
+          style={{
+            position: "absolute",
+            top: "50%", transform: "translateY(-50%)",
+            left: checked ? TRACK_W - KNOB - 3 : 3,
+            width: KNOB, height: KNOB,
+            borderRadius: "50%", background: "#fff",
+            boxShadow: "0 1px 3px rgba(0,0,0,.35)",
+            transition: "left .15s ease",
+          }}
+        />
+      </button>
+    </div>
+  )
+}
+
+/* ---------- Hlavní komponenta ---------- */
 export default function ClientPage() {
+  // světla
   const [lightIntensity, setLightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
-  const [uiReady, setUiReady] = useState(false)
-  useEffect(() => { const id = requestAnimationFrame(() => setUiReady(true)); return () => cancelAnimationFrame(id) }, [])
-
+  // mobil/desktop
   const [isMobile, setIsMobile] = useState(false)
   useEffect(() => {
     try {
@@ -565,51 +569,64 @@ export default function ClientPage() {
     } catch {}
   }, [])
 
-  const [title, setTitle] = useState<string | null>(null)
+  // UI
+  const [uiReady, setUiReady] = useState(false)
+  useEffect(() => { const id = requestAnimationFrame(() => setUiReady(true)); return () => cancelAnimationFrame(id) }, [])
 
-  const [files, setFiles] = useState<any[]>([])
-  const [colors, setColors] = useState<string[]>([])
-  const [opacities, setOpacities] = useState<number[]>([])
-  const [visibles, setVisibles] = useState<boolean[]>([])
-  const [roughnesses, setRoughnesses] = useState<number[]>([])
-  const [metalnesses, setMetalnesses] = useState<number[]>([])
-  const [fatal, setFatal] = useState<string | null>(null)
+  // text + logo
+  const [title, setTitle] = useState(null)
+  const [logoCfg, setLogoCfg] = useState({ url: DEFAULT_LOGO, opacity: 0.9, width: 160, pos: "bc" })
 
+  // modely
+  const [files, setFiles] = useState([])
+  const [colors, setColors] = useState([])
+  const [opacities, setOpacities] = useState([])
+  const [visibles, setVisibles] = useState([])
+  const [roughnesses, setRoughnesses] = useState([])
+  const [metalnesses, setMetalnesses] = useState([])
+  const [fatal, setFatal] = useState(null)
+
+  // Auto Smooth + úhel + Wireframe
   const [autoSmooth, setAutoSmooth] = useState((getParam("smooth") ?? "1") !== "0")
   const [smoothAngle, setSmoothAngle] = useState(() => {
-    const v = parseFloat(getParam("smoothAngle") ?? "30")
-    return isFinite(v) ? Math.max(0, Math.min(80, v)) : 30
+    const v = parseFloat(getParam("smoothAngle") ?? String(DEFAULT_SMOOTH_ANGLE))
+    return isFinite(v) ? Math.max(0, Math.min(80, v)) : DEFAULT_SMOOTH_ANGLE
   })
   const [wireframe, setWireframe] = useState(false)
 
-  const [logoCfg, setLogoCfg] = useState({ url: DEFAULT_LOGO, opacity: 0.9, width: 160, pos: "bc" as "bl" | "bc" | "br" })
-  const [photos, setPhotos] = useState<Array<{ n?: string, u: string }>>([])
-  const [lightbox, setLightbox] = useState<{ open: boolean, src: string | null, alt?: string }>({ open: false, src: null })
+  // Photos (z manifestu)
+  const [photos, setPhotos] = useState([])
+  const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
+  const [photosOpen, setPhotosOpen] = useState(!isMobile)
+  useEffect(() => { setPhotosOpen(!isMobile) }, [isMobile])
 
-  // kamera
+  // kamera / frame
   const [loadedCount, setLoadedCount] = useState(0)
   const handleModelLoaded = () => setLoadedCount((n) => n + 1)
+  const shouldFrameRef = useRef(true) // u live režimu určujeme z payloadu, při prvním načtení true
+
   const centerParam = (getParam("center") || "combined").toLowerCase()
-  const centerMode = (["per", "combined", "none"] as const).includes(centerParam as any) ? (centerParam as any) : "combined"
+  const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
-  // framing control pro LIVE
-  const shouldFrameRef = useRef(true)
-  const prevFileKeysRef = useRef<string[]>([])
-  const getFileKeys = (arr: any[]) => (arr || []).map(f => `${f.url}::${f.rawName || f.name}`)
+  // target kamery (pro pan)
+  const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
 
-  // jediný zdroj pravdy pro target kamery
-  const [cameraTarget, setCameraTarget] = useState<[number, number, number]>([0, 0, 0])
+  // root group
+  const rootRef = useRef()
 
-  /* ───────── INIT: manifest (?m nebo ?manifest) / ?files / LIVE noDemo ───────── */
+  // LIVE pomocné klíče
+  const prevFileKeysRef = useRef([])
+  const getFileKeys = (arr) => (arr || []).map(f => `${f.url}::${f.rawName || f.name}`)
+
+  /* ───────── INIT: ?m (Supabase manifest) / ?manifest / ?files / live ───────── */
   useEffect(() => {
     ;(async () => {
       try {
-        // 1) Pretty: ?m=<folder> (stahuje manifest z public bucketu)
         const mId = getParam("m")
         if (mId) {
           const manifestUrl = `${SUPABASE_URL}/storage/v1/object/public/${PUBLIC_BUCKET}/manifests/${encodeURIComponent(mId)}.json`
           const m = await fetchJSON(manifestUrl)
-          const Fs = (m?.files || []).map((x: any, i: number) => ({
+          const Fs = (m?.files || []).map((x, i) => ({
             url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
             c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
             v: typeof x.v === "boolean" ? x.v : true,
@@ -620,35 +637,35 @@ export default function ClientPage() {
           if (!Fs.length) throw new Error("Manifest je prázdný.")
           setFiles(Fs)
           const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
-          setColors(Fs.map((f: any, i: number) => f.c || palette[i % palette.length]))
-          setOpacities(Fs.map((f: any) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
-          setVisibles(Fs.map((f: any) => (typeof f.v === "boolean" ? f.v : true)))
-          setRoughnesses(Fs.map((f: any) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
-          setMetalnesses(Fs.map((f: any) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
+          setColors(Fs.map((f, i) => f.c || palette[i % palette.length]))
+          setOpacities(Fs.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
+          setVisibles(Fs.map((f) => (typeof f.v === "boolean" ? f.v : true)))
+          setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
+          setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
           setTitle(typeof m?.title === "string" ? m.title : (getParam("title") ?? null))
           const logoUrl = m?.logo?.url || DEFAULT_LOGO
           setLogoCfg({
             url: logoUrl || null,
             opacity: clamp01(parseFloat(getParam("logoOpacity") ?? "0.9")),
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
-            pos: (getParam("logoPos") as any) || "bc",
+            pos: getParam("logoPos") || "bc",
           })
           const hl = m?.lights?.headlight
           setHeadlightCfg({
             enabled: typeof hl?.enabled === "boolean" ? hl.enabled : true,
             intensity: typeof hl?.intensity === "number" ? hl.intensity : 2.0,
           })
-          setPhotos(Array.isArray(m?.photos) ? m.photos.filter((p: any) => p && p.u) : [])
+          if (typeof m?.lights?.intensity === "number") setLightIntensity(m.lights.intensity)
+          setPhotos(Array.isArray(m?.photos) ? m.photos.filter(p => p && p.u) : [])
           prevFileKeysRef.current = getFileKeys(Fs)
           shouldFrameRef.current = true
           return
         }
 
-        // 2) manifest URL
         const manifestUrlParam = getParam("manifest")
         if (manifestUrlParam) {
           const m = await fetchJSON(manifestUrlParam)
-          const Fs = (m?.files || []).map((x: any, i: number) => ({
+          const Fs = (m?.files || []).map((x, i) => ({
             url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
             c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
             v: typeof x.v === "boolean" ? x.v : true,
@@ -659,18 +676,18 @@ export default function ClientPage() {
           if (!Fs.length) throw new Error("Manifest je prázdný.")
           setFiles(Fs)
           const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
-          setColors(Fs.map((f: any, i: number) => f.c || palette[i % palette.length]))
-          setOpacities(Fs.map((f: any) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
-          setVisibles(Fs.map((f: any) => (typeof f.v === "boolean" ? f.v : true)))
-          setRoughnesses(Fs.map((f: any) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
-          setMetalnesses(Fs.map((f: any) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
+          setColors(Fs.map((f, i) => f.c || palette[i % palette.length]))
+          setOpacities(Fs.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
+          setVisibles(Fs.map((f) => (typeof f.v === "boolean" ? f.v : true)))
+          setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
+          setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
           setTitle(typeof m?.title === "string" ? m.title : (getParam("title") ?? null))
           const logoUrl = m?.logo?.url || DEFAULT_LOGO
           setLogoCfg({
             url: logoUrl || null,
             opacity: clamp01(parseFloat(getParam("logoOpacity") ?? "0.9")),
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
-            pos: (getParam("logoPos") as any) || "bc",
+            pos: getParam("logoPos") || "bc",
           })
           const qOn = getParam("headlight")
           const qI = parseFloat(getParam("headlightI") ?? "NaN")
@@ -678,19 +695,23 @@ export default function ClientPage() {
             enabled: qOn == null ? true : qOn !== "0",
             intensity: isFinite(qI) ? qI : 2.0,
           })
-          setPhotos(Array.isArray(m?.photos) ? m.photos.filter((p: any) => p && p.u) : [])
+          const scI = parseFloat(getParam("li") ?? "NaN")
+          if (isFinite(scI)) setLightIntensity(scI)
+          setPhotos(Array.isArray(m?.photos) ? m.photos.filter(p => p && p.u) : [])
           prevFileKeysRef.current = getFileKeys(Fs)
           shouldFrameRef.current = true
           return
         }
 
-        // 3) ?files=
-        const filesParam = getParam("files")
-        if (filesParam) {
-          let arr: any = null
-          try { arr = JSON.parse(filesParam) } catch {}
-          if (!arr) { try { arr = JSON.parse(decodeURIComponent(filesParam)) } catch {} }
-          const Fs = (Array.isArray(arr) ? arr : []).filter((x) => x && x.u).map((x: any, i: number) => ({
+        const f = getParam("files")
+        const mode = (getParam("mode") || "").toLowerCase()
+        const noDemo = (getParam("noDemo") ?? (mode === "live" ? "1" : "0")) !== "0"
+
+        if (f) {
+          let arr = null
+          try { arr = JSON.parse(f) } catch {}
+          if (!arr) { try { arr = JSON.parse(decodeURIComponent(f)) } catch {} }
+          const Fs = (Array.isArray(arr) ? arr : []).filter((x) => x && x.u).map((x, i) => ({
             url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
             c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
             v: typeof x.v === "boolean" ? x.v : true,
@@ -700,26 +721,24 @@ export default function ClientPage() {
           }))
           setFiles(Fs)
           const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
-          setColors(Fs.map((f: any, i: number) => f.c || palette[i % palette.length]))
-          setOpacities(Fs.map((f: any) => f.o))
-          setVisibles(Fs.map((f: any) => f.v))
-          setRoughnesses(Fs.map((f: any) => f.r))
-          setMetalnesses(Fs.map((f: any) => f.m))
+          setColors(Fs.map((f, i) => f.c || palette[i % palette.length]))
+          setOpacities(Fs.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
+          setVisibles(Fs.map((f) => (typeof f.v === "boolean" ? f.v : true)))
+          setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
+          setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
           setTitle(getParam("title") ?? null)
           setLogoCfg({
             url: getParam("logo") === "none" ? null : getParam("logo") || DEFAULT_LOGO,
             opacity: clamp01(parseFloat(getParam("logoOpacity") ?? "0.9")),
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
-            pos: (getParam("logoPos") as any) || "bc",
+            pos: getParam("logoPos") || "bc",
           })
           prevFileKeysRef.current = getFileKeys(Fs)
           shouldFrameRef.current = true
+          setPhotos([])
           return
         }
 
-        // 4) LIVE režim bez dema
-        const mode = (getParam("mode") || "").toLowerCase()
-        const noDemo = (getParam("noDemo") ?? (mode === "live" ? "1" : "0")) !== "0"
         const modeLive = mode === "live"
         const suppressDemo = noDemo || modeLive
         if (suppressDemo) {
@@ -729,27 +748,42 @@ export default function ClientPage() {
             url: getParam("logo") === "none" ? null : (getParam("logo") || DEFAULT_LOGO),
             opacity: clamp01(parseFloat(getParam("logoOpacity") ?? "0.9")),
             width: parseInt(getParam("logoWidth") ?? (window.innerWidth < 768 ? "120" : "160"), 10),
-            pos: (getParam("logoPos") as any) || "bc",
+            pos: getParam("logoPos") || "bc",
           })
-          shouldFrameRef.current = false
+          shouldFrameRef.current = false // čekáme na LIVE payload
           return
         }
 
-        // fallback: prázdno (nebo si tu dejte demo)
-        setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
-      } catch (e: any) {
+        // dev fallback
+        const Fs = [
+          { url: "/models/Upper.obj", name: "Upper", rawName: "Upper.obj", r: 0.5, m: 0.5, v: true, vc: false, km: false },
+          { url: "/models/Lower.stl", name: "Lower", rawName: "Lower.stl", r: 0.5, m: 0.5, v: true, vc: false, km: false },
+          { url: "/models/Crown21.ply", name: "Bridge", rawName: "Crown21.ply", r: 0.5, m: 0.5, v: true, vc: false, km: false },
+        ]
+        setFiles(Fs)
+        const palette = ["#f5f5dc", "#8e8e8e", "#ffffff"]
+        setColors(Fs.map((_, i) => palette[i % palette.length]))
+        setOpacities(Fs.map(() => 1))
+        setVisibles(Fs.map((f) => f.v))
+        setRoughnesses(Fs.map((f) => f.r))
+        setMetalnesses(Fs.map((f) => f.m))
+        setPhotos([])
+        prevFileKeysRef.current = getFileKeys(Fs)
+        shouldFrameRef.current = true
+      } catch (e) {
         console.error(e)
         setFatal("Tento náhled není dostupný (chyba při načtení dat).")
       }
     })()
   }, [])
 
-  /* ───────── LIVE postMessage listener ───────── */
-  const applyLivePayload = (p: any) => {
+  /* ───────── LIVE MODE: postMessage listener ───────── */
+  const applyLivePayload = (p) => {
     if (!p) return
     let filesActuallyChanged = false
+
     if (Array.isArray(p.files) && !(p.onlyParams && p.files.length === 0)) {
-      const newFiles = p.files.map((x: any, i: number) => ({
+      const newFiles = p.files.map((x, i) => ({
         url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
         c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
         v: typeof x.v === "boolean" ? x.v : true,
@@ -758,7 +792,7 @@ export default function ClientPage() {
         vc: !!x.vc, km: !!x.km,
       }))
 
-      const newKeys = newFiles.map((f: any) => `${f.url}::${f.rawName || f.name}`)
+      const newKeys = newFiles.map(f => `${f.url}::${f.rawName || f.name}`)
       const prevKeys = prevFileKeysRef.current
       filesActuallyChanged =
         newKeys.length !== prevKeys.length ||
@@ -768,11 +802,11 @@ export default function ClientPage() {
       prevFileKeysRef.current = newKeys
 
       const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
-      setColors(newFiles.map((f: any, i: number) => f.c || palette[i % palette.length]))
-      setOpacities(newFiles.map((f: any) => f.o))
-      setVisibles(newFiles.map((f: any) => f.v))
-      setRoughnesses(newFiles.map((f: any) => f.r))
-      setMetalnesses(newFiles.map((f: any) => f.m))
+      setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
+      setOpacities(newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
+      setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
+      setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
+      setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
     }
 
     if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
@@ -781,7 +815,7 @@ export default function ClientPage() {
         url: p.logo?.url ?? old.url,
         opacity: typeof p.logo?.opacity === "number" ? clamp01(p.logo.opacity) : old.opacity,
         width: typeof p.logo?.width === "number" ? p.logo.width : old.width,
-        pos: (p.logo?.pos as any) || old.pos,
+        pos: p.logo?.pos || old.pos,
       }))
     }
     if (p.lights) {
@@ -799,8 +833,8 @@ export default function ClientPage() {
   }
 
   useEffect(() => {
-    const onMsg = (e: MessageEvent) => {
-      const data: any = e.data
+    const onMsg = (e) => {
+      const data = e.data
       if (data && LIVE_MSG_TYPES.has(data.type) && data.payload) {
         if (!data.payload.onlyParams && Array.isArray(data.payload.files) && data.payload.files.length === 0) {
           setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
@@ -815,153 +849,104 @@ export default function ClientPage() {
     return () => window.removeEventListener("message", onMsg)
   }, [])
 
-  /* ---------- UI prvky ---------- */
+  /* ---------- Logo element ---------- */
   const logoEl = logoCfg.url && (
     <img
-      src={logoCfg.url!}
+      src={logoCfg.url}
       alt=""
       style={{
         position: "absolute",
-        bottom: (logoCfg.pos === "bc" || logoCfg.pos === "bl" || logoCfg.pos === "br") ? 12 : "auto",
+        bottom: logoCfg.pos === "bc" || logoCfg.pos === "bl" || logoCfg.pos === "br" ? 12 : "auto",
         left: logoCfg.pos === "bl" ? 12 : logoCfg.pos === "bc" ? "50%" : "auto",
         right: logoCfg.pos === "br" ? 12 : "auto",
         transform: logoCfg.pos === "bc" ? "translateX(-50%)" : "none",
-        width: logoCfg.width, opacity: logoCfg.opacity, zIndex: 0,
-        pointerEvents: "none", userSelect: "none",
+        width: logoCfg.width,
+        opacity: logoCfg.opacity,
+        zIndex: 0,
+        pointerEvents: "none",
+        userSelect: "none",
         filter: "drop-shadow(0 0 1px rgba(0,0,0,.25))",
       }}
     />
   )
 
-  const rootRef = useRef<THREE.Group>(null)
+  // klíč pro AutoCenterAndFrame
   const frameDepsKey = shouldFrameRef.current
     ? `frame-${files.length}-${loadedCount}`
     : `noframe-${files.length}-${loadedCount}`
+
+  // jednoduchý panel
+  const sidebar = (
+    <div
+      className="controls-panel"
+      style={{
+        position: "absolute",
+        top: 10, left: 10, zIndex: 2,
+        color: "white", fontFamily: "sans-serif", fontSize: "14px",
+        opacity: uiReady ? 1 : 0, transition: "opacity .12s ease",
+        backdropFilter: "blur(3px)", background: "rgba(0,0,0,.25)",
+        border: "1px solid rgba(255,255,255,.15)", borderRadius: 10,
+        padding: 10, width: "clamp(260px, 28vw, 420px)", maxWidth: "calc(100vw - 20px)",
+        boxSizing: "border-box", maxHeight: "calc(100vh - 20px)", overflowY: "auto",
+      }}
+    >
+      {fatal ? (
+        <div style={{ color: "#ff8b8b" }}>{fatal}</div>
+      ) : (
+        <>
+          {title && (
+            <div
+              title={title}
+              style={{
+                marginBottom: 8, maxWidth: 320, padding: "8px 10px",
+                borderRadius: 8, border: "1px solid rgba(255,255,255,.18)",
+                background: "rgba(255,255,255,.08)", fontSize: 13, fontWeight: 700,
+                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"
+              }}
+            >
+              {title}
+            </div>
+          )}
+
+          {/* AutoSmooth + úhel + Wireframe */}
+          <div style={{ display: "grid", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+              <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
+              <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 12, opacity: 0.8, whiteSpace: "nowrap" }}>Úhel: {Math.round(smoothAngle)}°</span>
+              <input className="slider" type="range" min={0} max={80} step={1} value={smoothAngle} onChange={(e) => setSmoothAngle(parseFloat(e.target.value))} style={{ width: 160 }} />
+            </div>
+          </div>
+
+          {/* Fotky z manifestu */}
+          {photos && photos.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 6 }}>Fotky ({photos.length})</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(72px, 1fr))", gap: 8 }}>
+                {photos.map((p, i) => (
+                  <button key={i} onClick={() => setLightbox({ open: true, src: p.u, alt: p.n || `Photo ${i+1}` })} style={{ padding: 0, margin: 0, border: "none", background: "transparent", cursor: "pointer", borderRadius: 8, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,.35)", border: "1px solid rgba(255,255,255,.12)" }} title={p.n || ""}>
+                    <img src={p.u} alt={p.n || ""} loading="lazy" style={{ display: "block", width: "100%", height: 72, objectFit: "cover" }} />
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+
+  const fillDim = headlightCfg.enabled ? 0.5 : 1
 
   return (
     <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
       <PreloadIcons />
       {logoEl}
+      {sidebar}
 
-      {/* Panel */}
-      <div
-        className="controls-panel"
-        style={{
-          position: "absolute",
-          top: 10, left: 10, zIndex: 2,
-          color: "white", fontFamily: "sans-serif", fontSize: "14px",
-          opacity: uiReady ? 1 : 0, transition: "opacity .12s ease",
-          backdropFilter: "blur(3px)", background: "rgba(0,0,0,.25)",
-          border: "1px solid rgba(255,255,255,.15)", borderRadius: 8,
-          padding: "8px 10px", width: "clamp(260px, 30vw, 420px)",
-          maxWidth: "calc(100vw - 20px)", boxSizing: "border-box",
-        }}
-      >
-        {fatal ? (
-          <div style={{ color: "#ff8b8b" }}>{fatal}</div>
-        ) : (
-          <>
-            {title && (
-              <div
-                title={title}
-                style={{
-                  marginBottom: 8, maxWidth: 320, padding: "6px 10px",
-                  borderRadius: 8, border: "1px solid rgba(255,255,255,.18)",
-                  background: "rgba(255,255,255,.08)", fontSize: 13, fontWeight: 700,
-                  whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"
-                }}
-              >
-                {title}
-              </div>
-            )}
-
-            {/* Per-model ovladače */}
-            {files.map((f, i) => (
-              <div key={`${f.url}-${i}`} style={{ display: "grid", gridTemplateColumns: "36px 1fr 36px", alignItems: "center", gap: 6, margin: "6px 0" }}>
-                <div style={{ gridColumn: "1 / -1", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={f.rawName || f.name}>
-                  {stripExt(f.name)}:
-                </div>
-
-                <input
-                  type="color"
-                  value={colors[i] ?? "#ffffff"}
-                  onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))}
-                  aria-label={`${f.name} color`}
-                  className="color-input"
-                  style={{ width: 36, height: 22, border: "1px solid #fff", borderRadius: 4, padding: 0, cursor: "pointer", background: "transparent" }}
-                />
-
-                <input
-                  className="slider"
-                  type="range" min={0} max={1} step={0.01}
-                  value={opacities[i] ?? 1}
-                  onChange={(e) => { const v = parseFloat(e.target.value); setOpacities((prev) => prev.map((x, idx) => (idx === i ? v : x))) }}
-                  style={{ width: "calc(100% - 18px)", minWidth: 140 }}
-                  aria-label={`${f.name} opacity`}
-                />
-
-                <button
-                  className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`}
-                  onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))}
-                  aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`}
-                  title={visibles[i] ? "Skrýt" : "Zobrazit"}
-                  style={{
-                    width: 36, height: 22,
-                    display: "inline-flex", alignItems: "center", justifyContent: "center",
-                    padding: 0, margin: 0, background: "transparent",
-                    border: "1px solid #fff", borderRadius: 4, cursor: "pointer",
-                  }}
-                >
-                  <img
-                    src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff}
-                    alt=""
-                    width={14}
-                    height={14}
-                    style={{ display: "block", pointerEvents: "none", userSelect: "none" }}
-                  />
-                </button>
-              </div>
-            ))}
-
-            {/* Auto smooth + Úhel + Wireframe */}
-            <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" }}>
-                <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-                  <input type="checkbox" checked={autoSmooth} onChange={(e) => setAutoSmooth(e.target.checked)} />
-                  <span>Auto smooth</span>
-                </label>
-                <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-                  <input type="checkbox" checked={wireframe} onChange={(e) => setWireframe(e.target.checked)} />
-                  <span>Wireframe</span>
-                </label>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ opacity: 0.8, fontSize: 12 }}>Úhel: {Math.round(smoothAngle)}°</span>
-                <input className="slider" type="range" min={0} max={80} step={1} value={smoothAngle}
-                  onChange={(e) => setSmoothAngle(parseFloat(e.target.value))} style={{ width: 160 }} />
-              </div>
-            </div>
-
-            {/* Fotky (pokud jsou v manifestu) */}
-            {photos.length > 0 && (
-              <div style={{ marginTop: 10 }}>
-                <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>Fotky ({photos.length})</div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(72px,1fr))", gap: 8 }}>
-                  {photos.map((p, i) => (
-                    <button key={i} onClick={() => setLightbox({ open: true, src: p.u, alt: p.n || "" })}
-                      style={{ padding: 0, margin: 0, border: "none", background: "transparent", cursor: "pointer", borderRadius: 8, overflow: "hidden", boxShadow: "0 1px 6px rgba(0,0,0,.35)", border: "1px solid rgba(255,255,255,.12)" }}
-                      title={p.n || ""}>
-                      <img src={p.u} alt={p.n || ""} loading="lazy" style={{ display: "block", width: "100%", height: 72, objectFit: "cover" }} />
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-
-      {/* CANVAS */}
       <Canvas
         orthographic
         camera={{ position: [0, 0, 1000], near: 0.1, far: 1e7 }}
@@ -971,12 +956,11 @@ export default function ClientPage() {
       >
         {!fatal && (
           <>
-            <ambientLight intensity={lightIntensity * 0.4 * (headlightCfg.enabled ? 0.5 : 1)} />
-            <directionalLight position={[0, 5, 5]} intensity={lightIntensity * 1.5 * (headlightCfg.enabled ? 0.5 : 1)} />
-            <directionalLight position={[-10, 0, 0]} intensity={lightIntensity * 1.0 * (headlightCfg.enabled ? 0.5 : 1)} />
-            <directionalLight position={[10, 0, 0]} intensity={lightIntensity * 1.2 * (headlightCfg.enabled ? 0.5 : 1)} />
-            <directionalLight position={[0, -5, -5]} intensity={lightIntensity * 0.8 * (headlightCfg.enabled ? 0.5 : 1)} />
-
+            <ambientLight intensity={lightIntensity * 0.4 * fillDim} />
+            <directionalLight position={[0, 5, 5]} intensity={lightIntensity * 1.5 * fillDim} />
+            <directionalLight position={[-10, 0, 0]} intensity={lightIntensity * 1.0 * fillDim} />
+            <directionalLight position={[10, 0, 0]} intensity={lightIntensity * 1.2 * fillDim} />
+            <directionalLight position={[0, -5, -5]} intensity={lightIntensity * 0.8 * fillDim} />
             <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity} />
 
             <group ref={rootRef}>
@@ -1004,13 +988,13 @@ export default function ClientPage() {
 
             <AutoCenterAndFrame
               rootRef={rootRef}
-              depsKey={shouldFrameRef.current ? `frame-${files.length}-${loadedCount}` : `noframe-${files.length}-${loadedCount}`}
+              depsKey={frameDepsKey}
               setTarget={setCameraTarget}
               margin={1.2}
               isMobile={isMobile}
               desktopScale={0.4}
               mobileScale={1.0}
-              centerMode={centerMode as any}
+              centerMode={centerMode}
               shouldFrame={shouldFrameRef}
             />
 
@@ -1020,20 +1004,14 @@ export default function ClientPage() {
         )}
       </Canvas>
 
-      <Lightbox open={!!lightbox.open} onClose={() => setLightbox({ open: false, src: null })} src={lightbox.src} alt={lightbox.alt || ""} />
+      <Lightbox open={lightbox.open} onClose={() => setLightbox({ open: false, src: null, alt: "" })} src={lightbox.src} alt={lightbox.alt} />
 
-      {/* Globální styly */}
       <style jsx global>{`
         .slider { appearance: none; height: 14px; background: transparent; margin: 5px 0; display: inline-block; }
         .slider::-webkit-slider-runnable-track { height: 4px; background: white; border-radius: 2px; }
         .slider::-webkit-slider-thumb { appearance: none; width: 14px; height: 14px; border-radius: 50%; background: white; cursor: pointer; box-shadow: 0 0 2px black; margin-top: -5px; }
         .slider::-moz-range-track { height: 4px; background: white; border-radius: 2px; }
         .slider::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: white; cursor: pointer; box-shadow: 0 0 2px black; border: none; }
-
-        .color-input { -webkit-appearance: none; appearance: none; }
-        .color-input::-webkit-color-swatch-wrapper { padding: 0; }
-        .color-input::-webkit-color-swatch { border: none; border-radius: 2px; }
-        .color-input::-moz-color-swatch { border: none; }
 
         @media (max-width: 720px) {
           .controls-panel {
