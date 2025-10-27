@@ -499,51 +499,64 @@ export default function ClientPage() {
   }, [])
 
   // LIVE payload
-  useEffect(() => {
-    const applyLivePayload = (p) => {
-      if (!p) return
-      if (Array.isArray(p.files) && !(p.onlyParams && p.files.length === 0)) {
-        const newFiles = p.files.map((x, i) => ({
-          url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
-          c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
-          v: typeof x.v === "boolean" ? x.v : true,
-          r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
-          m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-          vc: !!x.vc, km: !!x.km,
-        }))
-        const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
-        setFiles(newFiles)
-        setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
-        setOpacities(newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
-        setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
-        setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
-        setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
-        setLoadedCount(0); setDidInitialFrame(false)
+useEffect(() => {
+  const applyLivePayload = (p) => {
+    if (!p) return
+
+    // ⬇️ nesahej na files, pokud jde jen o param nebo lights
+    if (!p.onlyParams && !p.onlyLights && Array.isArray(p.files)) {
+      const newFiles = p.files.map((x, i) => ({
+        url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
+        c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
+        v: typeof x.v === "boolean" ? x.v : true,
+        r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
+        m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
+        vc: !!x.vc, km: !!x.km,
+      }))
+      const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
+      setFiles(newFiles)
+      setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
+      setOpacities(newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
+      setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
+      setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
+      setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
+      setLoadedCount(0); setDidInitialFrame(false)
+    }
+
+    if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
+
+    if (p.logo) {
+      setLogoCfg((old) => ({
+        url: p.logo?.url ?? old.url,
+        opacity: typeof p.logo?.opacity === "number" ? clamp01(p.logo.opacity) : old.opacity,
+        width: typeof p.logo?.width === "number" ? p.logo.width : old.width,
+        pos: p.logo?.pos || old.pos,
+      }))
+    }
+
+    if (p.lights) {
+      // ⬇️ přijímá "scene" i "intensity" (alias)
+      const sceneVal =
+        typeof p.lights.scene === "number" ? p.lights.scene
+        : typeof p.lights.intensity === "number" ? p.lights.intensity
+        : null
+      if (sceneVal != null) setSceneIntensity(clamp01(sceneVal))
+
+      if (typeof p.lights.highlight === "number") {
+        setHighlightIntensity(clamp01(p.lights.highlight))
       }
-      if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
-      if (p.logo) {
-        setLogoCfg((old) => ({
-          url: p.logo?.url ?? old.url,
-          opacity: typeof p.logo?.opacity === "number" ? clamp01(p.logo.opacity) : old.opacity,
-          width: typeof p.logo?.width === "number" ? p.logo.width : old.width,
-          pos: p.logo?.pos || old.pos,
+      if (p.lights.headlight) {
+        setHeadlightCfg((old) => ({
+          enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
+          intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
         }))
-      }
-      if (p.lights) {
-        if (typeof p.lights.scene === "number") setSceneIntensity(clamp01(p.lights.scene))
-        if (typeof p.lights.highlight === "number") setHighlightIntensity(clamp01(p.lights.highlight))
-        if (p.lights.headlight) {
-          setHeadlightCfg((old) => ({
-            enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
-            intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
-          }))
-        }
       }
     }
-    const onMsg = (e) => { const d = e.data; if (d && LIVE_MSG_TYPES.has(d.type) && d.payload) applyLivePayload(d.payload) }
-    window.addEventListener("message", onMsg)
-    return () => window.removeEventListener("message", onMsg)
-  }, [])
+  }
+  const onMsg = (e) => { const d = e.data; if (d && LIVE_MSG_TYPES.has(d.type) && d.payload) applyLivePayload(d.payload) }
+  window.addEventListener("message", onMsg)
+  return () => window.removeEventListener("message", onMsg)
+}, [])
 
   // logo
   const logoEl = logoCfg.url && (
