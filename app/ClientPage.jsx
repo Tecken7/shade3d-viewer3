@@ -16,38 +16,24 @@ const PUBLIC_BUCKET = "shade3d-viewer2"
 const DEFAULT_LOGO = "/Arthetic_logo.png"
 
 /* ---------- Helpers ---------- */
-const stripExt = (s?: string) => (s ? s.replace(/\.[^.]+$/, "") : "")
-const clamp01 = (x: number) => Math.max(0, Math.min(1, x))
-const getParam = (name: string) => {
+const stripExt = (s) => (s ? s.replace(/\.[^.]+$/, "") : "")
+const clamp01 = (x) => Math.max(0, Math.min(1, x))
+const getParam = (name) => {
   if (typeof window === "undefined") return null
   try { return new URL(window.location.href).searchParams.get(name) } catch { return null }
 }
-async function fetchJSON(url: string) {
+async function fetchJSON(url) {
   const r = await fetch(url, { cache: "no-store" })
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   return r.json()
 }
-function inferExt(nameOrUrl?: string) {
+function inferExt(nameOrUrl) {
   if (!nameOrUrl) return ""
   const s = nameOrUrl.split("?")[0]
   const m = s.match(/\.([a-z0-9]+)$/i)
   return m ? m[1].toLowerCase() : ""
 }
-type LiveFile = {
-  url: string
-  name: string
-  rawName?: string
-  c?: string
-  o?: number
-  v?: boolean
-  r?: number
-  m?: number
-  vc?: boolean
-  km?: boolean
-}
-
-/* porovnání, zda se změnil skutečný seznam modelů (podle URL) */
-function filesChanged(prev: LiveFile[], next: LiveFile[]) {
+function filesChanged(prev, next) {
   if (prev.length !== next.length) return true
   for (let i = 0; i < prev.length; i++) if (prev[i].url !== next[i].url) return true
   return false
@@ -70,13 +56,13 @@ function PreloadIcons() {
 
 /* ---------- Auto Smooth ---------- */
 const DEFAULT_SMOOTH_ANGLE = 30
-function autoSmoothGeometry(geometry: THREE.BufferGeometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
+function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
   const angle = Math.max(0, Math.min(89.9, angleDeg))
   const angleRad = (angle * Math.PI) / 180
-  const g = (geometry.index ? geometry.toNonIndexed() : geometry.clone()) as THREE.BufferGeometry
-  const pos = g.getAttribute("position") as THREE.BufferAttribute
+  const g = geometry.index ? geometry.toNonIndexed() : geometry.clone()
+  const pos = g.getAttribute("position")
   const triCount = pos.count / 3
-  const faceNormals: THREE.Vector3[] = new Array(triCount)
+  const faceNormals = new Array(triCount)
   const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
   const cb = new THREE.Vector3(), ab = new THREE.Vector3()
   for (let f = 0; f < triCount; f++) {
@@ -89,8 +75,8 @@ function autoSmoothGeometry(geometry: THREE.BufferGeometry, angleDeg = DEFAULT_S
     cb.cross(ab).normalize()
     faceNormals[f] = cb.clone()
   }
-  const groups = new Map<string, number[]>()
-  const keyOf = (ix: number) => `${pos.getX(ix).toFixed(5)},${pos.getY(ix).toFixed(5)},${pos.getZ(ix).toFixed(5)}`
+  const groups = new Map()
+  const keyOf = (ix) => `${pos.getX(ix).toFixed(5)},${pos.getY(ix).toFixed(5)},${pos.getZ(ix).toFixed(5)}`
   for (let i = 0; i < pos.count; i++) {
     const k = keyOf(i)
     let arr = groups.get(k); if (!arr) { arr = []; groups.set(k, arr) }
@@ -119,7 +105,7 @@ function autoSmoothGeometry(geometry: THREE.BufferGeometry, angleDeg = DEFAULT_S
 }
 
 /* ---------- Loader ---------- */
-function InlineLoader({ text }: { text?: string }) {
+function InlineLoader({ text }) {
   return (
     <Html center>
       <div style={{ background: "rgba(0,0,0,0.7)", padding: "16px 28px", borderRadius: 10, color: "white", fontFamily: "sans-serif", fontSize: 16 }}>
@@ -138,25 +124,11 @@ function AnyModel({
   useVertexColors = false,
   keepMaterials = false,
   wireframe = false,
-}: {
-  name?: string
-  url: string
-  color?: string
-  opacity: number
-  visible: boolean
-  onLoaded?: (o: THREE.Object3D) => void
-  autoSmooth: boolean
-  smoothAngle?: number
-  roughness?: number
-  metalness?: number
-  useVertexColors?: boolean
-  keepMaterials?: boolean
-  wireframe?: boolean
 }) {
-  const [object3D, setObject3D] = useState<THREE.Object3D | null>(null)
+  const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
 
-  const makeMat = (opts: THREE.MeshStandardMaterialParameters = {}) =>
+  const makeMat = (opts = {}) =>
     new THREE.MeshStandardMaterial({
       color: new THREE.Color(color || "#ffffff"),
       roughness: typeof roughness === "number" ? roughness : 0.5,
@@ -168,10 +140,9 @@ function AnyModel({
       ...opts,
     })
 
-  const forEachMesh = (obj: THREE.Object3D | null, cb: (m: THREE.Mesh) => void) =>
-    obj?.traverse?.((child: any) => { if (child.isMesh) cb(child) })
+  const forEachMesh = (obj, cb) => obj?.traverse?.((child) => { if (child.isMesh) cb(child) })
 
-  const rebuildWireOverlay = (mesh: any) => {
+  const rebuildWireOverlay = (mesh) => {
     if (mesh.userData._edges) {
       mesh.userData._edges.geometry?.dispose?.()
       mesh.userData._edges.material?.dispose?.()
@@ -187,21 +158,19 @@ function AnyModel({
     mesh.userData._edges = lines
   }
 
-  // načtení
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       try {
-        let obj: THREE.Object3D
+        let obj
         if (ext === "stl") {
           const geom = await new STLLoader().loadAsync(url)
           if (!geom.attributes.normal) geom.computeVertexNormals()
           const base = autoSmooth ? autoSmoothGeometry(geom, smoothAngle) : (geom.computeVertexNormals(), geom)
           const mat = makeMat()
-          const mesh = new THREE.Mesh(base, mat)
-          ;(mesh as any).userData._baseGeom = geom
-          ;(mesh as any).userData._derivedGeom = base
-          obj = mesh
+          obj = new THREE.Mesh(base, mat)
+          obj.userData._baseGeom = geom
+          obj.userData._derivedGeom = base
         } else if (ext === "ply") {
           const geom = await new PLYLoader().loadAsync(url)
           const hasVC = !!geom.getAttribute("color")
@@ -209,14 +178,13 @@ function AnyModel({
           if (autoSmooth) base = autoSmoothGeometry(geom, smoothAngle)
           else if (!geom.attributes.normal) geom.computeVertexNormals()
           const mat = hasVC && useVertexColors ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") }) : makeMat()
-          const mesh = new THREE.Mesh(base, mat)
-          ;(mesh as any).userData._baseGeom = geom
-          ;(mesh as any).userData._derivedGeom = base
-          obj = mesh
+          obj = new THREE.Mesh(base, mat)
+          obj.userData._baseGeom = geom
+          obj.userData._derivedGeom = base
         } else {
           const loaded = await new OBJLoader().loadAsync(url)
           if (keepMaterials) {
-            loaded.traverse((ch: any) => {
+            loaded.traverse((ch) => {
               if (ch.isMesh && ch.material) {
                 const m = ch.material
                 if ("transparent" in m) m.transparent = opacity < 1
@@ -228,7 +196,7 @@ function AnyModel({
             obj = loaded
           } else {
             const mat = makeMat()
-            loaded.traverse((ch: any) => { if (ch.isMesh) ch.material = mat })
+            loaded.traverse((ch) => { if (ch.isMesh) ch.material = mat })
             obj = loaded
           }
         }
@@ -242,16 +210,15 @@ function AnyModel({
       }
     })()
     return () => { cancelled = true }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, ext])
 
   // re-smooth / wireframe toggle
   useEffect(() => {
     if (!object3D) return
-    object3D.traverse((child: any) => {
+    object3D.traverse((child) => {
       if (!child.isMesh) return
       if (!child.userData._baseGeom) child.userData._baseGeom = child.geometry
-      const base: THREE.BufferGeometry = child.userData._baseGeom
+      const base = child.userData._baseGeom
       let newGeom = base
       if (autoSmooth) newGeom = autoSmoothGeometry(base, smoothAngle)
       else { newGeom = base.clone(); newGeom.computeVertexNormals() }
@@ -261,10 +228,10 @@ function AnyModel({
     })
   }, [object3D, autoSmooth, smoothAngle, wireframe])
 
-  // material changes (reagují okamžitě na props změny)
+  // material changes
   useEffect(() => {
     if (!object3D) return
-    object3D.traverse((child: any) => {
+    object3D.traverse((child) => {
       if (!child.isMesh) return
       if (keepMaterials) {
         const m = child.material
@@ -290,19 +257,19 @@ function AnyModel({
 }
 
 /* ---------- Headlight ---------- */
-function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }: {enabled?: boolean; intensity?: number; color?: string}) {
+function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
   const { camera } = useThree()
-  const ref = useRef<THREE.PointLight | null>(null)
+  const ref = useRef(null)
   useFrame(() => { if (ref.current) ref.current.position.copy(camera.position) })
-  return <pointLight ref={ref} color={color} intensity={enabled ? intensity! : 0} distance={0} decay={0} />
+  return <pointLight ref={ref} color={color} intensity={enabled ? intensity : 0} distance={0} decay={0} />
 }
 
 /* ---------- Trackball ---------- */
-function TouchTrackballControls({ target = [0, 0, 0] }: { target?: [number, number, number] }) {
+function TouchTrackballControls({ target = [0, 0, 0] }) {
   const { camera, gl, size } = useThree()
-  const controlsRef = useRef<any>(null)
+  const controlsRef = useRef(null)
   useEffect(() => {
-    const c = new (TrackballControls as any)(camera, gl.domElement)
+    const c = new TrackballControls(camera, gl.domElement)
     c.rotateSpeed = 5.0
     c.zoomSpeed = 1.2
     c.panSpeed = 1.0
@@ -322,18 +289,7 @@ function TouchTrackballControls({ target = [0, 0, 0] }: { target?: [number, numb
 }
 
 /* ---------- AutoCenter & AutoFrame (one-shot) ---------- */
-function AutoCenterAndFrame({
-  rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined",
-}: {
-  rootRef: React.RefObject<THREE.Object3D>
-  triggerKey: string
-  onFramed?: () => void
-  margin?: number
-  isMobile?: boolean
-  desktopScale?: number
-  mobileScale?: number
-  centerMode?: "per" | "combined" | "none"
-}) {
+function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined" }) {
   const { camera, size } = useThree()
   useEffect(() => {
     const root = rootRef.current
@@ -347,7 +303,7 @@ function AutoCenterAndFrame({
     boxAll.getCenter(centerAll); boxAll.getSize(dims)
 
     if (centerMode === "per") {
-      ;(root.children as any[]).forEach((child) => {
+      root.children.forEach((child) => {
         const b = new THREE.Box3().setFromObject(child)
         if (b.isEmpty()) return
         const cWorld = new THREE.Vector3(); b.getCenter(cWorld)
@@ -367,23 +323,22 @@ function AutoCenterAndFrame({
     const objH = Math.max(dims2.y, 1e-6)
     const zoomX = size.width / (objW * margin)
     const zoomY = size.height / (objH * margin)
-    const newZoom = Math.min(zoomX, zoomY) * (isMobile ? mobileScale : desktopScale)
+    let newZoom = Math.min(zoomX, zoomY) * (isMobile ? mobileScale : desktopScale)
 
     const depth = Math.max(dims2.z, Math.max(dims2.x, dims2.y) * 0.75) || 1
     const safeDist = depth * 10
-    ;(camera as any).near = Math.max(0.01, safeDist * 0.001)
-    ;(camera as any).far = safeDist * 80 + 200
+    camera.near = Math.max(0.01, safeDist * 0.001)
+    camera.far = safeDist * 80 + 200
     camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
-    ;(camera as any).zoom = Math.max(newZoom, 0.01)
-    ;(camera as any).updateProjectionMatrix()
+    camera.zoom = Math.max(newZoom, 0.01)
+    camera.updateProjectionMatrix()
     onFramed && onFramed()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [triggerKey])
   return null
 }
 
 /* ---------- Lightbox ---------- */
-function Lightbox({ open, onClose, src, alt }: {open: boolean; onClose: () => void; src: string | null; alt?: string}) {
+function Lightbox({ open, onClose, src, alt }) {
   if (!open || !src) return null
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
@@ -393,8 +348,8 @@ function Lightbox({ open, onClose, src, alt }: {open: boolean; onClose: () => vo
 }
 
 /* ---------- Switch ---------- */
-function Switch({ checked, onChange, label }: {checked: boolean; onChange: (v: boolean)=>void; label?: string}) {
-  const onKey = (e: React.KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onChange(!checked) } }
+function Switch({ checked, onChange, label }) {
+  const onKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onChange(!checked) } }
   const TRACK_W = 38, TRACK_H = 22, KNOB = 18
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -411,7 +366,7 @@ function Switch({ checked, onChange, label }: {checked: boolean; onChange: (v: b
 export default function ClientPage() {
   // světla
   const [sceneIntensity, setSceneIntensity] = useState(1)
-  const [highlightIntensity] = useState(1) // multiplicative knob (z Frameru neposíláme, necháváme 1)
+  const [highlightIntensity, setHighlightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
   // mobil
@@ -426,17 +381,17 @@ export default function ClientPage() {
   }, [])
 
   // titulek / logo
-  const [title, setTitle] = useState<string | null>(null)
-  const [logoCfg, setLogoCfg] = useState({ url: DEFAULT_LOGO as string | null, opacity: 0.9, width: 160, pos: "bc" as "bl"|"bc"|"br" })
+  const [title, setTitle] = useState(null)
+  const [logoCfg, setLogoCfg] = useState({ url: DEFAULT_LOGO, opacity: 0.9, width: 160, pos: "bc" })
 
   // modely
-  const [files, setFiles] = useState<LiveFile[]>([])
-  const [colors, setColors] = useState<string[]>([])
-  const [opacities, setOpacities] = useState<number[]>([])
-  const [visibles, setVisibles] = useState<boolean[]>([])
-  const [roughnesses, setRoughnesses] = useState<number[]>([])
-  const [metalnesses, setMetalnesses] = useState<number[]>([])
-  const [fatal, setFatal] = useState<string | null>(null)
+  const [files, setFiles] = useState([])
+  const [colors, setColors] = useState([])
+  const [opacities, setOpacities] = useState([])
+  const [visibles, setVisibles] = useState([])
+  const [roughnesses, setRoughnesses] = useState([])
+  const [metalnesses, setMetalnesses] = useState([])
+  const [fatal, setFatal] = useState(null)
 
   // vzhled
   const [autoSmooth, setAutoSmooth] = useState((getParam("smooth") ?? "1") !== "0")
@@ -444,8 +399,8 @@ export default function ClientPage() {
   const [wireframe, setWireframe] = useState(false)
 
   // fotky
-  const [photos, setPhotos] = useState<{u: string; n?: string}[]>([])
-  const [lightbox, setLightbox] = useState({ open: false, src: null as string | null, alt: "" })
+  const [photos, setPhotos] = useState([])
+  const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
 
   // UI (mobil)
   const [photosOpen, setPhotosOpen] = useState(!isMobile)
@@ -454,12 +409,12 @@ export default function ClientPage() {
   useEffect(() => { setSlidersOpen(!isMobile) }, [isMobile])
 
   // kamera / framing
-  const [cameraTarget] = useState<[number, number, number]>([0, 0, 0])
+  const [cameraTarget] = useState([0, 0, 0])
   const [loadedCount, setLoadedCount] = useState(0)
   const [didInitialFrame, setDidInitialFrame] = useState(false)
   const handleModelLoaded = () => setLoadedCount((n) => n + 1)
   const centerParam = (getParam("center") || "combined").toLowerCase()
-  const centerMode: "per"|"combined"|"none" = ["per", "combined", "none"].includes(centerParam) ? (centerParam as any) : "combined"
+  const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
   // init (manifest / query)
   useEffect(() => {
@@ -467,23 +422,24 @@ export default function ClientPage() {
       try {
         const mId = getParam("m")
         const manifestUrlParam = getParam("manifest")
+        theloop: {}
         const filesParam = getParam("files")
 
-        const applyFiles = (Fs: LiveFile[], titleStr?: string | null, logoUrl?: string | null, headlight?: {enabled?: boolean; intensity?: number} | null = null) => {
+        const applyFiles = (Fs, titleStr, logoUrl, headlight) => {
           if (!Fs.length) throw new Error("Manifest je prázdný.")
           setFiles(Fs)
           const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
-          setColors(Fs.map((f, i) => (f.c || palette[i % palette.length]) as string))
+          setColors(Fs.map((f, i) => f.c || palette[i % palette.length]))
           setOpacities(Fs.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
           setVisibles(Fs.map((f) => (typeof f.v === "boolean" ? f.v : true)))
           setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
           setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
           setTitle(titleStr ?? (getParam("title") ?? null))
           setLogoCfg({
-            url: logoUrl ?? (getParam("logo") === "none" ? null : (getParam("logo") || DEFAULT_LOGO)),
+            url: logoUrl ?? (getParam("logo") === "none" ? null : getParam("logo") || DEFAULT_LOGO),
             opacity: clamp01(parseFloat(getParam("logoOpacity") ?? "0.9")),
             width: parseInt(getParam("logoWidth") ?? (typeof window !== "undefined" && window.innerWidth < 768 ? "120" : "160"), 10),
-            pos: (getParam("logoPos") as any) || "bc",
+            pos: getParam("logoPos") || "bc",
           })
           if (headlight) {
             setHeadlightCfg({
@@ -497,7 +453,7 @@ export default function ClientPage() {
 
         if (mId) {
           const m = await fetchJSON(`${SUPABASE_URL}/storage/v1/object/public/${PUBLIC_BUCKET}/manifests/${encodeURIComponent(mId)}.json`)
-          const Fs: LiveFile[] = (m?.files || []).map((x: any, i: number) => ({
+          const Fs = (m?.files || []).map((x, i) => ({
             url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
             c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
             v: typeof x.v === "boolean" ? x.v : true,
@@ -505,17 +461,15 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: !!x.vc, km: !!x.km,
           }))
-          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight ?? null)
-          // případně scéna intenzita z manifestu:
+          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
-          // fotky
-          if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p: any) => ({ u: p.u, n: p.n })))
+          if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
         }
 
         if (manifestUrlParam) {
           const m = await fetchJSON(manifestUrlParam)
-          const Fs: LiveFile[] = (m?.files || []).map((x: any, i: number) => ({
+          const Fs = (m?.files || []).map((x, i) => ({
             url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
             c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
             v: typeof x.v === "boolean" ? x.v : true,
@@ -525,15 +479,15 @@ export default function ClientPage() {
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, null)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
-          if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p: any) => ({ u: p.u, n: p.n })))
+          if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
         }
 
         if (filesParam) {
-          let arr: any = null; try { arr = JSON.parse(filesParam) } catch {}
+          let arr = null; try { arr = JSON.parse(filesParam) } catch {}
           if (!arr) { try { arr = JSON.parse(decodeURIComponent(filesParam)) } catch {} }
           if (!Array.isArray(arr)) throw new Error("Neplatný formát parametru ?files=")
-          const Fs: LiveFile[] = arr.filter((x) => x && x.u).map((x: any, i: number) => ({
+          const Fs = arr.filter((x) => x && x.u).map((x, i) => ({
             url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
             c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
             v: typeof x.v === "boolean" ? x.v : true,
@@ -542,26 +496,27 @@ export default function ClientPage() {
             vc: !!x.vc, km: !!x.km,
           }))
           applyFiles(Fs, getParam("title") ?? null, null, null)
-          const li = parseFloat(getParam("li") || getParam("light") || ""); if (!Number.isNaN(li)) setSceneIntensity(clamp01(li))
-          const headI = parseFloat(getParam("headlightI") || ""); if (!Number.isNaN(headI)) setHeadlightCfg((o) => ({ ...o, intensity: headI }))
+          const li = parseFloat(getParam("li") || getParam("light") || "")
+          if (!Number.isNaN(li)) setSceneIntensity(clamp01(li))
+          const headI = parseFloat(getParam("headlightI") || "")
+          if (!Number.isNaN(headI)) setHeadlightCfg((o) => ({ ...o, intensity: headI }))
           return
         }
 
         // žádné vstupy – čekáme na LIVE
         setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
-      } catch (e: any) {
+      } catch (e) {
         console.error(e)
         setFatal("Tento náhled není dostupný (chyba při načtení dat).")
       }
     })()
   }, [])
 
-  // LIVE payload (Framer)
+  // LIVE payload
   useEffect(() => {
-    const applyLivePayload = (p: any) => {
+    const applyLivePayload = (p) => {
       if (!p) return
 
-      // lights-only
       if (p.onlyLights && p.lights) {
         if (typeof p.lights.intensity === "number") setSceneIntensity(clamp01(p.lights.intensity))
         if (p.lights.headlight) {
@@ -573,21 +528,19 @@ export default function ClientPage() {
         return
       }
 
-      // title / logo
       if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
       if (p.logo) {
         setLogoCfg((old) => ({
           url: p.logo?.url ?? old.url,
           opacity: typeof p.logo?.opacity === "number" ? clamp01(p.logo.opacity) : old.opacity,
           width: typeof p.logo?.width === "number" ? p.logo.width : old.width,
-          pos: (p.logo?.pos as any) || old.pos,
+          pos: p.logo?.pos || old.pos,
         }))
       }
 
-      // files / per-model params
       if (Array.isArray(p.files)) {
-        const newFiles: LiveFile[] = p.files.map((x: any, i: number) => ({
-          url: x.u, name: stripExt(x.n || `Model ${i + 1}`)!, rawName: x.n || `Model${i + 1}`,
+        const newFiles = p.files.map((x, i) => ({
+          url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
           c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
           v: typeof x.v === "boolean" ? x.v : true,
           r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
@@ -595,22 +548,19 @@ export default function ClientPage() {
           vc: !!x.vc, km: !!x.km,
         }))
 
-        // změníme jen arrays (barvy/opacity/viditelnost/…) pokud URL zůstaly stejné
-        const urlsReallyChanged = filesChanged(files, newFiles)
+        const urlsChanged = filesChanged(files, newFiles)
 
         setFiles(newFiles)
         const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
-        setColors(newFiles.map((f, i) => (f.c || palette[i % palette.length]) as string))
+        setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
         setOpacities(newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
         setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
         setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
         setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
 
-        // loader se resetuje jen pokud se změnily URL (= budou se znova loadovat)
-        if (urlsReallyChanged) { setLoadedCount(0); setDidInitialFrame(false) }
+        if (urlsChanged) { setLoadedCount(0); setDidInitialFrame(false) }
       }
 
-      // lights spolu s files (když přijde full payload)
       if (p.lights) {
         if (typeof p.lights.intensity === "number") setSceneIntensity(clamp01(p.lights.intensity))
         if (p.lights.headlight) {
@@ -621,14 +571,11 @@ export default function ClientPage() {
         }
       }
     }
-
-    const onMsg = (e: MessageEvent) => { const d = (e.data as any); if (d && LIVE_MSG_TYPES.has(d.type) && d.payload) applyLivePayload(d.payload) }
+    const onMsg = (e) => { const d = e.data; if (d && LIVE_MSG_TYPES.has(d.type) && d.payload) applyLivePayload(d.payload) }
     window.addEventListener("message", onMsg)
     return () => window.removeEventListener("message", onMsg)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [files])
 
-  // logo
   const logoEl = logoCfg.url && (
     <img src={logoCfg.url} alt="" style={{
       position: "absolute",
@@ -641,7 +588,7 @@ export default function ClientPage() {
     }}/>
   )
 
-  const rootRef = useRef<THREE.Object3D>(null!)
+  const rootGroupRef = useRef()
 
   const slidersContent = fatal ? (
     <div style={{ color: "#ff8b8b" }}>{fatal}</div>
@@ -676,7 +623,6 @@ export default function ClientPage() {
     </div>
   )
 
-  const rootRefObj = useRef<THREE.Object3D>(null!)
   const allLoaded = files.length > 0 && loadedCount === files.length
   const frameKey = allLoaded && !didInitialFrame ? `frame-${files.length}-${loadedCount}` : ""
 
@@ -688,22 +634,22 @@ export default function ClientPage() {
 
       <Canvas
         orthographic
-        camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 } as any}
+        camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }}
         gl={{ alpha: true }}
         onCreated={({ gl }) => gl.setClearAlpha(0)}
         style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
       >
-        {/* světla scény řízená z Frameru (lights.intensity) */}
+        {/* světla scény */}
         <ambientLight intensity={0.35 * sceneIntensity} />
         <directionalLight position={[0, 5, 5]} intensity={1.2 * sceneIntensity} />
         <directionalLight position={[-10, 0, 0]} intensity={0.9 * sceneIntensity} />
         <directionalLight position={[10, 0, 0]} intensity={1.0 * sceneIntensity} />
         <directionalLight position={[0, -5, -5]} intensity={0.7 * sceneIntensity} />
 
-        {/* headlight (z Frameru lights.headlight.intensity) */}
+        {/* headlight */}
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
 
-        <group ref={rootRef}>
+        <group ref={rootGroupRef}>
           <Suspense fallback={null}>
             {files.map((f, i) => (
               <AnyModel
@@ -726,10 +672,9 @@ export default function ClientPage() {
           </Suspense>
         </group>
 
-        {/* jednorázové zarámování až PO načtení všech */}
         {frameKey && (
           <AutoCenterAndFrame
-            rootRef={rootRef}
+            rootRef={rootGroupRef}
             triggerKey={frameKey}
             onFramed={() => setDidInitialFrame(true)}
             margin={1.12}
@@ -762,6 +707,4 @@ export default function ClientPage() {
       `}</style>
     </div>
   )
-
-  function rootRef(el: THREE.Object3D) { rootRefObj.current = el }
 }
