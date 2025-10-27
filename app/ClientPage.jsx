@@ -33,11 +33,6 @@ function inferExt(nameOrUrl) {
   const m = s.match(/\.([a-z0-9]+)$/i)
   return m ? m[1].toLowerCase() : ""
 }
-function filesChanged(prev, next) {
-  if (prev.length !== next.length) return true
-  for (let i = 0; i < prev.length; i++) if (prev[i].url !== next[i].url) return true
-  return false
-}
 
 /* ---------- Ikony ---------- */
 const ICON_BASE = (() => {
@@ -399,7 +394,7 @@ export default function ClientPage() {
   const [wireframe, setWireframe] = useState(false)
 
   // fotky
-  const [photos, setPhotos] = useState([])
+  const [photos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
 
   // UI (mobil)
@@ -410,11 +405,23 @@ export default function ClientPage() {
 
   // kamera / framing
   const [cameraTarget] = useState([0, 0, 0])
-  const [loadedCount, setLoadedCount] = useState(0)
   const [didInitialFrame, setDidInitialFrame] = useState(false)
-  const handleModelLoaded = () => setLoadedCount((n) => n + 1)
-  const centerParam = (getParam("center") || "combined").toLowerCase()
-  const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
+
+  // TRACK NAČTENÝCH URL (fix stuck loader)
+  const loadedByUrlRef = useRef(new Set())
+  const [, forceRender] = useState(0) // pro přerender po změně setu
+  const markLoaded = (url) => {
+    if (!url) return
+    if (!loadedByUrlRef.current.has(url)) {
+      loadedByUrlRef.current.add(url)
+      forceRender((x) => x + 1)
+    }
+  }
+  const syncLoadedSet = (newUrls) => {
+    const set = loadedByUrlRef.current
+    for (const u of Array.from(set)) if (!newUrls.has(u)) set.delete(u)
+    // Není potřeba přidávat nové URL – přidají se až AnyModel zavolá onLoaded
+  }
 
   // init (manifest / query)
   useEffect(() => {
@@ -422,7 +429,6 @@ export default function ClientPage() {
       try {
         const mId = getParam("m")
         const manifestUrlParam = getParam("manifest")
-        theloop: {}
         const filesParam = getParam("files")
 
         const applyFiles = (Fs, titleStr, logoUrl, headlight) => {
@@ -447,7 +453,9 @@ export default function ClientPage() {
               intensity: typeof headlight.intensity === "number" ? headlight.intensity : 2.0,
             })
           }
-          setLoadedCount(0)
+          // udrž set načtených URL v sync s novým seznamem
+          const newUrls = new Set(Fs.map((f) => f.url))
+          syncLoadedSet(newUrls)
           setDidInitialFrame(false)
         }
 
@@ -461,10 +469,7 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: !!x.vc, km: !!x.km,
           }))
-          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight)
-          if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
-          if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
-          return
+          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight); return
         }
 
         if (manifestUrlParam) {
@@ -477,10 +482,7 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: !!x.vc, km: !!x.km,
           }))
-          applyFiles(Fs, m?.title, m?.logo?.url, null)
-          if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
-          if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
-          return
+          applyFiles(Fs, m?.title, m?.logo?.url, null); return
         }
 
         if (filesParam) {
@@ -495,16 +497,12 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: !!x.vc, km: !!x.km,
           }))
-          applyFiles(Fs, getParam("title") ?? null, null, null)
-          const li = parseFloat(getParam("li") || getParam("light") || "")
-          if (!Number.isNaN(li)) setSceneIntensity(clamp01(li))
-          const headI = parseFloat(getParam("headlightI") || "")
-          if (!Number.isNaN(headI)) setHeadlightCfg((o) => ({ ...o, intensity: headI }))
-          return
+          applyFiles(Fs, getParam("title") ?? null, null, null); return
         }
 
         // žádné vstupy – čekáme na LIVE
         setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
+        syncLoadedSet(new Set())
       } catch (e) {
         console.error(e)
         setFatal("Tento náhled není dostupný (chyba při načtení dat).")
@@ -516,18 +514,27 @@ export default function ClientPage() {
   useEffect(() => {
     const applyLivePayload = (p) => {
       if (!p) return
-
-      if (p.onlyLights && p.lights) {
-        if (typeof p.lights.intensity === "number") setSceneIntensity(clamp01(p.lights.intensity))
-        if (p.lights.headlight) {
-          setHeadlightCfg((old) => ({
-            enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
-            intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
-          }))
-        }
-        return
+      if (Array.isArray(p.files) && !(p.onlyParams && p.files.length === 0)) {
+        const newFiles = p.files.map((x, i) => ({
+          url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
+          c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
+          v: typeof x.v === "boolean" ? x.v : true,
+          r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
+          m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
+          vc: !!x.vc, km: !!x.km,
+        }))
+        const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
+        setFiles(newFiles)
+        setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
+        setOpacities(newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
+        setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
+        setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
+        setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
+        // udrž set načtených URL – smaž ty, které už nejsou přítomné
+        const newUrls = new Set(newFiles.map((f) => f.url))
+        syncLoadedSet(newUrls)
+        setDidInitialFrame(false)
       }
-
       if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
       if (p.logo) {
         setLogoCfg((old) => ({
@@ -537,32 +544,9 @@ export default function ClientPage() {
           pos: p.logo?.pos || old.pos,
         }))
       }
-
-      if (Array.isArray(p.files)) {
-        const newFiles = p.files.map((x, i) => ({
-          url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
-          c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
-          v: typeof x.v === "boolean" ? x.v : true,
-          r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
-          m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-          vc: !!x.vc, km: !!x.km,
-        }))
-
-        const urlsChanged = filesChanged(files, newFiles)
-
-        setFiles(newFiles)
-        const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
-        setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
-        setOpacities(newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
-        setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
-        setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
-        setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
-
-        if (urlsChanged) { setLoadedCount(0); setDidInitialFrame(false) }
-      }
-
       if (p.lights) {
         if (typeof p.lights.intensity === "number") setSceneIntensity(clamp01(p.lights.intensity))
+        if (typeof p.lights.highlight === "number") setHighlightIntensity(clamp01(p.lights.highlight))
         if (p.lights.headlight) {
           setHeadlightCfg((old) => ({
             enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
@@ -574,8 +558,9 @@ export default function ClientPage() {
     const onMsg = (e) => { const d = e.data; if (d && LIVE_MSG_TYPES.has(d.type) && d.payload) applyLivePayload(d.payload) }
     window.addEventListener("message", onMsg)
     return () => window.removeEventListener("message", onMsg)
-  }, [files])
+  }, [])
 
+  // logo
   const logoEl = logoCfg.url && (
     <img src={logoCfg.url} alt="" style={{
       position: "absolute",
@@ -588,7 +573,7 @@ export default function ClientPage() {
     }}/>
   )
 
-  const rootGroupRef = useRef()
+  const rootRef = useRef()
 
   const slidersContent = fatal ? (
     <div style={{ color: "#ff8b8b" }}>{fatal}</div>
@@ -623,8 +608,18 @@ export default function ClientPage() {
     </div>
   )
 
-  const allLoaded = files.length > 0 && loadedCount === files.length
-  const frameKey = allLoaded && !didInitialFrame ? `frame-${files.length}-${loadedCount}` : ""
+  // allLoaded: všechny URL z files jsou v setu jako načtené
+  const allLoaded = files.length > 0 && files.every((f) => loadedByUrlRef.current.has(f.url))
+
+  // trigger pro jednorázové zarámování
+  useEffect(() => {
+    if (allLoaded && !didInitialFrame) {
+      // necháme AutoCenter proběhnout a pak přepneme flag
+      // (samotné zarámování spouštíme přes změnu frameKey níže)
+    }
+  }, [allLoaded, didInitialFrame])
+
+  const frameKey = allLoaded && !didInitialFrame ? `frame-${files.map((f) => f.url).join("|")}` : ""
 
   return (
     <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
@@ -646,10 +641,10 @@ export default function ClientPage() {
         <directionalLight position={[10, 0, 0]} intensity={1.0 * sceneIntensity} />
         <directionalLight position={[0, -5, -5]} intensity={0.7 * sceneIntensity} />
 
-        {/* headlight */}
+        {/* headlight (highlight slider) */}
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
 
-        <group ref={rootGroupRef}>
+        <group ref={rootRef}>
           <Suspense fallback={null}>
             {files.map((f, i) => (
               <AnyModel
@@ -659,7 +654,7 @@ export default function ClientPage() {
                 color={colors[i] ?? "#ffffff"}
                 opacity={opacities[i] ?? 1}
                 visible={visibles[i] ?? true}
-                onLoaded={handleModelLoaded}
+                onLoaded={() => markLoaded(f.url)}
                 autoSmooth={autoSmooth}
                 smoothAngle={smoothAngle}
                 wireframe={wireframe}
@@ -672,16 +667,17 @@ export default function ClientPage() {
           </Suspense>
         </group>
 
-        {frameKey && (
+        {/* jednorázové zarámování až PO načtení všech */}
+        {!!frameKey && (
           <AutoCenterAndFrame
-            rootRef={rootGroupRef}
+            rootRef={rootRef}
             triggerKey={frameKey}
             onFramed={() => setDidInitialFrame(true)}
             margin={1.12}
             isMobile={isMobile}
             desktopScale={1.0}
             mobileScale={1.0}
-            centerMode={centerMode}
+            centerMode={["per", "combined", "none"].includes((getParam("center") || "combined").toLowerCase()) ? (getParam("center") || "combined").toLowerCase() : "combined"}
           />
         )}
 
