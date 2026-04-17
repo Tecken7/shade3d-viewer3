@@ -116,13 +116,14 @@ function InlineLoader({ text }) {
 }
 
 /* ---------- VEKTOROVÝ MODEL KOMPONENTA ---------- */
-const CUT_LINE_THICKNESS = 0.2 // tloušťka linky v mm
+const CUT_LINE_THICKNESS = 0.15 // Poloměr tloušťky čáry (celkem 0.3 mm)
 
 function AnyModel({
   name, url, color, opacity, visible,
   onLoaded, autoSmooth, smoothAngle = DEFAULT_SMOOTH_ANGLE,
   roughness = 0.5, metalness = 0.5, useVertexColors = false,
   keepMaterials = false, wireframe = false,
+  clipPlanes = null, // OPRAVENO: Vráceno zpět do props!
   outlinePlane = null, 
   isSliceView = false,
   onSnapMove = null, onSnapClick = null, onSnapDoubleClick = null
@@ -132,6 +133,7 @@ function AnyModel({
   
   // Barva linky: Oranžová v 3D, barva skenu v 2D
   const outlineColor = useMemo(() => new THREE.Color(isSliceView ? (color || "#ffffff") : "#ff9900"), [isSliceView, color])
+  const activeClipPlanes = useMemo(() => clipPlanes || [], [clipPlanes])
 
   const makeMat = (opts = {}) => {
     const baseMat = isSliceView 
@@ -142,6 +144,7 @@ function AnyModel({
           metalness: typeof metalness === "number" ? metalness : 0.5,
           transparent: opacity < 1, opacity,
           side: THREE.DoubleSide, depthWrite: opacity === 1,
+          clippingPlanes: activeClipPlanes, clipShadows: true,
           ...opts,
       })
 
@@ -265,9 +268,10 @@ function AnyModel({
           m.color = new THREE.Color(color || "#ffffff")
       }
       
+      m.clippingPlanes = activeClipPlanes
       m.needsUpdate = true
     })
-  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, isSliceView]) // eslint-disable-line
+  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, activeClipPlanes, isSliceView]) // eslint-disable-line
 
   useFrame(() => {
       if (object3D) {
@@ -479,6 +483,19 @@ function ClippingGizmo({ plane, enabled, mode, setIsGizmoDragging, targetCenter 
   )
 }
 
+/* ---------- Plynulý Update Řezných Rovin ---------- */
+function SlicePlanesUpdater({ cutPlane, slicePlanes }) {
+    useFrame(() => {
+        if (cutPlane && slicePlanes.length === 2) {
+            slicePlanes[0].copy(cutPlane)
+            slicePlanes[0].constant += 0.05 // Dělá 0.1 mm širokou kapsu, ze které vidíme obrys
+            slicePlanes[1].copy(cutPlane).negate()
+            slicePlanes[1].constant += 0.05
+        }
+    })
+    return null
+}
+
 /* ---------- 2D MĚŘENÍ RENDEROVAČ ---------- */
 function MeasurementsRenderer({ points, currentStart, currentMouse }) {
     return (
@@ -517,6 +534,9 @@ function CrossSectionWindow({ files, colors, visibles, roughnesses, metalnesses,
     const [measureStart, setMeasureStart] = useState(null)
     const [measureCurrent, setMeasureCurrent] = useState(null)
     const [snapPoint, setSnapPoint] = useState(null)
+
+    // Výchozí prázdné roviny - budou se plnit dynamicky z Updateru
+    const slicePlanes = useMemo(() => [new THREE.Plane(), new THREE.Plane()], [])
 
     const handleSnapMove = (point) => {
         if (!cutPlane) return
@@ -563,7 +583,7 @@ function CrossSectionWindow({ files, colors, visibles, roughnesses, metalnesses,
                     <div style={{ position: "absolute", top: 10, left: 0, right: 0, textAlign: "center", color: "#ffd700", fontSize: 11, pointerEvents: "none", zIndex: 1 }}>Klikněte pro ukotvení...</div>
                 )}
                 
-                <Canvas orthographic style={{ width: "100%", height: "100%" }} onPointerOut={() => setSnapPoint(null)}>
+                <Canvas orthographic gl={{ localClippingEnabled: true }} style={{ width: "100%", height: "100%" }} onPointerOut={() => setSnapPoint(null)}>
                     <group>
                         <Suspense fallback={null}>
                             {files.map((f, i) => (
@@ -573,7 +593,8 @@ function CrossSectionWindow({ files, colors, visibles, roughnesses, metalnesses,
                                 color={colors[i]} opacity={1} visible={visibles[i]}
                                 autoSmooth={false} wireframe={false}
                                 roughness={roughnesses[i]} metalness={metalnesses[i]} useVertexColors={vertexColors[i]}
-                                outlinePlane={cutPlane} // VEKTOROVÝ REŽIM
+                                outlinePlane={cutPlane}
+                                clipPlanes={slicePlanes} // Vektorový sendvič
                                 isSliceView={true}
                                 onSnapMove={handleSnapMove}
                                 onSnapDoubleClick={handleSnapDoubleClick}
@@ -582,8 +603,12 @@ function CrossSectionWindow({ files, colors, visibles, roughnesses, metalnesses,
                             ))}
                         </Suspense>
                     </group>
+                    
+                    <SlicePlanesUpdater cutPlane={cutPlane} slicePlanes={slicePlanes} />
                     <CrossSectionCamera setupPlane={cutPlane} setTarget={setTarget} />
-                    <OrbitControls enableRotate={false} enableZoom={true} enablePan={true} target={target} makeDefault />
+                    
+                    <OrbitControls enableRotate={false} enableZoom={true} enablePan={!measureStart} target={target} makeDefault />
+                    
                     {snapPoint && (
                         <mesh position={snapPoint}><sphereGeometry args={[0.5, 16, 16]} /><meshBasicMaterial color="#ffb700" depthTest={false} /></mesh>
                     )}
@@ -784,72 +809,369 @@ export default function ClientPage() {
       setCutPlane(plane)
   }
 
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const mId = getParam("m")
+        const manifestUrlParam = getParam("manifest")
+        const filesParam = getParam("files")
+        const smoothParam = getParam("smooth")
+        if (smoothParam === "0") setAutoSmooth(false)
+
+        const applyFiles = (Fs, titleStr, logoUrl, headlight, camState) => {
+          if (!Fs.length) throw new Error("Manifest je prázdný.")
+          setFiles(Fs)
+          const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
+          setColors(Fs.map((f, i) => f.c || palette[i % palette.length]))
+          setOpacities(Fs.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
+          setVisibles(Fs.map((f) => (typeof f.v === "boolean" ? f.v : true)))
+          setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
+          setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
+          setVertexColors(Fs.map((f) => !!f.vc))
+          
+          setTitle(titleStr ?? (getParam("title") ?? null))
+          setLogoCfg({
+            url: logoUrl ?? (getParam("logo") === "none" ? null : getParam("logo") || DEFAULT_LOGO),
+            opacity: clamp01(parseFloat(getParam("logoOpacity") ?? "0.9")),
+            width: parseInt(getParam("logoWidth") ?? (typeof window !== "undefined" && window.innerWidth < 768 ? "120" : "160"), 10),
+            pos: getParam("logoPos") || "bc",
+          })
+          if (headlight) {
+            setHeadlightCfg({
+              enabled: typeof headlight.enabled === "boolean" ? headlight.enabled : true,
+              intensity: typeof headlight.intensity === "number" ? headlight.intensity : 2.0,
+            })
+          }
+          if (camState) setInitialCameraState(camState)
+          setDidInitialFrame(false)
+        }
+
+        if (mId) {
+          const m = await fetchJSON(`${SUPABASE_URL}/storage/v1/object/public/${PUBLIC_BUCKET}/manifests/${encodeURIComponent(mId)}.json`)
+          const Fs = (m?.files || []).map((x, i) => ({
+            url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
+            c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
+            v: typeof x.v === "boolean" ? x.v : true,
+            r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
+            m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
+            vc: !!x.vc, km: !!x.km,
+          }))
+          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera)
+          if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
+          if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
+          return
+        }
+
+        if (manifestUrlParam) {
+          const m = await fetchJSON(manifestUrlParam)
+          const Fs = (m?.files || []).map((x, i) => ({
+            url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
+            c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
+            v: typeof x.v === "boolean" ? x.v : true,
+            r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
+            m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
+            vc: !!x.vc, km: !!x.km,
+          }))
+          applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera)
+          if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
+          if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
+          return
+        }
+
+        if (filesParam) {
+          let arr = null; try { arr = JSON.parse(filesParam) } catch {}
+          if (!arr) { try { arr = JSON.parse(decodeURIComponent(filesParam)) } catch {} }
+          if (!Array.isArray(arr)) throw new Error("Neplatný formát parametru ?files=")
+          const Fs = arr.filter((x) => x && x.u).map((x, i) => ({
+            url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
+            c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
+            v: typeof x.v === "boolean" ? x.v : true,
+            r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
+            m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
+            vc: !!x.vc, km: !!x.km,
+          }))
+          applyFiles(Fs, getParam("title") ?? null, null, null, null)
+          const li = parseFloat(getParam("li") || getParam("light") || "")
+          if (!Number.isNaN(li)) setSceneIntensity(clamp01(li))
+          const headI = parseFloat(getParam("headlightI") || "")
+          if (!Number.isNaN(headI)) setHeadlightCfg((o) => ({ ...o, intensity: headI }))
+          return
+        }
+
+        setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([]); setVertexColors([])
+      } catch (e) {
+        console.error(e)
+        setFatal("Tento náhled není dostupný (chyba při načtení dat).")
+      }
+    })()
+  }, [])
+
+  useEffect(() => {
+    const applyLivePayload = (p) => {
+      if (!p) return
+
+      if (p.onlyLights && p.lights) {
+        if (typeof p.lights.intensity === "number") setSceneIntensity(clamp01(p.lights.intensity))
+        if (p.lights.headlight) {
+          setHeadlightCfg((old) => ({
+            enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
+            intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
+          }))
+        }
+        return
+      }
+
+      if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
+      if (p.logo) {
+        setLogoCfg((old) => ({
+          url: p.logo?.url ?? old.url,
+          opacity: typeof p.logo?.opacity === "number" ? clamp01(p.logo.opacity) : old.opacity,
+          width: typeof p.logo?.width === "number" ? p.logo.width : old.width,
+          pos: p.logo?.pos || old.pos,
+        }))
+      }
+
+      if (Array.isArray(p.files)) {
+        const newFiles = p.files.map((x, i) => ({
+          url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
+          c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
+          v: typeof x.v === "boolean" ? x.v : true,
+          r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
+          m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
+          vc: !!x.vc, km: !!x.km,
+        }))
+
+        const urlsChanged = filesChanged(files, newFiles)
+
+        setFiles(newFiles)
+        const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
+        setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
+        setOpacities(newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
+        setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
+        setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
+        setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
+        setVertexColors(newFiles.map((f) => !!f.vc))
+
+        if (urlsChanged) { 
+            setDidInitialFrame(false); 
+            setInitialCameraState(null); 
+            setCutPlane(null);
+        }
+      }
+
+      if (p.lights) {
+        if (typeof p.lights.intensity === "number") setSceneIntensity(clamp01(p.lights.intensity))
+        if (p.lights.headlight) {
+          setHeadlightCfg((old) => ({
+            enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
+            intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
+          }))
+        }
+      }
+    }
+    const onMsg = (e) => { const d = e.data; if (d && LIVE_MSG_TYPES.has(d.type) && d.payload) applyLivePayload(d.payload) }
+    window.addEventListener("message", onMsg)
+    return () => window.removeEventListener("message", onMsg)
+  }, [files])
+
+  const logoEl = logoCfg.url && (
+    <img src={logoCfg.url} alt="" style={{
+      position: "absolute",
+      bottom: logoCfg.pos === "bc" || logoCfg.pos === "bl" || logoCfg.pos === "br" ? 12 : "auto",
+      left: logoCfg.pos === "bl" ? 12 : logoCfg.pos === "bc" ? "50%" : "auto",
+      right: logoCfg.pos === "br" ? 12 : "auto",
+      transform: logoCfg.pos === "bc" ? "translateX(-50%)" : "none",
+      width: logoCfg.width, opacity: logoCfg.opacity, zIndex: 0,
+      pointerEvents: "none", userSelect: "none", filter: "drop-shadow(0 0 1px rgba(0,0,0,.25))",
+    }}/>
+  )
+
+  const slidersContent = fatal ? (
+    <div style={{ color: "#ff8b8b" }}>{fatal}</div>
+  ) : (
+    <>
+      {files.map((f, i) => (
+        <div key={`${f.url}-${i}`} className="control-row" style={{ display: "grid", gridTemplateColumns: "36px 1fr 32px 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
+          <div className="row-label" style={{ gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.rawName || f.name}>{stripExt(f.name)}:</div>
+          <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} aria-label={`${f.name} color`} className="color-input" style={{ width: 36, height: 22, border: "1px solid #fff", borderRadius: 4, padding: 0, cursor: "pointer", background: "transparent" }}/>
+          <input type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => setOpacities((prev) => prev.map((x, idx) => (idx === i ? parseFloat(e.target.value) : x))) } className="slider" style={{ width: "calc(100% - 12px)", minWidth: 110 }} aria-label={`${f.name} opacity`} />
+          <button onClick={() => setVertexColors(prev => prev.map((v, idx) => idx === i ? !v : v))} title="Přepnout texturu" style={{ width: 32, height: 22, fontSize: 10, fontWeight: "bold", background: vertexColors[i] ? "rgba(59,130,246,.45)" : "transparent", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, color: "#fff", cursor: "pointer", padding: 0 }}>TEX</button>
+          <button onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 36, height: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: "transparent", border: "1px solid #fff", borderRadius: 4, cursor: "pointer" }}>
+            <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
+          </button>
+        </div>
+      ))}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
+        <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
+        <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
+      </div>
+    </>
+  )
+
+  const sidebar = (
+    <div className="sidebar" style={{ position: "absolute", top: 10, left: 10, zIndex: 2, width: "clamp(260px, 28vw, 420px)", maxWidth: "calc(100vw - 20px)", color: "white", fontFamily: "sans-serif", fontSize: 14, backdropFilter: "blur(3px)", background: "rgba(0,0,0,.25)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, boxSizing: "border-box", maxHeight: "calc(100vh - 20px)", overflowY: "auto" }}>
+      {title && (<div title={title} style={{ marginBottom: 10, padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", background: "rgba(255,255,255,.08)", fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>)}
+      
+      {isMobile ? (
+        <>
+          <button onClick={() => setSlidersOpen((o) => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 12px", background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.18)", borderRadius: 10, color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>
+            <span>Nastavení modelů</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ transform: slidersOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform .15s ease" }} aria-hidden><path d="M8 5l8 7-8 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          </button>
+          {slidersOpen && <div style={{ marginTop: 8, border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>{slidersContent}</div>}
+        </>
+      ) : (
+        <div style={{ border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>{slidersContent}</div>
+      )}
+
+      {photos && photos.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <button onClick={() => setLightbox({ open: true, src: photos[0].u, alt: photos[0].n || "" })} style={{ width: "100%", padding: "8px 10px", background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.18)", borderRadius: 10, color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>Fotky ({photos.length})</button>
+        </div>
+      )}
+    </div>
+  )
+
+  const toolsMenu = (
+      <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", gap: 8 }}>
+          {cutPlane && (
+              <>
+                  <button 
+                      onClick={() => setClipMode(clipMode === "translate" ? "rotate" : "translate")} 
+                      style={{ background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.3)", color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", backdropFilter: "blur(4px)" }}
+                  >
+                      {clipMode === "translate" ? "🔄 Přejít na rotaci" : "↕ Přejít na posun"}
+                  </button>
+                  <button 
+                      onClick={() => { setCutPlane(null) }} 
+                      style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.5)", color: "#ffbaba", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}
+                  >
+                      ✖ Zrušit řez
+                  </button>
+              </>
+          )}
+          {!cutPlane && (
+              <button 
+                  onClick={spawnNewCut} 
+                  style={{ background: "rgba(59,130,246,0.3)", border: "1px solid rgba(59,130,246,0.8)", color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", backdropFilter: "blur(4px)", boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}
+              >
+                  ✂️ Nový Řez
+              </button>
+          )}
+      </div>
+  )
+
   const allLoaded = files.length > 0 && files.every(f => loadedUrls.has(f.url))
   const frameKey = allLoaded && !didInitialFrame ? `frame-${files.length}` : ""
 
   return (
     <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
       <PreloadIcons />
-      {logoCfg.url && (
-        <img src={logoCfg.url} alt="" style={{ position: "absolute", bottom: logoCfg.pos === "bc" || logoCfg.pos === "bl" || logoCfg.pos === "br" ? 12 : "auto", left: logoCfg.pos === "bl" ? 12 : logoCfg.pos === "bc" ? "50%" : "auto", right: logoCfg.pos === "br" ? 12 : "auto", transform: logoCfg.pos === "bc" ? "translateX(-50%)" : "none", width: logoCfg.width, opacity: logoCfg.opacity, zIndex: 0, pointerEvents: "none", userSelect: "none" }}/>
-      )}
-      
-      {/* SIDEBAR */}
-      <div className="sidebar" style={{ position: "absolute", top: 10, left: 10, zIndex: 2, width: "clamp(260px, 28vw, 420px)", maxWidth: "calc(100vw - 20px)", color: "white", fontFamily: "sans-serif", fontSize: 14, backdropFilter: "blur(3px)", background: "rgba(0,0,0,.25)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, maxHeight: "calc(100vh - 20px)", overflowY: "auto" }}>
-        {title && (<div style={{ marginBottom: 10, padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", background: "rgba(255,255,255,.08)", fontSize: 13, fontWeight: 700 }}>{title}</div>)}
-        <div style={{ border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>
-            {files.map((f, i) => (
-                <div key={`${f.url}-${i}`} style={{ display: "grid", gridTemplateColumns: "36px 1fr 32px 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
-                <div style={{ gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stripExt(f.name)}:</div>
-                <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} style={{ width: 36, height: 22, border: "1px solid #fff", borderRadius: 4, padding: 0, cursor: "pointer", background: "transparent" }}/>
-                <input type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => setOpacities((prev) => prev.map((x, idx) => (idx === i ? parseFloat(e.target.value) : x))) } style={{ width: "calc(100% - 12px)" }} />
-                <button onClick={() => setVertexColors(prev => prev.map((v, idx) => idx === i ? !v : v))} style={{ width: 32, height: 22, fontSize: 10, background: vertexColors[i] ? "rgba(59,130,246,.45)" : "transparent", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, color: "#fff", cursor: "pointer" }}>TEX</button>
-                <button onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} style={{ width: 36, height: 22, background: "transparent", border: "1px solid #fff", borderRadius: 4, cursor: "pointer" }}><img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} width={14} height={14}/></button>
-                </div>
-            ))}
-        </div>
-      </div>
-
-      {/* TLAČÍTKA NASTROJŮ */}
-      <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", gap: 8 }}>
-          {cutPlane && (
-              <>
-                  <button onClick={() => setClipMode(clipMode === "translate" ? "rotate" : "translate")} style={{ background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.3)", color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", backdropFilter: "blur(4px)" }}>{clipMode === "translate" ? "🔄 Rotovat" : "↕ Posunout"}</button>
-                  <button onClick={() => setCutPlane(null)} style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.5)", color: "#ffbaba", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer" }}>✖ Zrušit řez</button>
-              </>
-          )}
-          {!cutPlane && <button onClick={spawnNewCut} style={{ background: "rgba(59,130,246,0.3)", border: "1px solid rgba(59,130,246,0.8)", color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer" }}>✂️ Nový Řez</button>}
-      </div>
+      {logoEl}
+      {sidebar}
+      {files.length > 0 && toolsMenu}
 
       {cutPlane && (
-          <CrossSectionWindow files={files} colors={colors} visibles={visibles} roughnesses={roughnesses} metalnesses={metalnesses} vertexColors={vertexColors} cutPlane={cutPlane} onFlipCut={() => setCutPlane(cutPlane.clone().negate())} onClose={() => setCutPlane(null)} />
+          <CrossSectionWindow 
+              files={files} colors={colors} visibles={visibles} roughnesses={roughnesses} metalnesses={metalnesses} vertexColors={vertexColors}
+              cutPlane={cutPlane}
+              onFlipCut={() => {
+                  const newPlane = cutPlane.clone().negate()
+                  setCutPlane(newPlane)
+              }}
+              onClose={() => setCutPlane(null)}
+          />
       )}
 
-      <Canvas orthographic camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }} gl={{ alpha: true }} onCreated={({ gl }) => gl.setClearAlpha(0)} style={{ position: "absolute", inset: 0, zIndex: 1 }}>
+      <Canvas
+        orthographic
+        camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }}
+        gl={{ alpha: true, localClippingEnabled: false }} // V hlavním okně se nyní ořezy plně ignorují (zajišťuje to shader)
+        onCreated={({ gl }) => gl.setClearAlpha(0)}
+        style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
+      >
         <ambientLight intensity={0.35 * sceneIntensity} />
         <directionalLight position={[0, 5, 5]} intensity={1.2 * sceneIntensity} />
         <directionalLight position={[-10, 0, 0]} intensity={0.9 * sceneIntensity} />
         <directionalLight position={[10, 0, 0]} intensity={1.0 * sceneIntensity} />
+        <directionalLight position={[0, -5, -5]} intensity={0.7 * sceneIntensity} />
+
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
 
         <group ref={rootGroupRef}>
           <Suspense fallback={null}>
             {files.map((f, i) => (
-              <AnyModel key={`${f.url}-${i}`} name={f.rawName || f.name} url={f.url} color={colors[i]} opacity={opacities[i]} visible={visibles[i]} onLoaded={handleModelLoaded} autoSmooth={autoSmooth} smoothAngle={smoothAngle} wireframe={wireframe} roughness={roughnesses[i]} metalness={metalnesses[i]} useVertexColors={vertexColors[i]} keepMaterials={!!f.km} outlinePlane={cutPlane} isSliceView={false} />
+              <AnyModel
+                key={`${f.url}-${i}`}
+                name={f.rawName || f.name}
+                url={f.url}
+                color={colors[i] ?? "#ffffff"}
+                opacity={opacities[i] ?? 1}
+                visible={visibles[i] ?? true}
+                onLoaded={handleModelLoaded}
+                autoSmooth={autoSmooth}
+                smoothAngle={smoothAngle}
+                wireframe={wireframe}
+                roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.5)}
+                metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
+                useVertexColors={vertexColors[i]}
+                keepMaterials={!!f.km}
+                outlinePlane={cutPlane} // Vykreslí svítící čáru
+                clipPlanes={null}       
+                isSliceView={false}
+              />
             ))}
           </Suspense>
         </group>
 
         <ClippingGizmo plane={cutPlane} enabled={!!cutPlane} mode={clipMode} setIsGizmoDragging={setIsGizmoDragging} targetCenter={cameraTarget} />
+        
         <ViewStateSync trackballRef={trackballRef} />
 
-        {frameKey && !initialCameraState && (<AutoCenterAndFrame rootRef={rootGroupRef} triggerKey={frameKey} onFramed={() => setDidInitialFrame(true)} margin={1.12} isMobile={isMobile} centerMode={centerMode} setTarget={setCameraTarget} />)}
-        {frameKey && initialCameraState && (<CustomCameraSetter camState={initialCameraState} triggerKey={frameKey} onFramed={() => setDidInitialFrame(true)} setTarget={setCameraTarget} />)}
+        {frameKey && !initialCameraState && (
+          <AutoCenterAndFrame
+            rootRef={rootGroupRef}
+            triggerKey={frameKey}
+            onFramed={() => setDidInitialFrame(true)}
+            margin={1.12}
+            isMobile={isMobile}
+            desktopScale={1.0}
+            mobileScale={1.0}
+            centerMode={centerMode}
+            setTarget={setCameraTarget}
+          />
+        )}
+
+        {frameKey && initialCameraState && (
+          <CustomCameraSetter
+            camState={initialCameraState}
+            triggerKey={frameKey}
+            onFramed={() => setDidInitialFrame(true)}
+            setTarget={setCameraTarget}
+          />
+        )}
 
         <TouchTrackballControls ref={trackballRef} target={cameraTarget} enabled={!isGizmoDragging} />
         <RightButtonPan setTarget={setCameraTarget} enabled={!isGizmoDragging} />
+
         {!allLoaded && files.length > 0 && <InlineLoader text="Načítám modely…" />}
       </Canvas>
+
+      <Lightbox open={lightbox.open} onClose={() => setLightbox({ open: false, src: null, alt: "" })} src={lightbox.src} alt={lightbox.alt} />
+
+      <style jsx global>{`
+        .slider { appearance: none; height: 14px; background: transparent; margin: 5px 0; display: inline-block; }
+        .slider::-webkit-slider-runnable-track { height: 4px; background: white; border-radius: 2px; }
+        .slider::-webkit-slider-thumb { appearance: none; width: 14px; height: 14px; border-radius: 50%; background: white; cursor: pointer; box-shadow: 0 0 2px black; margin-top: -5px; }
+        .slider::-moz-range-track { height: 4px; background: white; border-radius: 2px; }
+        .slider::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: white; cursor: pointer; box-shadow: 0 0 2px black; border: none; }
+        .color-input { -webkit-appearance: none; appearance: none; }
+        .color-input::-webkit-color-swatch-wrapper { padding: 0; }
+        .color-input::-webkit-color-swatch, .color-input::-moz-color-swatch { border: none; border-radius: 2px; }
+        @media (max-width: 720px) {
+          .sidebar { left: 8px !important; width: calc(100vw - 16px) !important; max-width: calc(100vw - 16px) !important; }
+        }
+      `}</style>
     </div>
   )
 }
