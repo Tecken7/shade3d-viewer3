@@ -124,12 +124,10 @@ function AnyModel({
   useVertexColors = false,
   keepMaterials = false,
   wireframe = false,
-  // ZCELA NOVÉ: Props pro řez a měření
-  clipPlane = null,
-  clipEnabled = false,
+  clipPlanes = [], // NOVÉ: Podpora ořezu (řezů)
   measureMode = false,
   onMeasureClick = null,
-  onMeasureMove = null,
+  onMeasureMove = null
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
@@ -143,7 +141,7 @@ function AnyModel({
       opacity,
       side: THREE.DoubleSide,
       depthWrite: opacity === 1,
-      clippingPlanes: clipEnabled && clipPlane ? [clipPlane] : [], // Přidána podpora řezu
+      clippingPlanes: clipPlanes,
       clipShadows: true,
       ...opts,
     })
@@ -161,7 +159,7 @@ function AnyModel({
     const wfGeom = new THREE.WireframeGeometry(mesh.geometry)
     const wfMat = new THREE.LineBasicMaterial({ 
         color: 0x000000, depthTest: true, depthWrite: false, transparent: true, opacity: 0.95, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
-        clippingPlanes: clipEnabled && clipPlane ? [clipPlane] : []
+        clippingPlanes: clipPlanes
     })
     const lines = new THREE.LineSegments(wfGeom, wfMat)
     lines.renderOrder = (mesh.renderOrder || 0) + 10
@@ -202,7 +200,7 @@ function AnyModel({
                 if ("opacity" in m) m.opacity = opacity
                 if ("roughness" in m && typeof roughness === "number") m.roughness = roughness
                 if ("metalness" in m && typeof metalness === "number") m.metalness = metalness
-                m.clippingPlanes = clipEnabled && clipPlane ? [clipPlane] : []
+                m.clippingPlanes = clipPlanes
               }
             })
             obj = loaded
@@ -237,7 +235,7 @@ function AnyModel({
       child.geometry = newGeom; child.userData._derivedGeom = newGeom
       rebuildWireOverlay(child)
     })
-  }, [object3D, autoSmooth, smoothAngle, wireframe, clipEnabled, clipPlane]) // eslint-disable-line
+  }, [object3D, autoSmooth, smoothAngle, wireframe, clipPlanes]) // eslint-disable-line
 
   useEffect(() => {
     if (!object3D) return
@@ -252,7 +250,7 @@ function AnyModel({
         if ("metalness" in m && typeof metalness === "number") m.metalness = metalness
         if (!useVertexColors && "color" in m && color) m.color = new THREE.Color(color)
         if (useVertexColors && "vertexColors" in m) { m.vertexColors = true; if ("color" in m) m.color = new THREE.Color("#ffffff") }
-        m.clippingPlanes = clipEnabled && clipPlane ? [clipPlane] : []
+        m.clippingPlanes = clipPlanes
         m.needsUpdate = true
       } else {
         const hasVC = !!child.geometry.getAttribute?.("color")
@@ -261,26 +259,22 @@ function AnyModel({
       if (child.userData._edges) child.userData._edges.visible = !!wireframe
       else if (wireframe) rebuildWireOverlay(child)
     })
-  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, clipEnabled, clipPlane]) // eslint-disable-line
+  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, clipPlanes]) // eslint-disable-line
 
   if (!object3D) return null
   return visible ? (
     <primitive 
-      object={object3D} 
-      // Události pro měřící nástroj
-      onClick={(e) => {
-          if (!measureMode) return
-          // Rovina řezu nesmí být prokliknutelná z prázdné strany
-          if (clipEnabled && clipPlane && clipPlane.distanceToPoint(e.point) < 0) return
-          e.stopPropagation()
-          onMeasureClick?.(e.point.clone())
-      }}
-      onPointerMove={(e) => {
-          if (!measureMode) return
-          if (clipEnabled && clipPlane && clipPlane.distanceToPoint(e.point) < 0) return
-          e.stopPropagation()
-          onMeasureMove?.(e.point.clone())
-      }}
+        object={object3D} 
+        onClick={(e) => {
+            if (!measureMode) return
+            e.stopPropagation()
+            onMeasureClick?.(e.point.clone())
+        }}
+        onPointerMove={(e) => {
+            if (!measureMode) return
+            e.stopPropagation()
+            onMeasureMove?.(e.point.clone())
+        }}
     />
   ) : null
 }
@@ -294,7 +288,7 @@ function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
 }
 
 /* ---------- Trackball ---------- */
-const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], enabled = true }, ref) => {
+const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], enabled = true, noRotate = false }, ref) => {
   const { camera, gl, size } = useThree()
   const controlsRef = useRef(null)
   
@@ -307,10 +301,17 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], enabled =
     c.panSpeed = 1.0
     c.staticMoving = true
     c.dynamicDampingFactor = 0.15
-    c.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.ZOOM, RIGHT: THREE.MOUSE.PAN }
+    // Pokud je noRotate zapnuté (např v mini-mapě), zakážeme levé tlačítko pro rotaci
+    c.mouseButtons = { 
+        LEFT: noRotate ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE, 
+        MIDDLE: THREE.MOUSE.ZOOM, 
+        RIGHT: THREE.MOUSE.PAN 
+    }
+    if (noRotate) c.noRotate = true
+    
     controlsRef.current = c
     return () => c.dispose()
-  }, [camera, gl])
+  }, [camera, gl, noRotate])
   
   useEffect(() => {
     if (controlsRef.current) {
@@ -415,6 +416,168 @@ function RightButtonPan({ setTarget, enabled = true }) {
   }, [camera, gl, size.width, size.height, setTarget, enabled])
 
   return null
+}
+
+/* ---------- VÝPOČET ROVINY ŘEZU ---------- */
+function CutPlaneCalculator({ ndcLine, setCutPlane }) {
+    const { camera } = useThree()
+    
+    useEffect(() => {
+        if (!ndcLine || !ndcLine.start || !ndcLine.end) return
+        
+        const r1 = new THREE.Raycaster()
+        r1.setFromCamera(ndcLine.start, camera)
+        const r2 = new THREE.Raycaster()
+        r2.setFromCamera(ndcLine.end, camera)
+
+        const p1 = r1.ray.origin
+        const p2 = r2.ray.origin
+        const viewDir = new THREE.Vector3()
+        camera.getWorldDirection(viewDir)
+
+        const lineVec = new THREE.Vector3().subVectors(p2, p1)
+        if (lineVec.lengthSq() < 0.0001) return // Předejít chybě při kliknutí bez tažení
+
+        // Normála roviny kolmá na pohled kamery a načrtnutou linku
+        const normal = new THREE.Vector3().crossVectors(lineVec, viewDir).normalize()
+        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, p1)
+        
+        setCutPlane(plane)
+    }, [ndcLine, camera, setCutPlane])
+    
+    return null
+}
+
+/* ---------- 2D MĚŘENÍ RENDEROVAČ ---------- */
+function MeasurementsRenderer({ points, currentStart, currentMouse }) {
+    return (
+      <group>
+          {points.map((m, i) => (
+              <MeasureLine key={i} p1={m.p1} p2={m.p2} dist={m.dist} />
+          ))}
+          {currentStart && currentMouse && (
+              <MeasureLine p1={currentStart} p2={currentMouse} dist={currentStart.distanceTo(currentMouse)} isTemp />
+          )}
+      </group>
+    )
+  }
+  
+  function MeasureLine({ p1, p2, dist, isTemp = false }) {
+    const geom = useMemo(() => new THREE.BufferGeometry().setFromPoints([p1, p2]), [p1, p2])
+    const mid = useMemo(() => p1.clone().lerp(p2, 0.5), [p1, p2])
+    return (
+      <group>
+          <mesh position={p1}><sphereGeometry args={[0.6, 16, 16]} /><meshBasicMaterial color={isTemp ? "#aaaaaa" : "#ffd700"} depthTest={false} /></mesh>
+          <mesh position={p2}><sphereGeometry args={[0.6, 16, 16]} /><meshBasicMaterial color={isTemp ? "#aaaaaa" : "#ffd700"} depthTest={false} /></mesh>
+          <line geometry={geom}>
+              <lineBasicMaterial color={isTemp ? "#aaaaaa" : "#ffd700"} linewidth={3} depthTest={false} />
+          </line>
+          <Html position={mid} center zIndexRange={[100, 0]} style={{ pointerEvents: "none", background: "rgba(0,0,0,0.75)", color: isTemp ? "#ddd" : "#ffd700", padding: "3px 6px", borderRadius: 4, fontSize: 13, fontWeight: "bold", whiteSpace: "nowrap", border: "1px solid rgba(255,255,255,0.2)" }}>
+              {dist.toFixed(2)} mm
+          </Html>
+      </group>
+    )
+  }
+
+/* ---------- MINI-MAPA (Průřezové okno) ---------- */
+function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, metalnesses, vertexColors, cutPlane, onFlipCut, onClose }) {
+    const [target, setTarget] = useState([0,0,0])
+    const [measureMode, setMeasureMode] = useState(true) // V řezu se defaultně rovnou měří
+    const [measurePoints, setMeasurePoints] = useState([])
+    const [measureStart, setMeasureStart] = useState(null)
+    const [measureCurrent, setMeasureCurrent] = useState(null)
+
+    // Vytvoření "plátku" pro řez v mini-mapě (tloušťka 1mm)
+    const slicePlanes = useMemo(() => {
+        if (!cutPlane) return []
+        const p1 = new THREE.Plane(cutPlane.normal.clone(), cutPlane.constant + 0.5)
+        const p2 = new THREE.Plane(cutPlane.normal.clone().negate(), -cutPlane.constant + 0.5)
+        return [p1, p2]
+    }, [cutPlane])
+
+    const handleMeasureClick = (point) => {
+        if (!measureStart) {
+            setMeasureStart(point)
+        } else {
+            setMeasurePoints(prev => [...prev, { p1: measureStart, p2: point, dist: measureStart.distanceTo(point) }])
+            setMeasureStart(null)
+            setMeasureCurrent(null)
+        }
+    }
+
+    return (
+        <div style={{ position: "absolute", bottom: 20, right: 20, width: "35vw", height: "35vw", maxWidth: 450, maxHeight: 450, minWidth: 280, minHeight: 280, background: "#111", border: "1px solid #444", borderRadius: 12, overflow: "hidden", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.5)", zIndex: 10 }}>
+            {/* Hlavička okna s nástroji */}
+            <div style={{ padding: "8px 12px", background: "#222", borderBottom: "1px solid #333", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <span style={{ color: "white", fontSize: 13, fontWeight: "bold" }}>Průřez</span>
+                    <button onClick={onFlipCut} style={{ background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 11, cursor: "pointer" }}>🔄 Otočit</button>
+                    {measurePoints.length > 0 && (
+                        <button onClick={() => setMeasurePoints([])} style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.5)", color: "#ffbaba", borderRadius: 4, padding: "2px 8px", fontSize: 11, cursor: "pointer" }}>🗑 Smazat míry</button>
+                    )}
+                </div>
+                <button onClick={onClose} style={{ background: "none", border: "none", color: "#fff", cursor: "pointer", fontSize: 16, lineHeight: 1 }}>×</button>
+            </div>
+            
+            {/* Canvas s řezem */}
+            <div style={{ flex: 1, position: "relative", background: "#000" }}>
+                {measureStart && <div style={{ position: "absolute", top: 10, left: 0, right: 0, textAlign: "center", color: "#ffd700", fontSize: 11, pointerEvents: "none", zIndex: 1 }}>Vyberte druhý bod měření...</div>}
+                
+                <Canvas orthographic gl={{ localClippingEnabled: true }} style={{ width: "100%", height: "100%" }}>
+                    <ambientLight intensity={1.5} />
+                    <group>
+                        <Suspense fallback={null}>
+                            {files.map((f, i) => (
+                            <AnyModel
+                                key={`slice-${f.url}-${i}`}
+                                url={f.url}
+                                color={colors[i]} opacity={1} visible={visibles[i]}
+                                autoSmooth={true} wireframe={false}
+                                roughness={roughnesses[i]} metalness={metalnesses[i]} useVertexColors={vertexColors[i]}
+                                clipPlanes={slicePlanes} // Aplikace plátku
+                                measureMode={measureMode}
+                                onMeasureClick={handleMeasureClick}
+                                onMeasureMove={(p) => measureStart && setMeasureCurrent(p)}
+                            />
+                            ))}
+                        </Suspense>
+                    </group>
+                    
+                    {/* Nasměrování kamery kolmo na rovinu */}
+                    <CrossSectionCamera setupPlane={cutPlane} setTarget={setTarget} />
+                    <TouchTrackballControls target={target} enabled={!measureMode} noRotate={true} />
+                    <RightButtonPan setTarget={setTarget} enabled={!measureMode} />
+                    
+                    <MeasurementsRenderer points={measurePoints} currentStart={measureStart} currentMouse={measureCurrent} />
+                </Canvas>
+            </div>
+        </div>
+    )
+}
+
+/* ---------- Setup Kamery pro Mini-Mapu ---------- */
+function CrossSectionCamera({ setupPlane, setTarget }) {
+    const { camera, size } = useThree()
+    useEffect(() => {
+        if (!setupPlane) return
+        const cp = new THREE.Vector3()
+        setupPlane.coplanarPoint(cp)
+        
+        // Kamera kouká přesně proti normále (do řezu)
+        camera.position.copy(cp).add(setupPlane.normal.clone().multiplyScalar(100))
+        camera.lookAt(cp)
+        if (Math.abs(setupPlane.normal.y) > 0.9) camera.up.set(0, 0, -Math.sign(setupPlane.normal.y))
+        else camera.up.set(0, 1, 0)
+        
+        // Zoom nastavíme tak, aby se model vešel (odhad cca 80mm zorné pole)
+        camera.zoom = Math.min(size.width, size.height) / 80
+        camera.near = 0.1
+        camera.far = 200
+        camera.updateProjectionMatrix()
+        
+        setTarget([cp.x, cp.y, cp.z])
+    }, [setupPlane, camera, size.width, size.height, setTarget])
+    return null
 }
 
 /* ---------- AutoCenter & AutoFrame ---------- */
@@ -544,94 +707,6 @@ function ViewStateSync({ trackballRef }) {
   return null
 }
 
-/* ---------- NÁSTROJ ŘEZ (CLIPPING GIZMO) ---------- */
-function ClippingGizmo({ plane, enabled, mode, trackballRef }) {
-  const meshRef = useRef(null)
-  
-  useFrame(() => {
-    if (meshRef.current && enabled && plane) {
-        const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(meshRef.current.quaternion)
-        plane.setFromNormalAndCoplanarPoint(normal, meshRef.current.position)
-    }
-  })
-
-  if (!enabled) return null
-
-  return (
-    <TransformControls 
-        mode={mode} 
-        onDraggingChanged={(e) => {
-            if (trackballRef.current) trackballRef.current.enabled = !e.value
-        }}
-    >
-        <mesh ref={meshRef}>
-            <planeGeometry args={[500, 500]} />
-            <meshBasicMaterial color="#3b82f6" transparent opacity={0.15} side={THREE.DoubleSide} depthWrite={false} />
-            <lineSegments>
-                <edgesGeometry args={[new THREE.PlaneGeometry(500, 500)]} />
-                <lineBasicMaterial color="#ffffff" />
-            </lineSegments>
-        </mesh>
-    </TransformControls>
-  )
-}
-
-/* ---------- NÁSTROJ MĚŘENÍ (LINES) ---------- */
-function MeasurementsRenderer({ points, currentStart, currentMouse }) {
-  return (
-    <group>
-        {points.map((m, i) => (
-            <MeasureLine key={i} p1={m.p1} p2={m.p2} dist={m.dist} />
-        ))}
-        {currentStart && currentMouse && (
-            <MeasureLine p1={currentStart} p2={currentMouse} dist={currentStart.distanceTo(currentMouse)} isTemp />
-        )}
-    </group>
-  )
-}
-
-function MeasureLine({ p1, p2, dist, isTemp = false }) {
-  const geom = useMemo(() => new THREE.BufferGeometry().setFromPoints([p1, p2]), [p1, p2])
-  const mid = useMemo(() => p1.clone().lerp(p2, 0.5), [p1, p2])
-  return (
-    <group>
-        <mesh position={p1}><sphereGeometry args={[0.4, 16, 16]} /><meshBasicMaterial color={isTemp ? "#aaaaaa" : "#ffd700"} depthTest={false} /></mesh>
-        <mesh position={p2}><sphereGeometry args={[0.4, 16, 16]} /><meshBasicMaterial color={isTemp ? "#aaaaaa" : "#ffd700"} depthTest={false} /></mesh>
-        <line geometry={geom}>
-            <lineBasicMaterial color={isTemp ? "#aaaaaa" : "#ffd700"} linewidth={3} depthTest={false} />
-        </line>
-        <Html position={mid} center zIndexRange={[100, 0]} style={{ pointerEvents: "none", background: "rgba(0,0,0,0.75)", color: isTemp ? "#ddd" : "#ffd700", padding: "3px 6px", borderRadius: 4, fontSize: 13, fontWeight: "bold", whiteSpace: "nowrap", border: "1px solid rgba(255,255,255,0.2)" }}>
-            {dist.toFixed(2)} mm
-        </Html>
-    </group>
-  )
-}
-
-/* ---------- Lightbox ---------- */
-function Lightbox({ open, onClose, src, alt }) {
-  if (!open || !src) return null
-  return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
-      <img src={src} alt={alt || ""} style={{ maxWidth: "96vw", maxHeight: "92vh", objectFit: "contain", borderRadius: 12, boxShadow: "0 10px 40px rgba(0,0,0,.6)", border: "1px solid rgba(255,255,255,.15)" }} />
-    </div>
-  )
-}
-
-/* ---------- Switch ---------- */
-function Switch({ checked, onChange, label }) {
-  const onKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onChange(!checked) } }
-  const TRACK_W = 38, TRACK_H = 22, KNOB = 18
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      {label && <span style={{ opacity: .85 }}>{label}</span>}
-      <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)} onKeyDown={onKey}
-        style={{ position: "relative", width: TRACK_W, height: TRACK_H, borderRadius: 999, border: "1px solid rgba(255,255,255,.22)", background: checked ? "rgba(59,130,246,.45)" : "rgba(255,255,255,.10)", cursor: "pointer", transition: "background .15s ease, border-color .15s ease", outline: "none", padding: 0 }}>
-        <span aria-hidden style={{ position: "absolute", top: "50%", transform: "translateY(-50%)", left: checked ? TRACK_W - KNOB - 3 : 3, width: KNOB, height: KNOB, borderRadius: "50%", background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.35)", transition: "left .15s ease" }}/>
-      </button>
-    </div>
-  )
-}
-
 /* ---------- Hlavní komponenta ---------- */
 export default function ClientPage() {
   const [sceneIntensity, setSceneIntensity] = useState(1)
@@ -658,7 +733,7 @@ export default function ClientPage() {
   const [visibles, setVisibles] = useState([])
   const [roughnesses, setRoughnesses] = useState([])
   const [metalnesses, setMetalnesses] = useState([])
-  const [vertexColors, setVertexColors] = useState([]) // Podpora přepínání textur (TEX)
+  const [vertexColors, setVertexColors] = useState([])
   const [fatal, setFatal] = useState(null)
 
   const [autoSmooth, setAutoSmooth] = useState(true)
@@ -687,15 +762,44 @@ export default function ClientPage() {
   const [initialCameraState, setInitialCameraState] = useState(null)
 
   // NÁSTROJE
-  const [toolsOpen, setToolsOpen] = useState(false)
-  const [clipPlane] = useState(() => new THREE.Plane(new THREE.Vector3(0, 0, 1), 0))
-  const [clipEnabled, setClipEnabled] = useState(false)
-  const [clipMode, setClipMode] = useState("translate") // translate nebo rotate
+  const [toolMode, setToolMode] = useState("none") // none, cut
+  const [ndcCutLine, setNdcCutLine] = useState(null)
+  const [cutPlane, setCutPlane] = useState(null)
   
-  const [measureMode, setMeasureMode] = useState(false)
-  const [measurePoints, setMeasurePoints] = useState([])
-  const [measureStart, setMeasureStart] = useState(null)
-  const [measureCurrent, setMeasureCurrent] = useState(null)
+  // Pomocné stavy pro SVG kreslení lajny
+  const [cutStartPos, setCutStartPos] = useState(null)
+  const [cutCurrentPos, setCutCurrentPos] = useState(null)
+
+  const handlePointerDown = (e) => {
+    if (toolMode !== 'cut') return
+    e.preventDefault()
+    setCutStartPos({ x: e.clientX, y: e.clientY })
+    setCutCurrentPos({ x: e.clientX, y: e.clientY })
+  }
+
+  const handlePointerMove = (e) => {
+    if (toolMode !== 'cut' || !cutStartPos) return
+    e.preventDefault()
+    setCutCurrentPos({ x: e.clientX, y: e.clientY })
+  }
+
+  const handlePointerUp = (e) => {
+    if (toolMode !== 'cut' || !cutStartPos) return
+    e.preventDefault()
+    const bounds = e.currentTarget.getBoundingClientRect()
+    const ndc1 = new THREE.Vector2(
+        ((cutStartPos.x - bounds.left) / bounds.width) * 2 - 1,
+        -((cutStartPos.y - bounds.top) / bounds.height) * 2 + 1
+    )
+    const ndc2 = new THREE.Vector2(
+        ((e.clientX - bounds.left) / bounds.width) * 2 - 1,
+        -((e.clientY - bounds.top) / bounds.height) * 2 + 1
+    )
+    setNdcCutLine({ start: ndc1, end: ndc2 })
+    setCutStartPos(null)
+    setCutCurrentPos(null)
+    setToolMode('none')
+  }
 
   useEffect(() => {
     ;(async () => {
@@ -843,6 +947,9 @@ export default function ClientPage() {
         if (urlsChanged) { 
             setDidInitialFrame(false); 
             setInitialCameraState(null); 
+            setCutPlane(null);
+            setNdcCutLine(null);
+            setToolMode('none');
         }
       }
 
@@ -873,22 +980,6 @@ export default function ClientPage() {
     }}/>
   )
 
-  const handleMeasureClick = (point) => {
-      if (!measureStart) {
-          setMeasureStart(point)
-      } else {
-          setMeasurePoints(prev => [...prev, { p1: measureStart, p2: point, dist: measureStart.distanceTo(point) }])
-          setMeasureStart(null)
-          setMeasureCurrent(null)
-      }
-  }
-
-  const handleMeasureMove = (point) => {
-      if (measureStart) {
-          setMeasureCurrent(point)
-      }
-  }
-
   const slidersContent = fatal ? (
     <div style={{ color: "#ff8b8b" }}>{fatal}</div>
   ) : (
@@ -896,15 +987,11 @@ export default function ClientPage() {
       {files.map((f, i) => (
         <div key={`${f.url}-${i}`} className="control-row" style={{ display: "grid", gridTemplateColumns: "36px 1fr 32px 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
           <div className="row-label" style={{ gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.rawName || f.name}>{stripExt(f.name)}:</div>
-          
           <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} aria-label={`${f.name} color`} className="color-input" style={{ width: 36, height: 22, border: "1px solid #fff", borderRadius: 4, padding: 0, cursor: "pointer", background: "transparent" }}/>
-          
           <input className="slider" type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => { const v = parseFloat(e.target.value); setOpacities((prev) => prev.map((x, idx) => (idx === i ? v : x))) }} style={{ width: "calc(100% - 12px)", minWidth: 110 }} aria-label={`${f.name} opacity`} />
-          
           <button onClick={() => setVertexColors(prev => prev.map((v, idx) => idx === i ? !v : v))} title="Přepnout texturu" style={{ width: 32, height: 22, fontSize: 10, fontWeight: "bold", background: vertexColors[i] ? "rgba(59,130,246,.45)" : "transparent", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, color: "#fff", cursor: "pointer", padding: 0 }}>
             TEX
           </button>
-
           <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 36, height: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: "transparent", border: "1px solid #fff", borderRadius: 4, cursor: "pointer" }}>
             <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
           </button>
@@ -917,45 +1004,10 @@ export default function ClientPage() {
     </>
   )
 
-  const toolsContent = (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {/* Měření */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-            <Switch checked={measureMode} onChange={(v) => { setMeasureMode(v); if(!v){ setMeasureStart(null); setMeasureCurrent(null) } }} label="📏 Měření" />
-            {measurePoints.length > 0 && (
-                <button onClick={() => setMeasurePoints([])} style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.5)", color: "#ffbaba", borderRadius: 6, padding: "4px 8px", fontSize: 11, cursor: "pointer" }}>Smazat vše</button>
-            )}
-        </div>
-        {measureMode && <div style={{ fontSize: 11, color: "#ffd700", marginTop: -8 }}>Klikněte na model pro změření vzdálenosti.</div>}
-
-        {/* Řez / Clipping */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 4 }}>
-            <Switch checked={clipEnabled} onChange={setClipEnabled} label="✂️ Zobrazit Řez" />
-        </div>
-        {clipEnabled && (
-            <div style={{ display: "flex", background: "rgba(255,255,255,0.05)", borderRadius: 6, overflow: "hidden", marginTop: 4 }}>
-                <button onClick={() => setClipMode("translate")} style={{ flex: 1, padding: "6px", fontSize: 11, cursor: "pointer", border: "none", background: clipMode === "translate" ? "rgba(59,130,246,0.4)" : "transparent", color: "#fff" }}>Posun (Šipky)</button>
-                <button onClick={() => setClipMode("rotate")} style={{ flex: 1, padding: "6px", fontSize: 11, cursor: "pointer", border: "none", borderLeft: "1px solid rgba(255,255,255,0.1)", background: clipMode === "rotate" ? "rgba(59,130,246,0.4)" : "transparent", color: "#fff" }}>Rotace (Kruhy)</button>
-            </div>
-        )}
-    </div>
-  )
-
   const sidebar = (
     <div className="sidebar" style={{ position: "absolute", top: 10, left: 10, zIndex: 2, width: "clamp(260px, 28vw, 420px)", maxWidth: "calc(100vw - 20px)", color: "white", fontFamily: "sans-serif", fontSize: 14, backdropFilter: "blur(3px)", background: "rgba(0,0,0,.25)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, boxSizing: "border-box", maxHeight: "calc(100vh - 20px)", overflowY: "auto" }}>
       {title && (<div title={title} style={{ marginBottom: 10, padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", background: "rgba(255,255,255,.08)", fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>)}
       
-      {/* NÁSTROJE */}
-      {files.length > 0 && (
-         <div style={{ marginBottom: 10 }}>
-            <button onClick={() => setToolsOpen((o) => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 12px", background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.18)", borderRadius: 10, color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>
-                <span>Nástroje</span>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ transform: toolsOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform .15s ease" }} aria-hidden><path d="M8 5l8 7-8 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-            </button>
-            {toolsOpen && <div style={{ marginTop: 8, border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>{toolsContent}</div>}
-         </div>
-      )}
-
       {isMobile ? (
         <>
           <button onClick={() => setSlidersOpen((o) => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 12px", background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.18)", borderRadius: 10, color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>
@@ -976,21 +1028,70 @@ export default function ClientPage() {
     </div>
   )
 
+  // NÁSTROJE VPRAVO NAHOŘE
+  const toolsMenu = (
+      <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", gap: 8 }}>
+          {cutPlane && (
+              <button 
+                  onClick={() => { setCutPlane(null); setNdcCutLine(null); setToolMode('none') }} 
+                  style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.5)", color: "#ffbaba", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}
+              >
+                  ✖ Zrušit řez
+              </button>
+          )}
+          <button 
+              onClick={() => setToolMode(toolMode === 'cut' ? 'none' : 'cut')} 
+              style={{ background: toolMode === 'cut' ? "rgba(59,130,246,0.3)" : "rgba(0,0,0,0.5)", border: toolMode === 'cut' ? "1px solid rgba(59,130,246,0.8)" : "1px solid rgba(255,255,255,0.2)", color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", backdropFilter: "blur(4px)", boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}
+          >
+              {toolMode === 'cut' ? "Kreslete myší přes modely..." : "✂️ Řez"}
+          </button>
+      </div>
+  )
+
   const allLoaded = files.length > 0 && files.every(f => loadedUrls.has(f.url))
   const frameKey = allLoaded && !didInitialFrame ? `frame-${files.length}` : ""
 
   return (
-    <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
+    <div 
+        className="stage" 
+        style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onPointerLeave={handlePointerUp}
+    >
       <PreloadIcons />
       {logoEl}
       {sidebar}
+      {files.length > 0 && toolsMenu}
+
+      {/* SVG Overlay pro kreslení řezu */}
+      {toolMode === 'cut' && cutStartPos && cutCurrentPos && (
+          <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", zIndex: 5, pointerEvents: "none" }}>
+              <line x1={cutStartPos.x} y1={cutStartPos.y} x2={cutCurrentPos.x} y2={cutCurrentPos.y} stroke="#ef4444" strokeWidth="3" strokeDasharray="6 4" />
+          </svg>
+      )}
+
+      {/* Zde se renderuje sekundární okno s Průřezem */}
+      {cutPlane && (
+          <CrossSectionWindow 
+              files={files} colors={colors} opacities={opacities} visibles={visibles} roughnesses={roughnesses} metalnesses={metalnesses} vertexColors={vertexColors}
+              cutPlane={cutPlane} 
+              onFlipCut={() => {
+                  const newPlane = cutPlane.clone().negate()
+                  setCutPlane(newPlane)
+              }}
+              onClose={() => { setCutPlane(null); setNdcCutLine(null) }}
+          />
+      )}
 
       <Canvas
         orthographic
         camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }}
-        gl={{ alpha: true, localClippingEnabled: true }} // Povolení ořezu na Canvasu
+        gl={{ alpha: true, localClippingEnabled: true }}
         onCreated={({ gl }) => gl.setClearAlpha(0)}
-        style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
+        style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent", pointerEvents: toolMode === 'cut' ? 'none' : 'auto' }}
       >
         <ambientLight intensity={0.35 * sceneIntensity} />
         <directionalLight position={[0, 5, 5]} intensity={1.2 * sceneIntensity} />
@@ -1018,24 +1119,13 @@ export default function ClientPage() {
                 metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
                 useVertexColors={vertexColors[i]}
                 keepMaterials={!!f.km}
-                
-                // Nové Props: Řez & Měření
-                clipPlane={clipPlane}
-                clipEnabled={clipEnabled}
-                measureMode={measureMode}
-                onMeasureClick={handleMeasureClick}
-                onMeasureMove={handleMeasureMove}
+                clipPlanes={cutPlane ? [cutPlane] : []}
               />
             ))}
           </Suspense>
         </group>
 
-        {/* Nástroj pro Řezací Rovinu */}
-        <ClippingGizmo plane={clipPlane} enabled={clipEnabled} mode={clipMode} trackballRef={trackballRef} />
-        
-        {/* Nástroj pro vykreslení Měření */}
-        <MeasurementsRenderer points={measurePoints} currentStart={measureStart} currentMouse={measureCurrent} />
-
+        <CutPlaneCalculator ndcLine={ndcCutLine} setCutPlane={setCutPlane} />
         <ViewStateSync trackballRef={trackballRef} />
 
         {frameKey && !initialCameraState && (
@@ -1061,15 +1151,14 @@ export default function ClientPage() {
           />
         )}
 
-        {/* Během měření zablokujeme Trackball, aby se model neotáčel při klikání */}
         <TouchTrackballControls 
             ref={trackballRef} 
             target={cameraTarget} 
-            enabled={!measureMode} 
+            enabled={toolMode === 'none'}
         />
         <RightButtonPan 
             setTarget={setCameraTarget} 
-            enabled={!measureMode} 
+            enabled={toolMode === 'none'}
         />
 
         {!allLoaded && files.length > 0 && <InlineLoader text="Načítám modely…" />}
