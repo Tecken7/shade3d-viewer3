@@ -545,12 +545,17 @@ function Switch({ checked, onChange, label }) {
   )
 }
 
-/* ---------- 2D OVERLAY (MĚŘENÍ A VEKTOROVÉ ČÁRY) ---------- */
+/* ---------- 2D OVERLAY (MĚŘENÍ, PAN/ZOOM A VEKTOROVÉ ČÁRY) ---------- */
 function Overlay2D({ segments, boundingBox }) {
   const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
   const svgRef = useRef(null)
 
-  // Masivní optimalizace: Místo mapování a tisíců `<line>` generujeme jeden rychlý string SVG cesty.
+  // Větší defaultní rozměry
+  const [winSize, setWinSize] = useState({ w: 450, h: 320 })
+  const [pan, setPan] = useState({ x: 0, y: 0 })
+  const [zoom, setZoom] = useState(1)
+
+  // Rychlý render svg path místo stovek dom objektů
   const pathData = useMemo(() => {
       if (!segments || segments.length === 0) return ""
       let d = ""
@@ -573,7 +578,7 @@ function Overlay2D({ segments, boundingBox }) {
   const getSnappedPoint = (mousePoint) => {
     let bestPoint = null
     let minDist = Infinity
-    for (let i = 0; i < segments.length; i++) {
+    for(let i = 0; i < segments.length; i++) {
       const pt = closestPointOnSegment(mousePoint, segments[i][0], segments[i][1])
       const d = distSq(mousePoint, pt)
       if (d < minDist) { minDist = d; bestPoint = pt }
@@ -587,74 +592,169 @@ function Overlay2D({ segments, boundingBox }) {
     return { x: (e.clientX - CTM.e) / CTM.a, y: (e.clientY - CTM.f) / CTM.d }
   }
 
+  // Intercepting wheel events to prevent scrolling the 3D scene underneath
+  useEffect(() => {
+    const el = svgRef.current
+    if (!el) return
+    const handleWheel = (e) => {
+       e.preventDefault()
+       e.stopPropagation()
+       const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85
+       setZoom(z => Math.max(0.1, Math.min(20, z * zoomFactor)))
+    }
+    el.addEventListener('wheel', handleWheel, { passive: false })
+    return () => el.removeEventListener('wheel', handleWheel)
+  }, [])
+
+  // Draggable logic for panning viewport
+  const isDragging = useRef(false)
+  const lastPos = useRef({ x: 0, y: 0 })
+  const hasMoved = useRef(false)
+
+  const handlePointerDown = (e) => {
+    if (e.button !== 0 && e.button !== 1 && e.button !== 2) return
+    isDragging.current = true
+    hasMoved.current = false
+    lastPos.current = { x: e.clientX, y: e.clientY }
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+
+  const handlePointerMove = (e) => {
+    if (isDragging.current) {
+        const dx = e.clientX - lastPos.current.x
+        const dy = e.clientY - lastPos.current.y
+        if (Math.abs(dx) > 2 || Math.abs(dy) > 2) hasMoved.current = true
+        
+        if (boundingBox) {
+            const padX = boundingBox.width * 0.1 || 10
+            const padY = boundingBox.height * 0.1 || 10
+            const vW = (boundingBox.width + padX * 2) / zoom
+            const vH = (boundingBox.height + padY * 2) / zoom
+            const scaleX = vW / winSize.w
+            const scaleY = vH / winSize.h
+            setPan(p => ({ x: p.x - dx * scaleX, y: p.y + dy * scaleY }))
+        }
+        lastPos.current = { x: e.clientX, y: e.clientY }
+    } else if (measureState.active && segments.length > 0) {
+        const pos = getLogicalMousePos(e)
+        const snap = getSnappedPoint(pos)
+        setMeasureState(prev => ({ ...prev, p2: pos, snappedP2: snap }))
+    }
+  }
+
+  const handlePointerUp = (e) => {
+    isDragging.current = false
+    e.currentTarget.releasePointerCapture(e.pointerId)
+    // Pokud jsme jen klikli (netáhli), dokončujeme měření
+    if (!hasMoved.current && e.button === 0) {
+        if (measureState.active) {
+            const pos = getLogicalMousePos(e)
+            const snap = getSnappedPoint(pos)
+            setMeasureState(prev => ({ ...prev, active: false, p2: snap, snappedP2: snap }))
+        }
+    }
+  }
+
   const handleDoubleClick = (e) => {
     if (segments.length === 0) return
     const pos = getLogicalMousePos(e)
     const snap = getSnappedPoint(pos)
     setMeasureState({ active: true, p1: snap, p2: snap, snappedP2: snap })
   }
-
-  const handleMouseMove = (e) => {
-    if (!measureState.active || segments.length === 0) return
-    const pos = getLogicalMousePos(e)
-    const snap = getSnappedPoint(pos)
-    setMeasureState(prev => ({ ...prev, p2: pos, snappedP2: snap }))
-  }
-
-  const handleClick = (e) => {
-    if (!measureState.active) return
-    const pos = getLogicalMousePos(e)
-    const snap = getSnappedPoint(pos)
-    setMeasureState(prev => ({ ...prev, active: false, p2: snap, snappedP2: snap }))
-  }
   
   const handleContextMenu = (e) => {
+    e.preventDefault()
     if (measureState.active || measureState.p1) {
-      e.preventDefault()
       setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
     }
   }
 
+  // Změna velikosti celého okna tažením za ucho (resize handles)
+  const startResize = (e, dir) => {
+      e.stopPropagation()
+      const startW = winSize.w
+      const startH = winSize.h
+      const startX = e.clientX
+      const startY = e.clientY
+      const onMove = (me) => {
+          let newW = startW
+          let newH = startH
+          if (dir.includes('left')) newW = startW + (startX - me.clientX)
+          if (dir.includes('right')) newW = startW + (me.clientX - startX)
+          if (dir.includes('top')) newH = startH + (startY - me.clientY)
+
+          setWinSize({ w: Math.max(250, newW), h: Math.max(200, newH) })
+      }
+      const onUp = () => {
+          window.removeEventListener('pointermove', onMove)
+          window.removeEventListener('pointerup', onUp)
+      }
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+  }
+
   if (!boundingBox) return null
 
+  // Výpočet finálního viewBoxu (skládá BoundingBox vrstvy, uživatelský Pan a uživatelský Zoom)
   const padX = boundingBox.width * 0.1 || 10
   const padY = boundingBox.height * 0.1 || 10
-  const vBox = `${boundingBox.minX - padX} ${boundingBox.minY - padY} ${boundingBox.width + padX * 2} ${boundingBox.height + padY * 2}`
+  const baseW = boundingBox.width + padX * 2
+  const baseH = boundingBox.height + padY * 2
+  const vW = baseW / zoom
+  const vH = baseH / zoom
+  const vX = boundingBox.minX - padX + pan.x + (baseW - vW)/2
+  const vY = boundingBox.minY - padY + pan.y + (baseH - vH)/2
+
+  const vBox = `${vX} ${vY} ${vW} ${vH}`
 
   const distVal = measureState.p1 && measureState.snappedP2 
       ? Math.sqrt(distSq(measureState.p1, measureState.snappedP2)).toFixed(2) 
       : null
 
+  // Umístění vlevo dole
   return (
     <div 
       style={{
-        position: 'absolute', bottom: 20, right: 20, width: 320, height: 260,
+        position: 'absolute', bottom: 20, left: 20, width: winSize.w, height: winSize.h,
         background: '#1a1a1a', border: '1px solid #444', borderRadius: 8,
-        zIndex: 100, overflow: 'hidden', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-        cursor: measureState.active ? 'crosshair' : 'default'
+        zIndex: 100, overflow: 'visible', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+        cursor: measureState.active ? 'crosshair' : 'grab'
       }}
-      onDoubleClick={handleDoubleClick}
-      onMouseMove={handleMouseMove}
-      onClick={handleClick}
-      onContextMenu={handleContextMenu}
     >
-      <div style={{ position: 'absolute', top: 8, left: 8, fontSize: 11, color: '#aaa', pointerEvents: 'none' }}>
-        Dvojklik = start, Klik = konec, Pravé tl. = zrušit
+      {/* Nápověda a hodnota */}
+      <div style={{ position: 'absolute', top: 8, left: 16, fontSize: 11, color: '#aaa', pointerEvents: 'none', zIndex: 11 }}>
+        Levé tl. = posun, Kolečko = zoom<br/>Dvojklik = měření
       </div>
-      
       {distVal && (
-        <div style={{ position: 'absolute', top: 8, right: 8, fontSize: 16, fontWeight: 'bold', color: '#fbbf24', pointerEvents: 'none' }}>
+        <div style={{ position: 'absolute', top: 8, right: 16, fontSize: 18, fontWeight: 'bold', color: '#fbbf24', pointerEvents: 'none', zIndex: 11, textShadow: "0 2px 4px rgba(0,0,0,0.8)" }}>
           {distVal} mm
         </div>
       )}
 
+      {/* Resize uchytky */}
+      <div 
+        onPointerDown={(e) => startResize(e, 'top-left')}
+        style={{ position: 'absolute', top: -5, left: -5, width: 16, height: 16, cursor: 'nwse-resize', zIndex: 12, background: 'rgba(255,255,255,0.15)', borderRadius: '50%' }}
+        title="Zvětšit/Zmenšit"
+      />
+      <div 
+        onPointerDown={(e) => startResize(e, 'top-right')}
+        style={{ position: 'absolute', top: -5, right: -5, width: 16, height: 16, cursor: 'nesw-resize', zIndex: 12, background: 'rgba(255,255,255,0.15)', borderRadius: '50%' }}
+        title="Zvětšit/Zmenšit"
+      />
+
+      {/* SVG kreslící plátno */}
       <svg 
         ref={svgRef} 
         width="100%" height="100%" 
         viewBox={vBox}
-        style={{ display: 'block', transform: 'scale(1, -1)' }}
+        style={{ display: 'block', transform: 'scale(1, -1)', borderRadius: 8, overflow: 'hidden' }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onDoubleClick={handleDoubleClick}
+        onContextMenu={handleContextMenu}
       >
-        {/* Render obří vektorové čáry jako jednu jedinou cestu, nezahlcuje DOM */}
         <path d={pathData} stroke="#ffffff" strokeWidth={(boundingBox.width/300) * 1.5 || 0.5} strokeLinecap="round" strokeLinejoin="round" fill="none" />
 
         {measureState.p1 && (
@@ -717,6 +817,7 @@ export default function ClientPage() {
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
   const isDraggingGizmo = useRef(false)
+  const [orbitEnabled, setOrbitEnabled] = useState(true) // STAV PRO ZABLOKOVÁNÍ KAMERY BĚHEM TAŽENÍ GIMBALU
 
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
@@ -738,7 +839,6 @@ export default function ClientPage() {
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
-  // Obří optimalizace výpočetní matematiky (0 alokací Vector3 uvnitř smyčky)
   const updateClippingLogic = useCallback(() => {
     if (!planeGroupRef.current || !rootGroupRef.current) return
 
@@ -751,7 +851,6 @@ export default function ClientPage() {
     const invMat = planeGroupRef.current.matrixWorld.clone().invert()
     const plane = clipPlaneRef.current
 
-    // Znovupoužitelné objekty zabrání pádu aplikace přes Garbage Collector
     const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3()
     const edgePt = new THREE.Vector3(), locPt = new THREE.Vector3()
 
@@ -1122,7 +1221,7 @@ export default function ClientPage() {
                 style={{ flex: 1, padding: "6px", background: clipMode === "rotate" ? "#3b82f6" : "rgba(255,255,255,.1)", border: "none", color: "#fff", borderRadius: 4, cursor: "pointer", fontWeight: "bold" }}
               >Rotace</button>
             </div>
-            <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>Gimbalem ovládejte rovinu. Šipkami na klávesnici posouvejte řez.</p>
+            <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>Gimbalem ovládejte rovinu. Šipkami posouvejte řez.</p>
           </div>
         )}
       </div>
@@ -1146,7 +1245,7 @@ export default function ClientPage() {
         camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }}
         onCreated={({ gl }) => {
             gl.setClearAlpha(0)
-            gl.localClippingEnabled = true // Zásadní - aplikováno přesně po vytvoření Canvasu
+            gl.localClippingEnabled = true 
         }}
         style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
       >
@@ -1185,10 +1284,15 @@ export default function ClientPage() {
         {clippingEnabled && (
           <TransformControls 
             mode={clipMode}
-            onMouseDown={() => { isDraggingGizmo.current = true }}
-            onMouseUp={() => { isDraggingGizmo.current = false; updateClippingLogic() }}
+            onDraggingChanged={(e) => {
+               // Toto dočasně deaktivuje rotaci kamery při táhnutí nástroje
+               setOrbitEnabled(!e.value)
+               isDraggingGizmo.current = e.value
+               if (!e.value) updateClippingLogic() // Po puštění updatneme řez
+            }}
             onChange={() => {
               if (isDraggingGizmo.current && planeGroupRef.current) {
+                // Skutečný průběžný řez (vizuální on-the-fly)
                 planeGroupRef.current.updateMatrixWorld(true)
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroupRef.current.matrixWorld).normalize()
                 const pos = new THREE.Vector3().setFromMatrixPosition(planeGroupRef.current.matrixWorld)
@@ -1230,8 +1334,9 @@ export default function ClientPage() {
           />
         )}
 
-        <TouchTrackballControls ref={trackballRef} target={cameraTarget} enabled={!clippingEnabled} />
-        <RightButtonPan setTarget={setCameraTarget} enabled={!clippingEnabled} />
+        {/* Orbit control je povolen, pokud netáhneme gimbalem */}
+        <TouchTrackballControls ref={trackballRef} target={cameraTarget} enabled={orbitEnabled} />
+        <RightButtonPan setTarget={setCameraTarget} enabled={orbitEnabled} />
 
         {!allLoaded && files.length > 0 && <InlineLoader text="Načítám modely…" />}
       </Canvas>
