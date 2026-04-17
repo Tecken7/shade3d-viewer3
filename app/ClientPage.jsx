@@ -316,7 +316,6 @@ function RightButtonPan({ setTarget, trackballRef }) {
     const onContext = (e) => { e.preventDefault() }
 
     const onDown = (e) => {
-      // Blokování vlastního panu, pokud je kamera uzamčená Gimbalem
       if (trackballRef && trackballRef.current && !trackballRef.current.enabled) return;
       if ((e.button !== 2) && !(e.button === 0 && e.ctrlKey)) return
       e.preventDefault()
@@ -546,7 +545,8 @@ function Overlay2D({ segments, boundingBox }) {
   const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
   const svgRef = useRef(null)
 
-  const [winSize, setWinSize] = useState({ w: 450, h: 320 })
+  // Větší výchozí okno (bylo 450x320)
+  const [winSize, setWinSize] = useState({ w: 550, h: 400 })
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [zoom, setZoom] = useState(1)
 
@@ -585,19 +585,6 @@ function Overlay2D({ segments, boundingBox }) {
     const CTM = svgRef.current.getScreenCTM()
     return { x: (e.clientX - CTM.e) / CTM.a, y: (e.clientY - CTM.f) / CTM.d }
   }
-
-  useEffect(() => {
-    const el = svgRef.current
-    if (!el) return
-    const handleWheel = (e) => {
-       e.preventDefault()
-       e.stopPropagation()
-       const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85
-       setZoom(z => Math.max(0.1, Math.min(20, z * zoomFactor)))
-    }
-    el.addEventListener('wheel', handleWheel, { passive: false })
-    return () => el.removeEventListener('wheel', handleWheel)
-  }, [])
 
   const isDragging = useRef(false)
   const lastPos = useRef({ x: 0, y: 0 })
@@ -702,8 +689,14 @@ function Overlay2D({ segments, boundingBox }) {
 
   return (
     <div 
+      // Změněno na Reactí onWheel zachycující scroll
+      onWheel={(e) => {
+         e.stopPropagation()
+         const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85
+         setZoom(z => Math.max(0.1, Math.min(20, z * zoomFactor)))
+      }}
       style={{
-        position: 'absolute', bottom: 20, right: 20, width: winSize.w, height: winSize.h, // ZDE JE ZMĚNA right: 20
+        position: 'absolute', bottom: 20, right: 20, width: winSize.w, height: winSize.h,
         background: '#1a1a1a', border: '1px solid #444', borderRadius: 8,
         zIndex: 100, overflow: 'visible', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
         cursor: measureState.active ? 'crosshair' : 'grab'
@@ -812,6 +805,7 @@ export default function ClientPage() {
   const [clippingEnabled, setClippingEnabled] = useState(false)
   const [clipMode, setClipMode] = useState("translate")
   const [planeGroup, setPlaneGroup] = useState(null) 
+  const [planeRadius, setPlaneRadius] = useState(100) // Dynamická velikost roviny
   const clipPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(1, 0, 0), 0))
   const transformRef = useRef(null) 
   const [sliceSegments, setSliceSegments] = useState([])
@@ -964,8 +958,16 @@ export default function ClientPage() {
         if (!box.isEmpty()) {
            const center = new THREE.Vector3()
            box.getCenter(center)
+
+           // Vypočteme si obalovou sféru modelů, rovinu uděláme o 30% větší
+           const sphere = new THREE.Sphere()
+           box.getBoundingSphere(sphere)
+           setPlaneRadius(sphere.radius * 1.3)
+           
            planeGroup.position.copy(center)
-           planeGroup.rotation.set(0, 0, 0)
+           
+           // Výchozí rotace pro VERTIKÁLNÍ (sagitální) řez
+           planeGroup.rotation.set(0, Math.PI / 2, 0)
            planeGroup.updateMatrixWorld(true)
            
            const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
@@ -1295,8 +1297,9 @@ export default function ClientPage() {
         {clippingEnabled && (
           <group ref={setPlaneGroup}>
             <mesh>
-              <planeGeometry args={[200, 200]} />
-              <meshBasicMaterial color="#3b82f6" transparent opacity={0.1} side={THREE.DoubleSide} depthWrite={false} />
+              {/* Kulatá poloprůhledná rovina přesně podle Smilecloudu */}
+              <circleGeometry args={[planeRadius, 64]} />
+              <meshBasicMaterial color="#d95a5a" transparent opacity={0.35} side={THREE.DoubleSide} depthWrite={false} />
             </mesh>
           </group>
         )}
@@ -1306,6 +1309,7 @@ export default function ClientPage() {
             ref={transformRef}
             object={planeGroup}
             mode={clipMode}
+            space="local" // Lokální osy naprosto zásadní pro pohodlný přesun natočené roviny
             onChange={() => {
               if (planeGroup) {
                 // Přímá synchronizace roviny při tažení
@@ -1314,7 +1318,7 @@ export default function ClientPage() {
                 const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
                 clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
                 
-                // LIVE UPDATE 2D OKNA
+                // LIVE UPDATE 2D OKNA BĚHEM TAŽENÍ
                 updateClippingLogic() 
               }
             }}
