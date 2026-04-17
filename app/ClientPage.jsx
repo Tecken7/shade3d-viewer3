@@ -1,9 +1,9 @@
 "use client"
 
-import React, { Suspense, useEffect, useMemo, useRef, useState } from "react"
+import React, { Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react"
 import { Canvas, useThree, useFrame } from "@react-three/fiber"
 import * as THREE from "three"
-import { Html } from "@react-three/drei"
+import { Html, TransformControls } from "@react-three/drei"
 import { TrackballControls } from "three/examples/jsm/controls/TrackballControls"
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader"
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader"
@@ -124,6 +124,7 @@ function AnyModel({
   useVertexColors = false,
   keepMaterials = false,
   wireframe = false,
+  clipPlane = null, // PŘIDÁNO: Podpora globální roviny řezu
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
@@ -137,6 +138,7 @@ function AnyModel({
       opacity,
       side: THREE.DoubleSide,
       depthWrite: opacity === 1,
+      clippingPlanes: clipPlane ? [clipPlane] : [], // PŘIDÁNO: Clipping planes
       ...opts,
     })
 
@@ -191,6 +193,8 @@ function AnyModel({
                 if ("opacity" in m) m.opacity = opacity
                 if ("roughness" in m && typeof roughness === "number") m.roughness = roughness
                 if ("metalness" in m && typeof metalness === "number") m.metalness = metalness
+                m.clippingPlanes = clipPlane ? [clipPlane] : []
+                m.side = THREE.DoubleSide
               }
             })
             obj = loaded
@@ -240,6 +244,7 @@ function AnyModel({
         if ("metalness" in m && typeof metalness === "number") m.metalness = metalness
         if (!useVertexColors && "color" in m && color) m.color = new THREE.Color(color)
         if (useVertexColors && "vertexColors" in m) { m.vertexColors = true; if ("color" in m) m.color = new THREE.Color("#ffffff") }
+        m.clippingPlanes = clipPlane ? [clipPlane] : [] // PŘIDÁNO
         m.needsUpdate = true
       } else {
         const hasVC = !!child.geometry.getAttribute?.("color")
@@ -248,7 +253,7 @@ function AnyModel({
       if (child.userData._edges) child.userData._edges.visible = !!wireframe
       else if (wireframe) rebuildWireOverlay(child)
     })
-  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe])
+  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, clipPlane])
 
   if (!object3D) return null
   return visible ? <primitive object={object3D} /> : null
@@ -263,7 +268,7 @@ function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
 }
 
 /* ---------- Trackball ---------- */
-const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0] }, ref) => {
+const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], enabled = true }, ref) => {
   const { camera, gl, size } = useThree()
   const controlsRef = useRef(null)
   
@@ -282,6 +287,10 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0] }, ref) =>
   }, [camera, gl])
   
   useEffect(() => {
+    if(controlsRef.current) controlsRef.current.enabled = enabled
+  }, [enabled])
+
+  useEffect(() => {
     const c = controlsRef.current; if (!c) return
     c.target.set(target[0], target[1], target[2])
     c.update()
@@ -292,8 +301,8 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0] }, ref) =>
   return null
 })
 
-/* ---------- Vlastní pan (OPRAVEN ZÁSEK TLAČÍTKA) ---------- */
-function RightButtonPan({ setTarget }) {
+/* ---------- Vlastní pan ---------- */
+function RightButtonPan({ setTarget, enabled = true }) {
   const { camera, gl, size } = useThree()
   const isPanning = useRef(false)
   const last = useRef({ x: 0, y: 0 })
@@ -305,6 +314,7 @@ function RightButtonPan({ setTarget }) {
   const deltaWorld = new THREE.Vector3()
 
   useEffect(() => {
+    if(!enabled) return;
     const el = gl.domElement
 
     const onContext = (e) => { e.preventDefault() }
@@ -352,7 +362,6 @@ function RightButtonPan({ setTarget }) {
       }
     }
 
-    // Bezpečné uvolnění pro všechny případy
     const onUp = (e) => {
       if (!isPanning.current) return
       e.preventDefault()
@@ -364,7 +373,6 @@ function RightButtonPan({ setTarget }) {
       }
     }
 
-    // Navázáno přímo na plátno (nejspolehlivější pro capture)
     el.addEventListener("contextmenu", onContext)
     el.addEventListener("pointerdown", onDown)
     el.addEventListener("pointermove", onMove)
@@ -380,7 +388,7 @@ function RightButtonPan({ setTarget }) {
       el.removeEventListener("pointercancel", onUp)
       el.removeEventListener("pointerleave", onUp)
     }
-  }, [camera, gl, size.width, size.height, setTarget])
+  }, [camera, gl, size.width, size.height, setTarget, enabled])
 
   return null
 }
@@ -436,12 +444,12 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
     if (setTarget) setTarget([ctr.x, ctr.y, ctr.z])
 
     onFramed && onFramed()
-  }, [triggerKey]) // eslint-disable-line
+  }, [triggerKey]) 
   
   return null
 }
 
-/* ---------- Nasazení uložené kamery (OPRAVA RESIZU ZOOMU) ---------- */
+/* ---------- Nasazení uložené kamery ---------- */
 function CustomCameraSetter({ camState, triggerKey, onFramed, setTarget }) {
   const { camera, size } = useThree()
   
@@ -454,7 +462,6 @@ function CustomCameraSetter({ camState, triggerKey, onFramed, setTarget }) {
     }
     if (camState.up) camera.up.fromArray(camState.up)
     
-    // Responzivní Zoom
     if (camState.zoom) {
        if (camState.canvasSize) {
           const savedMin = Math.min(camState.canvasSize[0], camState.canvasSize[1])
@@ -472,7 +479,7 @@ function CustomCameraSetter({ camState, triggerKey, onFramed, setTarget }) {
     }
 
     onFramed && onFramed()
-  }, [triggerKey, camState, camera, setTarget, size.width, size.height]) // Přepočítá při změně okna
+  }, [triggerKey, camState, camera, setTarget, size.width, size.height])
 
   return null
 }
@@ -492,7 +499,7 @@ function ViewStateSync({ trackballRef }) {
         matrix: camera.matrix.toArray(),
         up: [camera.up.x, camera.up.y, camera.up.z],
         zoom: camera.zoom,
-        canvasSize: [size.width, size.height], // Ukládáme rozměry pro responzivní zoom
+        canvasSize: [size.width, size.height],
         target: [c.target.x, c.target.y, c.target.z] 
       }
       
@@ -536,6 +543,134 @@ function Switch({ checked, onChange, label }) {
   )
 }
 
+/* ---------- 2D OVERLAY (MĚŘENÍ A VEKTOROVÉ ČÁRY) ---------- */
+function Overlay2D({ segments, boundingBox }) {
+  const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
+  const svgRef = useRef(null)
+
+  // Pomocné funkce pro matematiku snapování
+  const distSq = (v, w) => Math.pow(v.x - w.x, 2) + Math.pow(v.y - w.y, 2)
+  const closestPointOnSegment = (p, v, w) => {
+    const l2 = distSq(v, w)
+    if (l2 === 0) return v
+    let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2
+    t = Math.max(0, Math.min(1, t))
+    return { x: v.x + t * (w.x - v.x), y: v.y + t * (w.y - v.y) }
+  }
+
+  const getSnappedPoint = (mousePoint) => {
+    let bestPoint = null
+    let minDist = Infinity
+    segments.forEach(seg => {
+      const pt = closestPointOnSegment(mousePoint, seg[0], seg[1])
+      const d = distSq(mousePoint, pt)
+      if (d < minDist) { minDist = d; bestPoint = pt }
+    })
+    // Snap threshold pro volný pohyb je velmi velký, aby to působilo "magneticky" všude
+    return bestPoint || mousePoint 
+  }
+
+  const getLogicalMousePos = (e) => {
+    if (!svgRef.current) return { x: 0, y: 0 }
+    const CTM = svgRef.current.getScreenCTM()
+    return { x: (e.clientX - CTM.e) / CTM.a, y: (e.clientY - CTM.f) / CTM.d }
+  }
+
+  const handleDoubleClick = (e) => {
+    if (segments.length === 0) return
+    const pos = getLogicalMousePos(e)
+    const snap = getSnappedPoint(pos)
+    setMeasureState({ active: true, p1: snap, p2: snap, snappedP2: snap })
+  }
+
+  const handleMouseMove = (e) => {
+    if (!measureState.active || segments.length === 0) return
+    const pos = getLogicalMousePos(e)
+    const snap = getSnappedPoint(pos)
+    setMeasureState(prev => ({ ...prev, p2: pos, snappedP2: snap }))
+  }
+
+  const handleClick = (e) => {
+    if (!measureState.active) return
+    // Dokončení měření
+    const pos = getLogicalMousePos(e)
+    const snap = getSnappedPoint(pos)
+    setMeasureState(prev => ({ ...prev, active: false, p2: snap, snappedP2: snap }))
+  }
+  
+  // Zrušení pravým tlačítkem
+  const handleContextMenu = (e) => {
+    if (measureState.active || measureState.p1) {
+      e.preventDefault()
+      setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
+    }
+  }
+
+  if (!boundingBox) return null
+
+  const padX = boundingBox.width * 0.1 || 10
+  const padY = boundingBox.height * 0.1 || 10
+  const vBox = `${boundingBox.minX - padX} ${boundingBox.minY - padY} ${boundingBox.width + padX * 2} ${boundingBox.height + padY * 2}`
+
+  const distVal = measureState.p1 && measureState.snappedP2 
+      ? Math.sqrt(distSq(measureState.p1, measureState.snappedP2)).toFixed(2) 
+      : null
+
+  return (
+    <div 
+      style={{
+        position: 'absolute', bottom: 20, right: 20, width: 320, height: 260,
+        background: '#1a1a1a', border: '1px solid #444', borderRadius: 8,
+        zIndex: 100, overflow: 'hidden', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+        cursor: measureState.active ? 'crosshair' : 'default'
+      }}
+      onDoubleClick={handleDoubleClick}
+      onMouseMove={handleMouseMove}
+      onClick={handleClick}
+      onContextMenu={handleContextMenu}
+    >
+      {/* Informační text */}
+      <div style={{ position: 'absolute', top: 8, left: 8, fontSize: 11, color: '#aaa', pointerEvents: 'none' }}>
+        Dvojklik = start, Klik = konec, Pravé tl. = zrušit
+      </div>
+      
+      {distVal && (
+        <div style={{ position: 'absolute', top: 8, right: 8, fontSize: 16, fontWeight: 'bold', color: '#fbbf24', pointerEvents: 'none' }}>
+          {distVal} mm
+        </div>
+      )}
+
+      <svg 
+        ref={svgRef} 
+        width="100%" height="100%" 
+        viewBox={vBox}
+        style={{ display: 'block', transform: 'scale(1, -1)' }} // Invert Y aby odpovídalo 3D
+      >
+        <g stroke="#ffffff" strokeWidth={(boundingBox.width/300) * 1.5 || 0.5} strokeLinecap="round" strokeLinejoin="round" fill="none">
+          {segments.map((seg, i) => (
+            <line key={i} x1={seg[0].x} y1={seg[0].y} x2={seg[1].x} y2={seg[1].y} />
+          ))}
+        </g>
+
+        {measureState.p1 && (
+          <circle cx={measureState.p1.x} cy={measureState.p1.y} r={(boundingBox.width/300) * 4 || 1} fill="#fbbf24" />
+        )}
+        
+        {measureState.p1 && measureState.snappedP2 && (
+          <>
+            <line 
+              x1={measureState.p1.x} y1={measureState.p1.y} 
+              x2={measureState.snappedP2.x} y2={measureState.snappedP2.y} 
+              stroke="#fbbf24" strokeWidth={(boundingBox.width/300) * 1.5 || 0.5} opacity={0.7}
+            />
+            <circle cx={measureState.snappedP2.x} cy={measureState.snappedP2.y} r={(boundingBox.width/300) * 4 || 1} fill="#fbbf24" />
+          </>
+        )}
+      </svg>
+    </div>
+  )
+}
+
 /* ---------- Hlavní komponenta ---------- */
 export default function ClientPage() {
   const [sceneIntensity, setSceneIntensity] = useState(1)
@@ -562,13 +697,21 @@ export default function ClientPage() {
   const [visibles, setVisibles] = useState([])
   const [roughnesses, setRoughnesses] = useState([])
   const [metalnesses, setMetalnesses] = useState([])
-  // PŘIDÁNO: Textury
   const [vertexColors, setVertexColors] = useState([])
   const [fatal, setFatal] = useState(null)
 
   const [autoSmooth, setAutoSmooth] = useState(true)
   const [smoothAngle] = useState(30)
   const [wireframe, setWireframe] = useState(false)
+
+  // -- STAVY PRO ŘEZÁNÍ (CLIPPING) --
+  const [clippingEnabled, setClippingEnabled] = useState(false)
+  const [clipMode, setClipMode] = useState("translate") // translate nebo rotate
+  const planeGroupRef = useRef(null)
+  const clipPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(1, 0, 0), 0))
+  const [sliceSegments, setSliceSegments] = useState([])
+  const [sliceBBox, setSliceBBox] = useState(null)
+  const isDraggingGizmo = useRef(false)
 
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
@@ -589,6 +732,114 @@ export default function ClientPage() {
 
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
+
+  // Aktualizace matematické roviny a výpočet 2D průsečíků
+  const updateClippingLogic = useCallback(() => {
+    if (!planeGroupRef.current || !rootGroupRef.current) return
+
+    planeGroupRef.current.updateMatrixWorld(true)
+    const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroupRef.current.matrixWorld).normalize()
+    const pos = new THREE.Vector3().setFromMatrixPosition(planeGroupRef.current.matrixWorld)
+    clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
+
+    // Výpočet 2D řezu pro SVG okno
+    const segments2D = []
+    const invMat = planeGroupRef.current.matrixWorld.clone().invert()
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
+    const plane = clipPlaneRef.current
+
+    rootGroupRef.current.children.forEach(child => {
+       if (!child.isMesh || !child.visible) return
+       
+       child.updateMatrixWorld(true)
+       const geom = child.geometry
+       const posAttr = geom.attributes.position
+       const index = geom.index
+       const matrix = child.matrixWorld
+
+       const checkEdge = (v1, v2) => {
+           const d1 = plane.distanceToPoint(v1)
+           const d2 = plane.distanceToPoint(v2)
+           if (d1 * d2 < 0) {
+               const t = d1 / (d1 - d2)
+               return new THREE.Vector3().copy(v1).lerp(v2, t)
+           }
+           if (d1 === 0) return v1.clone()
+           return null
+       }
+
+       const processTri = (iA, iB, iC) => {
+           a.fromBufferAttribute(posAttr, iA).applyMatrix4(matrix)
+           b.fromBufferAttribute(posAttr, iB).applyMatrix4(matrix)
+           c.fromBufferAttribute(posAttr, iC).applyMatrix4(matrix)
+
+           const pts = []
+           const p1 = checkEdge(a, b); if(p1) pts.push(p1)
+           const p2 = checkEdge(b, c); if(p2 && (!p1 || p1.distanceToSq(p2)>1e-10)) pts.push(p2)
+           const p3 = checkEdge(c, a); if(p3 && pts.length < 2 && (!pts[0] || pts[0].distanceToSq(p3)>1e-10)) pts.push(p3)
+
+           if(pts.length === 2) {
+               // Převod 3D bodu do lokálního 2D prostoru roviny
+               const loc1 = pts[0].clone().applyMatrix4(invMat)
+               const loc2 = pts[1].clone().applyMatrix4(invMat)
+               segments2D.push([{ x: loc1.x, y: loc1.y }, { x: loc2.x, y: loc2.y }])
+           }
+       }
+
+       if (index) {
+           for(let i=0; i<index.count; i+=3) processTri(index.getX(i), index.getX(i+1), index.getX(i+2))
+       } else {
+           for(let i=0; i<posAttr.count; i+=3) processTri(i, i+1, i+2)
+       }
+    })
+
+    setSliceSegments(segments2D)
+
+    // Výpočet Bounding Boxu pro SVG
+    if (segments2D.length > 0) {
+       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+       segments2D.forEach(seg => {
+           seg.forEach(p => {
+               if(p.x < minX) minX = p.x; if(p.x > maxX) maxX = p.x;
+               if(p.y < minY) minY = p.y; if(p.y > maxY) maxY = p.y;
+           })
+       })
+       setSliceBBox({ minX, minY, width: maxX - minX, height: maxY - minY })
+    } else {
+       setSliceBBox(null)
+    }
+
+  }, [])
+
+  // Posun roviny pomocí šipek
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (!clippingEnabled || !planeGroupRef.current) return
+      const step = 0.5 // Rychlost posunu šipkami
+      if (e.key === "ArrowUp" || e.key === "ArrowRight") {
+         planeGroupRef.current.translateZ(step)
+         updateClippingLogic()
+      } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
+         planeGroupRef.current.translateZ(-step)
+         updateClippingLogic()
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [clippingEnabled, updateClippingLogic])
+
+  // Úvodní inicializace roviny na střed modelů
+  useEffect(() => {
+     if (clippingEnabled && rootGroupRef.current && planeGroupRef.current) {
+        const box = new THREE.Box3().setFromObject(rootGroupRef.current)
+        if (!box.isEmpty()) {
+           const center = new THREE.Vector3()
+           box.getCenter(center)
+           planeGroupRef.current.position.copy(center)
+           updateClippingLogic()
+        }
+     }
+  }, [clippingEnabled, updateClippingLogic])
 
   useEffect(() => {
     ;(async () => {
@@ -771,7 +1022,6 @@ export default function ClientPage() {
   ) : (
     <>
       {files.map((f, i) => (
-        // PŘIDÁNO TLAČÍTKO "TEX" (upraven grid z 36px na 32px pro TEX a 36px pro oko)
         <div key={`${f.url}-${i}`} className="control-row" style={{ display: "grid", gridTemplateColumns: "36px 1fr 32px 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
           <div className="row-label" style={{ gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.rawName || f.name}>{stripExt(f.name)}:</div>
           
@@ -779,7 +1029,6 @@ export default function ClientPage() {
           
           <input className="slider" type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => { const v = parseFloat(e.target.value); setOpacities((prev) => prev.map((x, idx) => (idx === i ? v : x))) }} style={{ width: "calc(100% - 12px)", minWidth: 110 }} aria-label={`${f.name} opacity`} />
           
-          {/* TLAČÍTKO TEX */}
           <button 
             onClick={() => setVertexColors(prev => prev.map((v, idx) => idx === i ? !v : v))}
             title="Přepnout texturu / vertex colors"
@@ -800,6 +1049,25 @@ export default function ClientPage() {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
         <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
         <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
+      </div>
+
+      <div style={{ marginTop: 15, paddingTop: 10, borderTop: "1px solid rgba(255,255,255,.15)" }}>
+        <Switch checked={clippingEnabled} onChange={setClippingEnabled} label="Nástroj řezu (Průřez)" />
+        {clippingEnabled && (
+          <div style={{ marginTop: 10, fontSize: 12 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              <button 
+                onClick={() => setClipMode("translate")}
+                style={{ flex: 1, padding: "4px", background: clipMode === "translate" ? "#3b82f6" : "rgba(255,255,255,.1)", border: "none", color: "#fff", borderRadius: 4, cursor: "pointer" }}
+              >Posun</button>
+              <button 
+                onClick={() => setClipMode("rotate")}
+                style={{ flex: 1, padding: "4px", background: clipMode === "rotate" ? "#3b82f6" : "rgba(255,255,255,.1)", border: "none", color: "#fff", borderRadius: 4, cursor: "pointer" }}
+              >Rotace</button>
+            </div>
+            <p style={{ margin: 0, color: "#ccc" }}>Gimbalem ovládejte rovinu. Šipkami na klávesnici lze řez posouvat vpřed/vzad.</p>
+          </div>
+        )}
       </div>
     </>
   )
@@ -837,10 +1105,13 @@ export default function ClientPage() {
       {logoEl}
       {sidebar}
 
+      {/* 2D Měřící okno zobrazené, pokud je aktivní řez */}
+      {clippingEnabled && <Overlay2D segments={sliceSegments} boundingBox={sliceBBox} />}
+
       <Canvas
         orthographic
         camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }}
-        gl={{ alpha: true }}
+        gl={{ alpha: true, localClippingEnabled: true }} // POVOLENO localClippingEnabled
         onCreated={({ gl }) => gl.setClearAlpha(0)}
         style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
       >
@@ -868,11 +1139,39 @@ export default function ClientPage() {
                 wireframe={wireframe}
                 roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.5)}
                 metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
-                useVertexColors={vertexColors[i]} // PROPOJENO S NOVÝM TLAČÍTKEM
+                useVertexColors={vertexColors[i]}
                 keepMaterials={!!f.km}
+                clipPlane={clippingEnabled ? clipPlaneRef.current : null} // Předání roviny
               />
             ))}
           </Suspense>
+        </group>
+
+        {/* Nástroj TransformControls (Gimbal) pro ovládání řezu */}
+        {clippingEnabled && (
+          <TransformControls 
+            object={planeGroupRef} 
+            mode={clipMode}
+            onMouseDown={() => { isDraggingGizmo.current = true }}
+            onMouseUp={() => { isDraggingGizmo.current = false; updateClippingLogic() }}
+            onChange={() => {
+              if (isDraggingGizmo.current) {
+                // Přepočet 3D roviny on-the-fly pro vizuál
+                planeGroupRef.current.updateMatrixWorld(true)
+                const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroupRef.current.matrixWorld).normalize()
+                const pos = new THREE.Vector3().setFromMatrixPosition(planeGroupRef.current.matrixWorld)
+                clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
+              }
+            }}
+          />
+        )}
+        
+        {/* Neviditelný helper objekt sloužící jako pivot pro gimbal */}
+        <group ref={planeGroupRef}>
+           <mesh visible={clippingEnabled}>
+             <planeGeometry args={[200, 200]} />
+             <meshBasicMaterial color="#3b82f6" transparent opacity={0.1} side={THREE.DoubleSide} depthWrite={false} />
+           </mesh>
         </group>
 
         <ViewStateSync trackballRef={trackballRef} />
@@ -900,8 +1199,8 @@ export default function ClientPage() {
           />
         )}
 
-        <TouchTrackballControls ref={trackballRef} target={cameraTarget} />
-        <RightButtonPan setTarget={setCameraTarget} />
+        <TouchTrackballControls ref={trackballRef} target={cameraTarget} enabled={!clippingEnabled} />
+        <RightButtonPan setTarget={setCameraTarget} enabled={!clippingEnabled} />
 
         {!allLoaded && files.length > 0 && <InlineLoader text="Načítám modely…" />}
       </Canvas>
