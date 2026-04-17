@@ -292,7 +292,7 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0] }, ref) =>
   return null
 })
 
-/* ---------- Vlastní pan ---------- */
+/* ---------- Vlastní pan (OPRAVEN ZÁSEK TLAČÍTKA) ---------- */
 function RightButtonPan({ setTarget }) {
   const { camera, gl, size } = useThree()
   const isPanning = useRef(false)
@@ -315,8 +315,10 @@ function RightButtonPan({ setTarget }) {
       e.stopPropagation()
       isPanning.current = true
       last.current = { x: e.clientX, y: e.clientY }
-      pointerIdRef.current = e.pointerId
-      try { el.setPointerCapture?.(e.pointerId) } catch {}
+      try { 
+        el.setPointerCapture?.(e.pointerId); 
+        pointerIdRef.current = e.pointerId 
+      } catch {}
     }
 
     const onMove = (e) => {
@@ -350,39 +352,47 @@ function RightButtonPan({ setTarget }) {
       }
     }
 
+    // Bezpečné uvolnění pro všechny případy
     const onUp = (e) => {
       if (!isPanning.current) return
       e.preventDefault()
       e.stopPropagation()
       isPanning.current = false
-      try { el.releasePointerCapture?.(pointerIdRef.current) } catch {}
-      pointerIdRef.current = null
+      if (pointerIdRef.current !== null) {
+          try { el.releasePointerCapture?.(pointerIdRef.current) } catch {}
+          pointerIdRef.current = null
+      }
     }
 
+    // Navázáno přímo na plátno (nejspolehlivější pro capture)
     el.addEventListener("contextmenu", onContext)
     el.addEventListener("pointerdown", onDown)
-    window.addEventListener("pointermove", onMove, { capture: true })
-    window.addEventListener("pointerup", onUp, { capture: true })
+    el.addEventListener("pointermove", onMove)
+    el.addEventListener("pointerup", onUp)
+    el.addEventListener("pointercancel", onUp)
+    el.addEventListener("pointerleave", onUp)
+
     return () => {
       el.removeEventListener("contextmenu", onContext)
       el.removeEventListener("pointerdown", onDown)
-      window.removeEventListener("pointermove", onMove, { capture: true })
-      window.removeEventListener("pointerup", onUp, { capture: true })
+      el.removeEventListener("pointermove", onMove)
+      el.removeEventListener("pointerup", onUp)
+      el.removeEventListener("pointercancel", onUp)
+      el.removeEventListener("pointerleave", onUp)
     }
   }, [camera, gl, size.width, size.height, setTarget])
 
   return null
 }
 
-/* ---------- AutoCenter & AutoFrame (Vycentruje a pak případně PŘESKOČÍ kameru) ---------- */
-function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined", skipCamera = false, setTarget }) {
+/* ---------- AutoCenter & AutoFrame ---------- */
+function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined", setTarget }) {
   const { camera, size } = useThree()
   
   useEffect(() => {
     const root = rootRef.current
     if (!root) return
     
-    // 1. NEJPRVE VŽDY VYCENTRUJEME MODEL DO BODU 0,0,0 (Jinak na něj uložená kamera nedohlédne!)
     root.updateMatrixWorld(true)
     const boxAll = new THREE.Box3().setFromObject(root)
     if (boxAll.isEmpty()) return
@@ -404,29 +414,26 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
       root.updateMatrixWorld(true)
     }
 
-    // 2. NASTAVÍME VÝCHOZÍ KAMERU (POUZE POKUD NENÍ ULOŽENÁ Z MANIFESTU)
-    if (!skipCamera) {
-      const after = new THREE.Box3().setFromObject(root)
-      const dims2 = new THREE.Vector3(), ctr = new THREE.Vector3()
-      after.getSize(dims2); after.getCenter(ctr)
+    const after = new THREE.Box3().setFromObject(root)
+    const dims2 = new THREE.Vector3(), ctr = new THREE.Vector3()
+    after.getSize(dims2); after.getCenter(ctr)
 
-      const objW = Math.max(dims2.x, 1e-6)
-      const objH = Math.max(dims2.y, 1e-6)
-      const zoomX = size.width / (objW * margin)
-      const zoomY = size.height / (objH * margin)
-      let newZoom = Math.min(zoomX, zoomY) * (isMobile ? mobileScale : desktopScale)
+    const objW = Math.max(dims2.x, 1e-6)
+    const objH = Math.max(dims2.y, 1e-6)
+    const zoomX = size.width / (objW * margin)
+    const zoomY = size.height / (objH * margin)
+    let newZoom = Math.min(zoomX, zoomY) * (isMobile ? mobileScale : desktopScale)
 
-      const depth = Math.max(dims2.z, Math.max(dims2.x, dims2.y) * 0.75) || 1
-      const safeDist = depth * 10
-      camera.near = Math.max(0.01, safeDist * 0.001)
-      camera.far = safeDist * 80 + 200
-      camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
-      camera.up.set(0, 1, 0)
-      camera.zoom = Math.max(newZoom, 0.01)
-      camera.updateProjectionMatrix()
+    const depth = Math.max(dims2.z, Math.max(dims2.x, dims2.y) * 0.75) || 1
+    const safeDist = depth * 10
+    camera.near = Math.max(0.01, safeDist * 0.001)
+    camera.far = safeDist * 80 + 200
+    camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
+    camera.up.set(0, 1, 0)
+    camera.zoom = Math.max(newZoom, 0.01)
+    camera.updateProjectionMatrix()
       
-      if (setTarget) setTarget([ctr.x, ctr.y, ctr.z])
-    }
+    if (setTarget) setTarget([ctr.x, ctr.y, ctr.z])
 
     onFramed && onFramed()
   }, [triggerKey]) // eslint-disable-line
@@ -434,37 +441,45 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
   return null
 }
 
-/* ---------- Obnovení uložené kamery ---------- */
-function CustomCameraSetter({ camState, triggerKey, setTarget }) {
-  const { camera } = useThree()
+/* ---------- Nasazení uložené kamery (OPRAVA RESIZU ZOOMU) ---------- */
+function CustomCameraSetter({ camState, triggerKey, onFramed, setTarget }) {
+  const { camera, size } = useThree()
   
   useEffect(() => {
     if (!camState) return
     
-    // Obnovení absolutní matice kamery
     if (camState.matrix) {
       camera.matrix.fromArray(camState.matrix)
       camera.matrix.decompose(camera.position, camera.quaternion, camera.scale)
     }
-    
-    // Obnovení "Up" vektoru, který je zásadní pro Trackball
     if (camState.up) camera.up.fromArray(camState.up)
     
-    if (camState.zoom) camera.zoom = camState.zoom
+    // Responzivní Zoom
+    if (camState.zoom) {
+       if (camState.canvasSize) {
+          const savedMin = Math.min(camState.canvasSize[0], camState.canvasSize[1])
+          const currentMin = Math.min(size.width, size.height)
+          camera.zoom = camState.zoom * (currentMin / savedMin)
+       } else {
+          camera.zoom = camState.zoom
+       }
+    }
     
     camera.updateProjectionMatrix()
 
     if (camState.target && setTarget) {
       setTarget(camState.target)
     }
-  }, [triggerKey, camState, camera, setTarget])
+
+    onFramed && onFramed()
+  }, [triggerKey, camState, camera, setTarget, size.width, size.height]) // Přepočítá při změně okna
 
   return null
 }
 
 /* ---------- SYNC STAVU POHLEDU DO FRAMERU ---------- */
 function ViewStateSync({ trackballRef }) {
-  const { camera } = useThree()
+  const { camera, size } = useThree()
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -477,6 +492,7 @@ function ViewStateSync({ trackballRef }) {
         matrix: camera.matrix.toArray(),
         up: [camera.up.x, camera.up.y, camera.up.z],
         zoom: camera.zoom,
+        canvasSize: [size.width, size.height], // Ukládáme rozměry pro responzivní zoom
         target: [c.target.x, c.target.y, c.target.z] 
       }
       
@@ -490,7 +506,7 @@ function ViewStateSync({ trackballRef }) {
     }, 500)
 
     return () => clearInterval(interval)
-  }, [camera, trackballRef])
+  }, [camera, trackballRef, size.width, size.height])
 
   return null
 }
@@ -546,6 +562,8 @@ export default function ClientPage() {
   const [visibles, setVisibles] = useState([])
   const [roughnesses, setRoughnesses] = useState([])
   const [metalnesses, setMetalnesses] = useState([])
+  // PŘIDÁNO: Textury
+  const [vertexColors, setVertexColors] = useState([])
   const [fatal, setFatal] = useState(null)
 
   const [autoSmooth, setAutoSmooth] = useState(true)
@@ -572,7 +590,6 @@ export default function ClientPage() {
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
-
   useEffect(() => {
     ;(async () => {
       try {
@@ -591,6 +608,8 @@ export default function ClientPage() {
           setVisibles(Fs.map((f) => (typeof f.v === "boolean" ? f.v : true)))
           setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
           setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
+          setVertexColors(Fs.map((f) => !!f.vc))
+          
           setTitle(titleStr ?? (getParam("title") ?? null))
           setLogoCfg({
             url: logoUrl ?? (getParam("logo") === "none" ? null : getParam("logo") || DEFAULT_LOGO),
@@ -604,9 +623,7 @@ export default function ClientPage() {
               intensity: typeof headlight.intensity === "number" ? headlight.intensity : 2.0,
             })
           }
-          if (camState) {
-            setInitialCameraState(camState)
-          }
+          if (camState) setInitialCameraState(camState)
           setDidInitialFrame(false)
         }
 
@@ -662,7 +679,7 @@ export default function ClientPage() {
           return
         }
 
-        setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
+        setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([]); setVertexColors([])
       } catch (e) {
         console.error(e)
         setFatal("Tento náhled není dostupný (chyba při načtení dat).")
@@ -714,6 +731,7 @@ export default function ClientPage() {
         setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
         setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
         setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
+        setVertexColors(newFiles.map((f) => !!f.vc))
 
         if (urlsChanged) { 
             setDidInitialFrame(false); 
@@ -753,10 +771,27 @@ export default function ClientPage() {
   ) : (
     <>
       {files.map((f, i) => (
-        <div key={`${f.url}-${i}`} className="control-row" style={{ display: "grid", gridTemplateColumns: "36px 1fr 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
+        // PŘIDÁNO TLAČÍTKO "TEX" (upraven grid z 36px na 32px pro TEX a 36px pro oko)
+        <div key={`${f.url}-${i}`} className="control-row" style={{ display: "grid", gridTemplateColumns: "36px 1fr 32px 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
           <div className="row-label" style={{ gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.rawName || f.name}>{stripExt(f.name)}:</div>
+          
           <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} aria-label={`${f.name} color`} className="color-input" style={{ width: 36, height: 22, border: "1px solid #fff", borderRadius: 4, padding: 0, cursor: "pointer", background: "transparent" }}/>
-          <input className="slider" type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => { const v = parseFloat(e.target.value); setOpacities((prev) => prev.map((x, idx) => (idx === i ? v : x))) }} style={{ width: "calc(100% - 18px)", minWidth: 140 }} aria-label={`${f.name} opacity`} />
+          
+          <input className="slider" type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => { const v = parseFloat(e.target.value); setOpacities((prev) => prev.map((x, idx) => (idx === i ? v : x))) }} style={{ width: "calc(100% - 12px)", minWidth: 110 }} aria-label={`${f.name} opacity`} />
+          
+          {/* TLAČÍTKO TEX */}
+          <button 
+            onClick={() => setVertexColors(prev => prev.map((v, idx) => idx === i ? !v : v))}
+            title="Přepnout texturu / vertex colors"
+            style={{
+                width: 32, height: 22, fontSize: 10, fontWeight: "bold",
+                background: vertexColors[i] ? "rgba(59,130,246,.45)" : "transparent",
+                border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, color: "#fff", cursor: "pointer", padding: 0
+            }}
+          >
+            TEX
+          </button>
+
           <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 36, height: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: "transparent", border: "1px solid #fff", borderRadius: 4, cursor: "pointer" }}>
             <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
           </button>
@@ -833,7 +868,7 @@ export default function ClientPage() {
                 wireframe={wireframe}
                 roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.5)}
                 metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
-                useVertexColors={!!f.vc}
+                useVertexColors={vertexColors[i]} // PROPOJENO S NOVÝM TLAČÍTKEM
                 keepMaterials={!!f.km}
               />
             ))}
@@ -842,8 +877,7 @@ export default function ClientPage() {
 
         <ViewStateSync trackballRef={trackballRef} />
 
-        {/* POZOR ZDE JE ZMĚNA: AutoCenter MUSÍ vždy proběhnout (vycentruje model), ale kameru nastaví jen tehdy, když nemáme uloženou */}
-        {frameKey && (
+        {frameKey && !initialCameraState && (
           <AutoCenterAndFrame
             rootRef={rootGroupRef}
             triggerKey={frameKey}
@@ -853,16 +887,15 @@ export default function ClientPage() {
             desktopScale={1.0}
             mobileScale={1.0}
             centerMode={centerMode}
-            skipCamera={!!initialCameraState}
             setTarget={setCameraTarget}
           />
         )}
 
-        {/* ZDE JE ZMĚNA: Po vycentrování aplikuje uloženou kameru */}
         {frameKey && initialCameraState && (
           <CustomCameraSetter
             camState={initialCameraState}
             triggerKey={frameKey}
+            onFramed={() => setDidInitialFrame(true)}
             setTarget={setCameraTarget}
           />
         )}
