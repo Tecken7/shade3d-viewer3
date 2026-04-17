@@ -115,6 +115,35 @@ function InlineLoader({ text }) {
   )
 }
 
+/* ---------- 3D Vektorová linie na rovině řezu ---------- */
+function SliceOutline3D({ segments, color = "#fbbf24" }) {
+  const geomRef = useRef(null)
+
+  useEffect(() => {
+    if (geomRef.current) {
+      const pts = []
+      for (let i = 0; i < segments.length; i++) {
+        // Převedeme 2D segmenty z lokálního prostoru roviny na 3D body (Z=0, leží přesně na rovině)
+        pts.push(segments[i][0].x, segments[i][0].y, 0)
+        pts.push(segments[i][1].x, segments[i][1].y, 0)
+      }
+      geomRef.current.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3))
+      geomRef.current.computeBoundingBox()
+      geomRef.current.computeBoundingSphere()
+    }
+  }, [segments])
+
+  if (!segments || segments.length === 0) return null
+
+  return (
+    <lineSegments renderOrder={999}>
+      <bufferGeometry ref={geomRef} />
+      {/* Vykreslí se vždy navrchu, aby linie nebyly schované uvnitř modelů */}
+      <lineBasicMaterial color={color} depthTest={false} depthWrite={false} transparent opacity={0.9} />
+    </lineSegments>
+  )
+}
+
 /* ---------- AnyModel ---------- */
 function AnyModel({
   name, url,
@@ -124,7 +153,6 @@ function AnyModel({
   useVertexColors = false,
   keepMaterials = false,
   wireframe = false,
-  clipPlane = null, 
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
@@ -138,7 +166,6 @@ function AnyModel({
       opacity,
       side: THREE.DoubleSide,
       depthWrite: opacity === 1,
-      clippingPlanes: clipPlane ? [clipPlane] : [], 
       ...opts,
     })
 
@@ -193,7 +220,6 @@ function AnyModel({
                 if ("opacity" in m) m.opacity = opacity
                 if ("roughness" in m && typeof roughness === "number") m.roughness = roughness
                 if ("metalness" in m && typeof metalness === "number") m.metalness = metalness
-                m.clippingPlanes = clipPlane ? [clipPlane] : []
                 m.side = THREE.DoubleSide
               }
             })
@@ -244,7 +270,6 @@ function AnyModel({
         if ("metalness" in m && typeof metalness === "number") m.metalness = metalness
         if (!useVertexColors && "color" in m && color) m.color = new THREE.Color(color)
         if (useVertexColors && "vertexColors" in m) { m.vertexColors = true; if ("color" in m) m.color = new THREE.Color("#ffffff") }
-        m.clippingPlanes = clipPlane ? [clipPlane] : []
         m.needsUpdate = true
       } else {
         const hasVC = !!child.geometry.getAttribute?.("color")
@@ -255,7 +280,7 @@ function AnyModel({
       if (child.userData._edges) child.userData._edges.visible = !!wireframe
       else if (wireframe) rebuildWireOverlay(child)
     })
-  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, clipPlane])
+  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe])
 
   if (!object3D) return null
   return visible ? <primitive object={object3D} /> : null
@@ -796,7 +821,6 @@ function GizmoManager({ transformRefs, trackballRef }) {
     }
 
     if (trackballRef.current) {
-      // Zabrání zablokování kamery, pokud už uživatel drží levé tlačítko a táhne mimo osu
       if (isCamDragging.current) {
          trackballRef.current.enabled = true;
       } else {
@@ -1289,7 +1313,7 @@ export default function ClientPage() {
         camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }}
         onCreated={({ gl }) => {
             gl.setClearAlpha(0)
-            gl.localClippingEnabled = true 
+            gl.localClippingEnabled = false // JIŽ NENÍ POTŘEBA
         }}
         style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
       >
@@ -1319,7 +1343,6 @@ export default function ClientPage() {
                 metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
                 useVertexColors={vertexColors[i]}
                 keepMaterials={!!f.km}
-                clipPlane={clippingEnabled ? clipPlaneRef.current : null}
               />
             ))}
           </Suspense>
@@ -1331,6 +1354,8 @@ export default function ClientPage() {
               <circleGeometry args={[planeRadius, 64]} />
               <meshBasicMaterial color="#d95a5a" transparent opacity={0.35} side={THREE.DoubleSide} depthWrite={false} />
             </mesh>
+            {/* PRŮŘEZ JAKO 3D LINIE */}
+            <SliceOutline3D segments={sliceSegments} color="#eab308" />
           </group>
         )}
 
@@ -1340,10 +1365,10 @@ export default function ClientPage() {
             object={planeGroup}
             mode="rotate"
             space="local"
-            size={1.1} // Zmenšená velikost pro čistší vzhled
-            showX={true}  /* Červený kruh */
-            showY={true}  /* Zelený kruh */
-            showZ={false} /* Skryjeme modrý kruh - Nepotřebný balast */
+            size={1.1}
+            showX={true}
+            showY={true}
+            showZ={false}
             onChange={() => {
               if (planeGroup) {
                 planeGroup.updateMatrixWorld(true)
@@ -1362,10 +1387,10 @@ export default function ClientPage() {
             object={planeGroup}
             mode="translate"
             space="local"
-            size={1.1} // Zmenšená velikost pro čistší vzhled
-            showX={false} /* Skryjeme červenou šipku */
-            showY={false} /* Skryjeme zelenou šipku */
-            showZ={true}  /* Ponecháme POUZE modrou šipku pro posun */
+            size={1.1}
+            showX={false}
+            showY={false}
+            showZ={true}
             onChange={() => {
               if (planeGroup) {
                 planeGroup.updateMatrixWorld(true)
