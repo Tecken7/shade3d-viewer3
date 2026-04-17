@@ -160,7 +160,6 @@ function Measurement3D({ measureState, boundingBox }) {
 
   if (!measureState.p1 || !measureState.snappedP2) return null
 
-  // Dynamická velikost koleček ve 3D podle velikosti BoundingBoxu roviny
   const rad = boundingBox ? boundingBox.width * 0.008 : 0.5
 
   return (
@@ -1050,7 +1049,7 @@ export default function ClientPage() {
       if (!clippingEnabled || !planeGroup) return
       const step = 0.5 
       if (e.key === "ArrowUp" || e.key === "ArrowRight") {
-         setMeasureState({ active: false, p1: null, p2: null, snappedP2: null }) // Vymazání měření při pohybu
+         setMeasureState({ active: false, p1: null, p2: null, snappedP2: null }) 
          planeGroup.translateZ(step)
          planeGroup.updateMatrixWorld(true)
          const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
@@ -1058,7 +1057,7 @@ export default function ClientPage() {
          clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
          updateClippingLogic()
       } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
-         setMeasureState({ active: false, p1: null, p2: null, snappedP2: null }) // Vymazání měření při pohybu
+         setMeasureState({ active: false, p1: null, p2: null, snappedP2: null }) 
          planeGroup.translateZ(-step)
          planeGroup.updateMatrixWorld(true)
          const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
@@ -1081,7 +1080,6 @@ export default function ClientPage() {
            const size = new THREE.Vector3()
            box.getSize(size)
            const maxDim = Math.max(size.x, size.y, size.z)
-           // Přizpůsobená velikost roviny (aby nebyla zbytečně obří, ale stačila na proříznutí modelu)
            setPlaneRadius(maxDim * 0.6)
            
            planeGroup.position.copy(center)
@@ -1454,15 +1452,8 @@ export default function ClientPage() {
             showX={true}
             showY={true}
             showZ={false}
-            onDraggingChanged={(e) => {
-               if (e.value) {
-                   // Smaže měření při začátku pohybu
-                   setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
-               } else {
-                   updateClippingLogic() 
-               }
-            }}
             onChange={() => {
+              setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
               if (planeGroup) {
                 planeGroup.updateMatrixWorld(true)
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
@@ -1484,15 +1475,8 @@ export default function ClientPage() {
             showX={false}
             showY={false}
             showZ={true}
-            onDraggingChanged={(e) => {
-               if (e.value) {
-                   // Smaže měření při začátku pohybu
-                   setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
-               } else {
-                   updateClippingLogic() 
-               }
-            }}
             onChange={() => {
+              setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
               if (planeGroup) {
                 planeGroup.updateMatrixWorld(true)
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
