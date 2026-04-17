@@ -292,7 +292,89 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0] }, ref) =>
   return null
 })
 
-/* ---------- AutoCenter & AutoFrame (Vždy se provede!) ---------- */
+/* ---------- Vlastní pan ---------- */
+function RightButtonPan({ setTarget }) {
+  const { camera, gl, size } = useThree()
+  const isPanning = useRef(false)
+  const last = useRef({ x: 0, y: 0 })
+  const pointerIdRef = useRef(null)
+
+  const PAN_SENSITIVITY = 0.85
+  const right = new THREE.Vector3()
+  const up = new THREE.Vector3()
+  const deltaWorld = new THREE.Vector3()
+
+  useEffect(() => {
+    const el = gl.domElement
+
+    const onContext = (e) => { e.preventDefault() }
+
+    const onDown = (e) => {
+      if ((e.button !== 2) && !(e.button === 0 && e.ctrlKey)) return
+      e.preventDefault()
+      e.stopPropagation()
+      isPanning.current = true
+      last.current = { x: e.clientX, y: e.clientY }
+      pointerIdRef.current = e.pointerId
+      try { el.setPointerCapture?.(e.pointerId) } catch {}
+    }
+
+    const onMove = (e) => {
+      if (!isPanning.current) return
+      e.preventDefault()
+      e.stopPropagation()
+
+      const dx = e.clientX - last.current.x
+      const dy = e.clientY - last.current.y
+      last.current = { x: e.clientX, y: e.clientY }
+
+      right.setFromMatrixColumn(camera.matrixWorld, 0).normalize()
+      up.setFromMatrixColumn(camera.matrixWorld, 1).normalize()
+
+      if (camera.isOrthographicCamera) {
+        const wppX = ((camera.right - camera.left) / (size.width * camera.zoom))
+        const wppY = ((camera.top - camera.bottom) / (size.height * camera.zoom))
+        const moveRight = -dx * wppX * PAN_SENSITIVITY
+        const moveUp    =  dy * wppY * PAN_SENSITIVITY
+
+        deltaWorld.copy(right).multiplyScalar(moveRight).addScaledVector(up, moveUp)
+        camera.position.add(deltaWorld)
+        setTarget?.((t) => [t[0] + deltaWorld.x, t[1] + deltaWorld.y, t[2] + deltaWorld.z])
+        camera.updateProjectionMatrix()
+      } else {
+        const dist = camera.position.length()
+        const scale = (dist / Math.max(size.width, size.height)) * PAN_SENSITIVITY
+        deltaWorld.copy(right).multiplyScalar(-dx * scale).addScaledVector(up, dy * scale)
+        camera.position.add(deltaWorld)
+        setTarget?.((t) => [t[0] + deltaWorld.x, t[1] + deltaWorld.y, t[2] + deltaWorld.z])
+      }
+    }
+
+    const onUp = (e) => {
+      if (!isPanning.current) return
+      e.preventDefault()
+      e.stopPropagation()
+      isPanning.current = false
+      try { el.releasePointerCapture?.(pointerIdRef.current) } catch {}
+      pointerIdRef.current = null
+    }
+
+    el.addEventListener("contextmenu", onContext)
+    el.addEventListener("pointerdown", onDown)
+    window.addEventListener("pointermove", onMove, { capture: true })
+    window.addEventListener("pointerup", onUp, { capture: true })
+    return () => {
+      el.removeEventListener("contextmenu", onContext)
+      el.removeEventListener("pointerdown", onDown)
+      window.removeEventListener("pointermove", onMove, { capture: true })
+      window.removeEventListener("pointerup", onUp, { capture: true })
+    }
+  }, [camera, gl, size.width, size.height, setTarget])
+
+  return null
+}
+
+/* ---------- AutoCenter & AutoFrame ---------- */
 function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined", setTarget }) {
   const { camera, size } = useThree()
   
@@ -300,7 +382,6 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
     const root = rootRef.current
     if (!root) return
     
-    // Model posuneme tak, aby jeho aktuální rotovaný střed byl v 0,0,0
     root.updateMatrixWorld(true)
     const boxAll = new THREE.Box3().setFromObject(root)
     if (boxAll.isEmpty()) return
@@ -322,8 +403,6 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
       root.updateMatrixWorld(true)
     }
 
-    // VŽDY NASTAVÍME KAMERU na výchozí "čelní" pohled
-    // Díky tomu, že je skupina s modelem už natočená, to bude vypadat přesně jak chceme!
     const after = new THREE.Box3().setFromObject(root)
     const dims2 = new THREE.Vector3(), ctr = new THREE.Vector3()
     after.getSize(dims2); after.getCenter(ctr)
@@ -351,7 +430,7 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
   return null
 }
 
-/* ---------- ZCELA NOVÉ: Odchytávání rotace modelu (jako v Blenderu) ---------- */
+/* ---------- Odchytávání rotace modelu ---------- */
 function WorldTransformSync({ rootRef }) {
   useEffect(() => {
     const interval = setInterval(() => {
@@ -362,7 +441,7 @@ function WorldTransformSync({ rootRef }) {
       if (targetWindow) {
         targetWindow.postMessage({
           type: "SHADE3D_TRANSFORM_SYNC",
-          payload: { rotation: [r.x, r.y, r.z] }
+          payload: [r.x, r.y, r.z]
         }, "*")
       }
     }, 500)
@@ -405,12 +484,16 @@ export default function ClientPage() {
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
   const [isMobile, setIsMobile] = useState(false)
+  const [isLive, setIsLive] = useState(false)
+
+  // OPRAVA HYDRATION ERRORU - IsLive bezpečně čteme až na klientovi
   useEffect(() => {
     try {
       const uaMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
       const coarse = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(pointer: coarse)").matches
       const narrow = typeof window !== "undefined" && window.innerWidth < 768
       setIsMobile(uaMobile || coarse || narrow)
+      setIsLive(getParam("mode") === "live")
     } catch {}
   }, [])
 
@@ -425,7 +508,7 @@ export default function ClientPage() {
   const [metalnesses, setMetalnesses] = useState([])
   const [fatal, setFatal] = useState(null)
 
-  const [autoSmooth, setAutoSmooth] = useState((getParam("smooth") ?? "1") !== "0")
+  const [autoSmooth, setAutoSmooth] = useState(true) // Default true, v useEffect se případně přepíše
   const [smoothAngle] = useState(30)
   const [wireframe, setWireframe] = useState(false)
 
@@ -444,13 +527,16 @@ export default function ClientPage() {
   const [loadedUrls, setLoadedUrls] = useState(new Set())
   const handleModelLoaded = (url) => setLoadedUrls((prev) => { const n = new Set(prev); n.add(url); return n; })
 
-  const centerParam = (getParam("center") || "combined").toLowerCase()
-  const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
-
-  // ZCELA NOVÉ: Mode a transform
-  const isLive = getParam("mode") === "live"
   const [editRotMode, setEditRotMode] = useState(false)
   const [initialTransform, setInitialTransform] = useState(null)
+
+  // OPRAVA CRASHU TRANSFORM CONTROLS - State reference
+  const rootGroupRef = useRef(null)
+  const [rootTargetNode, setRootTargetNode] = useState(null)
+  const setRefs = React.useCallback((node) => {
+    rootGroupRef.current = node;
+    setRootTargetNode(node);
+  }, [])
 
   useEffect(() => {
     ;(async () => {
@@ -458,6 +544,8 @@ export default function ClientPage() {
         const mId = getParam("m")
         const manifestUrlParam = getParam("manifest")
         const filesParam = getParam("files")
+        const smoothParam = getParam("smooth")
+        if (smoothParam === "0") setAutoSmooth(false)
 
         const applyFiles = (Fs, titleStr, logoUrl, headlight, transformState) => {
           if (!Fs.length) throw new Error("Manifest je prázdný.")
@@ -626,8 +714,6 @@ export default function ClientPage() {
     }}/>
   )
 
-  const rootGroupRef = useRef()
-
   const slidersContent = fatal ? (
     <div style={{ color: "#ff8b8b" }}>{fatal}</div>
   ) : (
@@ -646,7 +732,7 @@ export default function ClientPage() {
         <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
         <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
       </div>
-      {/* TLAČÍTKO PRO ZOBRAZENÍ GIZMA (Pouze ve Frameru) */}
+      {/* TLAČÍTKO PRO ZOBRAZENÍ GIZMA */}
       {isLive && files.length > 0 && (
          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10, padding: "10px", background: "rgba(59,130,246, 0.15)", borderRadius: 10, border: "1px solid rgba(59,130,246, 0.5)" }}>
             <Switch checked={editRotMode} onChange={setEditRotMode} label="🛠 Upravit výchozí rotaci" />
@@ -666,6 +752,9 @@ export default function ClientPage() {
       )}
     </div>
   )
+
+  const centerParam = (getParam("center") || "combined").toLowerCase()
+  const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
   const allLoaded = files.length > 0 && files.every(f => loadedUrls.has(f.url))
   const frameKey = allLoaded && !didInitialFrame ? `frame-${files.length}` : ""
@@ -692,8 +781,8 @@ export default function ClientPage() {
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
 
         <group 
-            ref={rootGroupRef}
-            rotation={initialTransform?.rotation ? new THREE.Euler(...initialTransform.rotation) : [0,0,0]}
+            ref={setRefs}
+            rotation={initialTransform ? new THREE.Euler(initialTransform[0], initialTransform[1], initialTransform[2], "YXZ") : [0,0,0]}
         >
           <Suspense fallback={null}>
             {files.map((f, i) => (
@@ -717,10 +806,9 @@ export default function ClientPage() {
           </Suspense>
         </group>
 
-        {/* TOTO JE GIZMO Z BLENDERU */}
-        {isLive && editRotMode && (
+        {isLive && editRotMode && rootTargetNode && (
             <TransformControls 
-                object={rootGroupRef} 
+                object={rootTargetNode} 
                 mode="rotate" 
                 space="local"
                 onDraggingChanged={(e) => {
