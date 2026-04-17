@@ -115,6 +115,38 @@ function InlineLoader({ text }) {
   )
 }
 
+/* ---------- 3D Auto Rotate (Cinematic Spin) ---------- */
+function AutoRotateScene({ enabled, target }) {
+  const { camera, gl } = useThree()
+  const vTarget = useMemo(() => new THREE.Vector3(), [])
+  const isInteracting = useRef(false)
+
+  // Pozastaví rotaci, když uživatel aktivně klikne a tahá myší
+  useEffect(() => {
+    const onDown = () => { isInteracting.current = true }
+    const onUp = () => { isInteracting.current = false }
+    gl.domElement.addEventListener('pointerdown', onDown)
+    window.addEventListener('pointerup', onUp)
+    return () => {
+      gl.domElement.removeEventListener('pointerdown', onDown)
+      window.removeEventListener('pointerup', onUp)
+    }
+  }, [gl])
+
+  useFrame((_, delta) => {
+    if (!enabled || isInteracting.current) return
+    
+    vTarget.fromArray(target)
+    const speed = 0.25 * delta // Pomalá cinematická rychlost
+    
+    camera.position.sub(vTarget)
+    camera.position.applyAxisAngle(new THREE.Vector3(0, 1, 0), speed)
+    camera.position.add(vTarget)
+    camera.lookAt(vTarget)
+  })
+  return null
+}
+
 /* ---------- 3D Vektorová linie na rovině řezu ---------- */
 function SliceOutline3D({ segments, color = "#fbbf24" }) {
   const geomRef = useRef(null)
@@ -162,7 +194,6 @@ function Measurement3D({ measureState, boundingBox }) {
 
   const rad = boundingBox ? boundingBox.width * 0.008 : 0.5
   
-  // Výpočet středu a vzdálenosti pro 3D text
   const dx = measureState.snappedP2.x - measureState.p1.x;
   const dy = measureState.snappedP2.y - measureState.p1.y;
   const midX = measureState.p1.x + dx / 2;
@@ -184,7 +215,6 @@ function Measurement3D({ measureState, boundingBox }) {
         <meshBasicMaterial color="#fbbf24" depthTest={false} depthWrite={false} transparent opacity={0.95} />
       </mesh>
 
-      {/* HTML Popisek vzdálenosti ukotvený na střed 3D čáry */}
       <Html position={[midX, midY, 0]} center style={{ pointerEvents: "none" }} zIndexRange={[100, 0]}>
         <div style={{
           fontSize: 16,
@@ -192,7 +222,7 @@ function Measurement3D({ measureState, boundingBox }) {
           color: '#fbbf24',
           textShadow: "0 2px 4px rgba(0,0,0,0.8)",
           whiteSpace: "nowrap",
-          transform: "translate(8px, -12px)" // Vizuální odsazení textu od samotné linky
+          transform: "translate(8px, -12px)"
         }}>
           {distVal} mm
         </div>
@@ -935,7 +965,7 @@ export default function ClientPage() {
   const [smoothAngle] = useState(30)
   const [wireframe, setWireframe] = useState(false)
 
-  // -- STAVY PRO ŘEZÁNÍ (CLIPPING) --
+  // -- STAVY PRO ŘEZÁNÍ A ANIMACI --
   const [clippingEnabled, setClippingEnabled] = useState(false)
   const [planeGroup, setPlaneGroup] = useState(null) 
   const [planeRadius, setPlaneRadius] = useState(100) 
@@ -947,6 +977,8 @@ export default function ClientPage() {
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
   const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
+
+  const [isAutoRotating, setIsAutoRotating] = useState(false)
 
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
@@ -1387,6 +1419,29 @@ export default function ClientPage() {
 
   const topBarRight = (
     <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10, fontFamily: "sans-serif", color: "white" }}>
+      
+      {/* NOVÉ TLAČÍTKO PRO 360° ROTACI */}
+      <button 
+        onClick={() => setIsAutoRotating(p => !p)}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+          background: isAutoRotating ? "rgba(59,130,246,.8)" : "rgba(0,0,0,.25)",
+          backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)",
+          borderRadius: 10, padding: "10px 14px", color: "white", cursor: "pointer",
+          fontWeight: "bold", fontSize: 14, transition: "background 0.2s"
+        }}
+      >
+        <svg 
+          width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" 
+          strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" 
+          style={{ animation: isAutoRotating ? "spin 4s linear infinite" : "none" }}
+        >
+          <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+          <path d="M3 3v5h5" />
+        </svg>
+        360° Spin
+      </button>
+
       <div style={{ background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 12 }}>
         <Switch checked={clippingEnabled} onChange={setClippingEnabled} label="Nástroj řezu (Průřez)" />
         {clippingEnabled && (
@@ -1428,6 +1483,8 @@ export default function ClientPage() {
         <directionalLight position={[0, -5, -5]} intensity={0.7 * sceneIntensity} />
 
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
+
+        <AutoRotateScene enabled={isAutoRotating} target={cameraTarget} />
 
         <group ref={rootGroupRef}>
           <Suspense fallback={null}>
@@ -1475,7 +1532,7 @@ export default function ClientPage() {
             showZ={false}
             onChange={() => {
               if (planeGroup) {
-                // Skutečné smazání pouze pokud se fyzicky táhne osou
+                // Bezpečně vymaže měření jen, když fyzicky táhneš myší!
                 if (transformRotateRef.current?.dragging) {
                     setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
                 }
@@ -1501,7 +1558,7 @@ export default function ClientPage() {
             showZ={true}
             onChange={() => {
               if (planeGroup) {
-                // Skutečné smazání pouze pokud se fyzicky táhne osou
+                // Bezpečně vymaže měření jen, když fyzicky táhneš myší!
                 if (transformTranslateRef.current?.dragging) {
                     setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
                 }
@@ -1553,6 +1610,11 @@ export default function ClientPage() {
       <Lightbox open={lightbox.open} onClose={() => setLightbox({ open: false, src: null, alt: "" })} src={lightbox.src} alt={lightbox.alt} />
 
       <style jsx global>{`
+        /* Nová animace pro točící se ikonku Spin */
+        @keyframes spin { 
+          100% { transform: rotate(360deg); } 
+        }
+
         .slider { appearance: none; height: 14px; background: transparent; margin: 5px 0; display: inline-block; }
         .slider::-webkit-slider-runnable-track { height: 4px; background: white; border-radius: 2px; }
         .slider::-webkit-slider-thumb { appearance: none; width: 14px; height: 14px; border-radius: 50%; background: white; cursor: pointer; box-shadow: 0 0 2px black; margin-top: -5px; }
