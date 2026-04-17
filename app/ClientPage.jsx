@@ -212,7 +212,6 @@ function AnyModel({
     return () => { cancelled = true }
   }, [url, ext])
 
-  // re-smooth / wireframe toggle
   useEffect(() => {
     if (!object3D) return
     object3D.traverse((child) => {
@@ -228,7 +227,6 @@ function AnyModel({
     })
   }, [object3D, autoSmooth, smoothAngle, wireframe])
 
-  // material changes
   useEffect(() => {
     if (!object3D) return
     object3D.traverse((child) => {
@@ -337,6 +335,63 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
   return null
 }
 
+/* ---------- Nastavení uložené kamery ---------- */
+function CustomCameraSetter({ camState, setTarget, triggerKey, onFramed }) {
+  const { camera } = useThree()
+  
+  useEffect(() => {
+    if (!camState) return
+    
+    if (camState.position) {
+      camera.position.set(camState.position[0], camState.position[1], camState.position[2])
+    }
+    
+    if (camState.zoom) {
+      camera.zoom = camState.zoom
+    }
+    
+    camera.updateProjectionMatrix()
+
+    if (camState.target) {
+      setTarget(camState.target)
+    }
+
+    onFramed && onFramed()
+  }, [triggerKey, camState, setTarget, camera, onFramed])
+
+  return null
+}
+
+/* ---------- Synchronizace kamery pro Live Mode ---------- */
+function CameraSync({ controlsTarget }) {
+  const { camera } = useThree()
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (typeof window === "undefined") return
+      
+      const camData = {
+        position: [camera.position.x, camera.position.y, camera.position.z],
+        zoom: camera.zoom,
+        target: [controlsTarget[0], controlsTarget[1], controlsTarget[2]]
+      }
+
+      // Zpráva propadne všemi iframy až nahoru do aplikace ve Frameru
+      const targetWindow = window.top || window.parent;
+      if (targetWindow) {
+        targetWindow.postMessage({
+          type: "SHADE3D_CAMERA_SYNC",
+          payload: camData
+        }, "*")
+      }
+    }, 500)
+
+    return () => clearInterval(interval)
+  }, [camera, camera.position, camera.zoom, controlsTarget])
+
+  return null
+}
+
 /* ---------- Lightbox ---------- */
 function Lightbox({ open, onClose, src, alt }) {
   if (!open || !src) return null
@@ -409,9 +464,11 @@ export default function ClientPage() {
   useEffect(() => { setSlidersOpen(!isMobile) }, [isMobile])
 
   // kamera / framing
-  const [cameraTarget] = useState([0, 0, 0])
+  const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
   const [loadedCount, setLoadedCount] = useState(0)
   const [didInitialFrame, setDidInitialFrame] = useState(false)
+  const [initialCameraState, setInitialCameraState] = useState(null)
+
   const handleModelLoaded = () => setLoadedCount((n) => n + 1)
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
@@ -422,10 +479,9 @@ export default function ClientPage() {
       try {
         const mId = getParam("m")
         const manifestUrlParam = getParam("manifest")
-        theloop: {}
         const filesParam = getParam("files")
 
-        const applyFiles = (Fs, titleStr, logoUrl, headlight) => {
+        const applyFiles = (Fs, titleStr, logoUrl, headlight, camState) => {
           if (!Fs.length) throw new Error("Manifest je prázdný.")
           setFiles(Fs)
           const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
@@ -447,6 +503,9 @@ export default function ClientPage() {
               intensity: typeof headlight.intensity === "number" ? headlight.intensity : 2.0,
             })
           }
+          if (camState) {
+            setInitialCameraState(camState)
+          }
           setLoadedCount(0)
           setDidInitialFrame(false)
         }
@@ -461,7 +520,7 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: !!x.vc, km: !!x.km,
           }))
-          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight)
+          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -477,7 +536,7 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: !!x.vc, km: !!x.km,
           }))
-          applyFiles(Fs, m?.title, m?.logo?.url, null)
+          applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -495,7 +554,7 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: !!x.vc, km: !!x.km,
           }))
-          applyFiles(Fs, getParam("title") ?? null, null, null)
+          applyFiles(Fs, getParam("title") ?? null, null, null, null)
           const li = parseFloat(getParam("li") || getParam("light") || "")
           if (!Number.isNaN(li)) setSceneIntensity(clamp01(li))
           const headI = parseFloat(getParam("headlightI") || "")
@@ -558,7 +617,7 @@ export default function ClientPage() {
         setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
         setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
 
-        if (urlsChanged) { setLoadedCount(0); setDidInitialFrame(false) }
+        if (urlsChanged) { setLoadedCount(0); setDidInitialFrame(false); setInitialCameraState(null); }
       }
 
       if (p.lights) {
@@ -672,7 +731,10 @@ export default function ClientPage() {
           </Suspense>
         </group>
 
-        {frameKey && (
+        {/* Synchronizace pozice ven do Frameru */}
+        <CameraSync controlsTarget={cameraTarget} />
+
+        {frameKey && !initialCameraState && (
           <AutoCenterAndFrame
             rootRef={rootGroupRef}
             triggerKey={frameKey}
@@ -682,6 +744,15 @@ export default function ClientPage() {
             desktopScale={1.0}
             mobileScale={1.0}
             centerMode={centerMode}
+          />
+        )}
+
+        {frameKey && initialCameraState && (
+          <CustomCameraSetter
+            camState={initialCameraState}
+            setTarget={setCameraTarget}
+            triggerKey={frameKey}
+            onFramed={() => setDidInitialFrame(true)}
           />
         )}
 
