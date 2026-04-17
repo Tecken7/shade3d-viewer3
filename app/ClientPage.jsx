@@ -124,7 +124,7 @@ function AnyModel({
   useVertexColors = false,
   keepMaterials = false,
   wireframe = false,
-  clipPlanes = [], // NOVÉ: Podpora ořezu (řezů)
+  clipPlanes = [],
   measureMode = false,
   onMeasureClick = null,
   onMeasureMove = null
@@ -264,17 +264,17 @@ function AnyModel({
   if (!object3D) return null
   return visible ? (
     <primitive 
-        object={object3D} 
-        onClick={(e) => {
-            if (!measureMode) return
-            e.stopPropagation()
-            onMeasureClick?.(e.point.clone())
-        }}
-        onPointerMove={(e) => {
-            if (!measureMode) return
-            e.stopPropagation()
-            onMeasureMove?.(e.point.clone())
-        }}
+      object={object3D} 
+      onClick={(e) => {
+          if (!measureMode) return
+          e.stopPropagation()
+          onMeasureClick?.(e.point.clone())
+      }}
+      onPointerMove={(e) => {
+          if (!measureMode) return
+          e.stopPropagation()
+          onMeasureMove?.(e.point.clone())
+      }}
     />
   ) : null
 }
@@ -301,7 +301,6 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], enabled =
     c.panSpeed = 1.0
     c.staticMoving = true
     c.dynamicDampingFactor = 0.15
-    // Pokud je noRotate zapnuté (např v mini-mapě), zakážeme levé tlačítko pro rotaci
     c.mouseButtons = { 
         LEFT: noRotate ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE, 
         MIDDLE: THREE.MOUSE.ZOOM, 
@@ -418,7 +417,50 @@ function RightButtonPan({ setTarget, enabled = true }) {
   return null
 }
 
-/* ---------- VÝPOČET ROVINY ŘEZU ---------- */
+/* ---------- NÁSTROJ ŘEZ (CLIPPING GIZMO) ---------- */
+function ClippingGizmo({ plane, enabled, mode, trackballRef }) {
+  const meshRef = useRef(null)
+  
+  // Startovací pozice: srovnáme gizmo do roviny, jakmile se zapne
+  useEffect(() => {
+    if (meshRef.current && enabled && plane) {
+        const cp = new THREE.Vector3()
+        plane.coplanarPoint(cp)
+        meshRef.current.position.copy(cp)
+        const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1), plane.normal)
+        meshRef.current.quaternion.copy(q)
+    }
+  }, [enabled]) // eslint-disable-line
+
+  useFrame(() => {
+    if (meshRef.current && enabled && plane) {
+        const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(meshRef.current.quaternion)
+        plane.setFromNormalAndCoplanarPoint(normal, meshRef.current.position)
+    }
+  })
+
+  if (!enabled) return null
+
+  return (
+    <TransformControls 
+        mode={mode} 
+        onDraggingChanged={(e) => {
+            if (trackballRef.current) trackballRef.current.enabled = !e.value
+        }}
+    >
+        <mesh ref={meshRef}>
+            <planeGeometry args={[200, 200]} />
+            <meshBasicMaterial color="#ef4444" transparent opacity={0.15} side={THREE.DoubleSide} depthWrite={false} />
+            <lineSegments>
+                <edgesGeometry args={[new THREE.PlaneGeometry(200, 200)]} />
+                <lineBasicMaterial color="#ef4444" />
+            </lineSegments>
+        </mesh>
+    </TransformControls>
+  )
+}
+
+/* ---------- VÝPOČET ROVINY ŘEZU Z MYŠI ---------- */
 function CutPlaneCalculator({ ndcLine, setCutPlane }) {
     const { camera } = useThree()
     
@@ -436,9 +478,8 @@ function CutPlaneCalculator({ ndcLine, setCutPlane }) {
         camera.getWorldDirection(viewDir)
 
         const lineVec = new THREE.Vector3().subVectors(p2, p1)
-        if (lineVec.lengthSq() < 0.0001) return // Předejít chybě při kliknutí bez tažení
+        if (lineVec.lengthSq() < 0.0001) return
 
-        // Normála roviny kolmá na pohled kamery a načrtnutou linku
         const normal = new THREE.Vector3().crossVectors(lineVec, viewDir).normalize()
         const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, p1)
         
@@ -460,15 +501,15 @@ function MeasurementsRenderer({ points, currentStart, currentMouse }) {
           )}
       </group>
     )
-  }
-  
-  function MeasureLine({ p1, p2, dist, isTemp = false }) {
+}
+
+function MeasureLine({ p1, p2, dist, isTemp = false }) {
     const geom = useMemo(() => new THREE.BufferGeometry().setFromPoints([p1, p2]), [p1, p2])
     const mid = useMemo(() => p1.clone().lerp(p2, 0.5), [p1, p2])
     return (
       <group>
-          <mesh position={p1}><sphereGeometry args={[0.6, 16, 16]} /><meshBasicMaterial color={isTemp ? "#aaaaaa" : "#ffd700"} depthTest={false} /></mesh>
-          <mesh position={p2}><sphereGeometry args={[0.6, 16, 16]} /><meshBasicMaterial color={isTemp ? "#aaaaaa" : "#ffd700"} depthTest={false} /></mesh>
+          <mesh position={p1}><sphereGeometry args={[0.5, 16, 16]} /><meshBasicMaterial color={isTemp ? "#aaaaaa" : "#ffd700"} depthTest={false} /></mesh>
+          <mesh position={p2}><sphereGeometry args={[0.5, 16, 16]} /><meshBasicMaterial color={isTemp ? "#aaaaaa" : "#ffd700"} depthTest={false} /></mesh>
           <line geometry={geom}>
               <lineBasicMaterial color={isTemp ? "#aaaaaa" : "#ffd700"} linewidth={3} depthTest={false} />
           </line>
@@ -477,17 +518,16 @@ function MeasurementsRenderer({ points, currentStart, currentMouse }) {
           </Html>
       </group>
     )
-  }
+}
 
 /* ---------- MINI-MAPA (Průřezové okno) ---------- */
 function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, metalnesses, vertexColors, cutPlane, onFlipCut, onClose }) {
     const [target, setTarget] = useState([0,0,0])
-    const [measureMode, setMeasureMode] = useState(true) // V řezu se defaultně rovnou měří
+    const [measureMode, setMeasureMode] = useState(true)
     const [measurePoints, setMeasurePoints] = useState([])
     const [measureStart, setMeasureStart] = useState(null)
     const [measureCurrent, setMeasureCurrent] = useState(null)
 
-    // Vytvoření "plátku" pro řez v mini-mapě (tloušťka 1mm)
     const slicePlanes = useMemo(() => {
         if (!cutPlane) return []
         const p1 = new THREE.Plane(cutPlane.normal.clone(), cutPlane.constant + 0.5)
@@ -507,7 +547,6 @@ function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, m
 
     return (
         <div style={{ position: "absolute", bottom: 20, right: 20, width: "35vw", height: "35vw", maxWidth: 450, maxHeight: 450, minWidth: 280, minHeight: 280, background: "#111", border: "1px solid #444", borderRadius: 12, overflow: "hidden", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.5)", zIndex: 10 }}>
-            {/* Hlavička okna s nástroji */}
             <div style={{ padding: "8px 12px", background: "#222", borderBottom: "1px solid #333", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <span style={{ color: "white", fontSize: 13, fontWeight: "bold" }}>Průřez</span>
@@ -519,7 +558,6 @@ function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, m
                 <button onClick={onClose} style={{ background: "none", border: "none", color: "#fff", cursor: "pointer", fontSize: 16, lineHeight: 1 }}>×</button>
             </div>
             
-            {/* Canvas s řezem */}
             <div style={{ flex: 1, position: "relative", background: "#000" }}>
                 {measureStart && <div style={{ position: "absolute", top: 10, left: 0, right: 0, textAlign: "center", color: "#ffd700", fontSize: 11, pointerEvents: "none", zIndex: 1 }}>Vyberte druhý bod měření...</div>}
                 
@@ -534,7 +572,7 @@ function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, m
                                 color={colors[i]} opacity={1} visible={visibles[i]}
                                 autoSmooth={true} wireframe={false}
                                 roughness={roughnesses[i]} metalness={metalnesses[i]} useVertexColors={vertexColors[i]}
-                                clipPlanes={slicePlanes} // Aplikace plátku
+                                clipPlanes={slicePlanes}
                                 measureMode={measureMode}
                                 onMeasureClick={handleMeasureClick}
                                 onMeasureMove={(p) => measureStart && setMeasureCurrent(p)}
@@ -542,12 +580,9 @@ function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, m
                             ))}
                         </Suspense>
                     </group>
-                    
-                    {/* Nasměrování kamery kolmo na rovinu */}
                     <CrossSectionCamera setupPlane={cutPlane} setTarget={setTarget} />
                     <TouchTrackballControls target={target} enabled={!measureMode} noRotate={true} />
                     <RightButtonPan setTarget={setTarget} enabled={!measureMode} />
-                    
                     <MeasurementsRenderer points={measurePoints} currentStart={measureStart} currentMouse={measureCurrent} />
                 </Canvas>
             </div>
@@ -563,13 +598,11 @@ function CrossSectionCamera({ setupPlane, setTarget }) {
         const cp = new THREE.Vector3()
         setupPlane.coplanarPoint(cp)
         
-        // Kamera kouká přesně proti normále (do řezu)
         camera.position.copy(cp).add(setupPlane.normal.clone().multiplyScalar(100))
         camera.lookAt(cp)
         if (Math.abs(setupPlane.normal.y) > 0.9) camera.up.set(0, 0, -Math.sign(setupPlane.normal.y))
         else camera.up.set(0, 1, 0)
         
-        // Zoom nastavíme tak, aby se model vešel (odhad cca 80mm zorné pole)
         camera.zoom = Math.min(size.width, size.height) / 80
         camera.near = 0.1
         camera.far = 200
@@ -761,12 +794,12 @@ export default function ClientPage() {
 
   const [initialCameraState, setInitialCameraState] = useState(null)
 
-  // NÁSTROJE
+  // NÁSTROJE ŘEZÁNÍ
   const [toolMode, setToolMode] = useState("none") // none, cut
   const [ndcCutLine, setNdcCutLine] = useState(null)
   const [cutPlane, setCutPlane] = useState(null)
+  const [clipMode, setClipMode] = useState("translate")
   
-  // Pomocné stavy pro SVG kreslení lajny
   const [cutStartPos, setCutStartPos] = useState(null)
   const [cutCurrentPos, setCutCurrentPos] = useState(null)
 
@@ -1028,23 +1061,32 @@ export default function ClientPage() {
     </div>
   )
 
-  // NÁSTROJE VPRAVO NAHOŘE
   const toolsMenu = (
       <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", gap: 8 }}>
           {cutPlane && (
+              <>
+                  <button 
+                      onClick={() => setClipMode(clipMode === "translate" ? "rotate" : "translate")} 
+                      style={{ background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.3)", color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", backdropFilter: "blur(4px)" }}
+                  >
+                      {clipMode === "translate" ? "🔄 Rotace řezu" : "↕ Posun řezu"}
+                  </button>
+                  <button 
+                      onClick={() => { setCutPlane(null); setNdcCutLine(null); setToolMode('none') }} 
+                      style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.5)", color: "#ffbaba", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}
+                  >
+                      ✖ Zrušit řez
+                  </button>
+              </>
+          )}
+          {!cutPlane && (
               <button 
-                  onClick={() => { setCutPlane(null); setNdcCutLine(null); setToolMode('none') }} 
-                  style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.5)", color: "#ffbaba", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}
+                  onClick={() => setToolMode(toolMode === 'cut' ? 'none' : 'cut')} 
+                  style={{ background: toolMode === 'cut' ? "rgba(59,130,246,0.3)" : "rgba(0,0,0,0.5)", border: toolMode === 'cut' ? "1px solid rgba(59,130,246,0.8)" : "1px solid rgba(255,255,255,0.2)", color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", backdropFilter: "blur(4px)", boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}
               >
-                  ✖ Zrušit řez
+                  {toolMode === 'cut' ? "Kreslete myší přes modely..." : "✂️ Nový Řez"}
               </button>
           )}
-          <button 
-              onClick={() => setToolMode(toolMode === 'cut' ? 'none' : 'cut')} 
-              style={{ background: toolMode === 'cut' ? "rgba(59,130,246,0.3)" : "rgba(0,0,0,0.5)", border: toolMode === 'cut' ? "1px solid rgba(59,130,246,0.8)" : "1px solid rgba(255,255,255,0.2)", color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", backdropFilter: "blur(4px)", boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}
-          >
-              {toolMode === 'cut' ? "Kreslete myší přes modely..." : "✂️ Řez"}
-          </button>
       </div>
   )
 
@@ -1066,14 +1108,12 @@ export default function ClientPage() {
       {sidebar}
       {files.length > 0 && toolsMenu}
 
-      {/* SVG Overlay pro kreslení řezu */}
       {toolMode === 'cut' && cutStartPos && cutCurrentPos && (
           <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", zIndex: 5, pointerEvents: "none" }}>
               <line x1={cutStartPos.x} y1={cutStartPos.y} x2={cutCurrentPos.x} y2={cutCurrentPos.y} stroke="#ef4444" strokeWidth="3" strokeDasharray="6 4" />
           </svg>
       )}
 
-      {/* Zde se renderuje sekundární okno s Průřezem */}
       {cutPlane && (
           <CrossSectionWindow 
               files={files} colors={colors} opacities={opacities} visibles={visibles} roughnesses={roughnesses} metalnesses={metalnesses} vertexColors={vertexColors}
@@ -1082,7 +1122,7 @@ export default function ClientPage() {
                   const newPlane = cutPlane.clone().negate()
                   setCutPlane(newPlane)
               }}
-              onClose={() => { setCutPlane(null); setNdcCutLine(null) }}
+              onClose={() => { setCutPlane(null); setNdcCutLine(null); setToolMode('none') }}
           />
       )}
 
@@ -1125,7 +1165,9 @@ export default function ClientPage() {
           </Suspense>
         </group>
 
+        <ClippingGizmo plane={cutPlane} enabled={!!cutPlane} mode={clipMode} trackballRef={trackballRef} />
         <CutPlaneCalculator ndcLine={ndcCutLine} setCutPlane={setCutPlane} />
+        
         <ViewStateSync trackballRef={trackballRef} />
 
         {frameKey && !initialCameraState && (
