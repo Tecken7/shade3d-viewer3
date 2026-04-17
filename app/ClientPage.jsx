@@ -722,6 +722,16 @@ function Overlay2D({ segments, boundingBox }) {
       ? Math.sqrt(distSq(measureState.p1, measureState.snappedP2)).toFixed(2) 
       : null
 
+  // Výpočet pozice textu měření na obrazovce (dynamicky vedle kurzoru/bodů)
+  let textPos = null;
+  if (measureState.p1 && measureState.snappedP2) {
+     const midX = (measureState.p1.x + measureState.snappedP2.x) / 2;
+     const midY = (measureState.p1.y + measureState.snappedP2.y) / 2;
+     const pxX = ((midX - vX) / vW) * winSize.w;
+     const pxY = (((vY + vH) - midY) / vH) * winSize.h;
+     textPos = { x: pxX, y: pxY };
+  }
+
   return (
     <div 
       onWheel={(e) => {
@@ -739,20 +749,28 @@ function Overlay2D({ segments, boundingBox }) {
       <div style={{ position: 'absolute', top: 8, left: 16, fontSize: 11, color: '#aaa', pointerEvents: 'none', zIndex: 11 }}>
         Levé tl. = posun, Kolečko = zoom<br/>Dvojklik = měření
       </div>
-      {distVal && (
-        <div style={{ position: 'absolute', top: 8, right: 16, fontSize: 18, fontWeight: 'bold', color: '#fbbf24', pointerEvents: 'none', zIndex: 11, textShadow: "0 2px 4px rgba(0,0,0,0.8)" }}>
+
+      {/* Textové pole s hodnotou zobrazené dynamicky vedle středu linky */}
+      {distVal && textPos && (
+        <div style={{
+          position: 'absolute',
+          left: textPos.x + 8,
+          top: textPos.y - 12,
+          fontSize: 16,
+          fontWeight: 'bold',
+          color: '#fbbf24',
+          pointerEvents: 'none',
+          zIndex: 11,
+          textShadow: "0 2px 4px rgba(0,0,0,0.8)"
+        }}>
           {distVal} mm
         </div>
       )}
 
+      {/* Resize povolen už POUZE z levého horního rohu */}
       <div 
         onPointerDown={(e) => startResize(e, 'top-left')}
         style={{ position: 'absolute', top: -5, left: -5, width: 16, height: 16, cursor: 'nwse-resize', zIndex: 12, background: 'rgba(255,255,255,0.15)', borderRadius: '50%' }}
-        title="Zvětšit/Zmenšit"
-      />
-      <div 
-        onPointerDown={(e) => startResize(e, 'top-right')}
-        style={{ position: 'absolute', top: -5, right: -5, width: 16, height: 16, cursor: 'nesw-resize', zIndex: 12, background: 'rgba(255,255,255,0.15)', borderRadius: '50%' }}
         title="Zvětšit/Zmenšit"
       />
 
@@ -1022,9 +1040,12 @@ export default function ClientPage() {
            const center = new THREE.Vector3()
            box.getCenter(center)
 
-           const sphere = new THREE.Sphere()
-           box.getBoundingSphere(sphere)
-           setPlaneRadius(sphere.radius * 1.3)
+           // Vypočteme poloměr na základě největšího rozměru (šířka vs výška vs hloubka)
+           const size = new THREE.Vector3()
+           box.getSize(size)
+           const maxDim = Math.max(size.x, size.y, size.z)
+           // Ideální fit: 60% nejdelší hrany = poloměr pokrývající model + malá rezerva (approx 20% margin)
+           setPlaneRadius(maxDim * 0.6)
            
            planeGroup.position.copy(center)
            
@@ -1038,9 +1059,6 @@ export default function ClientPage() {
            updateClippingLogic()
         }
 
-        // DESATURACE BAREV GIMBALU
-        // TransformControls mění geometrii a materiály dynamicky, 
-        // proto musíme traverse pustit po krátké pauze, až je Gimbal plně připraven v grupě planeGroup
         setTimeout(() => {
             const desaturateMaterials = (obj) => {
                 obj.traverse((child) => {
@@ -1048,26 +1066,16 @@ export default function ClientPage() {
                         const mat = child.material;
                         if (!mat || !mat.color) return;
                         
-                        // Získáme barvu
                         const c = mat.color;
-
-                        // Detekce čistých barev os (RGB) a aplikace desaturovaných pastelových verzí
-                        // (Můžete doladit hex kódy podle vkusu)
-                        
-                        // Čistě červená -> Desaturovaná pastelově červená
                         if (c.r > 0.9 && c.g < 0.1 && c.b < 0.1) {
                             c.set("#cc5555"); 
                         }
-                        // Čistě zelená -> Desaturovaná pastelově zelená
                         else if (c.g > 0.9 && c.r < 0.1 && c.b < 0.1) {
                             c.set("#55cc55");
                         }
-                        // Čistě modrá -> Desaturovaná pastelově modrá
                         else if (c.b > 0.9 && c.r < 0.1 && c.g < 0.1) {
                             c.set("#5555cc");
                         }
-                        
-                        // Vynutíme update materiálu
                         mat.needsUpdate = true;
                     }
                 });
@@ -1076,7 +1084,7 @@ export default function ClientPage() {
             if (transformRotateRef.current) desaturateMaterials(planeGroup);
             if (transformTranslateRef.current) desaturateMaterials(planeGroup);
             
-        }, 50); // Krátká pauza na inicializaci
+        }, 50);
 
      } else if (!clippingEnabled) {
         setSliceSegments([])
@@ -1391,7 +1399,6 @@ export default function ClientPage() {
           <group ref={setPlaneGroup}>
             <mesh>
               <circleGeometry args={[planeRadius, 64]} />
-              {/* ZMĚNA: Barva je desaturovaná, opacity sníženo na 0.25 */}
               <meshBasicMaterial color="#b88f8f" transparent opacity={0.25} side={THREE.DoubleSide} depthWrite={false} />
             </mesh>
             <SliceOutline3D segments={sliceSegments} color="#eab308" />
