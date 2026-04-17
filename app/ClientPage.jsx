@@ -262,8 +262,8 @@ function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
   return <pointLight ref={ref} color={color} intensity={enabled ? intensity : 0} distance={0} decay={0} />
 }
 
-/* ---------- Trackball + Camera Sync ---------- */
-function TouchTrackballControls({ target = [0, 0, 0], initialCameraState = null, onTargetChange }) {
+/* ---------- Trackball ---------- */
+function TouchTrackballControls({ target = [0, 0, 0] }) {
   const { camera, gl, size } = useThree()
   const controlsRef = useRef(null)
   
@@ -276,25 +276,9 @@ function TouchTrackballControls({ target = [0, 0, 0], initialCameraState = null,
     c.dynamicDampingFactor = 0.15
     c.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.ZOOM, RIGHT: THREE.MOUSE.PAN }
     controlsRef.current = c
-
-    // ZDE JE OPRAVA PRO MANIFEST - Přesné uložení pozice, osy UP i Targetu
-    if (initialCameraState) {
-        if (initialCameraState.position) camera.position.fromArray(initialCameraState.position)
-        if (initialCameraState.up) camera.up.fromArray(initialCameraState.up)
-        if (initialCameraState.zoom) camera.zoom = initialCameraState.zoom
-        camera.updateProjectionMatrix()
-        
-        if (initialCameraState.target) {
-            c.target.fromArray(initialCameraState.target)
-            onTargetChange?.(initialCameraState.target)
-        }
-        c.update()
-    }
-
     return () => c.dispose()
-  }, [camera, gl, initialCameraState]) // eslint-disable-line
+  }, [camera, gl])
   
-  // Reakce na panování z RightButtonPan
   useEffect(() => {
     const c = controlsRef.current; if (!c) return
     c.target.set(target[0], target[1], target[2])
@@ -303,33 +287,6 @@ function TouchTrackballControls({ target = [0, 0, 0], initialCameraState = null,
   
   useFrame(() => { controlsRef.current?.update() })
   useEffect(() => { controlsRef.current?.handleResize() }, [size.width, size.height])
-
-  // SYNC DO FRAMERU - Oprava: Teď posíláme skutečný target přímo z jádra Trackballu
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (typeof window === "undefined" || !controlsRef.current) return
-      const c = controlsRef.current
-      
-      const camData = {
-        position: [camera.position.x, camera.position.y, camera.position.z],
-        up: [camera.up.x, camera.up.y, camera.up.z],
-        quaternion: [camera.quaternion.x, camera.quaternion.y, camera.quaternion.z, camera.quaternion.w],
-        zoom: camera.zoom,
-        target: [c.target.x, c.target.y, c.target.z] // Tohle byla ta chybějící magická hodnota!
-      }
-
-      const targetWindow = window.top || window.parent;
-      if (targetWindow) {
-        targetWindow.postMessage({
-          type: "SHADE3D_CAMERA_SYNC",
-          payload: camData
-        }, "*")
-      }
-    }, 500)
-
-    return () => clearInterval(interval)
-  }, [camera])
-
   return null
 }
 
@@ -415,16 +372,14 @@ function RightButtonPan({ setTarget }) {
   return null
 }
 
-/* ---------- AutoCenter & AutoFrame (one-shot) ---------- */
-function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined", skipCamera = false, setTarget }) {
+/* ---------- AutoCenter & AutoFrame ---------- */
+function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined", setTarget }) {
   const { camera, size } = useThree()
   
   useEffect(() => {
     const root = rootRef.current
     if (!root) return
     
-    // 1. NEJPRVE VŽDY VYCENTRUJEME MODEL
-    // Bez toho by uložená kamera koukala "mimo"
     root.updateMatrixWorld(true)
     const boxAll = new THREE.Box3().setFromObject(root)
     if (boxAll.isEmpty()) return
@@ -436,10 +391,9 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
     if (centerMode === "per") {
       root.children.forEach((child) => {
         const b = new THREE.Box3().setFromObject(child)
-        if (!b.isEmpty()) {
-            const cWorld = new THREE.Vector3(); b.getCenter(cWorld)
-            child.position.sub(cWorld)
-        }
+        if (b.isEmpty()) return
+        const cWorld = new THREE.Vector3(); b.getCenter(cWorld)
+        child.position.sub(cWorld)
       })
       root.updateMatrixWorld(true)
     } else if (centerMode === "combined") {
@@ -447,35 +401,60 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
       root.updateMatrixWorld(true)
     }
 
-    // 2. NASTAVÍME KAMERU (Pouze pokud nenahráváme tu uloženou z manifestu)
-    if (!skipCamera) {
-      const after = new THREE.Box3().setFromObject(root)
-      const dims2 = new THREE.Vector3(), ctr = new THREE.Vector3()
-      after.getSize(dims2); after.getCenter(ctr)
+    const after = new THREE.Box3().setFromObject(root)
+    const dims2 = new THREE.Vector3(), ctr = new THREE.Vector3()
+    after.getSize(dims2); after.getCenter(ctr)
 
-      const objW = Math.max(dims2.x, 1e-6)
-      const objH = Math.max(dims2.y, 1e-6)
-      const zoomX = size.width / (objW * margin)
-      const zoomY = size.height / (objH * margin)
-      let newZoom = Math.min(zoomX, zoomY) * (isMobile ? mobileScale : desktopScale)
+    const objW = Math.max(dims2.x, 1e-6)
+    const objH = Math.max(dims2.y, 1e-6)
+    const zoomX = size.width / (objW * margin)
+    const zoomY = size.height / (objH * margin)
+    let newZoom = Math.min(zoomX, zoomY) * (isMobile ? mobileScale : desktopScale)
 
-      const depth = Math.max(dims2.z, Math.max(dims2.x, dims2.y) * 0.75) || 1
-      const safeDist = depth * 10
-      camera.near = Math.max(0.01, safeDist * 0.001)
-      camera.far = safeDist * 80 + 200
-      camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
-      camera.up.set(0, 1, 0)
-      camera.zoom = Math.max(newZoom, 0.01)
-      camera.updateProjectionMatrix()
+    const depth = Math.max(dims2.z, Math.max(dims2.x, dims2.y) * 0.75) || 1
+    const safeDist = depth * 10
+    camera.near = Math.max(0.01, safeDist * 0.001)
+    camera.far = safeDist * 80 + 200
+    camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
+    camera.up.set(0, 1, 0)
+    camera.zoom = Math.max(newZoom, 0.01)
+    camera.updateProjectionMatrix()
       
-      if (setTarget) setTarget([ctr.x, ctr.y, ctr.z])
-    }
+    if (setTarget) setTarget([ctr.x, ctr.y, ctr.z])
 
     onFramed && onFramed()
   }, [triggerKey]) // eslint-disable-line
   
   return null
 }
+
+/* ---------- ZCELA NOVÉ: Odchytávání rotace vůči kameře ---------- */
+function WorldRotationSync() {
+  const { camera } = useThree()
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (typeof window === "undefined") return
+      
+      // Pro zjištění, jak moc má uživatel objekt natočený, sečteme rotaci Trackballu
+      // Nechceme znát polohu kamery, ale čistě její rotaci v Euler úhlech.
+      const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, "YXZ")
+      
+      const targetWindow = window.top || window.parent;
+      if (targetWindow) {
+        targetWindow.postMessage({
+          type: "SHADE3D_WORLD_ROTATION",
+          payload: [euler.x, euler.y, euler.z]
+        }, "*")
+      }
+    }, 500)
+
+    return () => clearInterval(interval)
+  }, [camera])
+
+  return null
+}
+
 
 /* ---------- Lightbox ---------- */
 function Lightbox({ open, onClose, src, alt }) {
@@ -552,7 +531,9 @@ export default function ClientPage() {
   const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
   const [loadedCount, setLoadedCount] = useState(0)
   const [didInitialFrame, setDidInitialFrame] = useState(false)
-  const [initialCameraState, setInitialCameraState] = useState(null)
+  
+  // NOVÉ: Držení rotace celého světa
+  const [initialWorldRotation, setInitialWorldRotation] = useState(null)
 
   const handleModelLoaded = () => setLoadedCount((n) => n + 1)
   const centerParam = (getParam("center") || "combined").toLowerCase()
@@ -566,7 +547,7 @@ export default function ClientPage() {
         const manifestUrlParam = getParam("manifest")
         const filesParam = getParam("files")
 
-        const applyFiles = (Fs, titleStr, logoUrl, headlight, camState) => {
+        const applyFiles = (Fs, titleStr, logoUrl, headlight, worldRotState) => {
           if (!Fs.length) throw new Error("Manifest je prázdný.")
           setFiles(Fs)
           const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
@@ -588,8 +569,8 @@ export default function ClientPage() {
               intensity: typeof headlight.intensity === "number" ? headlight.intensity : 2.0,
             })
           }
-          if (camState) {
-            setInitialCameraState(camState)
+          if (worldRotState) {
+            setInitialWorldRotation(worldRotState)
           }
           setLoadedCount(0)
           setDidInitialFrame(false)
@@ -605,7 +586,7 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: !!x.vc, km: !!x.km,
           }))
-          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera)
+          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.worldRotation)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -621,7 +602,7 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: !!x.vc, km: !!x.km,
           }))
-          applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera)
+          applyFiles(Fs, m?.title, m?.logo?.url, null, m?.worldRotation)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -702,7 +683,7 @@ export default function ClientPage() {
         setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
         setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
 
-        if (urlsChanged) { setLoadedCount(0); setDidInitialFrame(false); setInitialCameraState(null); }
+        if (urlsChanged) { setLoadedCount(0); setDidInitialFrame(false); setInitialWorldRotation(null); }
       }
 
       if (p.lights) {
@@ -793,7 +774,11 @@ export default function ClientPage() {
         {/* headlight */}
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
 
-        <group ref={rootGroupRef}>
+        {/* ZDE APLIKUJEME ULOŽENOU ROTACI */}
+        <group 
+            ref={rootGroupRef}
+            rotation={initialWorldRotation ? new THREE.Euler(initialWorldRotation[0], initialWorldRotation[1], initialWorldRotation[2], "YXZ") : [0,0,0]}
+        >
           <Suspense fallback={null}>
             {files.map((f, i) => (
               <AnyModel
@@ -816,6 +801,10 @@ export default function ClientPage() {
           </Suspense>
         </group>
 
+        {/* Vysíláme aktuální natočení ven do Frameru */}
+        <WorldRotationSync />
+
+        {/* Centrování proběhne bez ohledu na to, jak je to natočené. VŽDY trefíme střed. */}
         {frameKey && (
           <AutoCenterAndFrame
             rootRef={rootGroupRef}
@@ -826,16 +815,11 @@ export default function ClientPage() {
             desktopScale={1.0}
             mobileScale={1.0}
             centerMode={centerMode}
-            skipCamera={!!initialCameraState}
             setTarget={setCameraTarget}
           />
         )}
 
-        <TouchTrackballControls 
-            target={cameraTarget} 
-            initialCameraState={initialCameraState} 
-            onTargetChange={setCameraTarget} 
-        />
+        <TouchTrackballControls target={cameraTarget} />
         <RightButtonPan setTarget={setCameraTarget} />
 
         {!allLoaded && files.length > 0 && <InlineLoader text="Načítám modely…" />}
