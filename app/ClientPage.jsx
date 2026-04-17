@@ -545,7 +545,6 @@ function Overlay2D({ segments, boundingBox }) {
   const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
   const svgRef = useRef(null)
 
-  // Větší výchozí okno (bylo 450x320)
   const [winSize, setWinSize] = useState({ w: 550, h: 400 })
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [zoom, setZoom] = useState(1)
@@ -689,7 +688,6 @@ function Overlay2D({ segments, boundingBox }) {
 
   return (
     <div 
-      // Změněno na Reactí onWheel zachycující scroll
       onWheel={(e) => {
          e.stopPropagation()
          const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85
@@ -754,15 +752,23 @@ function Overlay2D({ segments, boundingBox }) {
   )
 }
 
-/* ---------- Manažer pro detekci hoveru na Gimbalu ---------- */
-function GizmoManager({ transformRef, trackballRef }) {
+/* ---------- Manažer pro detekci hoveru na obou Gimbalech ---------- */
+function GizmoManager({ transformRefs, trackballRef }) {
   useFrame(() => {
-    if (transformRef.current && trackballRef.current) {
-      const isHovered = transformRef.current.axis !== null;
-      const isDragging = transformRef.current.dragging;
+    let isHovered = false;
+    let isDragging = false;
+    
+    if (transformRefs) {
+      transformRefs.forEach(ref => {
+        if (ref.current) {
+          if (ref.current.axis !== null) isHovered = true;
+          if (ref.current.dragging) isDragging = true;
+        }
+      });
+    }
+
+    if (trackballRef.current) {
       trackballRef.current.enabled = !(isHovered || isDragging);
-    } else if (trackballRef.current) {
-      trackballRef.current.enabled = true;
     }
   })
   return null
@@ -803,13 +809,17 @@ export default function ClientPage() {
 
   // -- STAVY PRO ŘEZÁNÍ (CLIPPING) --
   const [clippingEnabled, setClippingEnabled] = useState(false)
-  const [clipMode, setClipMode] = useState("translate")
   const [planeGroup, setPlaneGroup] = useState(null) 
-  const [planeRadius, setPlaneRadius] = useState(100) // Dynamická velikost roviny
+  const [planeRadius, setPlaneRadius] = useState(100) 
   const clipPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(1, 0, 0), 0))
-  const transformRef = useRef(null) 
+  
+  // Dvě samostatné reference pro rotaci a posun zaráz
+  const transformRotateRef = useRef(null) 
+  const transformTranslateRef = useRef(null) 
+
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
+  const isDraggingGizmo = useRef(false)
 
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
@@ -959,14 +969,13 @@ export default function ClientPage() {
            const center = new THREE.Vector3()
            box.getCenter(center)
 
-           // Vypočteme si obalovou sféru modelů, rovinu uděláme o 30% větší
            const sphere = new THREE.Sphere()
            box.getBoundingSphere(sphere)
-           setPlaneRadius(sphere.radius * 1.3)
+           setPlaneRadius(sphere.radius * 1.3) // O 30 % větší než modely
            
            planeGroup.position.copy(center)
            
-           // Výchozí rotace pro VERTIKÁLNÍ (sagitální) řez
+           // Výchozí orientace pro vertikální řez
            planeGroup.rotation.set(0, Math.PI / 2, 0)
            planeGroup.updateMatrixWorld(true)
            
@@ -1224,17 +1233,9 @@ export default function ClientPage() {
         <Switch checked={clippingEnabled} onChange={setClippingEnabled} label="Nástroj řezu (Průřez)" />
         {clippingEnabled && (
           <div style={{ marginTop: 12, fontSize: 12, width: 220 }}>
-            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-              <button 
-                onClick={() => setClipMode("translate")}
-                style={{ flex: 1, padding: "6px", background: clipMode === "translate" ? "#3b82f6" : "rgba(255,255,255,.1)", border: "none", color: "#fff", borderRadius: 4, cursor: "pointer", fontWeight: "bold" }}
-              >Posun</button>
-              <button 
-                onClick={() => setClipMode("rotate")}
-                style={{ flex: 1, padding: "6px", background: clipMode === "rotate" ? "#3b82f6" : "rgba(255,255,255,.1)", border: "none", color: "#fff", borderRadius: 4, cursor: "pointer", fontWeight: "bold" }}
-              >Rotace</button>
-            </div>
-            <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>Najetím myší na osu ji uchopíte. Následným tažením posouváte 3D řez.</p>
+            <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>
+              Najetím myší na barevné kruhy měníte rotaci. Taháním za <b>modrou šipku</b> posouváte řez vpřed a vzad.
+            </p>
           </div>
         )}
       </div>
@@ -1297,28 +1298,55 @@ export default function ClientPage() {
         {clippingEnabled && (
           <group ref={setPlaneGroup}>
             <mesh>
-              {/* Kulatá poloprůhledná rovina přesně podle Smilecloudu */}
               <circleGeometry args={[planeRadius, 64]} />
               <meshBasicMaterial color="#d95a5a" transparent opacity={0.35} side={THREE.DoubleSide} depthWrite={false} />
             </mesh>
           </group>
         )}
 
+        {/* GIMBAL 1: Exkluzivně pro rotaci */}
         {clippingEnabled && planeGroup && (
           <TransformControls 
-            ref={transformRef}
+            ref={transformRotateRef}
             object={planeGroup}
-            mode={clipMode}
-            space="local" // Lokální osy naprosto zásadní pro pohodlný přesun natočené roviny
+            mode="rotate"
+            space="local"
+            size={1.6}
+            onDraggingChanged={(e) => {
+               if (!e.value) updateClippingLogic() 
+            }}
             onChange={() => {
               if (planeGroup) {
-                // Přímá synchronizace roviny při tažení
                 planeGroup.updateMatrixWorld(true)
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
                 const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
                 clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-                
-                // LIVE UPDATE 2D OKNA BĚHEM TAŽENÍ
+                updateClippingLogic() 
+              }
+            }}
+          />
+        )}
+
+        {/* GIMBAL 2: Exkluzivně pro posun podél lokální Z osy (Modrá šipka) */}
+        {clippingEnabled && planeGroup && (
+          <TransformControls 
+            ref={transformTranslateRef}
+            object={planeGroup}
+            mode="translate"
+            space="local"
+            showX={false}
+            showY={false}
+            showZ={true}
+            size={1.6}
+            onDraggingChanged={(e) => {
+               if (!e.value) updateClippingLogic() 
+            }}
+            onChange={() => {
+              if (planeGroup) {
+                planeGroup.updateMatrixWorld(true)
+                const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
+                const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
+                clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
                 updateClippingLogic() 
               }
             }}
@@ -1326,7 +1354,7 @@ export default function ClientPage() {
         )}
 
         {clippingEnabled && (
-          <GizmoManager transformRef={transformRef} trackballRef={trackballRef} />
+          <GizmoManager transformRefs={[transformRotateRef, transformTranslateRef]} trackballRef={trackballRef} />
         )}
 
         <ViewStateSync trackballRef={trackballRef} />
