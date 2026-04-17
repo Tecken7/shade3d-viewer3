@@ -115,8 +115,8 @@ function InlineLoader({ text }) {
   )
 }
 
-/* ---------- MODEL KOMPONENTA (Umí 3D Obrys i 2D čistou křivku) ---------- */
-const OUTLINE_THICKNESS = 0.15 // Generuje čáru o tloušťce 0.3mm (jde do hloubky pórů)
+/* ---------- VEKTOROVÝ MODEL KOMPONENTA ---------- */
+const CUT_LINE_THICKNESS = 0.2 // tloušťka linky v mm
 
 function AnyModel({
   name, url, color, opacity, visible,
@@ -130,7 +130,7 @@ function AnyModel({
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
   
-  // V 3D Okně je řez oranžový, v 2D okně použijeme pro přehlednost barvu modelu
+  // Barva linky: Oranžová v 3D, barva skenu v 2D
   const outlineColor = useMemo(() => new THREE.Color(isSliceView ? (color || "#ffffff") : "#ff9900"), [isSliceView, color])
 
   const makeMat = (opts = {}) => {
@@ -145,7 +145,7 @@ function AnyModel({
           ...opts,
       })
 
-    // INJEKCE SHADERU: Matematicky definuje linii průniku roviny a modelu
+    // VEKTOROVÝ SHADER: Matematicky vyřízne jen tenkou čáru
     baseMat.onBeforeCompile = (shader) => {
         shader.uniforms.uOutlinePlane = { value: new THREE.Vector4(0, 0, 0, 0) }
         shader.uniforms.uOutlineColor = { value: outlineColor }
@@ -160,7 +160,7 @@ function AnyModel({
         )
 
         if (isSliceView) {
-            // V 2D okně zahodí (discard) všechny pixely kromě samotné 0.3mm tenké linie
+            // 2D VEKTOROVÝ LOOK: Všechno kromě čáry zmizí
             shader.fragmentShader = `
                 uniform vec4 uOutlinePlane;
                 uniform vec3 uOutlineColor;
@@ -168,10 +168,10 @@ function AnyModel({
                 ${shader.fragmentShader}
             `.replace(
                 `#include <dithering_fragment>`,
-                `#include <dithering_fragment>\n if (length(uOutlinePlane.xyz) > 0.5) {\n float dist = dot(vCustomWorldPos, uOutlinePlane.xyz) + uOutlinePlane.w;\n if (abs(dist) > ${OUTLINE_THICKNESS.toFixed(3)}) {\n discard;\n } else {\n gl_FragColor = vec4(uOutlineColor, 1.0);\n }\n } else { discard; }`
+                `#include <dithering_fragment>\n if (length(uOutlinePlane.xyz) > 0.5) {\n float dist = dot(vCustomWorldPos, uOutlinePlane.xyz) + uOutlinePlane.w;\n if (abs(dist) > ${CUT_LINE_THICKNESS.toFixed(3)}) {\n discard;\n } else {\n gl_FragColor = vec4(uOutlineColor, 1.0);\n }\n } else { discard; }`
             )
         } else {
-            // V 3D okně pouze přebarví linku na oranžovo, zbytek modelu nechá normální
+            // 3D LOOK: Čára svítí přes model
             shader.fragmentShader = `
                 uniform vec4 uOutlinePlane;
                 uniform vec3 uOutlineColor;
@@ -179,29 +179,11 @@ function AnyModel({
                 ${shader.fragmentShader}
             `.replace(
                 `#include <dithering_fragment>`,
-                `#include <dithering_fragment>\n if (length(uOutlinePlane.xyz) > 0.5) {\n float dist = dot(vCustomWorldPos, uOutlinePlane.xyz) + uOutlinePlane.w;\n if (abs(dist) < ${OUTLINE_THICKNESS.toFixed(3)}) {\n gl_FragColor = vec4(uOutlineColor, 1.0);\n }\n }`
+                `#include <dithering_fragment>\n if (length(uOutlinePlane.xyz) > 0.5) {\n float dist = dot(vCustomWorldPos, uOutlinePlane.xyz) + uOutlinePlane.w;\n if (abs(dist) < ${CUT_LINE_THICKNESS.toFixed(3)}) {\n gl_FragColor = vec4(uOutlineColor, 1.0);\n }\n }`
             )
         }
     }
     return baseMat
-  }
-
-  const rebuildWireOverlay = (mesh) => {
-    if (mesh.userData._edges) {
-      mesh.userData._edges.geometry?.dispose?.()
-      mesh.userData._edges.material?.dispose?.()
-      mesh.remove(mesh.userData._edges)
-      mesh.userData._edges = null
-    }
-    if (!wireframe) return
-    const wfGeom = new THREE.WireframeGeometry(mesh.geometry)
-    const wfMat = new THREE.LineBasicMaterial({ 
-        color: 0x000000, depthTest: true, depthWrite: false, transparent: true, opacity: 0.95, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2
-    })
-    const lines = new THREE.LineSegments(wfGeom, wfMat)
-    lines.renderOrder = (mesh.renderOrder || 0) + 10
-    mesh.add(lines)
-    mesh.userData._edges = lines
   }
 
   useEffect(() => {
@@ -216,8 +198,7 @@ function AnyModel({
           obj.userData._baseGeom = geom
         } else if (ext === "ply") {
           const geom = await new PLYLoader().loadAsync(url)
-          const hasVC = !!geom.getAttribute("color")
-          obj = new THREE.Mesh(geom, hasVC && useVertexColors ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") }) : makeMat())
+          obj = new THREE.Mesh(geom, makeMat())
           obj.userData._baseGeom = geom
         } else {
           obj = await new OBJLoader().loadAsync(url)
@@ -252,9 +233,8 @@ function AnyModel({
       
       child.geometry = newGeom
       child.userData._derivedGeom = newGeom
-      if (!isSliceView) rebuildWireOverlay(child)
     })
-  }, [object3D, autoSmooth, smoothAngle, wireframe, isSliceView]) // eslint-disable-line
+  }, [object3D, autoSmooth, smoothAngle, isSliceView]) // eslint-disable-line
 
   useEffect(() => {
     if (!object3D) return
@@ -281,16 +261,14 @@ function AnyModel({
                   if ("color" in m) m.color = new THREE.Color("#ffffff") 
               }
           }
+      } else {
+          m.color = new THREE.Color(color || "#ffffff")
       }
       
       m.needsUpdate = true
-      if (!isSliceView) {
-          if (child.userData._edges) child.userData._edges.visible = !!wireframe
-      }
     })
   }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, isSliceView]) // eslint-disable-line
 
-  // Odeslání polohy řezu do GPU
   useFrame(() => {
       if (object3D) {
           object3D.traverse((child) => {
@@ -486,7 +464,7 @@ function ClippingGizmo({ plane, enabled, mode, setIsGizmoDragging, targetCenter 
     <TransformControls 
         mode={mode} 
         onDraggingChanged={(e) => {
-            setIsGizmoDragging(e.value) // Zamkne kameru během tahání
+            setIsGizmoDragging(e.value)
         }}
     >
         <mesh ref={meshRef}>
@@ -532,17 +510,14 @@ function MeasureLine({ p1, p2, dist, isTemp = false }) {
     )
 }
 
-/* ---------- MINI-MAPA (Průřezové okno s čistým Outline 2D) ---------- */
-function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, metalnesses, vertexColors, cutPlane, onFlipCut, onClose }) {
+/* ---------- MINI-MAPA (Průřezové okno s vektorovým lookem) ---------- */
+function CrossSectionWindow({ files, colors, visibles, roughnesses, metalnesses, vertexColors, cutPlane, onFlipCut, onClose }) {
     const [target, setTarget] = useState([0,0,0])
-    
-    // Měření
     const [measurePoints, setMeasurePoints] = useState([])
     const [measureStart, setMeasureStart] = useState(null)
     const [measureCurrent, setMeasureCurrent] = useState(null)
     const [snapPoint, setSnapPoint] = useState(null)
 
-    // Přisátí bodu (matematicky zploští bod myši přesně na řeznou rovinu)
     const handleSnapMove = (point) => {
         if (!cutPlane) return
         const projected = new THREE.Vector3()
@@ -575,7 +550,7 @@ function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, m
                     <span style={{ color: "white", fontSize: 13, fontWeight: "bold" }}>Průřez</span>
                     <button onClick={onFlipCut} style={{ background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 11, cursor: "pointer" }}>🔄 Otočit</button>
                     {measurePoints.length > 0 && (
-                        <button onClick={() => setMeasurePoints([])} style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.5)", color: "#ffbaba", borderRadius: 4, padding: "2px 8px", fontSize: 11, cursor: "pointer" }}>🗑 Smazat míry</button>
+                        <button onClick={() => setMeasurePoints([])} style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.5)", color: "#ffbaba", borderRadius: 4, padding: "2px 8px", fontSize: 11, cursor: "pointer" }}>🗑 Smazat</button>
                     )}
                 </div>
                 <button onClick={onClose} style={{ background: "none", border: "none", color: "#fff", cursor: "pointer", fontSize: 16, lineHeight: 1 }}>×</button>
@@ -598,7 +573,7 @@ function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, m
                                 color={colors[i]} opacity={1} visible={visibles[i]}
                                 autoSmooth={false} wireframe={false}
                                 roughness={roughnesses[i]} metalness={metalnesses[i]} useVertexColors={vertexColors[i]}
-                                outlinePlane={cutPlane} // Vykreslí se JEN čistá křivka
+                                outlinePlane={cutPlane} // VEKTOROVÝ REŽIM
                                 isSliceView={true}
                                 onSnapMove={handleSnapMove}
                                 onSnapDoubleClick={handleSnapDoubleClick}
@@ -607,13 +582,8 @@ function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, m
                             ))}
                         </Suspense>
                     </group>
-                    
                     <CrossSectionCamera setupPlane={cutPlane} setTarget={setTarget} />
-                    
-                    {/* Volný pohyb a Zoom ve 2D okně */}
                     <OrbitControls enableRotate={false} enableZoom={true} enablePan={true} target={target} makeDefault />
-                    
-                    {/* Magnetický Snap Point */}
                     {snapPoint && (
                         <mesh position={snapPoint}><sphereGeometry args={[0.5, 16, 16]} /><meshBasicMaterial color="#ffb700" depthTest={false} /></mesh>
                     )}
@@ -631,17 +601,12 @@ function CrossSectionCamera({ setupPlane, setTarget }) {
         if (!setupPlane) return
         const cp = new THREE.Vector3()
         setupPlane.coplanarPoint(cp)
-        
         camera.position.copy(cp).add(setupPlane.normal.clone().multiplyScalar(100))
         camera.lookAt(cp)
         if (Math.abs(setupPlane.normal.y) > 0.9) camera.up.set(0, 0, -Math.sign(setupPlane.normal.y))
         else camera.up.set(0, 1, 0)
-        
         camera.zoom = Math.min(size.width, size.height) / 80
-        camera.near = 0.1
-        camera.far = 200
         camera.updateProjectionMatrix()
-        
         setTarget([cp.x, cp.y, cp.z])
     }, [setupPlane, camera, size.width, size.height, setTarget])
     return null
@@ -654,14 +619,11 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
   useEffect(() => {
     const root = rootRef.current
     if (!root) return
-    
     root.updateMatrixWorld(true)
     const boxAll = new THREE.Box3().setFromObject(root)
     if (boxAll.isEmpty()) return
-
     const centerAll = new THREE.Vector3()
     boxAll.getCenter(centerAll)
-
     if (centerMode === "per") {
       root.children.forEach((child) => {
         const b = new THREE.Box3().setFromObject(child)
@@ -675,18 +637,15 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
       root.position.sub(centerAll)
       root.updateMatrixWorld(true)
     }
-
     if (!skipCamera) {
       const after = new THREE.Box3().setFromObject(root)
       const dims2 = new THREE.Vector3(), ctr = new THREE.Vector3()
       after.getSize(dims2); after.getCenter(ctr)
-
       const objW = Math.max(dims2.x, 1e-6)
       const objH = Math.max(dims2.y, 1e-6)
       const zoomX = size.width / (objW * margin)
       const zoomY = size.height / (objH * margin)
       let newZoom = Math.min(zoomX, zoomY) * (isMobile ? mobileScale : desktopScale)
-
       const depth = Math.max(dims2.z, Math.max(dims2.x, dims2.y) * 0.75) || 1
       const safeDist = depth * 10
       camera.near = Math.max(0.01, safeDist * 0.001)
@@ -695,32 +654,25 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
       camera.up.set(0, 1, 0)
       camera.zoom = Math.max(newZoom, 0.01)
       camera.updateProjectionMatrix()
-      
       if (setTarget) setTarget([ctr.x, ctr.y, ctr.z])
     }
-
     onFramed && onFramed()
   }, [triggerKey]) // eslint-disable-line
-  
   return null
 }
 
 /* ---------- Nasazení uložené kamery ---------- */
 function CustomCameraSetter({ camState, triggerKey, onFramed, setTarget }) {
   const { camera, size } = useThree()
-  
   useEffect(() => {
     if (!camState) return
-    
     if (camState.matrix) {
       camera.matrix.fromArray(camState.matrix)
       camera.matrix.decompose(camera.position, camera.quaternion, camera.scale)
     } else if (camState.position) {
         camera.position.fromArray(camState.position)
     }
-    
     if (camState.up) camera.up.fromArray(camState.up)
-    
     if (camState.zoom) {
        if (camState.canvasSize) {
           const savedMin = Math.min(camState.canvasSize[0], camState.canvasSize[1])
@@ -730,30 +682,23 @@ function CustomCameraSetter({ camState, triggerKey, onFramed, setTarget }) {
           camera.zoom = camState.zoom
        }
     }
-    
     camera.updateProjectionMatrix()
-
     if (camState.target && setTarget) {
       setTarget(camState.target)
     }
-
     onFramed && onFramed()
   }, [triggerKey, camState, camera, setTarget, size.width, size.height])
-
   return null
 }
 
 /* ---------- SYNC STAVU POHLEDU DO FRAMERU ---------- */
 function ViewStateSync({ trackballRef }) {
   const { camera, size } = useThree()
-
   useEffect(() => {
     const interval = setInterval(() => {
       if (typeof window === "undefined" || !trackballRef?.current) return
-      
       const c = trackballRef.current
       camera.updateMatrixWorld(true)
-      
       const camData = {
         matrix: camera.matrix.toArray(),
         up: [camera.up.x, camera.up.y, camera.up.z],
@@ -761,7 +706,6 @@ function ViewStateSync({ trackballRef }) {
         canvasSize: [size.width, size.height],
         target: [c.target.x, c.target.y, c.target.z] 
       }
-      
       const targetWindow = window.top || window.parent;
       if (targetWindow) {
         targetWindow.postMessage({
@@ -770,36 +714,9 @@ function ViewStateSync({ trackballRef }) {
         }, "*")
       }
     }, 500)
-
     return () => clearInterval(interval)
   }, [camera, trackballRef, size.width, size.height])
-
   return null
-}
-
-/* ---------- Lightbox ---------- */
-function Lightbox({ open, onClose, src, alt }) {
-  if (!open || !src) return null
-  return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
-      <img src={src} alt={alt || ""} style={{ maxWidth: "96vw", maxHeight: "92vh", objectFit: "contain", borderRadius: 12, boxShadow: "0 10px 40px rgba(0,0,0,.6)", border: "1px solid rgba(255,255,255,.15)" }} />
-    </div>
-  )
-}
-
-/* ---------- Switch ---------- */
-function Switch({ checked, onChange, label }) {
-  const onKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onChange(!checked) } }
-  const TRACK_W = 38, TRACK_H = 22, KNOB = 18
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      {label && <span style={{ opacity: .85 }}>{label}</span>}
-      <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)} onKeyDown={onKey}
-        style={{ position: "relative", width: TRACK_W, height: TRACK_H, borderRadius: 999, border: "1px solid rgba(255,255,255,.22)", background: checked ? "rgba(59,130,246,.45)" : "rgba(255,255,255,.10)", cursor: "pointer", transition: "background .15s ease, border-color .15s ease", outline: "none", padding: 0 }}>
-        <span aria-hidden style={{ position: "absolute", top: "50%", transform: "translateY(-50%)", left: checked ? TRACK_W - KNOB - 3 : 3, width: KNOB, height: KNOB, borderRadius: "50%", background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.35)", transition: "left .15s ease" }}/>
-      </button>
-    </div>
-  )
 }
 
 /* ---------- Hlavní komponenta ---------- */
@@ -809,7 +726,6 @@ export default function ClientPage() {
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
   const [isMobile, setIsMobile] = useState(false)
-
   useEffect(() => {
     try {
       const uaMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
@@ -821,7 +737,6 @@ export default function ClientPage() {
 
   const [title, setTitle] = useState(null)
   const [logoCfg, setLogoCfg] = useState({ url: DEFAULT_LOGO, opacity: 0.9, width: 160, pos: "bc" })
-
   const [files, setFiles] = useState([])
   const [colors, setColors] = useState([])
   const [opacities, setOpacities] = useState([])
@@ -830,14 +745,11 @@ export default function ClientPage() {
   const [metalnesses, setMetalnesses] = useState([])
   const [vertexColors, setVertexColors] = useState([])
   const [fatal, setFatal] = useState(null)
-
   const [autoSmooth, setAutoSmooth] = useState(true)
   const [smoothAngle] = useState(30)
   const [wireframe, setWireframe] = useState(false)
-
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
-
   const [photosOpen, setPhotosOpen] = useState(!isMobile)
   useEffect(() => { setPhotosOpen(!isMobile) }, [isMobile])
   const [slidersOpen, setSlidersOpen] = useState(!isMobile)
@@ -847,293 +759,30 @@ export default function ClientPage() {
   const rootGroupRef = useRef(null)
   const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
   const [didInitialFrame, setDidInitialFrame] = useState(false)
-  
   const [loadedUrls, setLoadedUrls] = useState(new Set())
   const handleModelLoaded = (url) => setLoadedUrls((prev) => { const n = new Set(prev); n.add(url); return n; })
-
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
-
   const [initialCameraState, setInitialCameraState] = useState(null)
 
   // NÁSTROJE ŘEZÁNÍ
   const [cutPlane, setCutPlane] = useState(null)
-  const [clipMode, setClipMode] = useState("translate") // translate / rotate
-  const [isGizmoDragging, setIsGizmoDragging] = useState(false) // Zabrání rotaci kamery při posunu řezu
+  const [clipMode, setClipMode] = useState("translate")
+  const [isGizmoDragging, setIsGizmoDragging] = useState(false)
 
-  // Funkce pro vertikální řez z aktuálního pohledu
   const spawnNewCut = () => {
       if (!trackballRef.current) return
       const camera = trackballRef.current.object
-      
       const viewDir = new THREE.Vector3()
       camera.getWorldDirection(viewDir)
-      
-      viewDir.y = 0 // Zamkne vertikální směr
+      viewDir.y = 0 
       if (viewDir.lengthSq() < 0.001) viewDir.set(0, 0, -1)
       viewDir.normalize()
-      
-      // Vypočte rovinu kolmou na směr pohledu (řeže model napříč)
       const normal = new THREE.Vector3().crossVectors(viewDir, new THREE.Vector3(0, 1, 0)).normalize()
       const center = new THREE.Vector3().fromArray(cameraTarget)
-      
       const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, center)
       setCutPlane(plane)
   }
-
-  useEffect(() => {
-    ;(async () => {
-      try {
-        const mId = getParam("m")
-        const manifestUrlParam = getParam("manifest")
-        const filesParam = getParam("files")
-        const smoothParam = getParam("smooth")
-        if (smoothParam === "0") setAutoSmooth(false)
-
-        const applyFiles = (Fs, titleStr, logoUrl, headlight, camState) => {
-          if (!Fs.length) throw new Error("Manifest je prázdný.")
-          setFiles(Fs)
-          const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
-          setColors(Fs.map((f, i) => f.c || palette[i % palette.length]))
-          setOpacities(Fs.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
-          setVisibles(Fs.map((f) => (typeof f.v === "boolean" ? f.v : true)))
-          setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
-          setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
-          setVertexColors(Fs.map((f) => !!f.vc))
-          
-          setTitle(titleStr ?? (getParam("title") ?? null))
-          setLogoCfg({
-            url: logoUrl ?? (getParam("logo") === "none" ? null : getParam("logo") || DEFAULT_LOGO),
-            opacity: clamp01(parseFloat(getParam("logoOpacity") ?? "0.9")),
-            width: parseInt(getParam("logoWidth") ?? (typeof window !== "undefined" && window.innerWidth < 768 ? "120" : "160"), 10),
-            pos: getParam("logoPos") || "bc",
-          })
-          if (headlight) {
-            setHeadlightCfg({
-              enabled: typeof headlight.enabled === "boolean" ? headlight.enabled : true,
-              intensity: typeof headlight.intensity === "number" ? headlight.intensity : 2.0,
-            })
-          }
-          if (camState) setInitialCameraState(camState)
-          setDidInitialFrame(false)
-        }
-
-        if (mId) {
-          const m = await fetchJSON(`${SUPABASE_URL}/storage/v1/object/public/${PUBLIC_BUCKET}/manifests/${encodeURIComponent(mId)}.json`)
-          const Fs = (m?.files || []).map((x, i) => ({
-            url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
-            c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
-            v: typeof x.v === "boolean" ? x.v : true,
-            r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
-            m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: !!x.vc, km: !!x.km,
-          }))
-          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera)
-          if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
-          if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
-          return
-        }
-
-        if (manifestUrlParam) {
-          const m = await fetchJSON(manifestUrlParam)
-          const Fs = (m?.files || []).map((x, i) => ({
-            url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
-            c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
-            v: typeof x.v === "boolean" ? x.v : true,
-            r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
-            m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: !!x.vc, km: !!x.km,
-          }))
-          applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera)
-          if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
-          if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
-          return
-        }
-
-        if (filesParam) {
-          let arr = null; try { arr = JSON.parse(filesParam) } catch {}
-          if (!arr) { try { arr = JSON.parse(decodeURIComponent(filesParam)) } catch {} }
-          if (!Array.isArray(arr)) throw new Error("Neplatný formát parametru ?files=")
-          const Fs = arr.filter((x) => x && x.u).map((x, i) => ({
-            url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
-            c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
-            v: typeof x.v === "boolean" ? x.v : true,
-            r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
-            m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: !!x.vc, km: !!x.km,
-          }))
-          applyFiles(Fs, getParam("title") ?? null, null, null, null)
-          const li = parseFloat(getParam("li") || getParam("light") || "")
-          if (!Number.isNaN(li)) setSceneIntensity(clamp01(li))
-          const headI = parseFloat(getParam("headlightI") || "")
-          if (!Number.isNaN(headI)) setHeadlightCfg((o) => ({ ...o, intensity: headI }))
-          return
-        }
-
-        setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([]); setVertexColors([])
-      } catch (e) {
-        console.error(e)
-        setFatal("Tento náhled není dostupný (chyba při načtení dat).")
-      }
-    })()
-  }, [])
-
-  useEffect(() => {
-    const applyLivePayload = (p) => {
-      if (!p) return
-
-      if (p.onlyLights && p.lights) {
-        if (typeof p.lights.intensity === "number") setSceneIntensity(clamp01(p.lights.intensity))
-        if (p.lights.headlight) {
-          setHeadlightCfg((old) => ({
-            enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
-            intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
-          }))
-        }
-        return
-      }
-
-      if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
-      if (p.logo) {
-        setLogoCfg((old) => ({
-          url: p.logo?.url ?? old.url,
-          opacity: typeof p.logo?.opacity === "number" ? clamp01(p.logo.opacity) : old.opacity,
-          width: typeof p.logo?.width === "number" ? p.logo.width : old.width,
-          pos: p.logo?.pos || old.pos,
-        }))
-      }
-
-      if (Array.isArray(p.files)) {
-        const newFiles = p.files.map((x, i) => ({
-          url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
-          c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
-          v: typeof x.v === "boolean" ? x.v : true,
-          r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
-          m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-          vc: !!x.vc, km: !!x.km,
-        }))
-
-        const urlsChanged = filesChanged(files, newFiles)
-
-        setFiles(newFiles)
-        const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
-        setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
-        setOpacities(newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
-        setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
-        setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
-        setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
-        setVertexColors(newFiles.map((f) => !!f.vc))
-
-        if (urlsChanged) { 
-            setDidInitialFrame(false); 
-            setInitialCameraState(null); 
-            setCutPlane(null);
-        }
-      }
-
-      if (p.lights) {
-        if (typeof p.lights.intensity === "number") setSceneIntensity(clamp01(p.lights.intensity))
-        if (p.lights.headlight) {
-          setHeadlightCfg((old) => ({
-            enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
-            intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
-          }))
-        }
-      }
-    }
-    const onMsg = (e) => { const d = e.data; if (d && LIVE_MSG_TYPES.has(d.type) && d.payload) applyLivePayload(d.payload) }
-    window.addEventListener("message", onMsg)
-    return () => window.removeEventListener("message", onMsg)
-  }, [files])
-
-  const logoEl = logoCfg.url && (
-    <img src={logoCfg.url} alt="" style={{
-      position: "absolute",
-      bottom: logoCfg.pos === "bc" || logoCfg.pos === "bl" || logoCfg.pos === "br" ? 12 : "auto",
-      left: logoCfg.pos === "bl" ? 12 : logoCfg.pos === "bc" ? "50%" : "auto",
-      right: logoCfg.pos === "br" ? 12 : "auto",
-      transform: logoCfg.pos === "bc" ? "translateX(-50%)" : "none",
-      width: logoCfg.width, opacity: logoCfg.opacity, zIndex: 0,
-      pointerEvents: "none", userSelect: "none", filter: "drop-shadow(0 0 1px rgba(0,0,0,.25))",
-    }}/>
-  )
-
-  const slidersContent = fatal ? (
-    <div style={{ color: "#ff8b8b" }}>{fatal}</div>
-  ) : (
-    <>
-      {files.map((f, i) => (
-        <div key={`${f.url}-${i}`} className="control-row" style={{ display: "grid", gridTemplateColumns: "36px 1fr 32px 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
-          <div className="row-label" style={{ gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.rawName || f.name}>{stripExt(f.name)}:</div>
-          <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} aria-label={`${f.name} color`} className="color-input" style={{ width: 36, height: 22, border: "1px solid #fff", borderRadius: 4, padding: 0, cursor: "pointer", background: "transparent" }}/>
-          <input className="slider" type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => { const v = parseFloat(e.target.value); setOpacities((prev) => prev.map((x, idx) => (idx === i ? v : x))) }} style={{ width: "calc(100% - 12px)", minWidth: 110 }} aria-label={`${f.name} opacity`} />
-          <button onClick={() => setVertexColors(prev => prev.map((v, idx) => idx === i ? !v : v))} title="Přepnout texturu" style={{ width: 32, height: 22, fontSize: 10, fontWeight: "bold", background: vertexColors[i] ? "rgba(59,130,246,.45)" : "transparent", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, color: "#fff", cursor: "pointer", padding: 0 }}>
-            TEX
-          </button>
-          <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 36, height: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: "transparent", border: "1px solid #fff", borderRadius: 4, cursor: "pointer" }}>
-            <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
-          </button>
-        </div>
-      ))}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
-        <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
-        <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
-      </div>
-    </>
-  )
-
-  const sidebar = (
-    <div className="sidebar" style={{ position: "absolute", top: 10, left: 10, zIndex: 2, width: "clamp(260px, 28vw, 420px)", maxWidth: "calc(100vw - 20px)", color: "white", fontFamily: "sans-serif", fontSize: 14, backdropFilter: "blur(3px)", background: "rgba(0,0,0,.25)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, boxSizing: "border-box", maxHeight: "calc(100vh - 20px)", overflowY: "auto" }}>
-      {title && (<div title={title} style={{ marginBottom: 10, padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", background: "rgba(255,255,255,.08)", fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>)}
-      
-      {isMobile ? (
-        <>
-          <button onClick={() => setSlidersOpen((o) => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 12px", background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.18)", borderRadius: 10, color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>
-            <span>Nastavení modelů</span>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ transform: slidersOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform .15s ease" }} aria-hidden><path d="M8 5l8 7-8 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-          </button>
-          {slidersOpen && <div style={{ marginTop: 8, border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>{slidersContent}</div>}
-        </>
-      ) : (
-        <div style={{ border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>{slidersContent}</div>
-      )}
-
-      {photos && photos.length > 0 && (
-        <div style={{ marginTop: 10 }}>
-          <button onClick={() => setLightbox({ open: true, src: photos[0].u, alt: photos[0].n || "" })} style={{ width: "100%", padding: "8px 10px", background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.18)", borderRadius: 10, color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>Fotky ({photos.length})</button>
-        </div>
-      )}
-    </div>
-  )
-
-  const toolsMenu = (
-      <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", gap: 8 }}>
-          {cutPlane && (
-              <>
-                  <button 
-                      onClick={() => setClipMode(clipMode === "translate" ? "rotate" : "translate")} 
-                      style={{ background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.3)", color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", backdropFilter: "blur(4px)" }}
-                  >
-                      {clipMode === "translate" ? "🔄 Přejít na rotaci" : "↕ Přejít na posun"}
-                  </button>
-                  <button 
-                      onClick={() => { setCutPlane(null) }} 
-                      style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.5)", color: "#ffbaba", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}
-                  >
-                      ✖ Zrušit řez
-                  </button>
-              </>
-          )}
-          {!cutPlane && (
-              <button 
-                  onClick={spawnNewCut} 
-                  style={{ background: "rgba(59,130,246,0.3)", border: "1px solid rgba(59,130,246,0.8)", color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", backdropFilter: "blur(4px)", boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}
-              >
-                  ✂️ Nový Řez
-              </button>
-          )}
-      </div>
-  )
 
   const allLoaded = files.length > 0 && files.every(f => loadedUrls.has(f.url))
   const frameKey = allLoaded && !didInitialFrame ? `frame-${files.length}` : ""
@@ -1141,117 +790,66 @@ export default function ClientPage() {
   return (
     <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
       <PreloadIcons />
-      {logoEl}
-      {sidebar}
-      {files.length > 0 && toolsMenu}
+      {logoCfg.url && (
+        <img src={logoCfg.url} alt="" style={{ position: "absolute", bottom: logoCfg.pos === "bc" || logoCfg.pos === "bl" || logoCfg.pos === "br" ? 12 : "auto", left: logoCfg.pos === "bl" ? 12 : logoCfg.pos === "bc" ? "50%" : "auto", right: logoCfg.pos === "br" ? 12 : "auto", transform: logoCfg.pos === "bc" ? "translateX(-50%)" : "none", width: logoCfg.width, opacity: logoCfg.opacity, zIndex: 0, pointerEvents: "none", userSelect: "none" }}/>
+      )}
+      
+      {/* SIDEBAR */}
+      <div className="sidebar" style={{ position: "absolute", top: 10, left: 10, zIndex: 2, width: "clamp(260px, 28vw, 420px)", maxWidth: "calc(100vw - 20px)", color: "white", fontFamily: "sans-serif", fontSize: 14, backdropFilter: "blur(3px)", background: "rgba(0,0,0,.25)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, maxHeight: "calc(100vh - 20px)", overflowY: "auto" }}>
+        {title && (<div style={{ marginBottom: 10, padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", background: "rgba(255,255,255,.08)", fontSize: 13, fontWeight: 700 }}>{title}</div>)}
+        <div style={{ border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>
+            {files.map((f, i) => (
+                <div key={`${f.url}-${i}`} style={{ display: "grid", gridTemplateColumns: "36px 1fr 32px 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
+                <div style={{ gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stripExt(f.name)}:</div>
+                <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} style={{ width: 36, height: 22, border: "1px solid #fff", borderRadius: 4, padding: 0, cursor: "pointer", background: "transparent" }}/>
+                <input type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => setOpacities((prev) => prev.map((x, idx) => (idx === i ? parseFloat(e.target.value) : x))) } style={{ width: "calc(100% - 12px)" }} />
+                <button onClick={() => setVertexColors(prev => prev.map((v, idx) => idx === i ? !v : v))} style={{ width: 32, height: 22, fontSize: 10, background: vertexColors[i] ? "rgba(59,130,246,.45)" : "transparent", border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, color: "#fff", cursor: "pointer" }}>TEX</button>
+                <button onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} style={{ width: 36, height: 22, background: "transparent", border: "1px solid #fff", borderRadius: 4, cursor: "pointer" }}><img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} width={14} height={14}/></button>
+                </div>
+            ))}
+        </div>
+      </div>
+
+      {/* TLAČÍTKA NASTROJŮ */}
+      <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", gap: 8 }}>
+          {cutPlane && (
+              <>
+                  <button onClick={() => setClipMode(clipMode === "translate" ? "rotate" : "translate")} style={{ background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.3)", color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", backdropFilter: "blur(4px)" }}>{clipMode === "translate" ? "🔄 Rotovat" : "↕ Posunout"}</button>
+                  <button onClick={() => setCutPlane(null)} style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.5)", color: "#ffbaba", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer" }}>✖ Zrušit řez</button>
+              </>
+          )}
+          {!cutPlane && <button onClick={spawnNewCut} style={{ background: "rgba(59,130,246,0.3)", border: "1px solid rgba(59,130,246,0.8)", color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer" }}>✂️ Nový Řez</button>}
+      </div>
 
       {cutPlane && (
-          <CrossSectionWindow 
-              files={files} colors={colors} opacities={opacities} visibles={visibles} roughnesses={roughnesses} metalnesses={metalnesses} vertexColors={vertexColors}
-              cutPlane={cutPlane}
-              onFlipCut={() => {
-                  const newPlane = cutPlane.clone().negate()
-                  setCutPlane(newPlane)
-              }}
-              onClose={() => setCutPlane(null)}
-          />
+          <CrossSectionWindow files={files} colors={colors} visibles={visibles} roughnesses={roughnesses} metalnesses={metalnesses} vertexColors={vertexColors} cutPlane={cutPlane} onFlipCut={() => setCutPlane(cutPlane.clone().negate())} onClose={() => setCutPlane(null)} />
       )}
 
-      <Canvas
-        orthographic
-        camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }}
-        gl={{ alpha: true }} // Vyčištěný Canvas pro vyšší výkon
-        onCreated={({ gl }) => gl.setClearAlpha(0)}
-        style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
-      >
+      <Canvas orthographic camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }} gl={{ alpha: true }} onCreated={({ gl }) => gl.setClearAlpha(0)} style={{ position: "absolute", inset: 0, zIndex: 1 }}>
         <ambientLight intensity={0.35 * sceneIntensity} />
         <directionalLight position={[0, 5, 5]} intensity={1.2 * sceneIntensity} />
         <directionalLight position={[-10, 0, 0]} intensity={0.9 * sceneIntensity} />
         <directionalLight position={[10, 0, 0]} intensity={1.0 * sceneIntensity} />
-        <directionalLight position={[0, -5, -5]} intensity={0.7 * sceneIntensity} />
-
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
 
         <group ref={rootGroupRef}>
           <Suspense fallback={null}>
             {files.map((f, i) => (
-              <AnyModel
-                key={`${f.url}-${i}`}
-                name={f.rawName || f.name}
-                url={f.url}
-                color={colors[i] ?? "#ffffff"}
-                opacity={opacities[i] ?? 1}
-                visible={visibles[i] ?? true}
-                onLoaded={handleModelLoaded}
-                autoSmooth={autoSmooth}
-                smoothAngle={smoothAngle}
-                wireframe={wireframe}
-                roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.5)}
-                metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
-                useVertexColors={vertexColors[i]}
-                keepMaterials={!!f.km}
-                outlinePlane={cutPlane}
-                isSliceView={false}
-              />
+              <AnyModel key={`${f.url}-${i}`} name={f.rawName || f.name} url={f.url} color={colors[i]} opacity={opacities[i]} visible={visibles[i]} onLoaded={handleModelLoaded} autoSmooth={autoSmooth} smoothAngle={smoothAngle} wireframe={wireframe} roughness={roughnesses[i]} metalness={metalnesses[i]} useVertexColors={vertexColors[i]} keepMaterials={!!f.km} outlinePlane={cutPlane} isSliceView={false} />
             ))}
           </Suspense>
         </group>
 
         <ClippingGizmo plane={cutPlane} enabled={!!cutPlane} mode={clipMode} setIsGizmoDragging={setIsGizmoDragging} targetCenter={cameraTarget} />
-        
         <ViewStateSync trackballRef={trackballRef} />
 
-        {frameKey && !initialCameraState && (
-          <AutoCenterAndFrame
-            rootRef={rootGroupRef}
-            triggerKey={frameKey}
-            onFramed={() => setDidInitialFrame(true)}
-            margin={1.12}
-            isMobile={isMobile}
-            desktopScale={1.0}
-            mobileScale={1.0}
-            centerMode={centerMode}
-            setTarget={setCameraTarget}
-          />
-        )}
+        {frameKey && !initialCameraState && (<AutoCenterAndFrame rootRef={rootGroupRef} triggerKey={frameKey} onFramed={() => setDidInitialFrame(true)} margin={1.12} isMobile={isMobile} centerMode={centerMode} setTarget={setCameraTarget} />)}
+        {frameKey && initialCameraState && (<CustomCameraSetter camState={initialCameraState} triggerKey={frameKey} onFramed={() => setDidInitialFrame(true)} setTarget={setCameraTarget} />)}
 
-        {frameKey && initialCameraState && (
-          <CustomCameraSetter
-            camState={initialCameraState}
-            triggerKey={frameKey}
-            onFramed={() => setDidInitialFrame(true)}
-            setTarget={setCameraTarget}
-          />
-        )}
-
-        <TouchTrackballControls 
-            ref={trackballRef} 
-            target={cameraTarget} 
-            enabled={!isGizmoDragging} // Zamyká pohled při tahání za kruh
-        />
-        <RightButtonPan 
-            setTarget={setCameraTarget} 
-            enabled={!isGizmoDragging}
-        />
-
+        <TouchTrackballControls ref={trackballRef} target={cameraTarget} enabled={!isGizmoDragging} />
+        <RightButtonPan setTarget={setCameraTarget} enabled={!isGizmoDragging} />
         {!allLoaded && files.length > 0 && <InlineLoader text="Načítám modely…" />}
       </Canvas>
-
-      <Lightbox open={lightbox.open} onClose={() => setLightbox({ open: false, src: null, alt: "" })} src={lightbox.src} alt={lightbox.alt} />
-
-      <style jsx global>{`
-        .slider { appearance: none; height: 14px; background: transparent; margin: 5px 0; display: inline-block; }
-        .slider::-webkit-slider-runnable-track { height: 4px; background: white; border-radius: 2px; }
-        .slider::-webkit-slider-thumb { appearance: none; width: 14px; height: 14px; border-radius: 50%; background: white; cursor: pointer; box-shadow: 0 0 2px black; margin-top: -5px; }
-        .slider::-moz-range-track { height: 4px; background: white; border-radius: 2px; }
-        .slider::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: white; cursor: pointer; box-shadow: 0 0 2px black; border: none; }
-        .color-input { -webkit-appearance: none; appearance: none; }
-        .color-input::-webkit-color-swatch-wrapper { padding: 0; }
-        .color-input::-webkit-color-swatch, .color-input::-moz-color-swatch { border: none; border-radius: 2px; }
-        @media (max-width: 720px) {
-          .sidebar { left: 8px !important; width: calc(100vw - 16px) !important; max-width: calc(100vw - 16px) !important; }
-        }
-      `}</style>
     </div>
   )
 }
