@@ -270,7 +270,7 @@ function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
 }
 
 /* ---------- Trackball ---------- */
-const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], enabled = true }, ref) => {
+const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0] }, ref) => {
   const { camera, gl, size } = useThree()
   const controlsRef = useRef(null)
   
@@ -287,10 +287,6 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], enabled =
     controlsRef.current = c
     return () => c.dispose()
   }, [camera, gl])
-  
-  useEffect(() => {
-    if(controlsRef.current) controlsRef.current.enabled = enabled
-  }, [enabled])
 
   useEffect(() => {
     const c = controlsRef.current; if (!c) return
@@ -304,7 +300,7 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], enabled =
 })
 
 /* ---------- Vlastní pan ---------- */
-function RightButtonPan({ setTarget, enabled = true }) {
+function RightButtonPan({ setTarget, trackballRef }) {
   const { camera, gl, size } = useThree()
   const isPanning = useRef(false)
   const last = useRef({ x: 0, y: 0 })
@@ -316,12 +312,13 @@ function RightButtonPan({ setTarget, enabled = true }) {
   const deltaWorld = new THREE.Vector3()
 
   useEffect(() => {
-    if(!enabled) return;
     const el = gl.domElement
 
     const onContext = (e) => { e.preventDefault() }
 
     const onDown = (e) => {
+      // Blokování panu, pokud je kamera zastavená (např. hover na Gimbalu)
+      if (trackballRef && trackballRef.current && !trackballRef.current.enabled) return;
       if ((e.button !== 2) && !(e.button === 0 && e.ctrlKey)) return
       e.preventDefault()
       e.stopPropagation()
@@ -390,7 +387,7 @@ function RightButtonPan({ setTarget, enabled = true }) {
       el.removeEventListener("pointercancel", onUp)
       el.removeEventListener("pointerleave", onUp)
     }
-  }, [camera, gl, size.width, size.height, setTarget, enabled])
+  }, [camera, gl, size.width, size.height, setTarget, trackballRef])
 
   return null
 }
@@ -803,10 +800,10 @@ export default function ClientPage() {
   const [clipMode, setClipMode] = useState("translate")
   const planeGroupRef = useRef(null) 
   const clipPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(1, 0, 0), 0))
+  const transformRef = useRef(null) // Důležitá reference pro detekci hoveru na Gimbalu
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
   const isDraggingGizmo = useRef(false)
-  const [orbitEnabled, setOrbitEnabled] = useState(true) 
 
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
@@ -1210,7 +1207,7 @@ export default function ClientPage() {
                 style={{ flex: 1, padding: "6px", background: clipMode === "rotate" ? "#3b82f6" : "rgba(255,255,255,.1)", border: "none", color: "#fff", borderRadius: 4, cursor: "pointer", fontWeight: "bold" }}
               >Rotace</button>
             </div>
-            <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>Gimbalem ovládejte rovinu. Šipkami posouvejte řez.</p>
+            <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>Najetím na osu ji zablokujete, tažením posouváte řez.</p>
           </div>
         )}
       </div>
@@ -1272,14 +1269,23 @@ export default function ClientPage() {
 
         {clippingEnabled && (
           <TransformControls 
+            ref={transformRef}
             mode={clipMode}
             onDraggingChanged={(e) => {
-               if (trackballRef.current) trackballRef.current.enabled = !e.value // Synchronní vypnutí kamery
-               setOrbitEnabled(!e.value)
                isDraggingGizmo.current = e.value
                if (!e.value) updateClippingLogic() 
             }}
             onChange={() => {
+              // DETEKCE HOVERU (NAJETÍ NA OSU) NEBO TAŽENÍ: Zablokujeme tím na ten moment Trackball
+              const tCtrl = transformRef.current
+              const trkCtrl = trackballRef.current
+              if (tCtrl && trkCtrl) {
+                  const isHovered = tCtrl.axis !== null;
+                  const isDragging = tCtrl.dragging;
+                  trkCtrl.enabled = !(isHovered || isDragging);
+              }
+
+              // Pokud uživatel zrovna táhne Gimbalem, propojíme to ihned na 3D model
               if (isDraggingGizmo.current && planeGroupRef.current) {
                 planeGroupRef.current.updateMatrixWorld(true)
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroupRef.current.matrixWorld).normalize()
@@ -1322,9 +1328,8 @@ export default function ClientPage() {
           />
         )}
 
-        {/* Přidán prefix klíče (key), aby event listenery kamery naskočily v DOMu až ZA Gimbalem */}
-        <TouchTrackballControls key={`trackball-${clippingEnabled}`} ref={trackballRef} target={cameraTarget} enabled={orbitEnabled} />
-        <RightButtonPan key={`pan-${clippingEnabled}`} setTarget={setCameraTarget} enabled={orbitEnabled} />
+        <TouchTrackballControls key="trackball" ref={trackballRef} target={cameraTarget} />
+        <RightButtonPan key="pan" setTarget={setCameraTarget} trackballRef={trackballRef} />
 
         {!allLoaded && files.length > 0 && <InlineLoader text="Načítám modely…" />}
       </Canvas>
