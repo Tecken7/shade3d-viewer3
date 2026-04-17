@@ -550,12 +550,10 @@ function Overlay2D({ segments, boundingBox }) {
   const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
   const svgRef = useRef(null)
 
-  // Větší defaultní rozměry
   const [winSize, setWinSize] = useState({ w: 450, h: 320 })
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [zoom, setZoom] = useState(1)
 
-  // Rychlý render svg path místo stovek dom objektů
   const pathData = useMemo(() => {
       if (!segments || segments.length === 0) return ""
       let d = ""
@@ -592,7 +590,6 @@ function Overlay2D({ segments, boundingBox }) {
     return { x: (e.clientX - CTM.e) / CTM.a, y: (e.clientY - CTM.f) / CTM.d }
   }
 
-  // Intercepting wheel events to prevent scrolling the 3D scene underneath
   useEffect(() => {
     const el = svgRef.current
     if (!el) return
@@ -606,7 +603,6 @@ function Overlay2D({ segments, boundingBox }) {
     return () => el.removeEventListener('wheel', handleWheel)
   }, [])
 
-  // Draggable logic for panning viewport
   const isDragging = useRef(false)
   const lastPos = useRef({ x: 0, y: 0 })
   const hasMoved = useRef(false)
@@ -645,7 +641,6 @@ function Overlay2D({ segments, boundingBox }) {
   const handlePointerUp = (e) => {
     isDragging.current = false
     e.currentTarget.releasePointerCapture(e.pointerId)
-    // Pokud jsme jen klikli (netáhli), dokončujeme měření
     if (!hasMoved.current && e.button === 0) {
         if (measureState.active) {
             const pos = getLogicalMousePos(e)
@@ -669,7 +664,6 @@ function Overlay2D({ segments, boundingBox }) {
     }
   }
 
-  // Změna velikosti celého okna tažením za ucho (resize handles)
   const startResize = (e, dir) => {
       e.stopPropagation()
       const startW = winSize.w
@@ -695,7 +689,6 @@ function Overlay2D({ segments, boundingBox }) {
 
   if (!boundingBox) return null
 
-  // Výpočet finálního viewBoxu (skládá BoundingBox vrstvy, uživatelský Pan a uživatelský Zoom)
   const padX = boundingBox.width * 0.1 || 10
   const padY = boundingBox.height * 0.1 || 10
   const baseW = boundingBox.width + padX * 2
@@ -711,7 +704,6 @@ function Overlay2D({ segments, boundingBox }) {
       ? Math.sqrt(distSq(measureState.p1, measureState.snappedP2)).toFixed(2) 
       : null
 
-  // Umístění vlevo dole
   return (
     <div 
       style={{
@@ -721,7 +713,6 @@ function Overlay2D({ segments, boundingBox }) {
         cursor: measureState.active ? 'crosshair' : 'grab'
       }}
     >
-      {/* Nápověda a hodnota */}
       <div style={{ position: 'absolute', top: 8, left: 16, fontSize: 11, color: '#aaa', pointerEvents: 'none', zIndex: 11 }}>
         Levé tl. = posun, Kolečko = zoom<br/>Dvojklik = měření
       </div>
@@ -731,7 +722,6 @@ function Overlay2D({ segments, boundingBox }) {
         </div>
       )}
 
-      {/* Resize uchytky */}
       <div 
         onPointerDown={(e) => startResize(e, 'top-left')}
         style={{ position: 'absolute', top: -5, left: -5, width: 16, height: 16, cursor: 'nwse-resize', zIndex: 12, background: 'rgba(255,255,255,0.15)', borderRadius: '50%' }}
@@ -743,7 +733,6 @@ function Overlay2D({ segments, boundingBox }) {
         title="Zvětšit/Zmenšit"
       />
 
-      {/* SVG kreslící plátno */}
       <svg 
         ref={svgRef} 
         width="100%" height="100%" 
@@ -817,7 +806,7 @@ export default function ClientPage() {
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
   const isDraggingGizmo = useRef(false)
-  const [orbitEnabled, setOrbitEnabled] = useState(true) // STAV PRO ZABLOKOVÁNÍ KAMERY BĚHEM TAŽENÍ GIMBALU
+  const [orbitEnabled, setOrbitEnabled] = useState(true) 
 
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
@@ -1285,14 +1274,13 @@ export default function ClientPage() {
           <TransformControls 
             mode={clipMode}
             onDraggingChanged={(e) => {
-               // Toto dočasně deaktivuje rotaci kamery při táhnutí nástroje
+               if (trackballRef.current) trackballRef.current.enabled = !e.value // Synchronní vypnutí kamery
                setOrbitEnabled(!e.value)
                isDraggingGizmo.current = e.value
-               if (!e.value) updateClippingLogic() // Po puštění updatneme řez
+               if (!e.value) updateClippingLogic() 
             }}
             onChange={() => {
               if (isDraggingGizmo.current && planeGroupRef.current) {
-                // Skutečný průběžný řez (vizuální on-the-fly)
                 planeGroupRef.current.updateMatrixWorld(true)
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroupRef.current.matrixWorld).normalize()
                 const pos = new THREE.Vector3().setFromMatrixPosition(planeGroupRef.current.matrixWorld)
@@ -1334,9 +1322,9 @@ export default function ClientPage() {
           />
         )}
 
-        {/* Orbit control je povolen, pokud netáhneme gimbalem */}
-        <TouchTrackballControls ref={trackballRef} target={cameraTarget} enabled={orbitEnabled} />
-        <RightButtonPan setTarget={setCameraTarget} enabled={orbitEnabled} />
+        {/* Přidán prefix klíče (key), aby event listenery kamery naskočily v DOMu až ZA Gimbalem */}
+        <TouchTrackballControls key={`trackball-${clippingEnabled}`} ref={trackballRef} target={cameraTarget} enabled={orbitEnabled} />
+        <RightButtonPan key={`pan-${clippingEnabled}`} setTarget={setCameraTarget} enabled={orbitEnabled} />
 
         {!allLoaded && files.length > 0 && <InlineLoader text="Načítám modely…" />}
       </Canvas>
