@@ -813,13 +813,11 @@ export default function ClientPage() {
   const [planeRadius, setPlaneRadius] = useState(100) 
   const clipPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(1, 0, 0), 0))
   
-  // Dvě samostatné reference pro rotaci a posun zaráz
   const transformRotateRef = useRef(null) 
   const transformTranslateRef = useRef(null) 
 
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
-  const isDraggingGizmo = useRef(false)
 
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
@@ -971,11 +969,10 @@ export default function ClientPage() {
 
            const sphere = new THREE.Sphere()
            box.getBoundingSphere(sphere)
-           setPlaneRadius(sphere.radius * 1.3) // O 30 % větší než modely
+           setPlaneRadius(sphere.radius * 1.3)
            
            planeGroup.position.copy(center)
            
-           // Výchozí orientace pro vertikální řez
            planeGroup.rotation.set(0, Math.PI / 2, 0)
            planeGroup.updateMatrixWorld(true)
            
@@ -1304,14 +1301,17 @@ export default function ClientPage() {
           </group>
         )}
 
-        {/* GIMBAL 1: Exkluzivně pro rotaci */}
+        {/* GIMBAL 1: Rotace s vynecháním zbytečné osy Z (modrého kruhu) a menším základním size */}
         {clippingEnabled && planeGroup && (
           <TransformControls 
             ref={transformRotateRef}
             object={planeGroup}
             mode="rotate"
             space="local"
-            size={1.6}
+            size={1.1}
+            showX={true}  /* Červený kruh */
+            showY={true}  /* Zelený kruh */
+            showZ={false} /* Skryjeme modrý kruh */
             onDraggingChanged={(e) => {
                if (!e.value) updateClippingLogic() 
             }}
@@ -1327,17 +1327,17 @@ export default function ClientPage() {
           />
         )}
 
-        {/* GIMBAL 2: Exkluzivně pro posun podél lokální Z osy (Modrá šipka) */}
+        {/* GIMBAL 2: Posun pouze v ose Z (modré šipky) */}
         {clippingEnabled && planeGroup && (
           <TransformControls 
             ref={transformTranslateRef}
             object={planeGroup}
             mode="translate"
             space="local"
-            showX={false}
-            showY={false}
-            showZ={true}
-            size={1.6}
+            size={1.1}
+            showX={false} /* Skryjeme červenou šipku */
+            showY={false} /* Skryjeme zelenou šipku */
+            showZ={true}  /* Modrá šipka (doleva/doprava podle roviny) */
             onDraggingChanged={(e) => {
                if (!e.value) updateClippingLogic() 
             }}
