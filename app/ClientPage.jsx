@@ -671,17 +671,24 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
   return null
 }
 
-/* ---------- Nasazení uložené kamery ---------- */
+/* ---------- Nasazení uložené kamery s fallbackem pro starší verze ---------- */
 function CustomCameraSetter({ camState, triggerKey, onFramed, setTarget }) {
   const { camera, size } = useThree()
   
   useEffect(() => {
     if (!camState) return
     
+    // Starý formát (předchozí verze ukládaly jen position)
+    if (camState.position && !camState.matrix) {
+        camera.position.fromArray(camState.position)
+    }
+    
+    // Nový formát (ukládá přesnou matici)
     if (camState.matrix) {
       camera.matrix.fromArray(camState.matrix)
       camera.matrix.decompose(camera.position, camera.quaternion, camera.scale)
     }
+    
     if (camState.up) camera.up.fromArray(camState.up)
     
     if (camState.zoom) {
@@ -738,6 +745,31 @@ function ViewStateSync({ trackballRef }) {
   }, [camera, trackballRef, size.width, size.height])
 
   return null
+}
+
+/* ---------- Lightbox ---------- */
+function Lightbox({ open, onClose, src, alt }) {
+  if (!open || !src) return null
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
+      <img src={src} alt={alt || ""} style={{ maxWidth: "96vw", maxHeight: "92vh", objectFit: "contain", borderRadius: 12, boxShadow: "0 10px 40px rgba(0,0,0,.6)", border: "1px solid rgba(255,255,255,.15)" }} />
+    </div>
+  )
+}
+
+/* ---------- Switch ---------- */
+function Switch({ checked, onChange, label }) {
+  const onKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onChange(!checked) } }
+  const TRACK_W = 38, TRACK_H = 22, KNOB = 18
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      {label && <span style={{ opacity: .85 }}>{label}</span>}
+      <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)} onKeyDown={onKey}
+        style={{ position: "relative", width: TRACK_W, height: TRACK_H, borderRadius: 999, border: "1px solid rgba(255,255,255,.22)", background: checked ? "rgba(59,130,246,.45)" : "rgba(255,255,255,.10)", cursor: "pointer", transition: "background .15s ease, border-color .15s ease", outline: "none", padding: 0 }}>
+        <span aria-hidden style={{ position: "absolute", top: "50%", transform: "translateY(-50%)", left: checked ? TRACK_W - KNOB - 3 : 3, width: KNOB, height: KNOB, borderRadius: "50%", background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.35)", transition: "left .15s ease" }}/>
+      </button>
+    </div>
+  )
 }
 
 /* ---------- Hlavní komponenta ---------- */
