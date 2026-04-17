@@ -123,7 +123,6 @@ function SliceOutline3D({ segments, color = "#fbbf24" }) {
     if (geomRef.current) {
       const pts = []
       for (let i = 0; i < segments.length; i++) {
-        // Převedeme 2D segmenty z lokálního prostoru roviny na 3D body (Z=0, leží přesně na rovině)
         pts.push(segments[i][0].x, segments[i][0].y, 0)
         pts.push(segments[i][1].x, segments[i][1].y, 0)
       }
@@ -138,7 +137,6 @@ function SliceOutline3D({ segments, color = "#fbbf24" }) {
   return (
     <lineSegments renderOrder={999}>
       <bufferGeometry ref={geomRef} />
-      {/* Vykreslí se vždy navrchu, aby linie nebyly schované uvnitř modelů */}
       <lineBasicMaterial color={color} depthTest={false} depthWrite={false} transparent opacity={0.9} />
     </lineSegments>
   )
@@ -1039,6 +1037,47 @@ export default function ClientPage() {
            
            updateClippingLogic()
         }
+
+        // DESATURACE BAREV GIMBALU
+        // TransformControls mění geometrii a materiály dynamicky, 
+        // proto musíme traverse pustit po krátké pauze, až je Gimbal plně připraven v grupě planeGroup
+        setTimeout(() => {
+            const desaturateMaterials = (obj) => {
+                obj.traverse((child) => {
+                    if (child.isMesh || child.isLine) {
+                        const mat = child.material;
+                        if (!mat || !mat.color) return;
+                        
+                        // Získáme barvu
+                        const c = mat.color;
+
+                        // Detekce čistých barev os (RGB) a aplikace desaturovaných pastelových verzí
+                        // (Můžete doladit hex kódy podle vkusu)
+                        
+                        // Čistě červená -> Desaturovaná pastelově červená
+                        if (c.r > 0.9 && c.g < 0.1 && c.b < 0.1) {
+                            c.set("#cc5555"); 
+                        }
+                        // Čistě zelená -> Desaturovaná pastelově zelená
+                        else if (c.g > 0.9 && c.r < 0.1 && c.b < 0.1) {
+                            c.set("#55cc55");
+                        }
+                        // Čistě modrá -> Desaturovaná pastelově modrá
+                        else if (c.b > 0.9 && c.r < 0.1 && c.g < 0.1) {
+                            c.set("#5555cc");
+                        }
+                        
+                        // Vynutíme update materiálu
+                        mat.needsUpdate = true;
+                    }
+                });
+            };
+
+            if (transformRotateRef.current) desaturateMaterials(planeGroup);
+            if (transformTranslateRef.current) desaturateMaterials(planeGroup);
+            
+        }, 50); // Krátká pauza na inicializaci
+
      } else if (!clippingEnabled) {
         setSliceSegments([])
         setSliceBBox(null)
@@ -1313,7 +1352,7 @@ export default function ClientPage() {
         camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }}
         onCreated={({ gl }) => {
             gl.setClearAlpha(0)
-            gl.localClippingEnabled = false // JIŽ NENÍ POTŘEBA
+            gl.localClippingEnabled = false
         }}
         style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
       >
@@ -1352,9 +1391,9 @@ export default function ClientPage() {
           <group ref={setPlaneGroup}>
             <mesh>
               <circleGeometry args={[planeRadius, 64]} />
-              <meshBasicMaterial color="#d95a5a" transparent opacity={0.35} side={THREE.DoubleSide} depthWrite={false} />
+              {/* ZMĚNA: Barva je desaturovaná, opacity sníženo na 0.25 */}
+              <meshBasicMaterial color="#b88f8f" transparent opacity={0.25} side={THREE.DoubleSide} depthWrite={false} />
             </mesh>
-            {/* PRŮŘEZ JAKO 3D LINIE */}
             <SliceOutline3D segments={sliceSegments} color="#eab308" />
           </group>
         )}
