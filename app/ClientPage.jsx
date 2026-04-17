@@ -313,11 +313,10 @@ function RightButtonPan({ setTarget, trackballRef }) {
 
   useEffect(() => {
     const el = gl.domElement
-
     const onContext = (e) => { e.preventDefault() }
 
     const onDown = (e) => {
-      // Blokování panu, pokud je kamera zastavená (např. hover na Gimbalu)
+      // Blokování vlastního panu, pokud je kamera uzamčená Gimbalem
       if (trackballRef && trackballRef.current && !trackballRef.current.enabled) return;
       if ((e.button !== 2) && !(e.button === 0 && e.ctrlKey)) return
       e.preventDefault()
@@ -762,6 +761,21 @@ function Overlay2D({ segments, boundingBox }) {
   )
 }
 
+/* ---------- Manažer pro detekci hoveru na Gimbalu ---------- */
+function GizmoManager({ transformRef, trackballRef }) {
+  // Smyčka kontroluje stav myši a okamžitě odpojuje Trackball, jakmile myš vstoupí nad červenou/modrou/zelenou osu
+  useFrame(() => {
+    if (transformRef.current && trackballRef.current) {
+      const isHovered = transformRef.current.axis !== null;
+      const isDragging = transformRef.current.dragging;
+      trackballRef.current.enabled = !(isHovered || isDragging);
+    } else if (trackballRef.current) {
+      trackballRef.current.enabled = true;
+    }
+  })
+  return null
+}
+
 /* ---------- Hlavní komponenta ---------- */
 export default function ClientPage() {
   const [sceneIntensity, setSceneIntensity] = useState(1)
@@ -798,12 +812,11 @@ export default function ClientPage() {
   // -- STAVY PRO ŘEZÁNÍ (CLIPPING) --
   const [clippingEnabled, setClippingEnabled] = useState(false)
   const [clipMode, setClipMode] = useState("translate")
-  const planeGroupRef = useRef(null) 
+  const [planeGroup, setPlaneGroup] = useState(null) 
   const clipPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(1, 0, 0), 0))
-  const transformRef = useRef(null) // Důležitá reference pro detekci hoveru na Gimbalu
+  const transformRef = useRef(null) 
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
-  const isDraggingGizmo = useRef(false)
 
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
@@ -826,15 +839,15 @@ export default function ClientPage() {
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
   const updateClippingLogic = useCallback(() => {
-    if (!planeGroupRef.current || !rootGroupRef.current) return
+    if (!planeGroup || !rootGroupRef.current) return
 
-    planeGroupRef.current.updateMatrixWorld(true)
-    const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroupRef.current.matrixWorld).normalize()
-    const pos = new THREE.Vector3().setFromMatrixPosition(planeGroupRef.current.matrixWorld)
+    planeGroup.updateMatrixWorld(true)
+    const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
+    const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
     clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
 
     const segments2D = []
-    const invMat = planeGroupRef.current.matrixWorld.clone().invert()
+    const invMat = planeGroup.matrixWorld.clone().invert()
     const plane = clipPlaneRef.current
 
     const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3()
@@ -920,40 +933,53 @@ export default function ClientPage() {
     } else {
        setSliceBBox(null)
     }
-  }, [])
+  }, [planeGroup])
 
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (!clippingEnabled || !planeGroupRef.current) return
+      if (!clippingEnabled || !planeGroup) return
       const step = 0.5 
       if (e.key === "ArrowUp" || e.key === "ArrowRight") {
-         planeGroupRef.current.translateZ(step)
+         planeGroup.translateZ(step)
+         planeGroup.updateMatrixWorld(true)
+         const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
+         const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
+         clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
          updateClippingLogic()
       } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
-         planeGroupRef.current.translateZ(-step)
+         planeGroup.translateZ(-step)
+         planeGroup.updateMatrixWorld(true)
+         const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
+         const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
+         clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
          updateClippingLogic()
       }
     }
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [clippingEnabled, updateClippingLogic])
+  }, [clippingEnabled, updateClippingLogic, planeGroup])
 
   useEffect(() => {
-     if (clippingEnabled && rootGroupRef.current && planeGroupRef.current) {
+     if (clippingEnabled && rootGroupRef.current && planeGroup) {
         const box = new THREE.Box3().setFromObject(rootGroupRef.current)
         if (!box.isEmpty()) {
            const center = new THREE.Vector3()
            box.getCenter(center)
-           planeGroupRef.current.position.copy(center)
-           planeGroupRef.current.rotation.set(0, 0, 0)
-           planeGroupRef.current.updateMatrixWorld(true)
+           planeGroup.position.copy(center)
+           planeGroup.rotation.set(0, 0, 0)
+           planeGroup.updateMatrixWorld(true)
+           
+           const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
+           const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
+           clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
+           
            updateClippingLogic()
         }
      } else if (!clippingEnabled) {
         setSliceSegments([])
         setSliceBBox(null)
      }
-  }, [clippingEnabled, updateClippingLogic]) 
+  }, [clippingEnabled, planeGroup, updateClippingLogic]) 
 
   useEffect(() => {
     ;(async () => {
@@ -1207,7 +1233,7 @@ export default function ClientPage() {
                 style={{ flex: 1, padding: "6px", background: clipMode === "rotate" ? "#3b82f6" : "rgba(255,255,255,.1)", border: "none", color: "#fff", borderRadius: 4, cursor: "pointer", fontWeight: "bold" }}
               >Rotace</button>
             </div>
-            <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>Najetím na osu ji zablokujete, tažením posouváte řez.</p>
+            <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>Najetím myší na osu ji uchopíte. Následným tažením posouváte 3D řez.</p>
           </div>
         )}
       </div>
@@ -1268,39 +1294,36 @@ export default function ClientPage() {
         </group>
 
         {clippingEnabled && (
+          <group ref={setPlaneGroup}>
+            <mesh>
+              <planeGeometry args={[200, 200]} />
+              <meshBasicMaterial color="#3b82f6" transparent opacity={0.1} side={THREE.DoubleSide} depthWrite={false} />
+            </mesh>
+          </group>
+        )}
+
+        {clippingEnabled && planeGroup && (
           <TransformControls 
             ref={transformRef}
+            object={planeGroup}
             mode={clipMode}
             onDraggingChanged={(e) => {
-               isDraggingGizmo.current = e.value
                if (!e.value) updateClippingLogic() 
             }}
             onChange={() => {
-              // DETEKCE HOVERU (NAJETÍ NA OSU) NEBO TAŽENÍ: Zablokujeme tím na ten moment Trackball
-              const tCtrl = transformRef.current
-              const trkCtrl = trackballRef.current
-              if (tCtrl && trkCtrl) {
-                  const isHovered = tCtrl.axis !== null;
-                  const isDragging = tCtrl.dragging;
-                  trkCtrl.enabled = !(isHovered || isDragging);
-              }
-
-              // Pokud uživatel zrovna táhne Gimbalem, propojíme to ihned na 3D model
-              if (isDraggingGizmo.current && planeGroupRef.current) {
-                planeGroupRef.current.updateMatrixWorld(true)
-                const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroupRef.current.matrixWorld).normalize()
-                const pos = new THREE.Vector3().setFromMatrixPosition(planeGroupRef.current.matrixWorld)
+              if (planeGroup) {
+                // Přímá synchronizace roviny při tažení
+                planeGroup.updateMatrixWorld(true)
+                const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
+                const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
                 clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
               }
             }}
-          >
-            <group ref={planeGroupRef}>
-               <mesh>
-                 <planeGeometry args={[200, 200]} />
-                 <meshBasicMaterial color="#3b82f6" transparent opacity={0.1} side={THREE.DoubleSide} depthWrite={false} />
-               </mesh>
-            </group>
-          </TransformControls>
+          />
+        )}
+
+        {clippingEnabled && (
+          <GizmoManager transformRef={transformRef} trackballRef={trackballRef} />
         )}
 
         <ViewStateSync trackballRef={trackballRef} />
