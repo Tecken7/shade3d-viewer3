@@ -286,8 +286,8 @@ function TouchTrackballControls({ target = [0, 0, 0] }) {
   return null
 }
 
-/* ---------- AutoCenter & AutoFrame (one-shot) ---------- */
-function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined" }) {
+/* ---------- AutoCenter & AutoFrame & Custom Camera (spojené) ---------- */
+function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined", initialCameraState, setTarget }) {
   const { camera, size } = useThree()
   useEffect(() => {
     const root = rootRef.current
@@ -300,6 +300,7 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
     const dims = new THREE.Vector3()
     boxAll.getCenter(centerAll); boxAll.getSize(dims)
 
+    // 1. NEJPRVE VŽDY VYCENTRUJEME MODELY
     if (centerMode === "per") {
       root.children.forEach((child) => {
         const b = new THREE.Box3().setFromObject(child)
@@ -313,52 +314,43 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
       root.updateMatrixWorld(true)
     }
 
-    const after = new THREE.Box3().setFromObject(root)
-    const dims2 = new THREE.Vector3(), ctr = new THREE.Vector3()
-    after.getSize(dims2); after.getCenter(ctr)
+    // 2. NASTAVENÍ KAMERY (Uložená vs. Auto-Framing)
+    if (initialCameraState) {
+      if (initialCameraState.position) camera.position.fromArray(initialCameraState.position)
+      // Tady byla ta chyba (rotace na bok): uložení a načtení osy UP pro Trackball!
+      if (initialCameraState.up) camera.up.fromArray(initialCameraState.up) 
+      if (initialCameraState.zoom) camera.zoom = initialCameraState.zoom
+      camera.updateProjectionMatrix()
+      
+      if (initialCameraState.target && setTarget) {
+        setTarget(initialCameraState.target)
+      }
+    } else {
+      // Normální Auto-Framing
+      const after = new THREE.Box3().setFromObject(root)
+      const dims2 = new THREE.Vector3(), ctr = new THREE.Vector3()
+      after.getSize(dims2); after.getCenter(ctr)
 
-    const objW = Math.max(dims2.x, 1e-6)
-    const objH = Math.max(dims2.y, 1e-6)
-    const zoomX = size.width / (objW * margin)
-    const zoomY = size.height / (objH * margin)
-    let newZoom = Math.min(zoomX, zoomY) * (isMobile ? mobileScale : desktopScale)
+      const objW = Math.max(dims2.x, 1e-6)
+      const objH = Math.max(dims2.y, 1e-6)
+      const zoomX = size.width / (objW * margin)
+      const zoomY = size.height / (objH * margin)
+      let newZoom = Math.min(zoomX, zoomY) * (isMobile ? mobileScale : desktopScale)
 
-    const depth = Math.max(dims2.z, Math.max(dims2.x, dims2.y) * 0.75) || 1
-    const safeDist = depth * 10
-    camera.near = Math.max(0.01, safeDist * 0.001)
-    camera.far = safeDist * 80 + 200
-    camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
-    camera.zoom = Math.max(newZoom, 0.01)
-    camera.updateProjectionMatrix()
-    onFramed && onFramed()
-  }, [triggerKey])
-  return null
-}
+      const depth = Math.max(dims2.z, Math.max(dims2.x, dims2.y) * 0.75) || 1
+      const safeDist = depth * 10
+      camera.near = Math.max(0.01, safeDist * 0.001)
+      camera.far = safeDist * 80 + 200
+      camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
+      camera.up.set(0, 1, 0) // Defaultní osa nahoru
+      camera.zoom = Math.max(newZoom, 0.01)
+      camera.updateProjectionMatrix()
 
-/* ---------- Nastavení uložené kamery ---------- */
-function CustomCameraSetter({ camState, setTarget, triggerKey, onFramed }) {
-  const { camera } = useThree()
-  
-  useEffect(() => {
-    if (!camState) return
-    
-    if (camState.position) {
-      camera.position.set(camState.position[0], camState.position[1], camState.position[2])
-    }
-    
-    if (camState.zoom) {
-      camera.zoom = camState.zoom
-    }
-    
-    camera.updateProjectionMatrix()
-
-    if (camState.target) {
-      setTarget(camState.target)
+      if (setTarget) setTarget([ctr.x, ctr.y, ctr.z])
     }
 
     onFramed && onFramed()
-  }, [triggerKey, camState, setTarget, camera, onFramed])
-
+  }, [triggerKey]) // eslint-disable-line
   return null
 }
 
@@ -372,11 +364,11 @@ function CameraSync({ controlsTarget }) {
       
       const camData = {
         position: [camera.position.x, camera.position.y, camera.position.z],
+        up: [camera.up.x, camera.up.y, camera.up.z], // PŘIDÁNO: Orientace Trackballu
         zoom: camera.zoom,
         target: [controlsTarget[0], controlsTarget[1], controlsTarget[2]]
       }
 
-      // Zpráva propadne všemi iframy až nahoru do aplikace ve Frameru
       const targetWindow = window.top || window.parent;
       if (targetWindow) {
         targetWindow.postMessage({
@@ -387,7 +379,7 @@ function CameraSync({ controlsTarget }) {
     }, 500)
 
     return () => clearInterval(interval)
-  }, [camera, camera.position, camera.zoom, controlsTarget])
+  }, [camera, camera.position, camera.zoom, camera.up, controlsTarget])
 
   return null
 }
@@ -734,7 +726,7 @@ export default function ClientPage() {
         {/* Synchronizace pozice ven do Frameru */}
         <CameraSync controlsTarget={cameraTarget} />
 
-        {frameKey && !initialCameraState && (
+        {frameKey && (
           <AutoCenterAndFrame
             rootRef={rootGroupRef}
             triggerKey={frameKey}
@@ -744,15 +736,8 @@ export default function ClientPage() {
             desktopScale={1.0}
             mobileScale={1.0}
             centerMode={centerMode}
-          />
-        )}
-
-        {frameKey && initialCameraState && (
-          <CustomCameraSetter
-            camState={initialCameraState}
+            initialCameraState={initialCameraState}
             setTarget={setCameraTarget}
-            triggerKey={frameKey}
-            onFramed={() => setDidInitialFrame(true)}
           />
         )}
 
