@@ -585,6 +585,19 @@ function Overlay2D({ segments, boundingBox }) {
     return { x: (e.clientX - CTM.e) / CTM.a, y: (e.clientY - CTM.f) / CTM.d }
   }
 
+  useEffect(() => {
+    const el = svgRef.current
+    if (!el) return
+    const handleWheel = (e) => {
+       e.preventDefault()
+       e.stopPropagation()
+       const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85
+       setZoom(z => Math.max(0.1, Math.min(20, z * zoomFactor)))
+    }
+    el.addEventListener('wheel', handleWheel, { passive: false })
+    return () => el.removeEventListener('wheel', handleWheel)
+  }, [])
+
   const isDragging = useRef(false)
   const lastPos = useRef({ x: 0, y: 0 })
   const hasMoved = useRef(false)
@@ -754,6 +767,21 @@ function Overlay2D({ segments, boundingBox }) {
 
 /* ---------- Manažer pro detekci hoveru na obou Gimbalech ---------- */
 function GizmoManager({ transformRefs, trackballRef }) {
+  const isCamDragging = useRef(false)
+
+  useEffect(() => {
+    const ctrl = trackballRef.current
+    if (!ctrl) return
+    const onStart = () => { isCamDragging.current = true }
+    const onEnd = () => { isCamDragging.current = false }
+    ctrl.addEventListener('start', onStart)
+    ctrl.addEventListener('end', onEnd)
+    return () => {
+      ctrl.removeEventListener('start', onStart)
+      ctrl.removeEventListener('end', onEnd)
+    }
+  }, [trackballRef])
+
   useFrame(() => {
     let isHovered = false;
     let isDragging = false;
@@ -768,7 +796,12 @@ function GizmoManager({ transformRefs, trackballRef }) {
     }
 
     if (trackballRef.current) {
-      trackballRef.current.enabled = !(isHovered || isDragging);
+      // Zabrání zablokování kamery, pokud už uživatel drží levé tlačítko a táhne mimo osu
+      if (isCamDragging.current) {
+         trackballRef.current.enabled = true;
+      } else {
+         trackballRef.current.enabled = !(isHovered || isDragging);
+      }
     }
   })
   return null
@@ -1301,20 +1334,16 @@ export default function ClientPage() {
           </group>
         )}
 
-        {/* GIMBAL 1: Rotace s vynecháním zbytečné osy Z (modrého kruhu) a menším základním size */}
         {clippingEnabled && planeGroup && (
           <TransformControls 
             ref={transformRotateRef}
             object={planeGroup}
             mode="rotate"
             space="local"
-            size={1.1}
+            size={1.1} // Zmenšená velikost pro čistší vzhled
             showX={true}  /* Červený kruh */
             showY={true}  /* Zelený kruh */
-            showZ={false} /* Skryjeme modrý kruh */
-            onDraggingChanged={(e) => {
-               if (!e.value) updateClippingLogic() 
-            }}
+            showZ={false} /* Skryjeme modrý kruh - Nepotřebný balast */
             onChange={() => {
               if (planeGroup) {
                 planeGroup.updateMatrixWorld(true)
@@ -1327,20 +1356,16 @@ export default function ClientPage() {
           />
         )}
 
-        {/* GIMBAL 2: Posun pouze v ose Z (modré šipky) */}
         {clippingEnabled && planeGroup && (
           <TransformControls 
             ref={transformTranslateRef}
             object={planeGroup}
             mode="translate"
             space="local"
-            size={1.1}
+            size={1.1} // Zmenšená velikost pro čistší vzhled
             showX={false} /* Skryjeme červenou šipku */
             showY={false} /* Skryjeme zelenou šipku */
-            showZ={true}  /* Modrá šipka (doleva/doprava podle roviny) */
-            onDraggingChanged={(e) => {
-               if (!e.value) updateClippingLogic() 
-            }}
+            showZ={true}  /* Ponecháme POUZE modrou šipku pro posun */
             onChange={() => {
               if (planeGroup) {
                 planeGroup.updateMatrixWorld(true)
