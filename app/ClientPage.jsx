@@ -115,53 +115,41 @@ function InlineLoader({ text }) {
   )
 }
 
-/* ---------- MODEL KOMPONENTA (Umí jak 3D tak 2D Outline) ---------- */
-const OUTLINE_THICKNESS = 0.35
+/* ---------- MODEL KOMPONENTA (Umí 3D Obrys i 2D čistou křivku) ---------- */
+const OUTLINE_THICKNESS = 0.15 // Generuje čáru o tloušťce 0.3mm (jde do hloubky pórů)
 
 function AnyModel({
   name, url, color, opacity, visible,
   onLoaded, autoSmooth, smoothAngle = DEFAULT_SMOOTH_ANGLE,
   roughness = 0.5, metalness = 0.5, useVertexColors = false,
   keepMaterials = false, wireframe = false,
-  clipPlanes = null, 
   outlinePlane = null, 
   isSliceView = false,
   onSnapMove = null, onSnapClick = null, onSnapDoubleClick = null
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
-  const outlineColor = useMemo(() => new THREE.Color("#ffb700"), [])
-
-  const activeClipPlanes = useMemo(() => clipPlanes || [], [clipPlanes])
+  
+  // V 3D Okně je řez oranžový, v 2D okně použijeme pro přehlednost barvu modelu
+  const outlineColor = useMemo(() => new THREE.Color(isSliceView ? (color || "#ffffff") : "#ff9900"), [isSliceView, color])
 
   const makeMat = (opts = {}) => {
-    // V 2D okně vytvoříme plochý neosvětlený BasicMaterial (funguje skvěle pro čisté čáry obrysu)
-    if (isSliceView) {
-        return new THREE.MeshBasicMaterial({
-            color: new THREE.Color(color || "#ffffff"),
-            side: THREE.DoubleSide,
-            clippingPlanes: activeClipPlanes,
-            transparent: opacity < 1,
-            opacity: opacity,
-            ...opts
-        })
-    }
+    const baseMat = isSliceView 
+      ? new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, ...opts })
+      : new THREE.MeshStandardMaterial({
+          color: new THREE.Color(color || "#ffffff"),
+          roughness: typeof roughness === "number" ? roughness : 0.5,
+          metalness: typeof metalness === "number" ? metalness : 0.5,
+          transparent: opacity < 1, opacity,
+          side: THREE.DoubleSide, depthWrite: opacity === 1,
+          ...opts,
+      })
 
-    // V hlavním okně použijeme Standard s vlastním shaderem pro svítící outline
-    const mat = new THREE.MeshStandardMaterial({
-      color: new THREE.Color(color || "#ffffff"),
-      roughness: typeof roughness === "number" ? roughness : 0.5,
-      metalness: typeof metalness === "number" ? metalness : 0.5,
-      transparent: opacity < 1, opacity,
-      side: THREE.DoubleSide, depthWrite: opacity === 1,
-      clippingPlanes: activeClipPlanes, clipShadows: true,
-      ...opts,
-    })
-
-    mat.onBeforeCompile = (shader) => {
+    // INJEKCE SHADERU: Matematicky definuje linii průniku roviny a modelu
+    baseMat.onBeforeCompile = (shader) => {
         shader.uniforms.uOutlinePlane = { value: new THREE.Vector4(0, 0, 0, 0) }
         shader.uniforms.uOutlineColor = { value: outlineColor }
-        mat.userData.shader = shader
+        baseMat.userData.shader = shader
 
         shader.vertexShader = `
             varying vec3 vCustomWorldPos;
@@ -171,17 +159,31 @@ function AnyModel({
             `#include <worldpos_vertex>\n vCustomWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;`
         )
 
-        shader.fragmentShader = `
-            uniform vec4 uOutlinePlane;
-            uniform vec3 uOutlineColor;
-            varying vec3 vCustomWorldPos;
-            ${shader.fragmentShader}
-        `.replace(
-            `#include <dithering_fragment>`,
-            `#include <dithering_fragment>\n if (length(uOutlinePlane.xyz) > 0.5) {\n float dist = dot(vCustomWorldPos, uOutlinePlane.xyz) + uOutlinePlane.w;\n if (abs(dist) < ${OUTLINE_THICKNESS.toFixed(2)}) {\n gl_FragColor = vec4(uOutlineColor, 1.0);\n }\n }`
-        )
+        if (isSliceView) {
+            // V 2D okně zahodí (discard) všechny pixely kromě samotné 0.3mm tenké linie
+            shader.fragmentShader = `
+                uniform vec4 uOutlinePlane;
+                uniform vec3 uOutlineColor;
+                varying vec3 vCustomWorldPos;
+                ${shader.fragmentShader}
+            `.replace(
+                `#include <dithering_fragment>`,
+                `#include <dithering_fragment>\n if (length(uOutlinePlane.xyz) > 0.5) {\n float dist = dot(vCustomWorldPos, uOutlinePlane.xyz) + uOutlinePlane.w;\n if (abs(dist) > ${OUTLINE_THICKNESS.toFixed(3)}) {\n discard;\n } else {\n gl_FragColor = vec4(uOutlineColor, 1.0);\n }\n } else { discard; }`
+            )
+        } else {
+            // V 3D okně pouze přebarví linku na oranžovo, zbytek modelu nechá normální
+            shader.fragmentShader = `
+                uniform vec4 uOutlinePlane;
+                uniform vec3 uOutlineColor;
+                varying vec3 vCustomWorldPos;
+                ${shader.fragmentShader}
+            `.replace(
+                `#include <dithering_fragment>`,
+                `#include <dithering_fragment>\n if (length(uOutlinePlane.xyz) > 0.5) {\n float dist = dot(vCustomWorldPos, uOutlinePlane.xyz) + uOutlinePlane.w;\n if (abs(dist) < ${OUTLINE_THICKNESS.toFixed(3)}) {\n gl_FragColor = vec4(uOutlineColor, 1.0);\n }\n }`
+            )
+        }
     }
-    return mat
+    return baseMat
   }
 
   const rebuildWireOverlay = (mesh) => {
@@ -194,8 +196,7 @@ function AnyModel({
     if (!wireframe) return
     const wfGeom = new THREE.WireframeGeometry(mesh.geometry)
     const wfMat = new THREE.LineBasicMaterial({ 
-        color: 0x000000, depthTest: true, depthWrite: false, transparent: true, opacity: 0.95, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
-        clippingPlanes: activeClipPlanes
+        color: 0x000000, depthTest: true, depthWrite: false, transparent: true, opacity: 0.95, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2
     })
     const lines = new THREE.LineSegments(wfGeom, wfMat)
     lines.renderOrder = (mesh.renderOrder || 0) + 10
@@ -246,14 +247,14 @@ function AnyModel({
       }
 
       let newGeom = base
-      if (autoSmooth) newGeom = autoSmoothGeometry(base, smoothAngle)
+      if (autoSmooth && !isSliceView) newGeom = autoSmoothGeometry(base, smoothAngle)
       else { newGeom = base.clone(); newGeom.computeVertexNormals() }
       
       child.geometry = newGeom
       child.userData._derivedGeom = newGeom
-      rebuildWireOverlay(child)
+      if (!isSliceView) rebuildWireOverlay(child)
     })
-  }, [object3D, autoSmooth, smoothAngle, wireframe, activeClipPlanes]) // eslint-disable-line
+  }, [object3D, autoSmooth, smoothAngle, wireframe, isSliceView]) // eslint-disable-line
 
   useEffect(() => {
     if (!object3D) return
@@ -263,14 +264,12 @@ function AnyModel({
       let m = child.material
       if (!m) return
       
-      m.transparent = opacity < 1
-      m.opacity = opacity
-      if ("roughness" in m) m.roughness = typeof roughness === "number" ? roughness : 0.5
-      if ("metalness" in m) m.metalness = typeof metalness === "number" ? metalness : 0.5
-      
-      if (isSliceView) {
-          m.color = new THREE.Color(color || "#ffffff")
-      } else {
+      if (!isSliceView) {
+          m.transparent = opacity < 1
+          m.opacity = opacity
+          if ("roughness" in m) m.roughness = typeof roughness === "number" ? roughness : 0.5
+          if ("metalness" in m) m.metalness = typeof metalness === "number" ? metalness : 0.5
+          
           if (!keepMaterials) {
               const hasVC = !!child.geometry.getAttribute?.("color")
               m.color = new THREE.Color(hasVC && useVertexColors ? "#ffffff" : (color || "#ffffff"))
@@ -284,15 +283,16 @@ function AnyModel({
           }
       }
       
-      m.clippingPlanes = activeClipPlanes 
       m.needsUpdate = true
-      
-      if (child.userData._edges) child.userData._edges.visible = !!wireframe
+      if (!isSliceView) {
+          if (child.userData._edges) child.userData._edges.visible = !!wireframe
+      }
     })
-  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, activeClipPlanes, isSliceView])
+  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, isSliceView]) // eslint-disable-line
 
+  // Odeslání polohy řezu do GPU
   useFrame(() => {
-      if (!isSliceView && object3D) {
+      if (object3D) {
           object3D.traverse((child) => {
               if (child.isMesh && child.material?.userData?.shader) {
                   const uPlane = child.material.userData.shader.uniforms.uOutlinePlane.value
@@ -486,7 +486,7 @@ function ClippingGizmo({ plane, enabled, mode, setIsGizmoDragging, targetCenter 
     <TransformControls 
         mode={mode} 
         onDraggingChanged={(e) => {
-            setIsGizmoDragging(e.value) // Zamkne kameru
+            setIsGizmoDragging(e.value) // Zamkne kameru během tahání
         }}
     >
         <mesh ref={meshRef}>
@@ -532,24 +532,17 @@ function MeasureLine({ p1, p2, dist, isTemp = false }) {
     )
 }
 
-/* ---------- MINI-MAPA (Průřezové okno s měřením) ---------- */
+/* ---------- MINI-MAPA (Průřezové okno s čistým Outline 2D) ---------- */
 function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, metalnesses, vertexColors, cutPlane, onFlipCut, onClose }) {
     const [target, setTarget] = useState([0,0,0])
     
+    // Měření
     const [measurePoints, setMeasurePoints] = useState([])
     const [measureStart, setMeasureStart] = useState(null)
     const [measureCurrent, setMeasureCurrent] = useState(null)
     const [snapPoint, setSnapPoint] = useState(null)
 
-    // Fyzický 2D plátek (široký 0.1 mm pro perfektní 2D linku)
-    const THICKNESS = 0.1;
-    const slicePlanes = useMemo(() => {
-        if (!cutPlane) return []
-        const p1 = new THREE.Plane(cutPlane.normal.clone(), cutPlane.constant + THICKNESS/2)
-        const p2 = new THREE.Plane(cutPlane.normal.clone().negate(), -cutPlane.constant + THICKNESS/2)
-        return [p1, p2]
-    }, [cutPlane])
-
+    // Přisátí bodu (matematicky zploští bod myši přesně na řeznou rovinu)
     const handleSnapMove = (point) => {
         if (!cutPlane) return
         const projected = new THREE.Vector3()
@@ -577,13 +570,12 @@ function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, m
 
     return (
         <div style={{ position: "absolute", bottom: 20, right: 20, width: "35vw", height: "35vw", maxWidth: 450, maxHeight: 450, minWidth: 280, minHeight: 280, background: "#111", border: "1px solid #444", borderRadius: 12, overflow: "hidden", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.5)", zIndex: 10 }}>
-            {/* Hlavička okna s nástroji */}
             <div style={{ padding: "8px 12px", background: "#222", borderBottom: "1px solid #333", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <span style={{ color: "white", fontSize: 13, fontWeight: "bold" }}>Průřez</span>
                     <button onClick={onFlipCut} style={{ background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", color: "#fff", borderRadius: 4, padding: "2px 8px", fontSize: 11, cursor: "pointer" }}>🔄 Otočit</button>
                     {measurePoints.length > 0 && (
-                        <button onClick={() => setMeasurePoints([])} style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.5)", color: "#ffbaba", borderRadius: 4, padding: "2px 8px", fontSize: 11, cursor: "pointer" }}>🗑 Smazat</button>
+                        <button onClick={() => setMeasurePoints([])} style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.5)", color: "#ffbaba", borderRadius: 4, padding: "2px 8px", fontSize: 11, cursor: "pointer" }}>🗑 Smazat míry</button>
                     )}
                 </div>
                 <button onClick={onClose} style={{ background: "none", border: "none", color: "#fff", cursor: "pointer", fontSize: 16, lineHeight: 1 }}>×</button>
@@ -596,7 +588,7 @@ function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, m
                     <div style={{ position: "absolute", top: 10, left: 0, right: 0, textAlign: "center", color: "#ffd700", fontSize: 11, pointerEvents: "none", zIndex: 1 }}>Klikněte pro ukotvení...</div>
                 )}
                 
-                <Canvas orthographic gl={{ localClippingEnabled: true }} style={{ width: "100%", height: "100%" }} onPointerOut={() => setSnapPoint(null)}>
+                <Canvas orthographic style={{ width: "100%", height: "100%" }} onPointerOut={() => setSnapPoint(null)}>
                     <group>
                         <Suspense fallback={null}>
                             {files.map((f, i) => (
@@ -604,9 +596,9 @@ function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, m
                                 key={`slice-${f.url}-${i}`}
                                 url={f.url}
                                 color={colors[i]} opacity={1} visible={visibles[i]}
-                                autoSmooth={true} wireframe={false}
+                                autoSmooth={false} wireframe={false}
                                 roughness={roughnesses[i]} metalness={metalnesses[i]} useVertexColors={vertexColors[i]}
-                                clipPlanes={slicePlanes} // Řez do tenkého plátku
+                                outlinePlane={cutPlane} // Vykreslí se JEN čistá křivka
                                 isSliceView={true}
                                 onSnapMove={handleSnapMove}
                                 onSnapDoubleClick={handleSnapDoubleClick}
@@ -617,10 +609,11 @@ function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, m
                     </group>
                     
                     <CrossSectionCamera setupPlane={cutPlane} setTarget={setTarget} />
-                    {/* Zde používáme spolehlivé OrbitControls z Drei s uzamčenou rotací, což dává perfektní 2D Pan a Zoom */}
+                    
+                    {/* Volný pohyb a Zoom ve 2D okně */}
                     <OrbitControls enableRotate={false} enableZoom={true} enablePan={true} target={target} makeDefault />
                     
-                    {/* Snap Point ukazatel */}
+                    {/* Magnetický Snap Point */}
                     {snapPoint && (
                         <mesh position={snapPoint}><sphereGeometry args={[0.5, 16, 16]} /><meshBasicMaterial color="#ffb700" depthTest={false} /></mesh>
                     )}
@@ -645,6 +638,8 @@ function CrossSectionCamera({ setupPlane, setTarget }) {
         else camera.up.set(0, 1, 0)
         
         camera.zoom = Math.min(size.width, size.height) / 80
+        camera.near = 0.1
+        camera.far = 200
         camera.updateProjectionMatrix()
         
         setTarget([cp.x, cp.y, cp.z])
@@ -864,19 +859,25 @@ export default function ClientPage() {
   // NÁSTROJE ŘEZÁNÍ
   const [cutPlane, setCutPlane] = useState(null)
   const [clipMode, setClipMode] = useState("translate") // translate / rotate
-  const [isGizmoDragging, setIsGizmoDragging] = useState(false) // Blokuje kameru
+  const [isGizmoDragging, setIsGizmoDragging] = useState(false) // Zabrání rotaci kamery při posunu řezu
 
-  // Funkce pro vytvoření nového vertikálního řezu přesně z pohledu kamery
+  // Funkce pro vertikální řez z aktuálního pohledu
   const spawnNewCut = () => {
       if (!trackballRef.current) return
       const camera = trackballRef.current.object
-      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion)
-      right.y = 0 // Zamkne rovinu, aby byla kolmá k podlaze (vertikální řez)
-      if (right.lengthSq() < 0.001) right.set(1,0,0)
-      right.normalize()
       
-      const center = new THREE.Vector3().fromArray(cameraTarget) // Bod, na který koukáme
-      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(right, center)
+      const viewDir = new THREE.Vector3()
+      camera.getWorldDirection(viewDir)
+      
+      viewDir.y = 0 // Zamkne vertikální směr
+      if (viewDir.lengthSq() < 0.001) viewDir.set(0, 0, -1)
+      viewDir.normalize()
+      
+      // Vypočte rovinu kolmou na směr pohledu (řeže model napříč)
+      const normal = new THREE.Vector3().crossVectors(viewDir, new THREE.Vector3(0, 1, 0)).normalize()
+      const center = new THREE.Vector3().fromArray(cameraTarget)
+      
+      const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, center)
       setCutPlane(plane)
   }
 
@@ -1116,7 +1117,7 @@ export default function ClientPage() {
                       {clipMode === "translate" ? "🔄 Přejít na rotaci" : "↕ Přejít na posun"}
                   </button>
                   <button 
-                      onClick={() => setCutPlane(null)} 
+                      onClick={() => { setCutPlane(null) }} 
                       style={{ background: "rgba(239,68,68,.15)", border: "1px solid rgba(239,68,68,.5)", color: "#ffbaba", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: "bold", cursor: "pointer", boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}
                   >
                       ✖ Zrušit řez
@@ -1159,7 +1160,7 @@ export default function ClientPage() {
       <Canvas
         orthographic
         camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }}
-        gl={{ alpha: true, localClippingEnabled: true }}
+        gl={{ alpha: true }} // Vyčištěný Canvas pro vyšší výkon
         onCreated={({ gl }) => gl.setClearAlpha(0)}
         style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
       >
@@ -1190,7 +1191,6 @@ export default function ClientPage() {
                 useVertexColors={vertexColors[i]}
                 keepMaterials={!!f.km}
                 outlinePlane={cutPlane}
-                clipPlanes={null}
                 isSliceView={false}
               />
             ))}
@@ -1224,11 +1224,10 @@ export default function ClientPage() {
           />
         )}
 
-        {/* Kameru ovládáme, pokud ZROVNA netahem za řezací kruh */}
         <TouchTrackballControls 
             ref={trackballRef} 
             target={cameraTarget} 
-            enabled={!isGizmoDragging}
+            enabled={!isGizmoDragging} // Zamyká pohled při tahání za kruh
         />
         <RightButtonPan 
             setTarget={setCameraTarget} 
