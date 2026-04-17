@@ -550,6 +550,17 @@ function Overlay2D({ segments, boundingBox }) {
   const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
   const svgRef = useRef(null)
 
+  // Masivní optimalizace: Místo mapování a tisíců `<line>` generujeme jeden rychlý string SVG cesty.
+  const pathData = useMemo(() => {
+      if (!segments || segments.length === 0) return ""
+      let d = ""
+      for (let i = 0; i < segments.length; i++) {
+          const s = segments[i]
+          d += `M${s[0].x.toFixed(2)},${s[0].y.toFixed(2)}L${s[1].x.toFixed(2)},${s[1].y.toFixed(2)}`
+      }
+      return d
+  }, [segments])
+
   const distSq = (v, w) => Math.pow(v.x - w.x, 2) + Math.pow(v.y - w.y, 2)
   const closestPointOnSegment = (p, v, w) => {
     const l2 = distSq(v, w)
@@ -562,11 +573,11 @@ function Overlay2D({ segments, boundingBox }) {
   const getSnappedPoint = (mousePoint) => {
     let bestPoint = null
     let minDist = Infinity
-    segments.forEach(seg => {
-      const pt = closestPointOnSegment(mousePoint, seg[0], seg[1])
+    for (let i = 0; i < segments.length; i++) {
+      const pt = closestPointOnSegment(mousePoint, segments[i][0], segments[i][1])
       const d = distSq(mousePoint, pt)
       if (d < minDist) { minDist = d; bestPoint = pt }
-    })
+    }
     return bestPoint || mousePoint 
   }
 
@@ -643,11 +654,8 @@ function Overlay2D({ segments, boundingBox }) {
         viewBox={vBox}
         style={{ display: 'block', transform: 'scale(1, -1)' }}
       >
-        <g stroke="#ffffff" strokeWidth={(boundingBox.width/300) * 1.5 || 0.5} strokeLinecap="round" strokeLinejoin="round" fill="none">
-          {segments.map((seg, i) => (
-            <line key={i} x1={seg[0].x} y1={seg[0].y} x2={seg[1].x} y2={seg[1].y} />
-          ))}
-        </g>
+        {/* Render obří vektorové čáry jako jednu jedinou cestu, nezahlcuje DOM */}
+        <path d={pathData} stroke="#ffffff" strokeWidth={(boundingBox.width/300) * 1.5 || 0.5} strokeLinecap="round" strokeLinejoin="round" fill="none" />
 
         {measureState.p1 && (
           <circle cx={measureState.p1.x} cy={measureState.p1.y} r={(boundingBox.width/300) * 4 || 1} fill="#fbbf24" />
@@ -704,7 +712,7 @@ export default function ClientPage() {
   // -- STAVY PRO ŘEZÁNÍ (CLIPPING) --
   const [clippingEnabled, setClippingEnabled] = useState(false)
   const [clipMode, setClipMode] = useState("translate")
-  const [planeGroup, setPlaneGroup] = useState(null) // OPRAVA: useState místo useRef pro korektní render TransformControls
+  const planeGroupRef = useRef(null) 
   const clipPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(1, 0, 0), 0))
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
@@ -730,53 +738,78 @@ export default function ClientPage() {
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
+  // Obří optimalizace výpočetní matematiky (0 alokací Vector3 uvnitř smyčky)
   const updateClippingLogic = useCallback(() => {
-    if (!planeGroup || !rootGroupRef.current) return
+    if (!planeGroupRef.current || !rootGroupRef.current) return
 
-    planeGroup.updateMatrixWorld(true)
-    const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
-    const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
+    planeGroupRef.current.updateMatrixWorld(true)
+    const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroupRef.current.matrixWorld).normalize()
+    const pos = new THREE.Vector3().setFromMatrixPosition(planeGroupRef.current.matrixWorld)
     clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
 
     const segments2D = []
-    const invMat = planeGroup.matrixWorld.clone().invert()
-    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
+    const invMat = planeGroupRef.current.matrixWorld.clone().invert()
     const plane = clipPlaneRef.current
+
+    // Znovupoužitelné objekty zabrání pádu aplikace přes Garbage Collector
+    const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3()
+    const edgePt = new THREE.Vector3(), locPt = new THREE.Vector3()
 
     rootGroupRef.current.children.forEach(child => {
        if (!child.isMesh || !child.visible) return
-       
        child.updateMatrixWorld(true)
+       const matrix = child.matrixWorld
        const geom = child.geometry
        const posAttr = geom.attributes.position
        const index = geom.index
-       const matrix = child.matrixWorld
 
-       const checkEdge = (v1, v2) => {
-           const d1 = plane.distanceToPoint(v1)
-           const d2 = plane.distanceToPoint(v2)
+       const checkEdge = (v1, v2, d1, d2) => {
            if (d1 * d2 < 0) {
                const t = d1 / (d1 - d2)
-               return new THREE.Vector3().copy(v1).lerp(v2, t)
+               edgePt.copy(v1).lerp(v2, t)
+               return true
            }
-           if (d1 === 0) return v1.clone()
-           return null
+           if (d1 === 0) {
+               edgePt.copy(v1)
+               return true
+           }
+           return false
        }
 
        const processTri = (iA, iB, iC) => {
-           a.fromBufferAttribute(posAttr, iA).applyMatrix4(matrix)
-           b.fromBufferAttribute(posAttr, iB).applyMatrix4(matrix)
-           c.fromBufferAttribute(posAttr, iC).applyMatrix4(matrix)
+           vA.fromBufferAttribute(posAttr, iA).applyMatrix4(matrix)
+           vB.fromBufferAttribute(posAttr, iB).applyMatrix4(matrix)
+           vC.fromBufferAttribute(posAttr, iC).applyMatrix4(matrix)
+
+           const dA = plane.distanceToPoint(vA)
+           const dB = plane.distanceToPoint(vB)
+           const dC = plane.distanceToPoint(vC)
+
+           if ((dA > 0 && dB > 0 && dC > 0) || (dA < 0 && dB < 0 && dC < 0)) return
 
            const pts = []
-           const p1 = checkEdge(a, b); if(p1) pts.push(p1)
-           const p2 = checkEdge(b, c); if(p2 && (!p1 || p1.distanceToSq(p2)>1e-10)) pts.push(p2)
-           const p3 = checkEdge(c, a); if(p3 && pts.length < 2 && (!pts[0] || pts[0].distanceToSq(p3)>1e-10)) pts.push(p3)
 
-           if(pts.length === 2) {
-               const loc1 = pts[0].clone().applyMatrix4(invMat)
-               const loc2 = pts[1].clone().applyMatrix4(invMat)
-               segments2D.push([{ x: loc1.x, y: loc1.y }, { x: loc2.x, y: loc2.y }])
+           if (checkEdge(vA, vB, dA, dB)) {
+               locPt.copy(edgePt).applyMatrix4(invMat)
+               pts.push(locPt.x, locPt.y)
+           }
+           if (checkEdge(vB, vC, dB, dC)) {
+               locPt.copy(edgePt).applyMatrix4(invMat)
+               if (pts.length < 2 || Math.abs(pts[0] - locPt.x) > 1e-5 || Math.abs(pts[1] - locPt.y) > 1e-5) {
+                   pts.push(locPt.x, locPt.y)
+               }
+           }
+           if (pts.length < 4 && checkEdge(vC, vA, dC, dA)) {
+               locPt.copy(edgePt).applyMatrix4(invMat)
+               if (pts.length < 2 || Math.abs(pts[0] - locPt.x) > 1e-5 || Math.abs(pts[1] - locPt.y) > 1e-5) {
+                   if (pts.length < 4 || Math.abs(pts[2] - locPt.x) > 1e-5 || Math.abs(pts[3] - locPt.y) > 1e-5) {
+                      pts.push(locPt.x, locPt.y)
+                   }
+               }
+           }
+
+           if (pts.length >= 4) {
+               segments2D.push([ { x: pts[0], y: pts[1] }, { x: pts[2], y: pts[3] } ])
            }
        }
 
@@ -791,47 +824,51 @@ export default function ClientPage() {
 
     if (segments2D.length > 0) {
        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-       segments2D.forEach(seg => {
-           seg.forEach(p => {
-               if(p.x < minX) minX = p.x; if(p.x > maxX) maxX = p.x;
-               if(p.y < minY) minY = p.y; if(p.y > maxY) maxY = p.y;
-           })
-       })
+       for(let i=0; i<segments2D.length; i++){
+           const s = segments2D[i]
+           if(s[0].x < minX) minX = s[0].x; if(s[0].x > maxX) maxX = s[0].x;
+           if(s[0].y < minY) minY = s[0].y; if(s[0].y > maxY) maxY = s[0].y;
+           if(s[1].x < minX) minX = s[1].x; if(s[1].x > maxX) maxX = s[1].x;
+           if(s[1].y < minY) minY = s[1].y; if(s[1].y > maxY) maxY = s[1].y;
+       }
        setSliceBBox({ minX, minY, width: maxX - minX, height: maxY - minY })
     } else {
        setSliceBBox(null)
     }
-
-  }, [planeGroup])
+  }, [])
 
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (!clippingEnabled || !planeGroup) return
+      if (!clippingEnabled || !planeGroupRef.current) return
       const step = 0.5 
       if (e.key === "ArrowUp" || e.key === "ArrowRight") {
-         planeGroup.translateZ(step)
+         planeGroupRef.current.translateZ(step)
          updateClippingLogic()
       } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
-         planeGroup.translateZ(-step)
+         planeGroupRef.current.translateZ(-step)
          updateClippingLogic()
       }
     }
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [clippingEnabled, updateClippingLogic, planeGroup])
+  }, [clippingEnabled, updateClippingLogic])
 
   useEffect(() => {
-     if (clippingEnabled && rootGroupRef.current && planeGroup) {
+     if (clippingEnabled && rootGroupRef.current && planeGroupRef.current) {
         const box = new THREE.Box3().setFromObject(rootGroupRef.current)
         if (!box.isEmpty()) {
            const center = new THREE.Vector3()
            box.getCenter(center)
-           planeGroup.position.copy(center)
-           planeGroup.rotation.set(0, 0, 0)
+           planeGroupRef.current.position.copy(center)
+           planeGroupRef.current.rotation.set(0, 0, 0)
+           planeGroupRef.current.updateMatrixWorld(true)
            updateClippingLogic()
         }
+     } else if (!clippingEnabled) {
+        setSliceSegments([])
+        setSliceBBox(null)
      }
-  }, [clippingEnabled, planeGroup]) // Vynechal jsem záměrně updateClippingLogic z deps, aby se reset provedl jen při změně pole/stavu
+  }, [clippingEnabled, updateClippingLogic]) 
 
   useEffect(() => {
     ;(async () => {
@@ -1069,7 +1106,6 @@ export default function ClientPage() {
     </div>
   )
 
-  // -- NOVÝ PANEL V PRAVO NAHOŘE PRO NÁSTROJ ŘEZU --
   const topBarRight = (
     <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10, fontFamily: "sans-serif", color: "white" }}>
       <div style={{ background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 12 }}>
@@ -1103,14 +1139,15 @@ export default function ClientPage() {
       {sidebar}
       {topBarRight}
 
-      {/* 2D Měřící okno zobrazené, pokud je aktivní řez */}
       {clippingEnabled && <Overlay2D segments={sliceSegments} boundingBox={sliceBBox} />}
 
       <Canvas
         orthographic
         camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }}
-        gl={{ alpha: true, localClippingEnabled: true }}
-        onCreated={({ gl }) => gl.setClearAlpha(0)}
+        onCreated={({ gl }) => {
+            gl.setClearAlpha(0)
+            gl.localClippingEnabled = true // Zásadní - aplikováno přesně po vytvoření Canvasu
+        }}
         style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
       >
         <ambientLight intensity={0.35 * sceneIntensity} />
@@ -1145,30 +1182,27 @@ export default function ClientPage() {
           </Suspense>
         </group>
 
-        {/* Neviditelný helper objekt sloužící jako pivot pro gimbal (navázaný do state) */}
-        <group ref={setPlaneGroup}>
-           <mesh visible={clippingEnabled}>
-             <planeGeometry args={[200, 200]} />
-             <meshBasicMaterial color="#3b82f6" transparent opacity={0.1} side={THREE.DoubleSide} depthWrite={false} />
-           </mesh>
-        </group>
-
-        {/* Nástroj TransformControls (Gimbal) pro ovládání řezu - nyní bezpečněji mountovaný */}
-        {clippingEnabled && planeGroup && (
+        {clippingEnabled && (
           <TransformControls 
-            object={planeGroup} 
             mode={clipMode}
             onMouseDown={() => { isDraggingGizmo.current = true }}
             onMouseUp={() => { isDraggingGizmo.current = false; updateClippingLogic() }}
             onChange={() => {
-              if (isDraggingGizmo.current) {
-                planeGroup.updateMatrixWorld(true)
-                const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
-                const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
+              if (isDraggingGizmo.current && planeGroupRef.current) {
+                planeGroupRef.current.updateMatrixWorld(true)
+                const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroupRef.current.matrixWorld).normalize()
+                const pos = new THREE.Vector3().setFromMatrixPosition(planeGroupRef.current.matrixWorld)
                 clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
               }
             }}
-          />
+          >
+            <group ref={planeGroupRef}>
+               <mesh>
+                 <planeGeometry args={[200, 200]} />
+                 <meshBasicMaterial color="#3b82f6" transparent opacity={0.1} side={THREE.DoubleSide} depthWrite={false} />
+               </mesh>
+            </group>
+          </TransformControls>
         )}
 
         <ViewStateSync trackballRef={trackballRef} />
