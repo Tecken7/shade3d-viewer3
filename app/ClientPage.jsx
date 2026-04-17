@@ -121,7 +121,6 @@ function AutoRotateScene({ enabled, target }) {
   const vTarget = useMemo(() => new THREE.Vector3(), [])
   const isInteracting = useRef(false)
 
-  // Pozastaví rotaci, když uživatel aktivně klikne a tahá myší
   useEffect(() => {
     const onDown = () => { isInteracting.current = true }
     const onUp = () => { isInteracting.current = false }
@@ -137,10 +136,11 @@ function AutoRotateScene({ enabled, target }) {
     if (!enabled || isInteracting.current) return
     
     vTarget.fromArray(target)
-    const speed = 0.25 * delta // Pomalá cinematická rychlost
+    const speed = 0.8 * delta // Zvýšená rychlost rotace
     
     camera.position.sub(vTarget)
-    camera.position.applyAxisAngle(new THREE.Vector3(0, 1, 0), speed)
+    // Rotace kolem Z osy
+    camera.position.applyAxisAngle(new THREE.Vector3(0, 0, 1), speed)
     camera.position.add(vTarget)
     camera.lookAt(vTarget)
   })
@@ -1420,7 +1420,6 @@ export default function ClientPage() {
   const topBarRight = (
     <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10, fontFamily: "sans-serif", color: "white" }}>
       
-      {/* NOVÉ TLAČÍTKO PRO 360° ROTACI */}
       <button 
         onClick={() => setIsAutoRotating(p => !p)}
         style={{
@@ -1610,7 +1609,6 @@ export default function ClientPage() {
       <Lightbox open={lightbox.open} onClose={() => setLightbox({ open: false, src: null, alt: "" })} src={lightbox.src} alt={lightbox.alt} />
 
       <style jsx global>{`
-        /* Nová animace pro točící se ikonku Spin */
         @keyframes spin { 
           100% { transform: rotate(360deg); } 
         }
