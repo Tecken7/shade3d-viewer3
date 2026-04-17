@@ -136,19 +136,16 @@ function AutoRotateScene({ enabled, target }) {
     if (!enabled || isInteracting.current) return
     
     vTarget.fromArray(target)
-    const speed = 0.8 * delta 
+    const speed = 1.0 * delta // O něco rychlejší cinematické tempo
     
-    // Ve webovém 3D je vertikální osa světa Y (0,1,0)
-    const axis = new THREE.Vector3(0, 1, 0)
+    // GÉNIUSOVÁ ÚPRAVA: Jako osu rotace použijeme UP vektor kamery.
+    // Tím zaručíme, že se to bude točit VŽDY perfektně zleva doprava podle toho, 
+    // co uživatel vidí na monitoru (osa odspodu nahoru obrazovky), nehledě na náklon.
+    const axis = camera.up.clone().normalize()
     
-    // Rotace pozice kamery
     camera.position.sub(vTarget)
     camera.position.applyAxisAngle(axis, speed)
     camera.position.add(vTarget)
-    
-    // KLÍČOVÉ: Aby se zachoval náklon nastavený uživatelem a kamera se "nežvýkala", 
-    // musíme rotovat i UP vektor kamery podél stejné absolutní osy.
-    camera.up.applyAxisAngle(axis, speed)
     
     camera.lookAt(vTarget)
   })
@@ -1539,7 +1536,7 @@ export default function ClientPage() {
             showZ={false}
             onChange={() => {
               if (planeGroup) {
-                // Skutečné smazání pouze pokud se fyzicky táhne osou
+                // Bezpečně vymaže měření jen, když fyzicky táhneš myší!
                 if (transformRotateRef.current?.dragging) {
                     setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
                 }
@@ -1565,7 +1562,7 @@ export default function ClientPage() {
             showZ={true}
             onChange={() => {
               if (planeGroup) {
-                // Skutečné smazání pouze pokud se fyzicky táhne osou
+                // Bezpečně vymaže měření jen, když fyzicky táhneš myší!
                 if (transformTranslateRef.current?.dragging) {
                     setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
                 }
