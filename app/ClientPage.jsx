@@ -382,6 +382,7 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
     const root = rootRef.current
     if (!root) return
     
+    // 1. NEJPRVE VŽDY VYCENTRUJEME MODEL
     root.updateMatrixWorld(true)
     const boxAll = new THREE.Box3().setFromObject(root)
     if (boxAll.isEmpty()) return
@@ -403,6 +404,7 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
       root.updateMatrixWorld(true)
     }
 
+    // VŽDY NASTAVÍME KAMERU na výchozí "čelní" pohled
     const after = new THREE.Box3().setFromObject(root)
     const dims2 = new THREE.Vector3(), ctr = new THREE.Vector3()
     after.getSize(dims2); after.getCenter(ctr)
@@ -430,7 +432,7 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
   return null
 }
 
-/* ---------- Odchytávání rotace modelu ---------- */
+/* ---------- Odchytávání rotace modelu (jako v Blenderu) ---------- */
 function WorldTransformSync({ rootRef }) {
   useEffect(() => {
     const interval = setInterval(() => {
@@ -486,7 +488,7 @@ export default function ClientPage() {
   const [isMobile, setIsMobile] = useState(false)
   const [isLive, setIsLive] = useState(false)
 
-  // OPRAVA HYDRATION ERRORU - IsLive bezpečně čteme až na klientovi
+  // OPRAVA HYDRATION ERRORU
   useEffect(() => {
     try {
       const uaMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
@@ -508,7 +510,7 @@ export default function ClientPage() {
   const [metalnesses, setMetalnesses] = useState([])
   const [fatal, setFatal] = useState(null)
 
-  const [autoSmooth, setAutoSmooth] = useState(true) // Default true, v useEffect se případně přepíše
+  const [autoSmooth, setAutoSmooth] = useState(true)
   const [smoothAngle] = useState(30)
   const [wireframe, setWireframe] = useState(false)
 
@@ -526,6 +528,9 @@ export default function ClientPage() {
   
   const [loadedUrls, setLoadedUrls] = useState(new Set())
   const handleModelLoaded = (url) => setLoadedUrls((prev) => { const n = new Set(prev); n.add(url); return n; })
+
+  const centerParam = (getParam("center") || "combined").toLowerCase()
+  const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
   const [editRotMode, setEditRotMode] = useState(false)
   const [initialTransform, setInitialTransform] = useState(null)
@@ -585,7 +590,7 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: !!x.vc, km: !!x.km,
           }))
-          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.transform)
+          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.worldRotation)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -601,7 +606,7 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: !!x.vc, km: !!x.km,
           }))
-          applyFiles(Fs, m?.title, m?.logo?.url, null, m?.transform)
+          applyFiles(Fs, m?.title, m?.logo?.url, null, m?.worldRotation)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -732,19 +737,33 @@ export default function ClientPage() {
         <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
         <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
       </div>
-      {/* TLAČÍTKO PRO ZOBRAZENÍ GIZMA */}
-      {isLive && files.length > 0 && (
-         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10, padding: "10px", background: "rgba(59,130,246, 0.15)", borderRadius: 10, border: "1px solid rgba(59,130,246, 0.5)" }}>
-            <Switch checked={editRotMode} onChange={setEditRotMode} label="🛠 Upravit výchozí rotaci" />
-         </div>
-      )}
     </>
   )
 
   const sidebar = (
     <div className="sidebar" style={{ position: "absolute", top: 10, left: 10, zIndex: 2, width: "clamp(260px, 28vw, 420px)", maxWidth: "calc(100vw - 20px)", color: "white", fontFamily: "sans-serif", fontSize: 14, backdropFilter: "blur(3px)", background: "rgba(0,0,0,.25)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, boxSizing: "border-box", maxHeight: "calc(100vh - 20px)", overflowY: "auto" }}>
+      
+      {/* ZVIDITELNĚNO A VYTAŽENO ÚPLNĚ NAHORU */}
+      {isLive && files.length > 0 && (
+         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 10, padding: "10px", background: editRotMode ? "rgba(16, 185, 129, 0.2)" : "rgba(59,130,246, 0.15)", borderRadius: 10, border: editRotMode ? "1px solid rgba(16, 185, 129, 0.5)" : "1px solid rgba(59,130,246, 0.5)" }}>
+            <Switch checked={editRotMode} onChange={setEditRotMode} label="🛠 Upravit rotaci" />
+         </div>
+      )}
+
       {title && (<div title={title} style={{ marginBottom: 10, padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", background: "rgba(255,255,255,.08)", fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>)}
-      <div>{slidersOpen ? <div style={{ border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>{slidersContent}</div> : null}</div>
+      
+      {isMobile ? (
+        <>
+          <button onClick={() => setSlidersOpen((o) => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 12px", background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.18)", borderRadius: 10, color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>
+            <span>Nastavení modelů</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ transform: slidersOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform .15s ease" }} aria-hidden><path d="M8 5l8 7-8 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          </button>
+          {slidersOpen && <div style={{ marginTop: 8, border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>{slidersContent}</div>}
+        </>
+      ) : (
+        <div style={{ border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>{slidersContent}</div>
+      )}
+
       {photos && photos.length > 0 && (
         <div style={{ marginTop: 10 }}>
           <button onClick={() => setLightbox({ open: true, src: photos[0].u, alt: photos[0].n || "" })} style={{ width: "100%", padding: "8px 10px", background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.18)", borderRadius: 10, color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>Fotky ({photos.length})</button>
@@ -752,9 +771,6 @@ export default function ClientPage() {
       )}
     </div>
   )
-
-  const centerParam = (getParam("center") || "combined").toLowerCase()
-  const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
   const allLoaded = files.length > 0 && files.every(f => loadedUrls.has(f.url))
   const frameKey = allLoaded && !didInitialFrame ? `frame-${files.length}` : ""
