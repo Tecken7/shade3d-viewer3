@@ -703,7 +703,7 @@ function Overlay2D({ segments, boundingBox }) {
   return (
     <div 
       style={{
-        position: 'absolute', bottom: 20, left: 20, width: winSize.w, height: winSize.h,
+        position: 'absolute', bottom: 20, right: 20, width: winSize.w, height: winSize.h, // ZDE JE ZMĚNA right: 20
         background: '#1a1a1a', border: '1px solid #444', borderRadius: 8,
         zIndex: 100, overflow: 'visible', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
         cursor: measureState.active ? 'crosshair' : 'grab'
@@ -763,7 +763,6 @@ function Overlay2D({ segments, boundingBox }) {
 
 /* ---------- Manažer pro detekci hoveru na Gimbalu ---------- */
 function GizmoManager({ transformRef, trackballRef }) {
-  // Smyčka kontroluje stav myši a okamžitě odpojuje Trackball, jakmile myš vstoupí nad červenou/modrou/zelenou osu
   useFrame(() => {
     if (transformRef.current && trackballRef.current) {
       const isHovered = transformRef.current.axis !== null;
@@ -1307,9 +1306,6 @@ export default function ClientPage() {
             ref={transformRef}
             object={planeGroup}
             mode={clipMode}
-            onDraggingChanged={(e) => {
-               if (!e.value) updateClippingLogic() 
-            }}
             onChange={() => {
               if (planeGroup) {
                 // Přímá synchronizace roviny při tažení
@@ -1317,6 +1313,9 @@ export default function ClientPage() {
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
                 const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
                 clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
+                
+                // LIVE UPDATE 2D OKNA
+                updateClippingLogic() 
               }
             }}
           />
