@@ -161,6 +161,13 @@ function Measurement3D({ measureState, boundingBox }) {
   if (!measureState.p1 || !measureState.snappedP2) return null
 
   const rad = boundingBox ? boundingBox.width * 0.008 : 0.5
+  
+  // Výpočet středu a vzdálenosti pro 3D text
+  const dx = measureState.snappedP2.x - measureState.p1.x;
+  const dy = measureState.snappedP2.y - measureState.p1.y;
+  const midX = measureState.p1.x + dx / 2;
+  const midY = measureState.p1.y + dy / 2;
+  const distVal = Math.sqrt(dx * dx + dy * dy).toFixed(2);
 
   return (
     <group>
@@ -176,6 +183,20 @@ function Measurement3D({ measureState, boundingBox }) {
         <circleGeometry args={[rad, 32]} />
         <meshBasicMaterial color="#fbbf24" depthTest={false} depthWrite={false} transparent opacity={0.95} />
       </mesh>
+
+      {/* HTML Popisek vzdálenosti ukotvený na střed 3D čáry */}
+      <Html position={[midX, midY, 0]} center style={{ pointerEvents: "none" }} zIndexRange={[100, 0]}>
+        <div style={{
+          fontSize: 16,
+          fontWeight: 'bold',
+          color: '#fbbf24',
+          textShadow: "0 2px 4px rgba(0,0,0,0.8)",
+          whiteSpace: "nowrap",
+          transform: "translate(8px, -12px)" // Vizuální odsazení textu od samotné linky
+        }}>
+          {distVal} mm
+        </div>
+      </Html>
     </group>
   )
 }
@@ -1453,11 +1474,11 @@ export default function ClientPage() {
             showY={true}
             showZ={false}
             onChange={() => {
-              // Zásadní úprava: Kontrolujeme přímo instanci. Pokud se táhne myší (dragging je true), smažeme měření.
-              if (transformRotateRef.current?.dragging) {
-                 setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
-              }
               if (planeGroup) {
+                // Skutečné smazání pouze pokud se fyzicky táhne osou
+                if (transformRotateRef.current?.dragging) {
+                    setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
+                }
                 planeGroup.updateMatrixWorld(true)
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
                 const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
@@ -1479,11 +1500,11 @@ export default function ClientPage() {
             showY={false}
             showZ={true}
             onChange={() => {
-              // Obdobně pro posun: Smaže měření jen při reálném tažení za osu
-              if (transformTranslateRef.current?.dragging) {
-                 setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
-              }
               if (planeGroup) {
+                // Skutečné smazání pouze pokud se fyzicky táhne osou
+                if (transformTranslateRef.current?.dragging) {
+                    setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
+                }
                 planeGroup.updateMatrixWorld(true)
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
                 const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
