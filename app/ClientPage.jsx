@@ -115,25 +115,27 @@ function InlineLoader({ text }) {
   )
 }
 
-/* ---------- AnyModel ---------- */
-const OUTLINE_THICKNESS = 0.35
+/* ---------- ROBUSTNÍ MODEL KOMPONENTA ---------- */
+const OUTLINE_THICKNESS = 0.35 // Tloušťka nakreslené čáry řezu v mm
 
 function AnyModel({
   name, url, color, opacity, visible,
   onLoaded, autoSmooth, smoothAngle = DEFAULT_SMOOTH_ANGLE,
   roughness = 0.5, metalness = 0.5, useVertexColors = false,
   keepMaterials = false, wireframe = false,
-  clipPlanes = [], 
-  outlinePlane = null, 
+  clipPlanes = null, // Pole rovin pouze pro 2D řez
+  outlinePlane = null, // Rovina shaderu pro 3D obrys
   isSliceView = false,
-  onSnapMove = null,
-  onSnapClick = null,
-  onSnapDoubleClick = null
+  onSnapMove = null, onSnapClick = null, onSnapDoubleClick = null
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
   const outlineColor = useMemo(() => new THREE.Color("#ffb700"), [])
 
+  // 1. Zajištění bezpečné reference pro klipovací roviny, aby nedocházelo k Infinity Loopům
+  const activeClipPlanes = useMemo(() => clipPlanes || [], [clipPlanes])
+
+  // Funkce pro sestavení čistého materiálu
   const makeMat = (opts = {}) => {
     const mat = new THREE.MeshStandardMaterial({
       color: new THREE.Color(color || "#ffffff"),
@@ -141,7 +143,7 @@ function AnyModel({
       metalness: typeof metalness === "number" ? metalness : 0.5,
       transparent: opacity < 1, opacity,
       side: THREE.DoubleSide, depthWrite: opacity === 1,
-      clippingPlanes: clipPlanes, clipShadows: true,
+      clippingPlanes: activeClipPlanes, clipShadows: true,
       ...opts,
     })
 
@@ -156,8 +158,7 @@ function AnyModel({
                 ${shader.vertexShader}
             `.replace(
                 `#include <worldpos_vertex>`,
-                `#include <worldpos_vertex>
-                 vCustomWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;`
+                `#include <worldpos_vertex>\n vCustomWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;`
             )
 
             shader.fragmentShader = `
@@ -167,14 +168,7 @@ function AnyModel({
                 ${shader.fragmentShader}
             `.replace(
                 `#include <dithering_fragment>`,
-                `#include <dithering_fragment>
-                 if (length(uOutlinePlane.xyz) > 0.5) {
-                     float dist = dot(vCustomWorldPos, uOutlinePlane.xyz) + uOutlinePlane.w;
-                     if (abs(dist) < ${OUTLINE_THICKNESS.toFixed(2)}) {
-                         gl_FragColor = vec4(uOutlineColor, 1.0);
-                     }
-                 }
-                `
+                `#include <dithering_fragment>\n if (length(uOutlinePlane.xyz) > 0.5) {\n float dist = dot(vCustomWorldPos, uOutlinePlane.xyz) + uOutlinePlane.w;\n if (abs(dist) < ${OUTLINE_THICKNESS.toFixed(2)}) {\n gl_FragColor = vec4(uOutlineColor, 1.0);\n }\n }`
             )
         }
     } else {
@@ -185,25 +179,7 @@ function AnyModel({
     return mat
   }
 
-  const rebuildWireOverlay = (mesh) => {
-    if (mesh.userData._edges) {
-      mesh.userData._edges.geometry?.dispose?.()
-      mesh.userData._edges.material?.dispose?.()
-      mesh.remove(mesh.userData._edges)
-      mesh.userData._edges = null
-    }
-    if (!wireframe) return
-    const wfGeom = new THREE.WireframeGeometry(mesh.geometry)
-    const wfMat = new THREE.LineBasicMaterial({ 
-        color: 0x000000, depthTest: true, depthWrite: false, transparent: true, opacity: 0.95, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
-        clippingPlanes: clipPlanes
-    })
-    const lines = new THREE.LineSegments(wfGeom, wfMat)
-    lines.renderOrder = (mesh.renderOrder || 0) + 10
-    mesh.add(lines)
-    mesh.userData._edges = lines
-  }
-
+  // Načtení dat (proběhne jen jednou per URL)
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -212,40 +188,21 @@ function AnyModel({
         if (ext === "stl") {
           const geom = await new STLLoader().loadAsync(url)
           if (!geom.attributes.normal) geom.computeVertexNormals()
-          const base = autoSmooth ? autoSmoothGeometry(geom, smoothAngle) : (geom.computeVertexNormals(), geom)
-          obj = new THREE.Mesh(base, makeMat())
+          obj = new THREE.Mesh(geom, makeMat())
           obj.userData._baseGeom = geom
-          obj.userData._derivedGeom = base
         } else if (ext === "ply") {
           const geom = await new PLYLoader().loadAsync(url)
           const hasVC = !!geom.getAttribute("color")
-          let base = geom
-          if (autoSmooth) base = autoSmoothGeometry(geom, smoothAngle)
-          else if (!geom.attributes.normal) geom.computeVertexNormals()
-          obj = new THREE.Mesh(base, hasVC && useVertexColors ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") }) : makeMat())
+          obj = new THREE.Mesh(geom, hasVC && useVertexColors ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") }) : makeMat())
           obj.userData._baseGeom = geom
-          obj.userData._derivedGeom = base
         } else {
-          const loaded = await new OBJLoader().loadAsync(url)
-          if (keepMaterials) {
-            loaded.traverse((ch) => {
-              if (ch.isMesh && ch.material) {
-                const m = ch.material
-                m.transparent = opacity < 1; m.opacity = opacity;
-                if ("roughness" in m) m.roughness = roughness
-                if ("metalness" in m) m.metalness = metalness
-                m.clippingPlanes = clipPlanes
-              }
-            })
-            obj = loaded
-          } else {
+          obj = await new OBJLoader().loadAsync(url)
+          if (!keepMaterials) {
             const mat = makeMat()
-            loaded.traverse((ch) => { if (ch.isMesh) ch.material = mat })
-            obj = loaded
+            obj.traverse((ch) => { if (ch.isMesh) ch.material = mat })
           }
         }
         if (!cancelled) {
-          forEachMesh(obj, (mesh) => rebuildWireOverlay(mesh))
           setObject3D(obj)
           onLoaded && onLoaded(url)
         }
@@ -254,13 +211,34 @@ function AnyModel({
     return () => { cancelled = true }
   }, [url, ext]) // eslint-disable-line
 
-  // OPRAVA Blesková aktualizace materiálů bez jejich nového vytváření
+  // 2. Geometrie (Přepočet vyhlazování - odděleno od barev)
+  useEffect(() => {
+    if (!object3D) return
+    object3D.traverse((child) => {
+      if (!child.isMesh) return
+      if (!child.userData._baseGeom) child.userData._baseGeom = child.geometry
+      const base = child.userData._baseGeom
+      
+      if (child.userData._derivedGeom && child.userData._derivedGeom !== base) {
+         child.userData._derivedGeom.dispose()
+      }
+
+      let newGeom = base
+      if (autoSmooth) newGeom = autoSmoothGeometry(base, smoothAngle)
+      else { newGeom = base.clone(); newGeom.computeVertexNormals() }
+      
+      child.geometry = newGeom
+      child.userData._derivedGeom = newGeom
+    })
+  }, [object3D, autoSmooth, smoothAngle])
+
+  // 3. Materiály a Wireframe (Okamžité úpravy)
   useEffect(() => {
     if (!object3D) return
     object3D.traverse((child) => {
       if (!child.isMesh) return
       
-      const m = child.material
+      let m = child.material
       if (!m) return
       
       m.transparent = opacity < 1
@@ -280,14 +258,31 @@ function AnyModel({
           }
       }
       
-      m.clippingPlanes = clipPlanes 
-      m.needsUpdate = true
+      m.clippingPlanes = activeClipPlanes
       
-      if (child.userData._edges) child.userData._edges.visible = !!wireframe
-      else if (wireframe) rebuildWireOverlay(child)
+      // Wireframe overlay logika
+      if (wireframe) {
+          if (!child.userData._edges) {
+              const wfGeom = new THREE.WireframeGeometry(child.geometry)
+              const wfMat = new THREE.LineBasicMaterial({ 
+                  color: 0x000000, depthTest: true, depthWrite: false, transparent: true, opacity: 0.95, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+                  clippingPlanes: activeClipPlanes
+              })
+              const lines = new THREE.LineSegments(wfGeom, wfMat)
+              lines.renderOrder = (child.renderOrder || 0) + 10
+              child.add(lines)
+              child.userData._edges = lines
+          } else {
+              child.userData._edges.visible = true
+              child.userData._edges.material.clippingPlanes = activeClipPlanes
+          }
+      } else {
+          if (child.userData._edges) child.userData._edges.visible = false
+      }
     })
-  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, clipPlanes]) // eslint-disable-line
+  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, activeClipPlanes])
 
+  // 4. Update shaderu pro kreslení řezné linky
   useFrame(() => {
       if (!isSliceView && object3D) {
           object3D.traverse((child) => {
@@ -535,21 +530,8 @@ function MeasureLine({ p1, p2, dist, isTemp = false }) {
     )
 }
 
-/* ---------- Synchronizace řezných rovin ---------- */
-function SliceSync({ cutPlane, slicePlanes }) {
-    useFrame(() => {
-        if (cutPlane) {
-            slicePlanes[0].copy(cutPlane)
-            slicePlanes[0].constant += 0.5
-            slicePlanes[1].copy(cutPlane).negate()
-            slicePlanes[1].constant += 0.5
-        }
-    })
-    return null
-}
-
 /* ---------- MINI-MAPA (Průřezové okno s měřením) ---------- */
-function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, metalnesses, vertexColors, cutPlane, trackballRefMain, onFlipCut, onClose }) {
+function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, metalnesses, vertexColors, cutPlane, onFlipCut, onClose }) {
     const trackballRef = useRef(null)
     const [target, setTarget] = useState([0,0,0])
     
@@ -559,7 +541,13 @@ function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, m
     const [measureCurrent, setMeasureCurrent] = useState(null)
     const [snapPoint, setSnapPoint] = useState(null)
 
-    const slicePlanes = useMemo(() => [new THREE.Plane(), new THREE.Plane()], [])
+    // Fyzický 2D plátek (široký 1 mm) pro minihru
+    const slicePlanes = useMemo(() => {
+        if (!cutPlane) return []
+        const p1 = new THREE.Plane(cutPlane.normal.clone(), cutPlane.constant + 0.5)
+        const p2 = new THREE.Plane(cutPlane.normal.clone().negate(), -cutPlane.constant + 0.5)
+        return [p1, p2]
+    }, [cutPlane])
 
     const handleSnapMove = (point) => {
         if (!cutPlane) return
@@ -628,12 +616,10 @@ function CrossSectionWindow({ files, colors, opacities, visibles, roughnesses, m
                         </Suspense>
                     </group>
                     
-                    <SliceSync cutPlane={cutPlane} slicePlanes={slicePlanes} />
                     <CrossSectionCamera setupPlane={cutPlane} trackballRef={trackballRef} />
                     <TouchTrackballControls ref={trackballRef} target={target} noRotate={true} />
                     <RightButtonPan setTarget={setTarget} />
                     
-                    {/* Snap Point ukazatel */}
                     {snapPoint && (
                         <mesh position={snapPoint}><sphereGeometry args={[0.5, 16, 16]} /><meshBasicMaterial color="#ffb700" depthTest={false} /></mesh>
                     )}
@@ -1152,14 +1138,12 @@ export default function ClientPage() {
       </div>
   )
 
+  // Ochrana před infinite loadem: Zkontrolujeme, zda všechny předané soubory nahlásily onLoaded
   const allLoaded = files.length > 0 && files.every(f => loadedUrls.has(f.url))
   const frameKey = allLoaded && !didInitialFrame ? `frame-${files.length}` : ""
 
   return (
-    <div 
-        className="stage" 
-        style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}
-    >
+    <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
       <PreloadIcons />
       {logoEl}
       {sidebar}
@@ -1210,8 +1194,8 @@ export default function ClientPage() {
                 metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
                 useVertexColors={vertexColors[i]}
                 keepMaterials={!!f.km}
-                outlinePlane={cutPlane}
-                clipPlanes={[]} // V hlavní scéně modely NEŘEŽEME, jen kreslíme linku
+                outlinePlane={cutPlane} // Rovina pro kreslení červené čáry řezu v 3D
+                clipPlanes={null}       // V hlavní scéně modely NEŘEŽEME fyzicky
                 isSliceView={false}
               />
             ))}
