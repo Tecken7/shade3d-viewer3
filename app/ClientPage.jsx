@@ -135,10 +135,49 @@ function SliceOutline3D({ segments, color = "#fbbf24" }) {
   if (!segments || segments.length === 0) return null
 
   return (
-    <lineSegments renderOrder={999}>
+    <lineSegments renderOrder={998}>
       <bufferGeometry ref={geomRef} />
       <lineBasicMaterial color={color} depthTest={false} depthWrite={false} transparent opacity={0.9} />
     </lineSegments>
+  )
+}
+
+/* ---------- 3D Měření (Body a linka na rovině) ---------- */
+function Measurement3D({ measureState, boundingBox }) {
+  const geomRef = useRef(null)
+
+  useEffect(() => {
+    if (geomRef.current && measureState.p1 && measureState.snappedP2) {
+      const pts = [
+        measureState.p1.x, measureState.p1.y, 0,
+        measureState.snappedP2.x, measureState.snappedP2.y, 0
+      ]
+      geomRef.current.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3))
+      geomRef.current.computeBoundingBox()
+      geomRef.current.computeBoundingSphere()
+    }
+  }, [measureState])
+
+  if (!measureState.p1 || !measureState.snappedP2) return null
+
+  // Dynamická velikost koleček ve 3D podle velikosti BoundingBoxu roviny
+  const rad = boundingBox ? boundingBox.width * 0.008 : 0.5
+
+  return (
+    <group>
+      <lineSegments renderOrder={999}>
+        <bufferGeometry ref={geomRef} />
+        <lineBasicMaterial color="#fbbf24" depthTest={false} depthWrite={false} transparent opacity={0.95} />
+      </lineSegments>
+      <mesh position={[measureState.p1.x, measureState.p1.y, 0]} renderOrder={999}>
+        <circleGeometry args={[rad, 32]} />
+        <meshBasicMaterial color="#fbbf24" depthTest={false} depthWrite={false} transparent opacity={0.95} />
+      </mesh>
+      <mesh position={[measureState.snappedP2.x, measureState.snappedP2.y, 0]} renderOrder={999}>
+        <circleGeometry args={[rad, 32]} />
+        <meshBasicMaterial color="#fbbf24" depthTest={false} depthWrite={false} transparent opacity={0.95} />
+      </mesh>
+    </group>
   )
 }
 
@@ -564,8 +603,7 @@ function Switch({ checked, onChange, label }) {
 }
 
 /* ---------- 2D OVERLAY (MĚŘENÍ, PAN/ZOOM A VEKTOROVÉ ČÁRY) ---------- */
-function Overlay2D({ segments, boundingBox }) {
-  const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
+function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
   const svgRef = useRef(null)
 
   const [winSize, setWinSize] = useState({ w: 550, h: 400 })
@@ -722,7 +760,6 @@ function Overlay2D({ segments, boundingBox }) {
       ? Math.sqrt(distSq(measureState.p1, measureState.snappedP2)).toFixed(2) 
       : null
 
-  // Výpočet pozice textu měření na obrazovce (dynamicky vedle kurzoru/bodů)
   let textPos = null;
   if (measureState.p1 && measureState.snappedP2) {
      const midX = (measureState.p1.x + measureState.snappedP2.x) / 2;
@@ -750,7 +787,6 @@ function Overlay2D({ segments, boundingBox }) {
         Levé tl. = posun, Kolečko = zoom<br/>Dvojklik = měření
       </div>
 
-      {/* Textové pole s hodnotou zobrazené dynamicky vedle středu linky */}
       {distVal && textPos && (
         <div style={{
           position: 'absolute',
@@ -767,7 +803,6 @@ function Overlay2D({ segments, boundingBox }) {
         </div>
       )}
 
-      {/* Resize povolen už POUZE z levého horního rohu */}
       <div 
         onPointerDown={(e) => startResize(e, 'top-left')}
         style={{ position: 'absolute', top: -5, left: -5, width: 16, height: 16, cursor: 'nwse-resize', zIndex: 12, background: 'rgba(255,255,255,0.15)', borderRadius: '50%' }}
@@ -891,6 +926,7 @@ export default function ClientPage() {
 
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
+  const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
 
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
@@ -1014,6 +1050,7 @@ export default function ClientPage() {
       if (!clippingEnabled || !planeGroup) return
       const step = 0.5 
       if (e.key === "ArrowUp" || e.key === "ArrowRight") {
+         setMeasureState({ active: false, p1: null, p2: null, snappedP2: null }) // Vymazání měření při pohybu
          planeGroup.translateZ(step)
          planeGroup.updateMatrixWorld(true)
          const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
@@ -1021,6 +1058,7 @@ export default function ClientPage() {
          clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
          updateClippingLogic()
       } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
+         setMeasureState({ active: false, p1: null, p2: null, snappedP2: null }) // Vymazání měření při pohybu
          planeGroup.translateZ(-step)
          planeGroup.updateMatrixWorld(true)
          const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
@@ -1040,11 +1078,10 @@ export default function ClientPage() {
            const center = new THREE.Vector3()
            box.getCenter(center)
 
-           // Vypočteme poloměr na základě největšího rozměru (šířka vs výška vs hloubka)
            const size = new THREE.Vector3()
            box.getSize(size)
            const maxDim = Math.max(size.x, size.y, size.z)
-           // Ideální fit: 60% nejdelší hrany = poloměr pokrývající model + malá rezerva (approx 20% margin)
+           // Přizpůsobená velikost roviny (aby nebyla zbytečně obří, ale stačila na proříznutí modelu)
            setPlaneRadius(maxDim * 0.6)
            
            planeGroup.position.copy(center)
@@ -1089,6 +1126,7 @@ export default function ClientPage() {
      } else if (!clippingEnabled) {
         setSliceSegments([])
         setSliceBBox(null)
+        setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
      }
   }, [clippingEnabled, planeGroup, updateClippingLogic]) 
 
@@ -1353,7 +1391,7 @@ export default function ClientPage() {
       {sidebar}
       {topBarRight}
 
-      {clippingEnabled && <Overlay2D segments={sliceSegments} boundingBox={sliceBBox} />}
+      {clippingEnabled && <Overlay2D segments={sliceSegments} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} />}
 
       <Canvas
         orthographic
@@ -1402,6 +1440,7 @@ export default function ClientPage() {
               <meshBasicMaterial color="#b88f8f" transparent opacity={0.25} side={THREE.DoubleSide} depthWrite={false} />
             </mesh>
             <SliceOutline3D segments={sliceSegments} color="#eab308" />
+            <Measurement3D measureState={measureState} boundingBox={sliceBBox} />
           </group>
         )}
 
@@ -1415,6 +1454,14 @@ export default function ClientPage() {
             showX={true}
             showY={true}
             showZ={false}
+            onDraggingChanged={(e) => {
+               if (e.value) {
+                   // Smaže měření při začátku pohybu
+                   setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
+               } else {
+                   updateClippingLogic() 
+               }
+            }}
             onChange={() => {
               if (planeGroup) {
                 planeGroup.updateMatrixWorld(true)
@@ -1437,6 +1484,14 @@ export default function ClientPage() {
             showX={false}
             showY={false}
             showZ={true}
+            onDraggingChanged={(e) => {
+               if (e.value) {
+                   // Smaže měření při začátku pohybu
+                   setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
+               } else {
+                   updateClippingLogic() 
+               }
+            }}
             onChange={() => {
               if (planeGroup) {
                 planeGroup.updateMatrixWorld(true)
