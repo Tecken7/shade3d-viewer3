@@ -136,12 +136,20 @@ function AutoRotateScene({ enabled, target }) {
     if (!enabled || isInteracting.current) return
     
     vTarget.fromArray(target)
-    const speed = 0.8 * delta // Zvýšená rychlost rotace
+    const speed = 0.8 * delta 
     
+    // Ve webovém 3D je vertikální osa světa Y (0,1,0)
+    const axis = new THREE.Vector3(0, 1, 0)
+    
+    // Rotace pozice kamery
     camera.position.sub(vTarget)
-    // Rotace kolem Z osy
-    camera.position.applyAxisAngle(new THREE.Vector3(0, 0, 1), speed)
+    camera.position.applyAxisAngle(axis, speed)
     camera.position.add(vTarget)
+    
+    // KLÍČOVÉ: Aby se zachoval náklon nastavený uživatelem a kamera se "nežvýkala", 
+    // musíme rotovat i UP vektor kamery podél stejné absolutní osy.
+    camera.up.applyAxisAngle(axis, speed)
+    
     camera.lookAt(vTarget)
   })
   return null
@@ -1531,7 +1539,7 @@ export default function ClientPage() {
             showZ={false}
             onChange={() => {
               if (planeGroup) {
-                // Bezpečně vymaže měření jen, když fyzicky táhneš myší!
+                // Skutečné smazání pouze pokud se fyzicky táhne osou
                 if (transformRotateRef.current?.dragging) {
                     setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
                 }
@@ -1557,7 +1565,7 @@ export default function ClientPage() {
             showZ={true}
             onChange={() => {
               if (planeGroup) {
-                // Bezpečně vymaže měření jen, když fyzicky táhneš myší!
+                // Skutečné smazání pouze pokud se fyzicky táhne osou
                 if (transformTranslateRef.current?.dragging) {
                     setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
                 }
