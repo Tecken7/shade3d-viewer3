@@ -124,7 +124,7 @@ function AnyModel({
   useVertexColors = false,
   keepMaterials = false,
   wireframe = false,
-  clipPlane = null, // PŘIDÁNO: Podpora globální roviny řezu
+  clipPlane = null, 
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
@@ -138,7 +138,7 @@ function AnyModel({
       opacity,
       side: THREE.DoubleSide,
       depthWrite: opacity === 1,
-      clippingPlanes: clipPlane ? [clipPlane] : [], // PŘIDÁNO: Clipping planes
+      clippingPlanes: clipPlane ? [clipPlane] : [], 
       ...opts,
     })
 
@@ -244,11 +244,13 @@ function AnyModel({
         if ("metalness" in m && typeof metalness === "number") m.metalness = metalness
         if (!useVertexColors && "color" in m && color) m.color = new THREE.Color(color)
         if (useVertexColors && "vertexColors" in m) { m.vertexColors = true; if ("color" in m) m.color = new THREE.Color("#ffffff") }
-        m.clippingPlanes = clipPlane ? [clipPlane] : [] // PŘIDÁNO
+        m.clippingPlanes = clipPlane ? [clipPlane] : []
         m.needsUpdate = true
       } else {
         const hasVC = !!child.geometry.getAttribute?.("color")
-        child.material = hasVC && useVertexColors ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") }) : makeMat()
+        const newMat = hasVC && useVertexColors ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") }) : makeMat()
+        if (child.material && child.material !== newMat) child.material.dispose()
+        child.material = newMat
       }
       if (child.userData._edges) child.userData._edges.visible = !!wireframe
       else if (wireframe) rebuildWireOverlay(child)
@@ -534,7 +536,7 @@ function Switch({ checked, onChange, label }) {
   const TRACK_W = 38, TRACK_H = 22, KNOB = 18
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      {label && <span style={{ opacity: .85 }}>{label}</span>}
+      {label && <span style={{ opacity: .85, fontWeight: "bold" }}>{label}</span>}
       <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)} onKeyDown={onKey}
         style={{ position: "relative", width: TRACK_W, height: TRACK_H, borderRadius: 999, border: "1px solid rgba(255,255,255,.22)", background: checked ? "rgba(59,130,246,.45)" : "rgba(255,255,255,.10)", cursor: "pointer", transition: "background .15s ease, border-color .15s ease", outline: "none", padding: 0 }}>
         <span aria-hidden style={{ position: "absolute", top: "50%", transform: "translateY(-50%)", left: checked ? TRACK_W - KNOB - 3 : 3, width: KNOB, height: KNOB, borderRadius: "50%", background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.35)", transition: "left .15s ease" }}/>
@@ -548,7 +550,6 @@ function Overlay2D({ segments, boundingBox }) {
   const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
   const svgRef = useRef(null)
 
-  // Pomocné funkce pro matematiku snapování
   const distSq = (v, w) => Math.pow(v.x - w.x, 2) + Math.pow(v.y - w.y, 2)
   const closestPointOnSegment = (p, v, w) => {
     const l2 = distSq(v, w)
@@ -566,7 +567,6 @@ function Overlay2D({ segments, boundingBox }) {
       const d = distSq(mousePoint, pt)
       if (d < minDist) { minDist = d; bestPoint = pt }
     })
-    // Snap threshold pro volný pohyb je velmi velký, aby to působilo "magneticky" všude
     return bestPoint || mousePoint 
   }
 
@@ -592,13 +592,11 @@ function Overlay2D({ segments, boundingBox }) {
 
   const handleClick = (e) => {
     if (!measureState.active) return
-    // Dokončení měření
     const pos = getLogicalMousePos(e)
     const snap = getSnappedPoint(pos)
     setMeasureState(prev => ({ ...prev, active: false, p2: snap, snappedP2: snap }))
   }
   
-  // Zrušení pravým tlačítkem
   const handleContextMenu = (e) => {
     if (measureState.active || measureState.p1) {
       e.preventDefault()
@@ -629,7 +627,6 @@ function Overlay2D({ segments, boundingBox }) {
       onClick={handleClick}
       onContextMenu={handleContextMenu}
     >
-      {/* Informační text */}
       <div style={{ position: 'absolute', top: 8, left: 8, fontSize: 11, color: '#aaa', pointerEvents: 'none' }}>
         Dvojklik = start, Klik = konec, Pravé tl. = zrušit
       </div>
@@ -644,7 +641,7 @@ function Overlay2D({ segments, boundingBox }) {
         ref={svgRef} 
         width="100%" height="100%" 
         viewBox={vBox}
-        style={{ display: 'block', transform: 'scale(1, -1)' }} // Invert Y aby odpovídalo 3D
+        style={{ display: 'block', transform: 'scale(1, -1)' }}
       >
         <g stroke="#ffffff" strokeWidth={(boundingBox.width/300) * 1.5 || 0.5} strokeLinecap="round" strokeLinejoin="round" fill="none">
           {segments.map((seg, i) => (
@@ -706,8 +703,8 @@ export default function ClientPage() {
 
   // -- STAVY PRO ŘEZÁNÍ (CLIPPING) --
   const [clippingEnabled, setClippingEnabled] = useState(false)
-  const [clipMode, setClipMode] = useState("translate") // translate nebo rotate
-  const planeGroupRef = useRef(null)
+  const [clipMode, setClipMode] = useState("translate")
+  const [planeGroup, setPlaneGroup] = useState(null) // OPRAVA: useState místo useRef pro korektní render TransformControls
   const clipPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(1, 0, 0), 0))
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
@@ -733,18 +730,16 @@ export default function ClientPage() {
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
-  // Aktualizace matematické roviny a výpočet 2D průsečíků
   const updateClippingLogic = useCallback(() => {
-    if (!planeGroupRef.current || !rootGroupRef.current) return
+    if (!planeGroup || !rootGroupRef.current) return
 
-    planeGroupRef.current.updateMatrixWorld(true)
-    const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroupRef.current.matrixWorld).normalize()
-    const pos = new THREE.Vector3().setFromMatrixPosition(planeGroupRef.current.matrixWorld)
+    planeGroup.updateMatrixWorld(true)
+    const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
+    const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
     clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
 
-    // Výpočet 2D řezu pro SVG okno
     const segments2D = []
-    const invMat = planeGroupRef.current.matrixWorld.clone().invert()
+    const invMat = planeGroup.matrixWorld.clone().invert()
     const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
     const plane = clipPlaneRef.current
 
@@ -779,7 +774,6 @@ export default function ClientPage() {
            const p3 = checkEdge(c, a); if(p3 && pts.length < 2 && (!pts[0] || pts[0].distanceToSq(p3)>1e-10)) pts.push(p3)
 
            if(pts.length === 2) {
-               // Převod 3D bodu do lokálního 2D prostoru roviny
                const loc1 = pts[0].clone().applyMatrix4(invMat)
                const loc2 = pts[1].clone().applyMatrix4(invMat)
                segments2D.push([{ x: loc1.x, y: loc1.y }, { x: loc2.x, y: loc2.y }])
@@ -795,7 +789,6 @@ export default function ClientPage() {
 
     setSliceSegments(segments2D)
 
-    // Výpočet Bounding Boxu pro SVG
     if (segments2D.length > 0) {
        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
        segments2D.forEach(seg => {
@@ -809,37 +802,36 @@ export default function ClientPage() {
        setSliceBBox(null)
     }
 
-  }, [])
+  }, [planeGroup])
 
-  // Posun roviny pomocí šipek
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (!clippingEnabled || !planeGroupRef.current) return
-      const step = 0.5 // Rychlost posunu šipkami
+      if (!clippingEnabled || !planeGroup) return
+      const step = 0.5 
       if (e.key === "ArrowUp" || e.key === "ArrowRight") {
-         planeGroupRef.current.translateZ(step)
+         planeGroup.translateZ(step)
          updateClippingLogic()
       } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
-         planeGroupRef.current.translateZ(-step)
+         planeGroup.translateZ(-step)
          updateClippingLogic()
       }
     }
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [clippingEnabled, updateClippingLogic])
+  }, [clippingEnabled, updateClippingLogic, planeGroup])
 
-  // Úvodní inicializace roviny na střed modelů
   useEffect(() => {
-     if (clippingEnabled && rootGroupRef.current && planeGroupRef.current) {
+     if (clippingEnabled && rootGroupRef.current && planeGroup) {
         const box = new THREE.Box3().setFromObject(rootGroupRef.current)
         if (!box.isEmpty()) {
            const center = new THREE.Vector3()
            box.getCenter(center)
-           planeGroupRef.current.position.copy(center)
+           planeGroup.position.copy(center)
+           planeGroup.rotation.set(0, 0, 0)
            updateClippingLogic()
         }
      }
-  }, [clippingEnabled, updateClippingLogic])
+  }, [clippingEnabled, planeGroup]) // Vynechal jsem záměrně updateClippingLogic z deps, aby se reset provedl jen při změně pole/stavu
 
   useEffect(() => {
     ;(async () => {
@@ -1050,25 +1042,6 @@ export default function ClientPage() {
         <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
         <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
       </div>
-
-      <div style={{ marginTop: 15, paddingTop: 10, borderTop: "1px solid rgba(255,255,255,.15)" }}>
-        <Switch checked={clippingEnabled} onChange={setClippingEnabled} label="Nástroj řezu (Průřez)" />
-        {clippingEnabled && (
-          <div style={{ marginTop: 10, fontSize: 12 }}>
-            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-              <button 
-                onClick={() => setClipMode("translate")}
-                style={{ flex: 1, padding: "4px", background: clipMode === "translate" ? "#3b82f6" : "rgba(255,255,255,.1)", border: "none", color: "#fff", borderRadius: 4, cursor: "pointer" }}
-              >Posun</button>
-              <button 
-                onClick={() => setClipMode("rotate")}
-                style={{ flex: 1, padding: "4px", background: clipMode === "rotate" ? "#3b82f6" : "rgba(255,255,255,.1)", border: "none", color: "#fff", borderRadius: 4, cursor: "pointer" }}
-              >Rotace</button>
-            </div>
-            <p style={{ margin: 0, color: "#ccc" }}>Gimbalem ovládejte rovinu. Šipkami na klávesnici lze řez posouvat vpřed/vzad.</p>
-          </div>
-        )}
-      </div>
     </>
   )
 
@@ -1096,6 +1069,30 @@ export default function ClientPage() {
     </div>
   )
 
+  // -- NOVÝ PANEL V PRAVO NAHOŘE PRO NÁSTROJ ŘEZU --
+  const topBarRight = (
+    <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10, fontFamily: "sans-serif", color: "white" }}>
+      <div style={{ background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 12 }}>
+        <Switch checked={clippingEnabled} onChange={setClippingEnabled} label="Nástroj řezu (Průřez)" />
+        {clippingEnabled && (
+          <div style={{ marginTop: 12, fontSize: 12, width: 220 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              <button 
+                onClick={() => setClipMode("translate")}
+                style={{ flex: 1, padding: "6px", background: clipMode === "translate" ? "#3b82f6" : "rgba(255,255,255,.1)", border: "none", color: "#fff", borderRadius: 4, cursor: "pointer", fontWeight: "bold" }}
+              >Posun</button>
+              <button 
+                onClick={() => setClipMode("rotate")}
+                style={{ flex: 1, padding: "6px", background: clipMode === "rotate" ? "#3b82f6" : "rgba(255,255,255,.1)", border: "none", color: "#fff", borderRadius: 4, cursor: "pointer", fontWeight: "bold" }}
+              >Rotace</button>
+            </div>
+            <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>Gimbalem ovládejte rovinu. Šipkami na klávesnici posouvejte řez.</p>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+
   const allLoaded = files.length > 0 && files.every(f => loadedUrls.has(f.url))
   const frameKey = allLoaded && !didInitialFrame ? `frame-${files.length}` : ""
 
@@ -1104,6 +1101,7 @@ export default function ClientPage() {
       <PreloadIcons />
       {logoEl}
       {sidebar}
+      {topBarRight}
 
       {/* 2D Měřící okno zobrazené, pokud je aktivní řez */}
       {clippingEnabled && <Overlay2D segments={sliceSegments} boundingBox={sliceBBox} />}
@@ -1111,7 +1109,7 @@ export default function ClientPage() {
       <Canvas
         orthographic
         camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }}
-        gl={{ alpha: true, localClippingEnabled: true }} // POVOLENO localClippingEnabled
+        gl={{ alpha: true, localClippingEnabled: true }}
         onCreated={({ gl }) => gl.setClearAlpha(0)}
         style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
       >
@@ -1141,38 +1139,37 @@ export default function ClientPage() {
                 metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
                 useVertexColors={vertexColors[i]}
                 keepMaterials={!!f.km}
-                clipPlane={clippingEnabled ? clipPlaneRef.current : null} // Předání roviny
+                clipPlane={clippingEnabled ? clipPlaneRef.current : null}
               />
             ))}
           </Suspense>
         </group>
 
-        {/* Nástroj TransformControls (Gimbal) pro ovládání řezu */}
-        {clippingEnabled && (
-          <TransformControls 
-            object={planeGroupRef} 
-            mode={clipMode}
-            onMouseDown={() => { isDraggingGizmo.current = true }}
-            onMouseUp={() => { isDraggingGizmo.current = false; updateClippingLogic() }}
-            onChange={() => {
-              if (isDraggingGizmo.current) {
-                // Přepočet 3D roviny on-the-fly pro vizuál
-                planeGroupRef.current.updateMatrixWorld(true)
-                const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroupRef.current.matrixWorld).normalize()
-                const pos = new THREE.Vector3().setFromMatrixPosition(planeGroupRef.current.matrixWorld)
-                clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-              }
-            }}
-          />
-        )}
-        
-        {/* Neviditelný helper objekt sloužící jako pivot pro gimbal */}
-        <group ref={planeGroupRef}>
+        {/* Neviditelný helper objekt sloužící jako pivot pro gimbal (navázaný do state) */}
+        <group ref={setPlaneGroup}>
            <mesh visible={clippingEnabled}>
              <planeGeometry args={[200, 200]} />
              <meshBasicMaterial color="#3b82f6" transparent opacity={0.1} side={THREE.DoubleSide} depthWrite={false} />
            </mesh>
         </group>
+
+        {/* Nástroj TransformControls (Gimbal) pro ovládání řezu - nyní bezpečněji mountovaný */}
+        {clippingEnabled && planeGroup && (
+          <TransformControls 
+            object={planeGroup} 
+            mode={clipMode}
+            onMouseDown={() => { isDraggingGizmo.current = true }}
+            onMouseUp={() => { isDraggingGizmo.current = false; updateClippingLogic() }}
+            onChange={() => {
+              if (isDraggingGizmo.current) {
+                planeGroup.updateMatrixWorld(true)
+                const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
+                const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
+                clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
+              }
+            }}
+          />
+        )}
 
         <ViewStateSync trackballRef={trackballRef} />
 
