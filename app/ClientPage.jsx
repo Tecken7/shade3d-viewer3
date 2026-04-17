@@ -262,8 +262,8 @@ function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
   return <pointLight ref={ref} color={color} intensity={enabled ? intensity : 0} distance={0} decay={0} />
 }
 
-/* ---------- Trackball ---------- */
-function TouchTrackballControls({ target = [0, 0, 0] }) {
+/* ---------- Trackball + Camera Sync ---------- */
+function TouchTrackballControls({ target = [0, 0, 0], initialCameraState = null, onTargetChange }) {
   const { camera, gl, size } = useThree()
   const controlsRef = useRef(null)
   
@@ -276,9 +276,25 @@ function TouchTrackballControls({ target = [0, 0, 0] }) {
     c.dynamicDampingFactor = 0.15
     c.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.ZOOM, RIGHT: THREE.MOUSE.PAN }
     controlsRef.current = c
+
+    // ZDE JE OPRAVA PRO MANIFEST - Přesné uložení pozice, osy UP i Targetu
+    if (initialCameraState) {
+        if (initialCameraState.position) camera.position.fromArray(initialCameraState.position)
+        if (initialCameraState.up) camera.up.fromArray(initialCameraState.up)
+        if (initialCameraState.zoom) camera.zoom = initialCameraState.zoom
+        camera.updateProjectionMatrix()
+        
+        if (initialCameraState.target) {
+            c.target.fromArray(initialCameraState.target)
+            onTargetChange?.(initialCameraState.target)
+        }
+        c.update()
+    }
+
     return () => c.dispose()
-  }, [camera, gl])
+  }, [camera, gl, initialCameraState]) // eslint-disable-line
   
+  // Reakce na panování z RightButtonPan
   useEffect(() => {
     const c = controlsRef.current; if (!c) return
     c.target.set(target[0], target[1], target[2])
@@ -287,11 +303,120 @@ function TouchTrackballControls({ target = [0, 0, 0] }) {
   
   useFrame(() => { controlsRef.current?.update() })
   useEffect(() => { controlsRef.current?.handleResize() }, [size.width, size.height])
+
+  // SYNC DO FRAMERU - Oprava: Teď posíláme skutečný target přímo z jádra Trackballu
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (typeof window === "undefined" || !controlsRef.current) return
+      const c = controlsRef.current
+      
+      const camData = {
+        position: [camera.position.x, camera.position.y, camera.position.z],
+        up: [camera.up.x, camera.up.y, camera.up.z],
+        quaternion: [camera.quaternion.x, camera.quaternion.y, camera.quaternion.z, camera.quaternion.w],
+        zoom: camera.zoom,
+        target: [c.target.x, c.target.y, c.target.z] // Tohle byla ta chybějící magická hodnota!
+      }
+
+      const targetWindow = window.top || window.parent;
+      if (targetWindow) {
+        targetWindow.postMessage({
+          type: "SHADE3D_CAMERA_SYNC",
+          payload: camData
+        }, "*")
+      }
+    }, 500)
+
+    return () => clearInterval(interval)
+  }, [camera])
+
   return null
 }
 
-/* ---------- AutoCenter, Frame & Setup Camera ---------- */
-function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined", initialCameraState, setTarget }) {
+/* ---------- Vlastní pan ---------- */
+function RightButtonPan({ setTarget }) {
+  const { camera, gl, size } = useThree()
+  const isPanning = useRef(false)
+  const last = useRef({ x: 0, y: 0 })
+  const pointerIdRef = useRef(null)
+
+  const PAN_SENSITIVITY = 0.85
+  const right = new THREE.Vector3()
+  const up = new THREE.Vector3()
+  const deltaWorld = new THREE.Vector3()
+
+  useEffect(() => {
+    const el = gl.domElement
+
+    const onContext = (e) => { e.preventDefault() }
+
+    const onDown = (e) => {
+      if ((e.button !== 2) && !(e.button === 0 && e.ctrlKey)) return
+      e.preventDefault()
+      e.stopPropagation()
+      isPanning.current = true
+      last.current = { x: e.clientX, y: e.clientY }
+      pointerIdRef.current = e.pointerId
+      try { el.setPointerCapture?.(e.pointerId) } catch {}
+    }
+
+    const onMove = (e) => {
+      if (!isPanning.current) return
+      e.preventDefault()
+      e.stopPropagation()
+
+      const dx = e.clientX - last.current.x
+      const dy = e.clientY - last.current.y
+      last.current = { x: e.clientX, y: e.clientY }
+
+      right.setFromMatrixColumn(camera.matrixWorld, 0).normalize()
+      up.setFromMatrixColumn(camera.matrixWorld, 1).normalize()
+
+      if (camera.isOrthographicCamera) {
+        const wppX = ((camera.right - camera.left) / (size.width * camera.zoom))
+        const wppY = ((camera.top - camera.bottom) / (size.height * camera.zoom))
+        const moveRight = -dx * wppX * PAN_SENSITIVITY
+        const moveUp    =  dy * wppY * PAN_SENSITIVITY
+
+        deltaWorld.copy(right).multiplyScalar(moveRight).addScaledVector(up, moveUp)
+        camera.position.add(deltaWorld)
+        setTarget?.((t) => [t[0] + deltaWorld.x, t[1] + deltaWorld.y, t[2] + deltaWorld.z])
+        camera.updateProjectionMatrix()
+      } else {
+        const dist = camera.position.length()
+        const scale = (dist / Math.max(size.width, size.height)) * PAN_SENSITIVITY
+        deltaWorld.copy(right).multiplyScalar(-dx * scale).addScaledVector(up, dy * scale)
+        camera.position.add(deltaWorld)
+        setTarget?.((t) => [t[0] + deltaWorld.x, t[1] + deltaWorld.y, t[2] + deltaWorld.z])
+      }
+    }
+
+    const onUp = (e) => {
+      if (!isPanning.current) return
+      e.preventDefault()
+      e.stopPropagation()
+      isPanning.current = false
+      try { el.releasePointerCapture?.(pointerIdRef.current) } catch {}
+      pointerIdRef.current = null
+    }
+
+    el.addEventListener("contextmenu", onContext)
+    el.addEventListener("pointerdown", onDown)
+    window.addEventListener("pointermove", onMove, { capture: true })
+    window.addEventListener("pointerup", onUp, { capture: true })
+    return () => {
+      el.removeEventListener("contextmenu", onContext)
+      el.removeEventListener("pointerdown", onDown)
+      window.removeEventListener("pointermove", onMove, { capture: true })
+      window.removeEventListener("pointerup", onUp, { capture: true })
+    }
+  }, [camera, gl, size.width, size.height, setTarget])
+
+  return null
+}
+
+/* ---------- AutoCenter & AutoFrame (one-shot) ---------- */
+function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined", skipCamera = false, setTarget }) {
   const { camera, size } = useThree()
   
   useEffect(() => {
@@ -299,7 +424,7 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
     if (!root) return
     
     // 1. NEJPRVE VŽDY VYCENTRUJEME MODEL
-    // Bez toho by uložená kamera koukala "mimo", protože modely mají surové souřadnice ze skeneru
+    // Bez toho by uložená kamera koukala "mimo"
     root.updateMatrixWorld(true)
     const boxAll = new THREE.Box3().setFromObject(root)
     if (boxAll.isEmpty()) return
@@ -311,9 +436,10 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
     if (centerMode === "per") {
       root.children.forEach((child) => {
         const b = new THREE.Box3().setFromObject(child)
-        if (b.isEmpty()) return
-        const cWorld = new THREE.Vector3(); b.getCenter(cWorld)
-        child.position.sub(cWorld)
+        if (!b.isEmpty()) {
+            const cWorld = new THREE.Vector3(); b.getCenter(cWorld)
+            child.position.sub(cWorld)
+        }
       })
       root.updateMatrixWorld(true)
     } else if (centerMode === "combined") {
@@ -321,20 +447,8 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
       root.updateMatrixWorld(true)
     }
 
-    // 2. NASTAVÍME KAMERU
-    if (initialCameraState) {
-      // Máme uloženou kameru z manifestu -> nastavíme natvrdo
-      if (initialCameraState.position) camera.position.fromArray(initialCameraState.position)
-      if (initialCameraState.up) camera.up.fromArray(initialCameraState.up)
-      if (initialCameraState.zoom) camera.zoom = initialCameraState.zoom
-      camera.updateProjectionMatrix()
-      
-      // Předáme target do Trackballu, který provede c.update() a tím se natočí přesně podle uložené osy
-      if (initialCameraState.target && setTarget) {
-        setTarget(initialCameraState.target)
-      }
-    } else {
-      // Nemáme uloženou kameru -> klasický Auto-Frame zepředu
+    // 2. NASTAVÍME KAMERU (Pouze pokud nenahráváme tu uloženou z manifestu)
+    if (!skipCamera) {
       const after = new THREE.Box3().setFromObject(root)
       const dims2 = new THREE.Vector3(), ctr = new THREE.Vector3()
       after.getSize(dims2); after.getCenter(ctr)
@@ -360,36 +474,6 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
     onFramed && onFramed()
   }, [triggerKey]) // eslint-disable-line
   
-  return null
-}
-
-/* ---------- Synchronizace kamery pro Live Mode ---------- */
-function CameraSync({ controlsTarget }) {
-  const { camera } = useThree()
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (typeof window === "undefined") return
-      
-      const camData = {
-        position: [camera.position.x, camera.position.y, camera.position.z],
-        up: [camera.up.x, camera.up.y, camera.up.z], // Sbíráme i osu "Nahoru"
-        zoom: camera.zoom,
-        target: [controlsTarget[0], controlsTarget[1], controlsTarget[2]]
-      }
-
-      const targetWindow = window.top || window.parent;
-      if (targetWindow) {
-        targetWindow.postMessage({
-          type: "SHADE3D_CAMERA_SYNC",
-          payload: camData
-        }, "*")
-      }
-    }, 500)
-
-    return () => clearInterval(interval)
-  }, [camera, camera.position, camera.zoom, camera.up, controlsTarget])
-
   return null
 }
 
@@ -732,9 +816,6 @@ export default function ClientPage() {
           </Suspense>
         </group>
 
-        {/* Synchronizace pozice ven do Frameru */}
-        <CameraSync controlsTarget={cameraTarget} />
-
         {frameKey && (
           <AutoCenterAndFrame
             rootRef={rootGroupRef}
@@ -745,12 +826,17 @@ export default function ClientPage() {
             desktopScale={1.0}
             mobileScale={1.0}
             centerMode={centerMode}
-            initialCameraState={initialCameraState}
+            skipCamera={!!initialCameraState}
             setTarget={setCameraTarget}
           />
         )}
 
-        <TouchTrackballControls target={cameraTarget} />
+        <TouchTrackballControls 
+            target={cameraTarget} 
+            initialCameraState={initialCameraState} 
+            onTargetChange={setCameraTarget} 
+        />
+        <RightButtonPan setTarget={setCameraTarget} />
 
         {!allLoaded && files.length > 0 && <InlineLoader text="Načítám modely…" />}
       </Canvas>
