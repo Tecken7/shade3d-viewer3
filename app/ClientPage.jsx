@@ -1049,7 +1049,7 @@ export default function ClientPage() {
       if (!clippingEnabled || !planeGroup) return
       const step = 0.5 
       if (e.key === "ArrowUp" || e.key === "ArrowRight") {
-         setMeasureState({ active: false, p1: null, p2: null, snappedP2: null }) 
+         setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev); 
          planeGroup.translateZ(step)
          planeGroup.updateMatrixWorld(true)
          const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
@@ -1057,7 +1057,7 @@ export default function ClientPage() {
          clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
          updateClippingLogic()
       } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
-         setMeasureState({ active: false, p1: null, p2: null, snappedP2: null }) 
+         setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev); 
          planeGroup.translateZ(-step)
          planeGroup.updateMatrixWorld(true)
          const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
@@ -1452,8 +1452,15 @@ export default function ClientPage() {
             showX={true}
             showY={true}
             showZ={false}
+            onDraggingChanged={(e) => {
+               if (e.value) {
+                   // Vymazání pouze při reálném startu tažení
+                   setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
+               } else {
+                   updateClippingLogic() 
+               }
+            }}
             onChange={() => {
-              setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
               if (planeGroup) {
                 planeGroup.updateMatrixWorld(true)
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
@@ -1475,8 +1482,15 @@ export default function ClientPage() {
             showX={false}
             showY={false}
             showZ={true}
+            onDraggingChanged={(e) => {
+               if (e.value) {
+                   // Vymazání pouze při reálném startu tažení
+                   setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
+               } else {
+                   updateClippingLogic() 
+               }
+            }}
             onChange={() => {
-              setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
               if (planeGroup) {
                 planeGroup.updateMatrixWorld(true)
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
