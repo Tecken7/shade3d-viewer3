@@ -1452,15 +1452,11 @@ export default function ClientPage() {
             showX={true}
             showY={true}
             showZ={false}
-            onDraggingChanged={(e) => {
-               if (e.value) {
-                   // Vymazání pouze při reálném startu tažení
-                   setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
-               } else {
-                   updateClippingLogic() 
-               }
-            }}
             onChange={() => {
+              // Zásadní úprava: Kontrolujeme přímo instanci. Pokud se táhne myší (dragging je true), smažeme měření.
+              if (transformRotateRef.current?.dragging) {
+                 setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
+              }
               if (planeGroup) {
                 planeGroup.updateMatrixWorld(true)
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
@@ -1482,15 +1478,11 @@ export default function ClientPage() {
             showX={false}
             showY={false}
             showZ={true}
-            onDraggingChanged={(e) => {
-               if (e.value) {
-                   // Vymazání pouze při reálném startu tažení
-                   setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
-               } else {
-                   updateClippingLogic() 
-               }
-            }}
             onChange={() => {
+              // Obdobně pro posun: Smaže měření jen při reálném tažení za osu
+              if (transformTranslateRef.current?.dragging) {
+                 setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
+              }
               if (planeGroup) {
                 planeGroup.updateMatrixWorld(true)
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
