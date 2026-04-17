@@ -306,6 +306,7 @@ function RightButtonPan({ setTarget }) {
 
   useEffect(() => {
     const el = gl.domElement
+
     const onContext = (e) => { e.preventDefault() }
 
     const onDown = (e) => {
@@ -373,14 +374,15 @@ function RightButtonPan({ setTarget }) {
   return null
 }
 
-/* ---------- AutoCenter & AutoFrame ---------- */
-function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined", setTarget }) {
+/* ---------- AutoCenter & AutoFrame (Vycentruje a pak případně PŘESKOČÍ kameru) ---------- */
+function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined", skipCamera = false, setTarget }) {
   const { camera, size } = useThree()
   
   useEffect(() => {
     const root = rootRef.current
     if (!root) return
     
+    // 1. NEJPRVE VŽDY VYCENTRUJEME MODEL DO BODU 0,0,0 (Jinak na něj uložená kamera nedohlédne!)
     root.updateMatrixWorld(true)
     const boxAll = new THREE.Box3().setFromObject(root)
     if (boxAll.isEmpty()) return
@@ -402,26 +404,29 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
       root.updateMatrixWorld(true)
     }
 
-    const after = new THREE.Box3().setFromObject(root)
-    const dims2 = new THREE.Vector3(), ctr = new THREE.Vector3()
-    after.getSize(dims2); after.getCenter(ctr)
+    // 2. NASTAVÍME VÝCHOZÍ KAMERU (POUZE POKUD NENÍ ULOŽENÁ Z MANIFESTU)
+    if (!skipCamera) {
+      const after = new THREE.Box3().setFromObject(root)
+      const dims2 = new THREE.Vector3(), ctr = new THREE.Vector3()
+      after.getSize(dims2); after.getCenter(ctr)
 
-    const objW = Math.max(dims2.x, 1e-6)
-    const objH = Math.max(dims2.y, 1e-6)
-    const zoomX = size.width / (objW * margin)
-    const zoomY = size.height / (objH * margin)
-    let newZoom = Math.min(zoomX, zoomY) * (isMobile ? mobileScale : desktopScale)
+      const objW = Math.max(dims2.x, 1e-6)
+      const objH = Math.max(dims2.y, 1e-6)
+      const zoomX = size.width / (objW * margin)
+      const zoomY = size.height / (objH * margin)
+      let newZoom = Math.min(zoomX, zoomY) * (isMobile ? mobileScale : desktopScale)
 
-    const depth = Math.max(dims2.z, Math.max(dims2.x, dims2.y) * 0.75) || 1
-    const safeDist = depth * 10
-    camera.near = Math.max(0.01, safeDist * 0.001)
-    camera.far = safeDist * 80 + 200
-    camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
-    camera.up.set(0, 1, 0)
-    camera.zoom = Math.max(newZoom, 0.01)
-    camera.updateProjectionMatrix()
+      const depth = Math.max(dims2.z, Math.max(dims2.x, dims2.y) * 0.75) || 1
+      const safeDist = depth * 10
+      camera.near = Math.max(0.01, safeDist * 0.001)
+      camera.far = safeDist * 80 + 200
+      camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
+      camera.up.set(0, 1, 0)
+      camera.zoom = Math.max(newZoom, 0.01)
+      camera.updateProjectionMatrix()
       
-    if (setTarget) setTarget([ctr.x, ctr.y, ctr.z])
+      if (setTarget) setTarget([ctr.x, ctr.y, ctr.z])
+    }
 
     onFramed && onFramed()
   }, [triggerKey]) // eslint-disable-line
@@ -429,62 +434,63 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
   return null
 }
 
-/* ---------- Nasazení uložené kamery ---------- */
-function CustomCameraSetter({ camState, triggerKey, onFramed, setTarget }) {
+/* ---------- Obnovení uložené kamery ---------- */
+function CustomCameraSetter({ camState, triggerKey, setTarget }) {
   const { camera } = useThree()
   
   useEffect(() => {
     if (!camState) return
     
+    // Obnovení absolutní matice kamery
     if (camState.matrix) {
       camera.matrix.fromArray(camState.matrix)
       camera.matrix.decompose(camera.position, camera.quaternion, camera.scale)
     }
     
+    // Obnovení "Up" vektoru, který je zásadní pro Trackball
+    if (camState.up) camera.up.fromArray(camState.up)
+    
     if (camState.zoom) camera.zoom = camState.zoom
     
     camera.updateProjectionMatrix()
-    if (camState.target && setTarget) setTarget(camState.target)
 
-    onFramed && onFramed()
-  }, [triggerKey, camState, camera, onFramed, setTarget])
+    if (camState.target && setTarget) {
+      setTarget(camState.target)
+    }
+  }, [triggerKey, camState, camera, setTarget])
 
   return null
 }
 
-/* ---------- UNIFIKOVANÝ SYNC STAVU POHLEDU ---------- */
-function ViewStateSync({ trackballRef, rootRef }) {
+/* ---------- SYNC STAVU POHLEDU DO FRAMERU ---------- */
+function ViewStateSync({ trackballRef }) {
   const { camera } = useThree()
 
   useEffect(() => {
     const interval = setInterval(() => {
-      if (typeof window === "undefined") return
+      if (typeof window === "undefined" || !trackballRef?.current) return
       
-      const c = trackballRef?.current
-      const r = rootRef?.current
-      if (!c || !r) return
-
+      const c = trackballRef.current
       camera.updateMatrixWorld(true)
       
       const camData = {
         matrix: camera.matrix.toArray(),
+        up: [camera.up.x, camera.up.y, camera.up.z],
         zoom: camera.zoom,
         target: [c.target.x, c.target.y, c.target.z] 
       }
       
-      const rotData = [r.rotation.x, r.rotation.y, r.rotation.z]
-
       const targetWindow = window.top || window.parent;
       if (targetWindow) {
         targetWindow.postMessage({
           type: "SHADE3D_VIEW_SYNC",
-          payload: { camera: camData, transform: rotData }
+          payload: { camera: camData }
         }, "*")
       }
     }, 500)
 
     return () => clearInterval(interval)
-  }, [camera, trackballRef, rootRef])
+  }, [camera, trackballRef])
 
   return null
 }
@@ -521,6 +527,7 @@ export default function ClientPage() {
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
   const [isMobile, setIsMobile] = useState(false)
+
   useEffect(() => {
     try {
       const uaMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
@@ -532,6 +539,7 @@ export default function ClientPage() {
 
   const [title, setTitle] = useState(null)
   const [logoCfg, setLogoCfg] = useState({ url: DEFAULT_LOGO, opacity: 0.9, width: 160, pos: "bc" })
+
   const [files, setFiles] = useState([])
   const [colors, setColors] = useState([])
   const [opacities, setOpacities] = useState([])
@@ -541,7 +549,9 @@ export default function ClientPage() {
   const [fatal, setFatal] = useState(null)
 
   const [autoSmooth, setAutoSmooth] = useState(true)
+  const [smoothAngle] = useState(30)
   const [wireframe, setWireframe] = useState(false)
+
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
 
@@ -554,12 +564,14 @@ export default function ClientPage() {
   const rootGroupRef = useRef(null)
   const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
   const [didInitialFrame, setDidInitialFrame] = useState(false)
+  const [initialCameraState, setInitialCameraState] = useState(null)
   
   const [loadedUrls, setLoadedUrls] = useState(new Set())
   const handleModelLoaded = (url) => setLoadedUrls((prev) => { const n = new Set(prev); n.add(url); return n; })
 
-  const [initialTransform, setInitialTransform] = useState(null)
-  const [initialCameraState, setInitialCameraState] = useState(null)
+  const centerParam = (getParam("center") || "combined").toLowerCase()
+  const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
+
 
   useEffect(() => {
     ;(async () => {
@@ -570,7 +582,7 @@ export default function ClientPage() {
         const smoothParam = getParam("smooth")
         if (smoothParam === "0") setAutoSmooth(false)
 
-        const applyFiles = (Fs, titleStr, logoUrl, headlight, camState, transformState) => {
+        const applyFiles = (Fs, titleStr, logoUrl, headlight, camState) => {
           if (!Fs.length) throw new Error("Manifest je prázdný.")
           setFiles(Fs)
           const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
@@ -592,8 +604,9 @@ export default function ClientPage() {
               intensity: typeof headlight.intensity === "number" ? headlight.intensity : 2.0,
             })
           }
-          if (camState) setInitialCameraState(camState)
-          if (transformState) setInitialTransform(transformState)
+          if (camState) {
+            setInitialCameraState(camState)
+          }
           setDidInitialFrame(false)
         }
 
@@ -607,7 +620,7 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: !!x.vc, km: !!x.km,
           }))
-          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera, m?.transform)
+          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -623,7 +636,7 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: !!x.vc, km: !!x.km,
           }))
-          applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera, m?.transform)
+          applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -641,13 +654,15 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: !!x.vc, km: !!x.km,
           }))
-          applyFiles(Fs, getParam("title") ?? null, null, null, null, null)
+          applyFiles(Fs, getParam("title") ?? null, null, null, null)
           const li = parseFloat(getParam("li") || getParam("light") || "")
           if (!Number.isNaN(li)) setSceneIntensity(clamp01(li))
           const headI = parseFloat(getParam("headlightI") || "")
           if (!Number.isNaN(headI)) setHeadlightCfg((o) => ({ ...o, intensity: headI }))
           return
         }
+
+        setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([])
       } catch (e) {
         console.error(e)
         setFatal("Tento náhled není dostupný (chyba při načtení dat).")
@@ -656,50 +671,67 @@ export default function ClientPage() {
   }, [])
 
   useEffect(() => {
-    const onMsg = (e) => { 
-        const d = e.data; 
-        if (d && LIVE_MSG_TYPES.has(d.type) && d.payload) {
-            const p = d.payload
-            if (p.onlyLights && p.lights) {
-                if (typeof p.lights.intensity === "number") setSceneIntensity(clamp01(p.lights.intensity))
-                if (p.lights.headlight) {
-                  setHeadlightCfg((old) => ({
-                    enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
-                    intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
-                  }))
-                }
-                return
-            }
-            if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
-            if (p.logo) {
-                setLogoCfg((old) => ({
-                    url: p.logo?.url ?? old.url,
-                    opacity: typeof p.logo?.opacity === "number" ? clamp01(p.logo.opacity) : old.opacity,
-                    width: typeof p.logo?.width === "number" ? p.logo.width : old.width,
-                    pos: p.logo?.pos || old.pos,
-                }))
-            }
-            if (Array.isArray(p.files)) {
-                const newFiles = p.files.map((x, i) => ({
-                    url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
-                    c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
-                    v: typeof x.v === "boolean" ? x.v : true,
-                    r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
-                    m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-                    vc: !!x.vc, km: !!x.km,
-                }))
-                const urlsChanged = filesChanged(files, newFiles)
-                setFiles(newFiles)
-                const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
-                setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
-                setOpacities(newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
-                setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
-                setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
-                setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
-                if (urlsChanged) { setDidInitialFrame(false); setInitialTransform(null); setInitialCameraState(null); }
-            }
+    const applyLivePayload = (p) => {
+      if (!p) return
+
+      if (p.onlyLights && p.lights) {
+        if (typeof p.lights.intensity === "number") setSceneIntensity(clamp01(p.lights.intensity))
+        if (p.lights.headlight) {
+          setHeadlightCfg((old) => ({
+            enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
+            intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
+          }))
         }
+        return
+      }
+
+      if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
+      if (p.logo) {
+        setLogoCfg((old) => ({
+          url: p.logo?.url ?? old.url,
+          opacity: typeof p.logo?.opacity === "number" ? clamp01(p.logo.opacity) : old.opacity,
+          width: typeof p.logo?.width === "number" ? p.logo.width : old.width,
+          pos: p.logo?.pos || old.pos,
+        }))
+      }
+
+      if (Array.isArray(p.files)) {
+        const newFiles = p.files.map((x, i) => ({
+          url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
+          c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
+          v: typeof x.v === "boolean" ? x.v : true,
+          r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
+          m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
+          vc: !!x.vc, km: !!x.km,
+        }))
+
+        const urlsChanged = filesChanged(files, newFiles)
+
+        setFiles(newFiles)
+        const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
+        setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
+        setOpacities(newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
+        setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
+        setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
+        setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
+
+        if (urlsChanged) { 
+            setDidInitialFrame(false); 
+            setInitialCameraState(null); 
+        }
+      }
+
+      if (p.lights) {
+        if (typeof p.lights.intensity === "number") setSceneIntensity(clamp01(p.lights.intensity))
+        if (p.lights.headlight) {
+          setHeadlightCfg((old) => ({
+            enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
+            intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
+          }))
+        }
+      }
     }
+    const onMsg = (e) => { const d = e.data; if (d && LIVE_MSG_TYPES.has(d.type) && d.payload) applyLivePayload(d.payload) }
     window.addEventListener("message", onMsg)
     return () => window.removeEventListener("message", onMsg)
   }, [files])
@@ -716,6 +748,27 @@ export default function ClientPage() {
     }}/>
   )
 
+  const slidersContent = fatal ? (
+    <div style={{ color: "#ff8b8b" }}>{fatal}</div>
+  ) : (
+    <>
+      {files.map((f, i) => (
+        <div key={`${f.url}-${i}`} className="control-row" style={{ display: "grid", gridTemplateColumns: "36px 1fr 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
+          <div className="row-label" style={{ gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.rawName || f.name}>{stripExt(f.name)}:</div>
+          <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} aria-label={`${f.name} color`} className="color-input" style={{ width: 36, height: 22, border: "1px solid #fff", borderRadius: 4, padding: 0, cursor: "pointer", background: "transparent" }}/>
+          <input className="slider" type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => { const v = parseFloat(e.target.value); setOpacities((prev) => prev.map((x, idx) => (idx === i ? v : x))) }} style={{ width: "calc(100% - 18px)", minWidth: 140 }} aria-label={`${f.name} opacity`} />
+          <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 36, height: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: "transparent", border: "1px solid #fff", borderRadius: 4, cursor: "pointer" }}>
+            <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
+          </button>
+        </div>
+      ))}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
+        <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
+        <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
+      </div>
+    </>
+  )
+
   const sidebar = (
     <div className="sidebar" style={{ position: "absolute", top: 10, left: 10, zIndex: 2, width: "clamp(260px, 28vw, 420px)", maxWidth: "calc(100vw - 20px)", color: "white", fontFamily: "sans-serif", fontSize: 14, backdropFilter: "blur(3px)", background: "rgba(0,0,0,.25)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, boxSizing: "border-box", maxHeight: "calc(100vh - 20px)", overflowY: "auto" }}>
       {title && (<div title={title} style={{ marginBottom: 10, padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", background: "rgba(255,255,255,.08)", fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>)}
@@ -726,42 +779,10 @@ export default function ClientPage() {
             <span>Nastavení modelů</span>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ transform: slidersOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform .15s ease" }} aria-hidden><path d="M8 5l8 7-8 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
           </button>
-          {slidersOpen && (
-            <div style={{ marginTop: 8, border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>
-                {files.map((f, i) => (
-                    <div key={`${f.url}-${i}`} className="control-row" style={{ display: "grid", gridTemplateColumns: "36px 1fr 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
-                    <div className="row-label" style={{ gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.rawName || f.name}>{stripExt(f.name)}:</div>
-                    <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} aria-label={`${f.name} color`} className="color-input" style={{ width: 36, height: 22, border: "1px solid #fff", borderRadius: 4, padding: 0, cursor: "pointer", background: "transparent" }}/>
-                    <input className="slider" type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => { const v = parseFloat(e.target.value); setOpacities((prev) => prev.map((x, idx) => (idx === i ? v : x))) }} style={{ width: "calc(100% - 18px)", minWidth: 140 }} aria-label={`${f.name} opacity`} />
-                    <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 36, height: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: "transparent", border: "1px solid #fff", borderRadius: 4, cursor: "pointer" }}>
-                        <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
-                    </button>
-                    </div>
-                ))}
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
-                    <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
-                    <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
-                </div>
-            </div>
-          )}
+          {slidersOpen && <div style={{ marginTop: 8, border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>{slidersContent}</div>}
         </>
       ) : (
-        <div style={{ border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>
-            {files.map((f, i) => (
-                <div key={`${f.url}-${i}`} className="control-row" style={{ display: "grid", gridTemplateColumns: "36px 1fr 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
-                <div className="row-label" style={{ gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.rawName || f.name}>{stripExt(f.name)}:</div>
-                <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} aria-label={`${f.name} color`} className="color-input" style={{ width: 36, height: 22, border: "1px solid #fff", borderRadius: 4, padding: 0, cursor: "pointer", background: "transparent" }}/>
-                <input className="slider" type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => { const v = parseFloat(e.target.value); setOpacities((prev) => prev.map((x, idx) => (idx === i ? v : x))) }} style={{ width: "calc(100% - 18px)", minWidth: 140 }} aria-label={`${f.name} opacity`} />
-                <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 36, height: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: "transparent", border: "1px solid #fff", borderRadius: 4, cursor: "pointer" }}>
-                    <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
-                </button>
-                </div>
-            ))}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
-                <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
-                <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
-            </div>
-        </div>
+        <div style={{ border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>{slidersContent}</div>
       )}
 
       {photos && photos.length > 0 && (
@@ -796,10 +817,7 @@ export default function ClientPage() {
 
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
 
-        <group 
-            ref={rootGroupRef}
-            rotation={initialTransform ? [initialTransform[0], initialTransform[1], initialTransform[2]] : [0,0,0]}
-        >
+        <group ref={rootGroupRef}>
           <Suspense fallback={null}>
             {files.map((f, i) => (
               <AnyModel
@@ -822,9 +840,10 @@ export default function ClientPage() {
           </Suspense>
         </group>
 
-        <ViewStateSync trackballRef={trackballRef} rootRef={rootGroupRef} />
+        <ViewStateSync trackballRef={trackballRef} />
 
-        {frameKey && !initialCameraState && (
+        {/* POZOR ZDE JE ZMĚNA: AutoCenter MUSÍ vždy proběhnout (vycentruje model), ale kameru nastaví jen tehdy, když nemáme uloženou */}
+        {frameKey && (
           <AutoCenterAndFrame
             rootRef={rootGroupRef}
             triggerKey={frameKey}
@@ -834,26 +853,22 @@ export default function ClientPage() {
             desktopScale={1.0}
             mobileScale={1.0}
             centerMode={centerMode}
+            skipCamera={!!initialCameraState}
             setTarget={setCameraTarget}
           />
         )}
 
+        {/* ZDE JE ZMĚNA: Po vycentrování aplikuje uloženou kameru */}
         {frameKey && initialCameraState && (
           <CustomCameraSetter
             camState={initialCameraState}
             triggerKey={frameKey}
-            onFramed={() => setDidInitialFrame(true)}
             setTarget={setCameraTarget}
           />
         )}
 
-        <TouchTrackballControls 
-            ref={trackballRef} 
-            target={cameraTarget} 
-        />
-        <RightButtonPan 
-            setTarget={setCameraTarget} 
-        />
+        <TouchTrackballControls ref={trackballRef} target={cameraTarget} />
+        <RightButtonPan setTarget={setCameraTarget} />
 
         {!allLoaded && files.length > 0 && <InlineLoader text="Načítám modely…" />}
       </Canvas>
