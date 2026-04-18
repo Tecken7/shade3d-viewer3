@@ -109,7 +109,7 @@ function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
   return g
 }
 
-/* ---------- Heatmap Funkce (Opravená a vylepšená pro stomatologii) ---------- */
+/* ---------- Heatmap Funkce ---------- */
 export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
   try {
     if (!meshB.geometry.boundsTree) {
@@ -118,8 +118,15 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
 
     const geomA = meshA.geometry
     const posA = geomA.attributes.position
-    const colors = new Float32Array(posA.count * 3)
 
+    // Uložíme si původní barvy (texturu ze skenu) do zálohy, pokud tam ještě nejsou
+    if (!geomA.userData._originalColors) {
+      if (geomA.attributes.color) {
+        geomA.userData._originalColors = geomA.attributes.color.clone()
+      }
+    }
+
+    const colors = new Float32Array(posA.count * 3)
     const vA = new THREE.Vector3()
     
     // Zubařský gradient
@@ -136,7 +143,6 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
       vA.applyMatrix4(meshA.matrixWorld)
       vA.applyMatrix4(invMatB)
 
-      // Spolehlivé získání vzdálenosti z BVH
       const distResult = meshB.geometry.boundsTree.closestPointToPoint(vA, target)
       const distance = typeof distResult === "number" ? distResult : target.distance
 
@@ -157,10 +163,8 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
       colors[i * 3 + 2] = finalColor.b
     }
 
-    geomA.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-    meshA.material.vertexColors = true
-    meshA.material.color.setHex(0xffffff)
-    meshA.material.needsUpdate = true
+    // Uložíme vypočítanou heatmapu pouze do dat (zobrazení si pak řeší komponenta AnyModel přes React)
+    geomA.userData._heatmapColors = new THREE.BufferAttribute(colors, 3)
     
   } catch (err) {
     console.error("Chyba výpočtu heatmapy: ", err)
@@ -307,6 +311,7 @@ function AnyModel({
   useVertexColors = false,
   keepMaterials = false,
   wireframe = false,
+  showHeatmap = false,
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
@@ -415,10 +420,24 @@ function AnyModel({
     })
   }, [object3D, autoSmooth, smoothAngle, wireframe])
 
+  // CHYTRÁ APLIKACE MATERIÁLŮ (sleduje heatmapu i původní textury)
   useEffect(() => {
     if (!object3D) return
     object3D.traverse((child) => {
       if (!child.isMesh) return
+
+      // 1. Nastavení správných barev pro Geometrii
+      if (showHeatmap && child.userData._heatmapColors) {
+          child.geometry.setAttribute('color', child.userData._heatmapColors);
+      } else {
+          if (child.userData._originalColors) {
+              child.geometry.setAttribute('color', child.userData._originalColors);
+          } else {
+              child.geometry.deleteAttribute('color');
+          }
+      }
+
+      // 2. Nastavení vlastností Materiálu
       if (keepMaterials) {
         const m = child.material
         if (!m) return
@@ -426,19 +445,30 @@ function AnyModel({
         if ("opacity" in m) m.opacity = opacity
         if ("roughness" in m && typeof roughness === "number") m.roughness = roughness
         if ("metalness" in m && typeof metalness === "number") m.metalness = metalness
-        if (!useVertexColors && "color" in m && color) m.color = new THREE.Color(color)
-        if (useVertexColors && "vertexColors" in m) { m.vertexColors = true; if ("color" in m) m.color = new THREE.Color("#ffffff") }
+
+        if (showHeatmap && child.userData._heatmapColors) {
+            m.vertexColors = true;
+            if ("color" in m) m.color = new THREE.Color("#ffffff");
+        } else {
+            if (!useVertexColors && "color" in m && color) m.color = new THREE.Color(color)
+            if (useVertexColors && "vertexColors" in m) { m.vertexColors = true; if ("color" in m) m.color = new THREE.Color("#ffffff") }
+        }
         m.needsUpdate = true
       } else {
-        const hasVC = !!child.geometry.getAttribute?.("color")
-        const newMat = hasVC && useVertexColors ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") }) : makeMat()
+        const hasVC = !!child.geometry.getAttribute("color")
+        const isHeatmapNow = showHeatmap && child.userData._heatmapColors;
+        const wantVC = isHeatmapNow || (hasVC && useVertexColors);
+        const newMat = wantVC ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") }) : makeMat()
+
         if (child.material && child.material !== newMat) child.material.dispose()
         child.material = newMat
       }
+
+      // Overlays
       if (child.userData._edges) child.userData._edges.visible = !!wireframe
       else if (wireframe) rebuildWireOverlay(child)
     })
-  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe])
+  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, showHeatmap])
 
   if (!object3D) return null
   return visible ? <primitive object={object3D} /> : null
@@ -1059,6 +1089,10 @@ export default function ClientPage() {
   const [heatmapMenuOpen, setHeatmapMenuOpen] = useState(false)
   const [heatmapSelection, setHeatmapSelection] = useState([])
   const [isCalculatingHeatmap, setIsCalculatingHeatmap] = useState(false)
+  
+  // ZCELA NOVÉ STAVY PRO PŘEPÍNÁNÍ
+  const [hasComputedHeatmap, setHasComputedHeatmap] = useState(false)
+  const [showHeatmap, setShowHeatmap] = useState(false)
 
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
@@ -1083,21 +1117,20 @@ export default function ClientPage() {
     meshesRef.current[url] = mesh
   }, [])
 
-  // -- Logika nového menu pro heatmapu --
   const toggleHeatmapModel = (url) => {
     setHeatmapSelection((prev) => {
-      if (prev.includes(url)) return prev.filter(u => u !== url)
-      if (prev.length >= 2) return prev // Limit je 2
-      return [...prev, url]
+      const newSel = prev.includes(url) ? prev.filter(u => u !== url) : (prev.length >= 2 ? prev : [...prev, url])
+      return newSel;
     })
+    // Pokud uživatel změní výběr modelů, zresetujeme stav
+    setHasComputedHeatmap(false)
+    setShowHeatmap(false)
   }
 
   const handleApplyHeatmap = () => {
     if (heatmapSelection.length !== 2) return
-    
-    setIsCalculatingHeatmap(true); // Zapne "načítání" v UI
+    setIsCalculatingHeatmap(true);
 
-    // Zpoždění pomocí setTimeout dá prohlížeči šanci překreslit UI (aby text načítání byl vidět)
     setTimeout(() => {
       try {
         const meshA = meshesRef.current[heatmapSelection[0]]
@@ -1106,16 +1139,8 @@ export default function ClientPage() {
         if (meshA && meshB) {
           applyOcclusionHeatmap(meshA, meshB, 2.0)
           
-          // Zapne vertex colors (tlačítko TEX) pro první vybraný model, aby se barvy ukázaly
-          const indexA = files.findIndex(f => f.url === heatmapSelection[0])
-          if (indexA !== -1) {
-            setVertexColors(prev => {
-              const next = [...prev]
-              next[indexA] = true
-              return next
-            })
-          }
-          setHeatmapMenuOpen(false) // Zavřít menu po potvrzení
+          setHasComputedHeatmap(true)
+          setShowHeatmap(true) // Okamžitě se heatmapa zapne
         }
       } catch(e) {
         console.error("Heatmap chyba:", e)
@@ -1551,11 +1576,7 @@ export default function ClientPage() {
       {/* Vykreslení Menu pro Heatmapu */}
       <div style={{ position: "relative" }}>
         <button 
-          onClick={() => {
-            setHeatmapMenuOpen(prev => !prev);
-            // Při zavření zrušíme výběr (aby to bylo hezky vyčištěné pro další použití)
-            if (heatmapMenuOpen) setHeatmapSelection([]);
-          }}
+          onClick={() => setHeatmapMenuOpen(prev => !prev)}
           style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
             background: heatmapMenuOpen ? "rgba(239,68,68,.8)" : "rgba(0,0,0,.25)",
@@ -1607,8 +1628,14 @@ export default function ClientPage() {
                 transition: "background 0.2s"
               }}
             >
-              {isCalculatingHeatmap ? "Počítám (může trvat)..." : "Vypočítat a zobrazit"}
+              {isCalculatingHeatmap ? "Počítám (může trvat)..." : (hasComputedHeatmap ? "Přepočítat modely" : "Vypočítat")}
             </button>
+
+            {hasComputedHeatmap && (
+              <div style={{ marginTop: 12, borderTop: "1px solid rgba(255,255,255,.2)", paddingTop: 12 }}>
+                <Switch checked={showHeatmap} onChange={setShowHeatmap} label="Zobrazit vrstvu skusu" />
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -1697,6 +1724,8 @@ export default function ClientPage() {
                 metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
                 useVertexColors={vertexColors[i]}
                 keepMaterials={!!f.km}
+                // Předáváme prop o tom, jestli se zrovna tenhle konkrétní model má zobrazit jako heatmapa
+                showHeatmap={showHeatmap && heatmapSelection[0] === f.url}
               />
             ))}
           </Suspense>
