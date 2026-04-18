@@ -109,7 +109,7 @@ function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
   return g
 }
 
-/* ---------- Heatmap Funkce (Čistě datová) ---------- */
+/* ---------- Heatmap Funkce ---------- */
 export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
   try {
     if (!meshB.geometry.boundsTree) {
@@ -131,10 +131,10 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
     const distances = new Float32Array(posA.count)
     const vA = new THREE.Vector3()
     
-    const colorRed = new THREE.Color(0xff0000)    // 0.0 - 0.5 mm
-    const colorYellow = new THREE.Color(0xffff00) // 0.5 - 1.5 mm
-    const colorGreen = new THREE.Color(0x00ff00)  // 1.5 - 2.0 mm
-    const colorWhite = new THREE.Color(0xffffff)  // Nad limit
+    const colorRed = new THREE.Color(0xff0000)
+    const colorYellow = new THREE.Color(0xffff00)
+    const colorGreen = new THREE.Color(0x00ff00)
+    const colorWhite = new THREE.Color(0xffffff)
     
     const invMatB = new THREE.Matrix4().copy(meshB.matrixWorld).invert()
     const target = { point: new THREE.Vector3(), distance: 0 }
@@ -948,6 +948,7 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
 
   const vBox = `${vX} ${vY} ${vW} ${vH}`
 
+  // Dynamický výpočet pro font textu přímo v SVG
   const svgToScreenRatio = vW / winSize.w
   const dynamicStrokeWidth = 1.5 * svgToScreenRatio
   const dynamicPointRadius = 4 * svgToScreenRatio
@@ -955,15 +956,6 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
   const distVal = measureState.p1 && measureState.snappedP2 
       ? Math.sqrt(distSq(measureState.p1, measureState.snappedP2)).toFixed(2) 
       : null
-
-  let textPos = null;
-  if (measureState.p1 && measureState.snappedP2) {
-     const midX = (measureState.p1.x + measureState.snappedP2.x) / 2;
-     const midY = (measureState.p1.y + measureState.snappedP2.y) / 2;
-     const pxX = ((midX - vX) / vW) * winSize.w;
-     const pxY = (((vY + vH) - midY) / vH) * winSize.h;
-     textPos = { x: pxX, y: pxY };
-  }
 
   return (
     <div 
@@ -982,22 +974,6 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
       <div style={{ position: 'absolute', top: 8, left: 16, fontSize: 11, color: '#aaa', pointerEvents: 'none', zIndex: 11 }}>
         Levé tl. = posun, Kolečko = zoom<br/>Dvojklik = měření
       </div>
-
-      {distVal && textPos && (
-        <div style={{
-          position: 'absolute',
-          left: textPos.x + 8,
-          top: textPos.y - 12,
-          fontSize: 16,
-          fontWeight: 'bold',
-          color: '#fbbf24',
-          pointerEvents: 'none',
-          zIndex: 11,
-          textShadow: "0 2px 4px rgba(0,0,0,0.8)"
-        }}>
-          {distVal} mm
-        </div>
-      )}
 
       <div 
         onPointerDown={(e) => startResize(e, 'top-left')}
@@ -1030,6 +1006,37 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
               stroke="#fbbf24" strokeWidth={dynamicStrokeWidth} opacity={0.7}
             />
             <circle cx={measureState.snappedP2.x} cy={measureState.snappedP2.y} r={dynamicPointRadius} fill="#fbbf24" />
+            
+            {/* Tímto jsme kompletně vyřešili bug s plavajícím textem. Text je nyní součástí vnitřního SVG nákresu! */}
+            <text
+              x={ (measureState.p1.x + measureState.snappedP2.x) / 2 }
+              y={ -((measureState.p1.y + measureState.snappedP2.y) / 2 + 15 * svgToScreenRatio) }
+              transform="scale(1, -1)"
+              fill="none"
+              stroke="black"
+              strokeWidth={4 * svgToScreenRatio}
+              strokeLinejoin="round"
+              fontSize={14 * svgToScreenRatio}
+              fontWeight="bold"
+              textAnchor="middle"
+              dominantBaseline="middle"
+              style={{ pointerEvents: "none", userSelect: "none" }}
+            >
+              {distVal} mm
+            </text>
+            <text
+              x={ (measureState.p1.x + measureState.snappedP2.x) / 2 }
+              y={ -((measureState.p1.y + measureState.snappedP2.y) / 2 + 15 * svgToScreenRatio) }
+              transform="scale(1, -1)"
+              fill="#fbbf24"
+              fontSize={14 * svgToScreenRatio}
+              fontWeight="bold"
+              textAnchor="middle"
+              dominantBaseline="middle"
+              style={{ pointerEvents: "none", userSelect: "none" }}
+            >
+              {distVal} mm
+            </text>
           </>
         )}
       </svg>
@@ -1120,7 +1127,6 @@ export default function ClientPage() {
   const transformRotateRef = useRef(null) 
   const transformTranslateRef = useRef(null) 
   
-  // -- NOVÉ: Paměť pro nástroj řezu --
   const isPlaneInitialized = useRef(false)
   const planeMatrixRef = useRef(new THREE.Matrix4())
 
@@ -1130,7 +1136,6 @@ export default function ClientPage() {
 
   const [isAutoRotating, setIsAutoRotating] = useState(false)
 
-  // -- Stavy pro menu Heatmapy --
   const [heatmapMenuOpen, setHeatmapMenuOpen] = useState(false)
   const [heatmapSelection, setHeatmapSelection] = useState([])
   const [isCalculatingHeatmap, setIsCalculatingHeatmap] = useState(false)
@@ -1330,7 +1335,7 @@ export default function ClientPage() {
          setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev); 
          planeGroup.translateZ(step)
          planeGroup.updateMatrixWorld(true)
-         planeMatrixRef.current.copy(planeGroup.matrix) // Uložit pozici
+         planeMatrixRef.current.copy(planeGroup.matrix)
          const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
          const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
          clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
@@ -1339,7 +1344,7 @@ export default function ClientPage() {
          setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev); 
          planeGroup.translateZ(-step)
          planeGroup.updateMatrixWorld(true)
-         planeMatrixRef.current.copy(planeGroup.matrix) // Uložit pozici
+         planeMatrixRef.current.copy(planeGroup.matrix)
          const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
          const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
          clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
@@ -1350,7 +1355,6 @@ export default function ClientPage() {
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [clippingEnabled, updateClippingLogic, planeGroup])
 
-  // -- RESET PRŮŘEZU --
   const handleResetPlane = useCallback(() => {
     if (!rootGroupRef.current || !planeGroup) {
        isPlaneInitialized.current = false;
@@ -1380,7 +1384,6 @@ export default function ClientPage() {
 
   useEffect(() => {
      if (clippingEnabled && rootGroupRef.current && planeGroup) {
-        // Inicializace nebo obnova pozice z paměti
         if (!isPlaneInitialized.current) {
             const box = new THREE.Box3().setFromObject(rootGroupRef.current)
             if (!box.isEmpty()) {
@@ -1480,7 +1483,7 @@ export default function ClientPage() {
           }
           if (camState) setInitialCameraState(camState)
           setDidInitialFrame(false)
-          isPlaneInitialized.current = false // Reset řezu při nových modelech
+          isPlaneInitialized.current = false 
         }
 
         if (mId) {
