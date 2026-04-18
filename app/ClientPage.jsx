@@ -109,7 +109,7 @@ function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
   return g
 }
 
-/* ---------- Heatmap Funkce ---------- */
+/* ---------- Heatmap Funkce (Čistě datová) ---------- */
 export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
   try {
     if (!meshB.geometry.boundsTree) {
@@ -119,19 +119,9 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
     const geomA = meshA.geometry
     const posA = geomA.attributes.position
 
-    // Uložíme si původní barvy do paměti Meshe (ne geometrie, aby to React našel)
-    if (meshA.userData._originalColors === undefined) {
-      if (geomA.attributes.color) {
-        meshA.userData._originalColors = geomA.attributes.color.clone()
-      } else {
-        meshA.userData._originalColors = null
-      }
-    }
-
     const colors = new Float32Array(posA.count * 3)
     const vA = new THREE.Vector3()
     
-    // Zubařský gradient
     const colorRed = new THREE.Color(0xff0000)    // 0.0 - 0.5 mm
     const colorYellow = new THREE.Color(0xffff00) // 0.5 - 1.5 mm
     const colorGreen = new THREE.Color(0x00ff00)  // 1.5 - 2.0 mm
@@ -165,7 +155,7 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
       colors[i * 3 + 2] = finalColor.b
     }
 
-    // Uložíme vypočítanou heatmapu do dat Meshe
+    // Uložíme pouze pole barev, renderování si už vyřeší React v AnyModel
     meshA.userData._heatmapColors = new THREE.BufferAttribute(colors, 3)
     
   } catch (err) {
@@ -407,31 +397,31 @@ function AnyModel({
     return () => { cancelled = true }
   }, [url, ext])
 
-  useEffect(() => {
-    if (!object3D) return
-    object3D.traverse((child) => {
-      if (!child.isMesh) return
-      if (!child.userData._baseGeom) child.userData._baseGeom = child.geometry
-      const base = child.userData._baseGeom
-      let newGeom = base
-      if (autoSmooth) newGeom = autoSmoothGeometry(base, smoothAngle)
-      else { newGeom = base.clone(); newGeom.computeVertexNormals() }
-      if (child.userData._derivedGeom && child.userData._derivedGeom !== base) child.userData._derivedGeom.dispose()
-      child.geometry = newGeom; child.userData._derivedGeom = newGeom
-      rebuildWireOverlay(child)
-    })
-  }, [object3D, autoSmooth, smoothAngle, wireframe])
-
-  // CHYTRÁ APLIKACE MATERIÁLŮ (sleduje heatmapu i původní textury)
+  // ----------------------------------------------------
+  // ROBUSTNÍ APLIKACE MATERIÁLŮ (Heatmapa vs TEX vs Solid)
+  // ----------------------------------------------------
   useEffect(() => {
     if (!object3D) return
     object3D.traverse((child) => {
       if (!child.isMesh) return
 
-      // 1. Nastavení správných barev pro Geometrii
-      if (showHeatmap && child.userData._heatmapColors) {
+      // 1. ZÁLOHA PŮVODNÍCH BAREV Z GEOMETRIE IHNED PO NAČTENÍ
+      if (child.userData._originalColors === undefined) {
+          if (child.geometry.attributes.color) {
+              child.userData._originalColors = child.geometry.attributes.color.clone();
+          } else {
+              child.userData._originalColors = null;
+          }
+      }
+
+      // 2. APLIKACE SPRÁVNÉ BAREVNÉ VRSTVY DO GEOMETRIE
+      const isHeatmapActive = showHeatmap && child.userData._heatmapColors;
+      
+      if (isHeatmapActive) {
+          // Přepíšeme geometrii barvami z heatmapy
           child.geometry.setAttribute('color', child.userData._heatmapColors);
       } else {
+          // Vrátíme původní barvy (pokud nějaké model měl)
           if (child.userData._originalColors) {
               child.geometry.setAttribute('color', child.userData._originalColors);
           } else {
@@ -439,36 +429,38 @@ function AnyModel({
           }
       }
       
-      // Explicitní refresh pro Three.js aby zaznamenal změnu
       if (child.geometry.attributes.color) {
           child.geometry.attributes.color.needsUpdate = true;
       }
 
-      // 2. Nastavení vlastností Materiálu
+      // 3. APLIKACE MATERIÁLU
+      // Chceme zapnout renderování vertexů buď kvůli heatmapě, nebo kvůli zapnutému TEX tlačítku (pokud model .ply barvy má)
+      const isOriginalTexActive = useVertexColors && child.userData._originalColors;
+      const wantVertexColors = isHeatmapActive || isOriginalTexActive;
+
       if (keepMaterials) {
-        const m = child.material
-        if (!m) return
-        if ("transparent" in m) m.transparent = opacity < 1
-        if ("opacity" in m) m.opacity = opacity
-        if ("roughness" in m && typeof roughness === "number") m.roughness = roughness
-        if ("metalness" in m && typeof metalness === "number") m.metalness = metalness
+          const m = child.material
+          if (!m) return
+          m.transparent = opacity < 1
+          m.opacity = opacity
+          if (typeof roughness === "number") m.roughness = roughness
+          if (typeof metalness === "number") m.metalness = metalness
 
-        if (showHeatmap && child.userData._heatmapColors) {
-            m.vertexColors = true;
-            if ("color" in m) m.color = new THREE.Color("#ffffff");
-        } else {
-            if (!useVertexColors && "color" in m && color) m.color = new THREE.Color(color)
-            if (useVertexColors && "vertexColors" in m) { m.vertexColors = true; if ("color" in m) m.color = new THREE.Color("#ffffff") }
-        }
-        m.needsUpdate = true
+          if (wantVertexColors) {
+              m.vertexColors = true;
+              if ("color" in m) m.color = new THREE.Color("#ffffff");
+          } else {
+              m.vertexColors = false;
+              if ("color" in m) m.color = new THREE.Color(color);
+          }
+          m.needsUpdate = true
       } else {
-        const hasVC = !!child.geometry.getAttribute("color")
-        const isHeatmapNow = showHeatmap && child.userData._heatmapColors;
-        const wantVC = isHeatmapNow || (hasVC && useVertexColors);
-        const newMat = wantVC ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") }) : makeMat()
+          const newMat = wantVertexColors 
+              ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") }) 
+              : makeMat({ vertexColors: false, color: new THREE.Color(color) })
 
-        if (child.material && child.material !== newMat) child.material.dispose()
-        child.material = newMat
+          if (child.material && child.material !== newMat) child.material.dispose()
+          child.material = newMat
       }
 
       // Overlays
@@ -1097,7 +1089,7 @@ export default function ClientPage() {
   const [heatmapSelection, setHeatmapSelection] = useState([])
   const [isCalculatingHeatmap, setIsCalculatingHeatmap] = useState(false)
   
-  // ZCELA NOVÉ STAVY PRO PŘEPÍNÁNÍ
+  // Stavy pro přepínání
   const [hasComputedHeatmap, setHasComputedHeatmap] = useState(false)
   const [showHeatmap, setShowHeatmap] = useState(false)
 
@@ -1129,7 +1121,6 @@ export default function ClientPage() {
       const newSel = prev.includes(url) ? prev.filter(u => u !== url) : (prev.length >= 2 ? prev : [...prev, url])
       return newSel;
     })
-    // Pokud uživatel změní výběr modelů, zresetujeme stav
     setHasComputedHeatmap(false)
     setShowHeatmap(false)
   }
@@ -1580,7 +1571,6 @@ export default function ClientPage() {
   const topBarRight = !isMobile && (
     <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10, fontFamily: "sans-serif", color: "white" }}>
       
-      {/* Vykreslení Menu pro Heatmapu */}
       <div style={{ position: "relative" }}>
         <button 
           onClick={() => setHeatmapMenuOpen(prev => !prev)}
@@ -1731,7 +1721,6 @@ export default function ClientPage() {
                 metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
                 useVertexColors={vertexColors[i]}
                 keepMaterials={!!f.km}
-                // Předáváme prop o tom, jestli se zrovna tenhle konkrétní model má zobrazit jako heatmapa
                 showHeatmap={showHeatmap && heatmapSelection[0] === f.url}
               />
             ))}
