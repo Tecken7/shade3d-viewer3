@@ -109,7 +109,7 @@ function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
   return g
 }
 
-/* ---------- Heatmap Funkce (Čistě datová) ---------- */
+/* ---------- Heatmap Funkce ---------- */
 export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
   try {
     if (!meshB.geometry.boundsTree) {
@@ -128,12 +128,13 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
     }
 
     const colors = new Float32Array(posA.count * 3)
+    const distances = new Float32Array(posA.count) // NOVÉ: paměť pro hodnoty tooltipu
     const vA = new THREE.Vector3()
     
-    const colorRed = new THREE.Color(0xff0000)    // 0.0 - 0.5 mm
-    const colorYellow = new THREE.Color(0xffff00) // 0.5 - 1.5 mm
-    const colorGreen = new THREE.Color(0x00ff00)  // 1.5 - 2.0 mm
-    const colorWhite = new THREE.Color(0xffffff)  // Nad limit
+    const colorRed = new THREE.Color(0xff0000)
+    const colorYellow = new THREE.Color(0xffff00)
+    const colorGreen = new THREE.Color(0x00ff00)
+    const colorWhite = new THREE.Color(0xffffff)
     
     const invMatB = new THREE.Matrix4().copy(meshB.matrixWorld).invert()
     const target = { point: new THREE.Vector3(), distance: 0 }
@@ -145,6 +146,8 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
 
       const distResult = meshB.geometry.boundsTree.closestPointToPoint(vA, target)
       const distance = typeof distResult === "number" ? distResult : target.distance
+
+      distances[i] = distance // Uložíme přesnou vzdálenost pro zobrazení na hover
 
       let finalColor = colorWhite
       
@@ -164,6 +167,8 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
     }
 
     meshA.userData._heatmapColors = new THREE.BufferAttribute(colors, 3)
+    // Uložíme pole vzdáleností do geometrie, abychom z něj mohli rychle číst
+    geomA.setAttribute('_occlusionDist', new THREE.BufferAttribute(distances, 1))
     
   } catch (err) {
     console.error("Chyba výpočtu heatmapy: ", err)
@@ -311,6 +316,7 @@ function AnyModel({
   keepMaterials = false,
   wireframe = false,
   showHeatmap = false,
+  onHoverDist, // NOVÉ: callback pro tooltip
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
@@ -466,7 +472,31 @@ function AnyModel({
   }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, showHeatmap])
 
   if (!object3D) return null
-  return visible ? <primitive object={object3D} /> : null
+
+  return visible ? (
+    <primitive 
+      object={object3D} 
+      // NOVÉ: Snímání myši pro tooltip
+      onPointerMove={(e) => {
+        if (!showHeatmap || !onHoverDist) return;
+        e.stopPropagation(); // Zabránit problikávání skrz objekty
+        const distAttr = e.object.geometry.getAttribute('_occlusionDist');
+        
+        if (distAttr && e.face) {
+          const dA = distAttr.getX(e.face.a);
+          const dB = distAttr.getX(e.face.b);
+          const dC = distAttr.getX(e.face.c);
+          const avgDist = (dA + dB + dC) / 3;
+          onHoverDist(avgDist, e.clientX, e.clientY);
+        } else if (distAttr && e.index !== undefined) {
+          onHoverDist(distAttr.getX(e.index), e.clientX, e.clientY);
+        }
+      }}
+      onPointerOut={() => {
+        if (showHeatmap && onHoverDist) onHoverDist(null);
+      }}
+    />
+  ) : null
 }
 
 /* ---------- Headlight ---------- */
@@ -1085,9 +1115,11 @@ export default function ClientPage() {
   const [heatmapSelection, setHeatmapSelection] = useState([])
   const [isCalculatingHeatmap, setIsCalculatingHeatmap] = useState(false)
   
-  // Stavy pro přepínání vrstvy
   const [hasComputedHeatmap, setHasComputedHeatmap] = useState(false)
   const [showHeatmap, setShowHeatmap] = useState(false)
+
+  // NOVÉ: Ref pro tooltip prvek (aktualizujeme ho ručně bez React renderu = 60 FPS plynulost)
+  const tooltipRef = useRef(null)
 
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
@@ -1119,6 +1151,7 @@ export default function ClientPage() {
     })
     setHasComputedHeatmap(false)
     setShowHeatmap(false)
+    if (tooltipRef.current) tooltipRef.current.style.opacity = "0"; // skryje tooltip
   }
 
   const handleApplyHeatmap = () => {
@@ -1143,6 +1176,19 @@ export default function ClientPage() {
       }
     }, 50)
   }
+
+  // NOVÉ: Funkce pro ruční pohyb Tooltipu bez zasekávání celé aplikace
+  const handleHeatmapHover = useCallback((dist, x, y) => {
+    if (!tooltipRef.current || !showHeatmap) return;
+    if (dist === null) {
+      tooltipRef.current.style.opacity = "0";
+    } else {
+      tooltipRef.current.style.opacity = "1";
+      tooltipRef.current.style.transform = `translate(${x + 15}px, ${y + 15}px)`;
+      // Změníme text přímo v DOMu
+      tooltipRef.current.innerText = `Vzdálenost: ${dist.toFixed(2)} mm`;
+    }
+  }, [showHeatmap])
 
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
@@ -1567,10 +1613,13 @@ export default function ClientPage() {
   const topBarRight = !isMobile && (
     <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10, fontFamily: "sans-serif", color: "white" }}>
       
-      {/* Menu pro Heatmapu - ODSTRANĚNO absolute pozicování a nahrazeno za accordion vyjíždění dolů */}
-      <div style={{ position: "relative" }}>
+      {/* Menu pro Heatmapu s Accordion CSS animací */}
+      <div>
         <button 
-          onClick={() => setHeatmapMenuOpen(prev => !prev)}
+          onClick={() => {
+            setHeatmapMenuOpen(prev => !prev);
+            if (heatmapMenuOpen) setHeatmapSelection([]);
+          }}
           style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
             background: heatmapMenuOpen ? "rgba(239,68,68,.8)" : "rgba(0,0,0,.25)",
@@ -1583,12 +1632,18 @@ export default function ClientPage() {
           🔥 Mapa skusu
         </button>
 
-        {heatmapMenuOpen && (
+        <div style={{
+          maxHeight: heatmapMenuOpen ? "500px" : "0px",
+          opacity: heatmapMenuOpen ? 1 : 0,
+          overflow: "hidden",
+          transition: "max-height 0.4s ease-in-out, opacity 0.3s ease",
+          pointerEvents: heatmapMenuOpen ? "auto" : "none"
+        }}>
           <div style={{
             marginTop: 8,
             background: "rgba(0,0,0,.85)", backdropFilter: "blur(8px)",
             border: "1px solid rgba(255,255,255,.2)", borderRadius: 10,
-            padding: 12, width: 240, zIndex: 100, color: "white", boxShadow: "0 10px 30px rgba(0,0,0,0.5)"
+            padding: 12, width: 240, color: "white", boxShadow: "0 10px 30px rgba(0,0,0,0.5)"
           }}>
             <div style={{ marginBottom: 12, fontSize: 13, fontWeight: "bold", color: "#ccc" }}>
               Vyberte 2 modely k porovnání:
@@ -1631,7 +1686,7 @@ export default function ClientPage() {
               </div>
             )}
           </div>
-        )}
+        </div>
       </div>
 
       <button 
@@ -1678,7 +1733,23 @@ export default function ClientPage() {
       {sidebar}
       {topBarRight}
 
-      {/* Vykreslení horní vrstvy s legendou barev (pokud je zapnutá) */}
+      {/* Rychlý tooltip (aktualizovaný přes DOM ref pro maximální výkon) */}
+      <div 
+        ref={tooltipRef}
+        style={{
+          position: "fixed", top: 0, left: 0, opacity: 0,
+          background: "rgba(0,0,0,0.85)", color: "#fff",
+          padding: "6px 10px", borderRadius: 6, fontSize: 13,
+          fontWeight: "bold", pointerEvents: "none", zIndex: 9999,
+          border: "1px solid rgba(255,255,255,0.2)",
+          boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+          transition: "opacity 0.15s ease",
+          transformOrigin: "top left",
+          display: showHeatmap ? "block" : "none" // Zmizí, když vypneš heatmapu
+        }}
+      />
+
+      {/* Vykreslení horní lišty s legendou barev (pokud je zapnutá) */}
       {showHeatmap && hasComputedHeatmap && (
         <div style={{
           position: "absolute", top: 20, left: "50%", transform: "translateX(-50%)",
@@ -1744,6 +1815,7 @@ export default function ClientPage() {
                 useVertexColors={vertexColors[i]}
                 keepMaterials={!!f.km}
                 showHeatmap={showHeatmap && heatmapSelection[0] === f.url}
+                onHoverDist={handleHeatmapHover} // Předání callbacku na hover
               />
             ))}
           </Suspense>
