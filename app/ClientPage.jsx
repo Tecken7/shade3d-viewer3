@@ -8,6 +8,11 @@ import { TrackballControls } from "three/examples/jsm/controls/TrackballControls
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader"
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader"
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader"
+import { computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh"
+
+/* ---------- Instalace BVH do Three.js ---------- */
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree
 
 /* ---------- Konst + konfigurace ---------- */
 const LIVE_MSG_TYPES = new Set(["SHADE3D_LIVE", "SHADE3D_LIVE_V6", "SHADE3D_LIVE_V5"])
@@ -102,6 +107,51 @@ function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
   g.setAttribute("normal", new THREE.BufferAttribute(normals, 3))
   g.computeBoundingBox(); g.computeBoundingSphere()
   return g
+}
+
+/* ---------- Heatmap Funkce ---------- */
+export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
+  if (!meshB.geometry.boundsTree) {
+    meshB.geometry.computeBoundsTree()
+  }
+
+  const geomA = meshA.geometry
+  const posA = geomA.attributes.position
+  const colors = new Float32Array(posA.count * 3)
+
+  const vA = new THREE.Vector3()
+  const colorNear = new THREE.Color(0xff0000) // Červená (dotyk/průnik)
+  const colorMid = new THREE.Color(0x00ff00)  // Zelená
+  const colorFar = new THREE.Color(0xaaaaaa)  // Šedá/Výchozí
+  
+  const invMatB = new THREE.Matrix4().copy(meshB.matrixWorld).invert()
+
+  for (let i = 0; i < posA.count; i++) {
+    vA.fromBufferAttribute(posA, i)
+    vA.applyMatrix4(meshA.matrixWorld)
+    vA.applyMatrix4(invMatB)
+
+    const distance = meshB.geometry.boundsTree.distanceToPoint(vA)
+
+    let finalColor = colorFar
+    if (distance < maxDist) {
+      const t = distance / maxDist
+      if (t < 0.5) {
+        finalColor = new THREE.Color().lerpColors(colorNear, colorMid, t * 2)
+      } else {
+        finalColor = new THREE.Color().lerpColors(colorMid, colorFar, (t - 0.5) * 2)
+      }
+    }
+
+    colors[i * 3] = finalColor.r
+    colors[i * 3 + 1] = finalColor.g
+    colors[i * 3 + 2] = finalColor.b
+  }
+
+  geomA.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+  meshA.material.vertexColors = true
+  meshA.material.color.setHex(0xffffff)
+  meshA.material.needsUpdate = true
 }
 
 /* ---------- Loader ---------- */
@@ -239,7 +289,7 @@ function Measurement3D({ measureState, boundingBox }) {
 function AnyModel({
   name, url,
   color, opacity, visible,
-  onLoaded, autoSmooth, smoothAngle = DEFAULT_SMOOTH_ANGLE,
+  onLoaded, onMeshReady, autoSmooth, smoothAngle = DEFAULT_SMOOTH_ANGLE,
   roughness = 0.5, metalness = 0.5,
   useVertexColors = false,
   keepMaterials = false,
@@ -325,6 +375,10 @@ function AnyModel({
           forEachMesh(obj, (mesh) => rebuildWireOverlay(mesh))
           setObject3D(obj)
           onLoaded && onLoaded(url)
+          
+          let foundMesh = null;
+          obj.traverse((child) => { if (child.isMesh && !foundMesh) foundMesh = child });
+          if (foundMesh && onMeshReady) onMeshReady(foundMesh, url);
         }
       } catch (e) {
         console.error("Model load error:", e)
@@ -1005,6 +1059,30 @@ export default function ClientPage() {
   const [loadedUrls, setLoadedUrls] = useState(new Set())
   const handleModelLoaded = (url) => setLoadedUrls((prev) => { const n = new Set(prev); n.add(url); return n; })
 
+  // -- Reference pro heatmapu --
+  const meshesRef = useRef({})
+  const handleMeshReady = useCallback((mesh, url) => {
+    meshesRef.current[url] = mesh
+  }, [])
+
+  const handleGenerateHeatmap = () => {
+    const urls = files.map(f => f.url);
+    if (urls.length < 2) {
+      alert("Pro heatmapu potřebuješ alespoň 2 modely (např. horní a dolní čelist).");
+      return;
+    }
+    const meshA = meshesRef.current[urls[0]];
+    const meshB = meshesRef.current[urls[1]];
+    if (meshA && meshB) {
+      applyOcclusionHeatmap(meshA, meshB, 2.0);
+      setVertexColors(prev => {
+        const next = [...prev];
+        next[0] = true;
+        return next;
+      });
+    }
+  };
+
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
@@ -1429,6 +1507,20 @@ export default function ClientPage() {
     <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10, fontFamily: "sans-serif", color: "white" }}>
       
       <button 
+        onClick={handleGenerateHeatmap}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+          background: "rgba(239,68,68,.8)",
+          backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)",
+          borderRadius: 10, padding: "10px 14px", color: "white", cursor: "pointer",
+          fontWeight: "bold", fontSize: 14, transition: "background 0.2s"
+        }}
+        title="Barevně vyznačí místa dotyku (max 2 mm) prvního modelu vůči druhému."
+      >
+        🔥 Mapa skusu
+      </button>
+
+      <button 
         onClick={() => setIsAutoRotating(p => !p)}
         style={{
           display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
@@ -1504,6 +1596,7 @@ export default function ClientPage() {
                 opacity={opacities[i] ?? 1}
                 visible={visibles[i] ?? true}
                 onLoaded={handleModelLoaded}
+                onMeshReady={handleMeshReady}
                 autoSmooth={autoSmooth}
                 smoothAngle={smoothAngle}
                 wireframe={wireframe}
