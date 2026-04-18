@@ -109,49 +109,62 @@ function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
   return g
 }
 
-/* ---------- Heatmap Funkce ---------- */
+/* ---------- Heatmap Funkce (Opravená a vylepšená pro stomatologii) ---------- */
 export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
-  if (!meshB.geometry.boundsTree) {
-    meshB.geometry.computeBoundsTree()
-  }
-
-  const geomA = meshA.geometry
-  const posA = geomA.attributes.position
-  const colors = new Float32Array(posA.count * 3)
-
-  const vA = new THREE.Vector3()
-  const colorNear = new THREE.Color(0xff0000) // Červená (dotyk/průnik)
-  const colorMid = new THREE.Color(0x00ff00)  // Zelená
-  const colorFar = new THREE.Color(0xaaaaaa)  // Šedá/Výchozí
-  
-  const invMatB = new THREE.Matrix4().copy(meshB.matrixWorld).invert()
-
-  for (let i = 0; i < posA.count; i++) {
-    vA.fromBufferAttribute(posA, i)
-    vA.applyMatrix4(meshA.matrixWorld)
-    vA.applyMatrix4(invMatB)
-
-    const distance = meshB.geometry.boundsTree.distanceToPoint(vA)
-
-    let finalColor = colorFar
-    if (distance < maxDist) {
-      const t = distance / maxDist
-      if (t < 0.5) {
-        finalColor = new THREE.Color().lerpColors(colorNear, colorMid, t * 2)
-      } else {
-        finalColor = new THREE.Color().lerpColors(colorMid, colorFar, (t - 0.5) * 2)
-      }
+  try {
+    if (!meshB.geometry.boundsTree) {
+      meshB.geometry.computeBoundsTree()
     }
 
-    colors[i * 3] = finalColor.r
-    colors[i * 3 + 1] = finalColor.g
-    colors[i * 3 + 2] = finalColor.b
-  }
+    const geomA = meshA.geometry
+    const posA = geomA.attributes.position
+    const colors = new Float32Array(posA.count * 3)
 
-  geomA.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-  meshA.material.vertexColors = true
-  meshA.material.color.setHex(0xffffff)
-  meshA.material.needsUpdate = true
+    const vA = new THREE.Vector3()
+    
+    // Zubařský gradient
+    const colorRed = new THREE.Color(0xff0000)    // 0.0 - 0.5 mm
+    const colorYellow = new THREE.Color(0xffff00) // 0.5 - 1.5 mm
+    const colorGreen = new THREE.Color(0x00ff00)  // 1.5 - 2.0 mm
+    const colorWhite = new THREE.Color(0xffffff)  // Nad limit
+    
+    const invMatB = new THREE.Matrix4().copy(meshB.matrixWorld).invert()
+    const target = { point: new THREE.Vector3(), distance: 0 }
+
+    for (let i = 0; i < posA.count; i++) {
+      vA.fromBufferAttribute(posA, i)
+      vA.applyMatrix4(meshA.matrixWorld)
+      vA.applyMatrix4(invMatB)
+
+      // Spolehlivé získání vzdálenosti z BVH
+      const distResult = meshB.geometry.boundsTree.closestPointToPoint(vA, target)
+      const distance = typeof distResult === "number" ? distResult : target.distance
+
+      let finalColor = colorWhite
+      
+      if (distance < maxDist) {
+        if (distance < 0.5) {
+          finalColor = new THREE.Color().lerpColors(colorRed, colorYellow, distance / 0.5)
+        } else if (distance < 1.5) {
+          finalColor = new THREE.Color().lerpColors(colorYellow, colorGreen, (distance - 0.5) / 1.0)
+        } else {
+          finalColor = new THREE.Color().lerpColors(colorGreen, colorWhite, (distance - 1.5) / 0.5)
+        }
+      }
+
+      colors[i * 3] = finalColor.r
+      colors[i * 3 + 1] = finalColor.g
+      colors[i * 3 + 2] = finalColor.b
+    }
+
+    geomA.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    meshA.material.vertexColors = true
+    meshA.material.color.setHex(0xffffff)
+    meshA.material.needsUpdate = true
+    
+  } catch (err) {
+    console.error("Chyba výpočtu heatmapy: ", err)
+  }
 }
 
 /* ---------- Loader ---------- */
@@ -1042,9 +1055,10 @@ export default function ClientPage() {
 
   const [isAutoRotating, setIsAutoRotating] = useState(false)
 
-  // -- Stavy pro menu Heatmapy (NOVÉ) --
+  // -- Stavy pro menu Heatmapy --
   const [heatmapMenuOpen, setHeatmapMenuOpen] = useState(false)
   const [heatmapSelection, setHeatmapSelection] = useState([])
+  const [isCalculatingHeatmap, setIsCalculatingHeatmap] = useState(false)
 
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
@@ -1080,23 +1094,35 @@ export default function ClientPage() {
 
   const handleApplyHeatmap = () => {
     if (heatmapSelection.length !== 2) return
-    const meshA = meshesRef.current[heatmapSelection[0]]
-    const meshB = meshesRef.current[heatmapSelection[1]]
+    
+    setIsCalculatingHeatmap(true); // Zapne "načítání" v UI
 
-    if (meshA && meshB) {
-      applyOcclusionHeatmap(meshA, meshB, 2.0)
-      
-      // Zapne vertex colors (tlačítko TEX) pro první vybraný model, aby se barvy ukázaly
-      const indexA = files.findIndex(f => f.url === heatmapSelection[0])
-      if (indexA !== -1) {
-        setVertexColors(prev => {
-          const next = [...prev]
-          next[indexA] = true
-          return next
-        })
+    // Zpoždění pomocí setTimeout dá prohlížeči šanci překreslit UI (aby text načítání byl vidět)
+    setTimeout(() => {
+      try {
+        const meshA = meshesRef.current[heatmapSelection[0]]
+        const meshB = meshesRef.current[heatmapSelection[1]]
+
+        if (meshA && meshB) {
+          applyOcclusionHeatmap(meshA, meshB, 2.0)
+          
+          // Zapne vertex colors (tlačítko TEX) pro první vybraný model, aby se barvy ukázaly
+          const indexA = files.findIndex(f => f.url === heatmapSelection[0])
+          if (indexA !== -1) {
+            setVertexColors(prev => {
+              const next = [...prev]
+              next[indexA] = true
+              return next
+            })
+          }
+          setHeatmapMenuOpen(false) // Zavřít menu po potvrzení
+        }
+      } catch(e) {
+        console.error("Heatmap chyba:", e)
+      } finally {
+        setIsCalculatingHeatmap(false);
       }
-      setHeatmapMenuOpen(false) // Zavřít menu po potvrzení
-    }
+    }, 50)
   }
 
   const centerParam = (getParam("center") || "combined").toLowerCase()
@@ -1572,16 +1598,16 @@ export default function ClientPage() {
 
             <button 
               onClick={handleApplyHeatmap}
-              disabled={heatmapSelection.length !== 2}
+              disabled={heatmapSelection.length !== 2 || isCalculatingHeatmap}
               style={{
                 width: "100%", padding: "10px 0", borderRadius: 6,
-                background: heatmapSelection.length === 2 ? "#fbbf24" : "rgba(255,255,255,0.1)",
-                color: heatmapSelection.length === 2 ? "black" : "#888",
-                fontWeight: "bold", border: "none", cursor: heatmapSelection.length === 2 ? "pointer" : "not-allowed",
+                background: heatmapSelection.length === 2 && !isCalculatingHeatmap ? "#fbbf24" : "rgba(255,255,255,0.1)",
+                color: heatmapSelection.length === 2 && !isCalculatingHeatmap ? "black" : "#888",
+                fontWeight: "bold", border: "none", cursor: heatmapSelection.length === 2 && !isCalculatingHeatmap ? "pointer" : "not-allowed",
                 transition: "background 0.2s"
               }}
             >
-              Vypočítat a zobrazit
+              {isCalculatingHeatmap ? "Počítám (může trvat)..." : "Vypočítat a zobrazit"}
             </button>
           </div>
         )}
