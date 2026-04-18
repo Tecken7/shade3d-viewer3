@@ -109,7 +109,7 @@ function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
   return g
 }
 
-/* ---------- Heatmap Funkce (Čistě datová) ---------- */
+/* ---------- Heatmap Funkce ---------- */
 export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
   try {
     if (!meshB.geometry.boundsTree) {
@@ -131,10 +131,10 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
     const distances = new Float32Array(posA.count)
     const vA = new THREE.Vector3()
     
-    const colorRed = new THREE.Color(0xff0000)    // 0.0 - 0.5 mm
-    const colorYellow = new THREE.Color(0xffff00) // 0.5 - 1.5 mm
-    const colorGreen = new THREE.Color(0x00ff00)  // 1.5 - 2.0 mm
-    const colorWhite = new THREE.Color(0xffffff)  // Nad limit
+    const colorRed = new THREE.Color(0xff0000)
+    const colorYellow = new THREE.Color(0xffff00)
+    const colorGreen = new THREE.Color(0x00ff00)
+    const colorWhite = new THREE.Color(0xffffff)
     
     const invMatB = new THREE.Matrix4().copy(meshB.matrixWorld).invert()
     const target = { point: new THREE.Vector3(), distance: 0 }
@@ -316,7 +316,7 @@ function AnyModel({
   wireframe = false,
   showHeatmap = false,
   onHoverDist,
-  onPinNote, // NOVÉ: callback pro připnutí štítku
+  onPinNote,
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
@@ -494,8 +494,8 @@ function AnyModel({
       onPointerOut={() => {
         if (showHeatmap && onHoverDist) onHoverDist(null);
       }}
-      onClick={(e) => {
-        // NOVÉ: Kliknutím uložíme hodnotu a 3D pozici
+      // ZMĚNĚNO NA DVOJKLIK PRO PŘIDÁNÍ POZNÁMKY
+      onDoubleClick={(e) => {
         if (!showHeatmap || !onPinNote) return;
         e.stopPropagation();
         const distAttr = e.object.geometry.getAttribute('_occlusionDist');
@@ -1135,7 +1135,6 @@ export default function ClientPage() {
   const [hasComputedHeatmap, setHasComputedHeatmap] = useState(false)
   const [showHeatmap, setShowHeatmap] = useState(false)
   
-  // NOVÉ: Stav pro připnuté poznámky (pins)
   const [pinnedNotes, setPinnedNotes] = useState([])
 
   const tooltipRef = useRef(null)
@@ -1169,14 +1168,14 @@ export default function ClientPage() {
     })
     setHasComputedHeatmap(false)
     setShowHeatmap(false)
-    setPinnedNotes([]) // Zruší připnuté poznámky při změně výběru
+    setPinnedNotes([]) 
     if (tooltipRef.current) tooltipRef.current.style.opacity = "0";
   }
 
   const handleApplyHeatmap = () => {
     if (heatmapSelection.length !== 2) return
     setIsCalculatingHeatmap(true);
-    setPinnedNotes([]); // Promaže poznámky při novém výpočtu
+    setPinnedNotes([]); 
 
     setTimeout(() => {
       try {
@@ -1208,7 +1207,6 @@ export default function ClientPage() {
     }
   }, [showHeatmap])
 
-  // NOVÉ: Handler pro uložení hodnoty po kliknutí
   const handlePinNote = useCallback((dist, point) => {
     setPinnedNotes(prev => [...prev, { 
       id: Date.now() + Math.random(), 
@@ -1644,7 +1642,6 @@ export default function ClientPage() {
   const topBarRight = !isMobile && (
     <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10, fontFamily: "sans-serif", color: "white" }}>
       
-      {/* Menu pro Heatmapu s Accordion animací a zachováním dat po zavření */}
       <div>
         <button 
           onClick={() => setHeatmapMenuOpen(prev => !prev)}
@@ -1711,6 +1708,9 @@ export default function ClientPage() {
             {hasComputedHeatmap && (
               <div style={{ marginTop: 12, borderTop: "1px solid rgba(255,255,255,.2)", paddingTop: 12 }}>
                 <Switch checked={showHeatmap} onChange={setShowHeatmap} label="Zobrazit vrstvu skusu" />
+                <div style={{ fontSize: 10, color: "#888", marginTop: 8 }}>
+                  Tip: Dvojklikem na model připnete hodnotu.
+                </div>
               </div>
             )}
           </div>
@@ -1761,7 +1761,6 @@ export default function ClientPage() {
       {sidebar}
       {topBarRight}
 
-      {/* Rychlý tooltip při pohybu myši nad modelem */}
       <div 
         ref={tooltipRef}
         style={{
@@ -1777,7 +1776,6 @@ export default function ClientPage() {
         }}
       />
 
-      {/* Vykreslení horní lišty s legendou barev */}
       {showHeatmap && hasComputedHeatmap && (
         <div style={{
           position: "absolute", top: 20, left: "50%", transform: "translateX(-50%)",
@@ -1844,29 +1842,49 @@ export default function ClientPage() {
                 keepMaterials={!!f.km}
                 showHeatmap={showHeatmap && heatmapSelection[0] === f.url}
                 onHoverDist={handleHeatmapHover} 
-                onPinNote={handlePinNote} // Předání callbacku na kliknutí
+                onPinNote={handlePinNote}
               />
             ))}
           </Suspense>
           
-          {/* Vykreslení připnutých poznámek s křížkem */}
+          {/* Nádherně stylované připnuté poznámky (Pins) */}
           {showHeatmap && hasComputedHeatmap && pinnedNotes.map(note => (
-            <Html key={note.id} position={note.pos} center zIndexRange={[100, 0]}>
-              <div style={{
-                background: "rgba(0,0,0,0.85)", color: "#fbbf24", padding: "4px 8px",
-                borderRadius: 6, fontSize: 13, fontWeight: "bold", border: "1px solid rgba(251, 191, 36, 0.5)",
-                display: "flex", alignItems: "center", gap: 8, pointerEvents: "auto",
-                boxShadow: "0 4px 12px rgba(0,0,0,0.5)", userSelect: "none"
-              }}>
-                {note.value.toFixed(2)} mm
-                <button 
-                  onClick={(e) => { e.stopPropagation(); removeNote(note.id); }} 
-                  style={{
-                    background: "none", border: "none", color: "#ccc", cursor: "pointer", 
-                    padding: 0, fontSize: 16, lineHeight: 1, display: "flex", alignItems: "center"
-                  }}
-                  title="Smazat poznámku"
-                >&times;</button>
+            <Html key={note.id} position={note.pos} zIndexRange={[100, 0]}>
+              <div style={{ position: 'relative' }}>
+                {/* Malý bod přesně na 3D koordinátu */}
+                <div style={{
+                  position: 'absolute', left: -4, top: -4, width: 8, height: 8,
+                  backgroundColor: '#fbbf24', borderRadius: '50%', border: '1.5px solid #000',
+                  pointerEvents: 'none'
+                }} />
+                
+                {/* Vodící linka (leader line) - přesná a plynulá */}
+                <svg style={{
+                  position: 'absolute', left: 0, top: -30, width: 30, height: 30,
+                  pointerEvents: 'none', overflow: 'visible'
+                }}>
+                  <line x1="0" y1="30" x2="30" y2="0" stroke="#fbbf24" strokeWidth="2" />
+                </svg>
+                
+                {/* Samotný box posunutý dál od modelu */}
+                <div style={{
+                  position: 'absolute', left: 30, top: -45,
+                  background: "rgba(0,0,0,0.85)", color: "#fbbf24", padding: "4px 8px",
+                  borderRadius: 6, fontSize: 13, fontWeight: "bold", border: "1px solid rgba(251, 191, 36, 0.5)",
+                  display: "flex", alignItems: "center", gap: 8, pointerEvents: "auto",
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.5)", userSelect: "none",
+                  whiteSpace: "nowrap"
+                }}>
+                  {note.value.toFixed(2)} mm
+                  <button 
+                    onClick={(e) => { e.stopPropagation(); removeNote(note.id); }} 
+                    style={{
+                      background: "none", border: "none", color: "#ccc", cursor: "pointer", 
+                      padding: 0, fontSize: 16, lineHeight: 1, display: "flex", alignItems: "center"
+                    }}
+                    title="Smazat poznámku"
+                  >&times;</button>
+                </div>
               </div>
             </Html>
           ))}
