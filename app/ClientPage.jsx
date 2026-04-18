@@ -119,6 +119,14 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
     const geomA = meshA.geometry
     const posA = geomA.attributes.position
 
+    if (meshA.userData._originalColors === undefined) {
+      if (geomA.attributes.color) {
+        meshA.userData._originalColors = geomA.attributes.color.clone()
+      } else {
+        meshA.userData._originalColors = null
+      }
+    }
+
     const colors = new Float32Array(posA.count * 3)
     const vA = new THREE.Vector3()
     
@@ -155,7 +163,6 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
       colors[i * 3 + 2] = finalColor.b
     }
 
-    // Uložíme pouze pole barev, renderování si už vyřeší React v AnyModel
     meshA.userData._heatmapColors = new THREE.BufferAttribute(colors, 3)
     
   } catch (err) {
@@ -397,15 +404,10 @@ function AnyModel({
     return () => { cancelled = true }
   }, [url, ext])
 
-  // ----------------------------------------------------
-  // ROBUSTNÍ APLIKACE MATERIÁLŮ (Heatmapa vs TEX vs Solid)
-  // ----------------------------------------------------
   useEffect(() => {
     if (!object3D) return
     object3D.traverse((child) => {
       if (!child.isMesh) return
-
-      // 1. ZÁLOHA PŮVODNÍCH BAREV Z GEOMETRIE IHNED PO NAČTENÍ
       if (child.userData._originalColors === undefined) {
           if (child.geometry.attributes.color) {
               child.userData._originalColors = child.geometry.attributes.color.clone();
@@ -414,14 +416,11 @@ function AnyModel({
           }
       }
 
-      // 2. APLIKACE SPRÁVNÉ BAREVNÉ VRSTVY DO GEOMETRIE
       const isHeatmapActive = showHeatmap && child.userData._heatmapColors;
       
       if (isHeatmapActive) {
-          // Přepíšeme geometrii barvami z heatmapy
           child.geometry.setAttribute('color', child.userData._heatmapColors);
       } else {
-          // Vrátíme původní barvy (pokud nějaké model měl)
           if (child.userData._originalColors) {
               child.geometry.setAttribute('color', child.userData._originalColors);
           } else {
@@ -433,8 +432,6 @@ function AnyModel({
           child.geometry.attributes.color.needsUpdate = true;
       }
 
-      // 3. APLIKACE MATERIÁLU
-      // Chceme zapnout renderování vertexů buď kvůli heatmapě, nebo kvůli zapnutému TEX tlačítku (pokud model .ply barvy má)
       const isOriginalTexActive = useVertexColors && child.userData._originalColors;
       const wantVertexColors = isHeatmapActive || isOriginalTexActive;
 
@@ -463,7 +460,6 @@ function AnyModel({
           child.material = newMat
       }
 
-      // Overlays
       if (child.userData._edges) child.userData._edges.visible = !!wireframe
       else if (wireframe) rebuildWireOverlay(child)
     })
@@ -1089,7 +1085,7 @@ export default function ClientPage() {
   const [heatmapSelection, setHeatmapSelection] = useState([])
   const [isCalculatingHeatmap, setIsCalculatingHeatmap] = useState(false)
   
-  // Stavy pro přepínání
+  // Stavy pro přepínání vrstvy
   const [hasComputedHeatmap, setHasComputedHeatmap] = useState(false)
   const [showHeatmap, setShowHeatmap] = useState(false)
 
@@ -1138,7 +1134,7 @@ export default function ClientPage() {
           applyOcclusionHeatmap(meshA, meshB, 2.0)
           
           setHasComputedHeatmap(true)
-          setShowHeatmap(true) // Okamžitě se heatmapa zapne
+          setShowHeatmap(true) 
         }
       } catch(e) {
         console.error("Heatmap chyba:", e)
@@ -1571,6 +1567,7 @@ export default function ClientPage() {
   const topBarRight = !isMobile && (
     <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10, fontFamily: "sans-serif", color: "white" }}>
       
+      {/* Menu pro Heatmapu - ODSTRANĚNO absolute pozicování a nahrazeno za accordion vyjíždění dolů */}
       <div style={{ position: "relative" }}>
         <button 
           onClick={() => setHeatmapMenuOpen(prev => !prev)}
@@ -1588,7 +1585,7 @@ export default function ClientPage() {
 
         {heatmapMenuOpen && (
           <div style={{
-            position: "absolute", top: "100%", right: 0, marginTop: 8,
+            marginTop: 8,
             background: "rgba(0,0,0,.85)", backdropFilter: "blur(8px)",
             border: "1px solid rgba(255,255,255,.2)", borderRadius: 10,
             padding: 12, width: 240, zIndex: 100, color: "white", boxShadow: "0 10px 30px rgba(0,0,0,0.5)"
@@ -1680,6 +1677,31 @@ export default function ClientPage() {
       {logoEl}
       {sidebar}
       {topBarRight}
+
+      {/* Vykreslení horní vrstvy s legendou barev (pokud je zapnutá) */}
+      {showHeatmap && hasComputedHeatmap && (
+        <div style={{
+          position: "absolute", top: 20, left: "50%", transform: "translateX(-50%)",
+          zIndex: 100, background: "rgba(0,0,0,0.65)", padding: "12px 24px",
+          borderRadius: 12, border: "1px solid rgba(255,255,255,0.2)",
+          color: "white", fontFamily: "sans-serif", fontSize: 12,
+          display: "flex", flexDirection: "column", alignItems: "center", gap: 8,
+          backdropFilter: "blur(6px)", boxShadow: "0 4px 12px rgba(0,0,0,0.5)"
+        }}>
+          <span style={{ fontWeight: "bold", fontSize: 14 }}>Vzdálenost a kontakt (mm)</span>
+          <div style={{
+            width: 250, height: 12, borderRadius: 6,
+            background: "linear-gradient(to right, #ff0000 0%, #ffff00 25%, #00ff00 75%, #ffffff 100%)",
+            boxShadow: "inset 0 1px 3px rgba(0,0,0,0.4)"
+          }} />
+          <div style={{ display: "flex", justifyContent: "space-between", width: 250, fontSize: 11, fontWeight: "bold", opacity: 0.8 }}>
+            <span>0.0</span>
+            <span style={{ marginLeft: "-15px" }}>0.5</span>
+            <span style={{ marginLeft: "15px" }}>1.5</span>
+            <span>2.0+</span>
+          </div>
+        </div>
+      )}
 
       {clippingEnabled && !isMobile && <Overlay2D segments={sliceSegments} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} />}
 
