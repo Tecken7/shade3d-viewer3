@@ -174,17 +174,6 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
   }
 }
 
-/* ---------- Loader ---------- */
-function InlineLoader({ text }) {
-  return (
-    <Html center>
-      <div style={{ background: "rgba(0,0,0,0.7)", padding: "16px 28px", borderRadius: 10, color: "white", fontFamily: "sans-serif", fontSize: 16 }}>
-        ⏳ {text || "Načítám…"}
-      </div>
-    </Html>
-  )
-}
-
 /* ---------- 3D Auto Rotate (Cinematic Spin) ---------- */
 function AutoRotateScene({ enabled, target }) {
   const { camera, gl } = useThree()
@@ -1192,7 +1181,7 @@ export default function ClientPage() {
       } finally {
         setIsCalculatingHeatmap(false);
       }
-    }, 150) // Zvýšeno na 150ms, aby se načítací obrazovka stihla vykreslit
+    }, 150) 
   }
 
   const handleHeatmapHover = useCallback((dist, x, y) => {
@@ -1701,7 +1690,7 @@ export default function ClientPage() {
                 transition: "background 0.2s"
               }}
             >
-              {isCalculatingHeatmap ? "Počítám (může trvat)..." : (hasComputedHeatmap ? "Přepočítat modely" : "Vypočítat")}
+              Vypočítat
             </button>
 
             {hasComputedHeatmap && (
@@ -1759,6 +1748,20 @@ export default function ClientPage() {
       {logoEl}
       {sidebar}
       {topBarRight}
+
+      {/* OVERLAY BĚHEM NAČÍTÁNÍ MODELŮ */}
+      {!allLoaded && files.length > 0 && (
+        <div style={{
+          position: "absolute", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.85)", 
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", 
+          color: "white", fontFamily: "sans-serif"
+        }}>
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "spin 1s linear infinite", marginBottom: 16 }}>
+            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+          </svg>
+          <div style={{ fontSize: 18, fontWeight: "bold" }}>Načítám modely...</div>
+        </div>
+      )}
 
       {/* OVERLAY BĚHEM VÝPOČTU */}
       {isCalculatingHeatmap && (
@@ -1991,8 +1994,6 @@ export default function ClientPage() {
 
         <TouchTrackballControls key="trackball" ref={trackballRef} target={cameraTarget} />
         <RightButtonPan key="pan" setTarget={setCameraTarget} trackballRef={trackballRef} />
-
-        {!allLoaded && files.length > 0 && <InlineLoader text="Načítám modely…" />}
       </Canvas>
 
       <Lightbox open={lightbox.open} onClose={() => setLightbox({ open: false, src: null, alt: "" })} src={lightbox.src} alt={lightbox.alt} />
