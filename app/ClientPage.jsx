@@ -109,7 +109,7 @@ function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
   return g
 }
 
-/* ---------- Heatmap Funkce ---------- */
+/* ---------- Heatmap Funkce (Čistě datová) ---------- */
 export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
   try {
     if (!meshB.geometry.boundsTree) {
@@ -131,10 +131,10 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
     const distances = new Float32Array(posA.count)
     const vA = new THREE.Vector3()
     
-    const colorRed = new THREE.Color(0xff0000)
-    const colorYellow = new THREE.Color(0xffff00)
-    const colorGreen = new THREE.Color(0x00ff00)
-    const colorWhite = new THREE.Color(0xffffff)
+    const colorRed = new THREE.Color(0xff0000)    // 0.0 - 0.5 mm
+    const colorYellow = new THREE.Color(0xffff00) // 0.5 - 1.5 mm
+    const colorGreen = new THREE.Color(0x00ff00)  // 1.5 - 2.0 mm
+    const colorWhite = new THREE.Color(0xffffff)  // Nad limit
     
     const invMatB = new THREE.Matrix4().copy(meshB.matrixWorld).invert()
     const target = { point: new THREE.Vector3(), distance: 0 }
@@ -494,7 +494,6 @@ function AnyModel({
       onPointerOut={() => {
         if (showHeatmap && onHoverDist) onHoverDist(null);
       }}
-      // ZMĚNĚNO NA DVOJKLIK PRO PŘIDÁNÍ POZNÁMKY
       onDoubleClick={(e) => {
         if (!showHeatmap || !onPinNote) return;
         e.stopPropagation();
@@ -1193,7 +1192,7 @@ export default function ClientPage() {
       } finally {
         setIsCalculatingHeatmap(false);
       }
-    }, 50)
+    }, 150) // Zvýšeno na 150ms, aby se načítací obrazovka stihla vykreslit
   }
 
   const handleHeatmapHover = useCallback((dist, x, y) => {
@@ -1761,13 +1760,27 @@ export default function ClientPage() {
       {sidebar}
       {topBarRight}
 
+      {/* OVERLAY BĚHEM VÝPOČTU */}
+      {isCalculatingHeatmap && (
+        <div style={{
+          position: "absolute", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.7)", 
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", 
+          color: "white", fontFamily: "sans-serif"
+        }}>
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "spin 1s linear infinite", marginBottom: 16 }}>
+            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+          </svg>
+          <div style={{ fontSize: 18, fontWeight: "bold" }}>Vypočítávám mapu skusu...</div>
+        </div>
+      )}
+
       <div 
         ref={tooltipRef}
         style={{
           position: "fixed", top: 0, left: 0, opacity: 0,
           background: "rgba(0,0,0,0.85)", color: "#fff",
           padding: "6px 10px", borderRadius: 6, fontSize: 13,
-          fontWeight: "bold", pointerEvents: "none", zIndex: 9999,
+          fontWeight: "bold", pointerEvents: "none", zIndex: 9998,
           border: "1px solid rgba(255,255,255,0.2)",
           boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
           transition: "opacity 0.15s ease",
@@ -1847,18 +1860,15 @@ export default function ClientPage() {
             ))}
           </Suspense>
           
-          {/* Nádherně stylované připnuté poznámky (Pins) */}
           {showHeatmap && hasComputedHeatmap && pinnedNotes.map(note => (
             <Html key={note.id} position={note.pos} zIndexRange={[100, 0]}>
               <div style={{ position: 'relative' }}>
-                {/* Malý bod přesně na 3D koordinátu */}
                 <div style={{
                   position: 'absolute', left: -4, top: -4, width: 8, height: 8,
                   backgroundColor: '#fbbf24', borderRadius: '50%', border: '1.5px solid #000',
                   pointerEvents: 'none'
                 }} />
                 
-                {/* Vodící linka (leader line) - přesná a plynulá */}
                 <svg style={{
                   position: 'absolute', left: 0, top: -30, width: 30, height: 30,
                   pointerEvents: 'none', overflow: 'visible'
@@ -1866,7 +1876,6 @@ export default function ClientPage() {
                   <line x1="0" y1="30" x2="30" y2="0" stroke="#fbbf24" strokeWidth="2" />
                 </svg>
                 
-                {/* Samotný box posunutý dál od modelu */}
                 <div style={{
                   position: 'absolute', left: 30, top: -45,
                   background: "rgba(0,0,0,0.85)", color: "#fbbf24", padding: "4px 8px",
