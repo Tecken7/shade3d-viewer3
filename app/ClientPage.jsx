@@ -1042,6 +1042,10 @@ export default function ClientPage() {
 
   const [isAutoRotating, setIsAutoRotating] = useState(false)
 
+  // -- Stavy pro menu Heatmapy (NOVÉ) --
+  const [heatmapMenuOpen, setHeatmapMenuOpen] = useState(false)
+  const [heatmapSelection, setHeatmapSelection] = useState([])
+
   const [photos, setPhotos] = useState([])
   const [lightbox, setLightbox] = useState({ open: false, src: null, alt: "" })
 
@@ -1065,23 +1069,35 @@ export default function ClientPage() {
     meshesRef.current[url] = mesh
   }, [])
 
-  const handleGenerateHeatmap = () => {
-    const urls = files.map(f => f.url);
-    if (urls.length < 2) {
-      alert("Pro heatmapu potřebuješ alespoň 2 modely (např. horní a dolní čelist).");
-      return;
-    }
-    const meshA = meshesRef.current[urls[0]];
-    const meshB = meshesRef.current[urls[1]];
+  // -- Logika nového menu pro heatmapu --
+  const toggleHeatmapModel = (url) => {
+    setHeatmapSelection((prev) => {
+      if (prev.includes(url)) return prev.filter(u => u !== url)
+      if (prev.length >= 2) return prev // Limit je 2
+      return [...prev, url]
+    })
+  }
+
+  const handleApplyHeatmap = () => {
+    if (heatmapSelection.length !== 2) return
+    const meshA = meshesRef.current[heatmapSelection[0]]
+    const meshB = meshesRef.current[heatmapSelection[1]]
+
     if (meshA && meshB) {
-      applyOcclusionHeatmap(meshA, meshB, 2.0);
-      setVertexColors(prev => {
-        const next = [...prev];
-        next[0] = true;
-        return next;
-      });
+      applyOcclusionHeatmap(meshA, meshB, 2.0)
+      
+      // Zapne vertex colors (tlačítko TEX) pro první vybraný model, aby se barvy ukázaly
+      const indexA = files.findIndex(f => f.url === heatmapSelection[0])
+      if (indexA !== -1) {
+        setVertexColors(prev => {
+          const next = [...prev]
+          next[indexA] = true
+          return next
+        })
+      }
+      setHeatmapMenuOpen(false) // Zavřít menu po potvrzení
     }
-  };
+  }
 
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
@@ -1506,19 +1522,70 @@ export default function ClientPage() {
   const topBarRight = !isMobile && (
     <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10, fontFamily: "sans-serif", color: "white" }}>
       
-      <button 
-        onClick={handleGenerateHeatmap}
-        style={{
-          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-          background: "rgba(239,68,68,.8)",
-          backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)",
-          borderRadius: 10, padding: "10px 14px", color: "white", cursor: "pointer",
-          fontWeight: "bold", fontSize: 14, transition: "background 0.2s"
-        }}
-        title="Barevně vyznačí místa dotyku (max 2 mm) prvního modelu vůči druhému."
-      >
-        🔥 Mapa skusu
-      </button>
+      {/* Vykreslení Menu pro Heatmapu */}
+      <div style={{ position: "relative" }}>
+        <button 
+          onClick={() => {
+            setHeatmapMenuOpen(prev => !prev);
+            // Při zavření zrušíme výběr (aby to bylo hezky vyčištěné pro další použití)
+            if (heatmapMenuOpen) setHeatmapSelection([]);
+          }}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            background: heatmapMenuOpen ? "rgba(239,68,68,.8)" : "rgba(0,0,0,.25)",
+            backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)",
+            borderRadius: 10, padding: "10px 14px", color: "white", cursor: "pointer",
+            fontWeight: "bold", fontSize: 14, transition: "background 0.2s", width: "100%"
+          }}
+          title="Zobrazit vzdálenost (skus) mezi dvěma modely"
+        >
+          🔥 Mapa skusu
+        </button>
+
+        {heatmapMenuOpen && (
+          <div style={{
+            position: "absolute", top: "100%", right: 0, marginTop: 8,
+            background: "rgba(0,0,0,.85)", backdropFilter: "blur(8px)",
+            border: "1px solid rgba(255,255,255,.2)", borderRadius: 10,
+            padding: 12, width: 240, zIndex: 100, color: "white", boxShadow: "0 10px 30px rgba(0,0,0,0.5)"
+          }}>
+            <div style={{ marginBottom: 12, fontSize: 13, fontWeight: "bold", color: "#ccc" }}>
+              Vyberte 2 modely k porovnání:
+            </div>
+            
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 180, overflowY: "auto", marginBottom: 16 }}>
+              {files.map((f) => (
+                <label key={f.url} style={{ display: "flex", alignItems: "center", gap: 8, cursor: heatmapSelection.length >= 2 && !heatmapSelection.includes(f.url) ? "not-allowed" : "pointer", fontSize: 13, opacity: heatmapSelection.length >= 2 && !heatmapSelection.includes(f.url) ? 0.5 : 1 }}>
+                  <input 
+                    type="checkbox" 
+                    checked={heatmapSelection.includes(f.url)}
+                    onChange={() => toggleHeatmapModel(f.url)}
+                    disabled={heatmapSelection.length >= 2 && !heatmapSelection.includes(f.url)}
+                    style={{ width: 16, height: 16, cursor: "inherit" }}
+                  />
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {stripExt(f.name)}
+                  </span>
+                </label>
+              ))}
+            </div>
+
+            <button 
+              onClick={handleApplyHeatmap}
+              disabled={heatmapSelection.length !== 2}
+              style={{
+                width: "100%", padding: "10px 0", borderRadius: 6,
+                background: heatmapSelection.length === 2 ? "#fbbf24" : "rgba(255,255,255,0.1)",
+                color: heatmapSelection.length === 2 ? "black" : "#888",
+                fontWeight: "bold", border: "none", cursor: heatmapSelection.length === 2 ? "pointer" : "not-allowed",
+                transition: "background 0.2s"
+              }}
+            >
+              Vypočítat a zobrazit
+            </button>
+          </div>
+        )}
+      </div>
 
       <button 
         onClick={() => setIsAutoRotating(p => !p)}
