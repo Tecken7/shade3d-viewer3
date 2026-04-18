@@ -119,10 +119,12 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
     const geomA = meshA.geometry
     const posA = geomA.attributes.position
 
-    // Uložíme si původní barvy (texturu ze skenu) do zálohy, pokud tam ještě nejsou
-    if (!geomA.userData._originalColors) {
+    // Uložíme si původní barvy do paměti Meshe (ne geometrie, aby to React našel)
+    if (meshA.userData._originalColors === undefined) {
       if (geomA.attributes.color) {
-        geomA.userData._originalColors = geomA.attributes.color.clone()
+        meshA.userData._originalColors = geomA.attributes.color.clone()
+      } else {
+        meshA.userData._originalColors = null
       }
     }
 
@@ -163,8 +165,8 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
       colors[i * 3 + 2] = finalColor.b
     }
 
-    // Uložíme vypočítanou heatmapu pouze do dat (zobrazení si pak řeší komponenta AnyModel přes React)
-    geomA.userData._heatmapColors = new THREE.BufferAttribute(colors, 3)
+    // Uložíme vypočítanou heatmapu do dat Meshe
+    meshA.userData._heatmapColors = new THREE.BufferAttribute(colors, 3)
     
   } catch (err) {
     console.error("Chyba výpočtu heatmapy: ", err)
@@ -435,6 +437,11 @@ function AnyModel({
           } else {
               child.geometry.deleteAttribute('color');
           }
+      }
+      
+      // Explicitní refresh pro Three.js aby zaznamenal změnu
+      if (child.geometry.attributes.color) {
+          child.geometry.attributes.color.needsUpdate = true;
       }
 
       // 2. Nastavení vlastností Materiálu
