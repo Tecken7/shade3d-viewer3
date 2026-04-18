@@ -810,7 +810,6 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
 
   const vBox = `${vX} ${vY} ${vW} ${vH}`
 
-  // Výpočet přesné tloušťky na obrazovce nezávisle na zoomu
   const svgToScreenRatio = vW / winSize.w
   const dynamicStrokeWidth = 1.5 * svgToScreenRatio
   const dynamicPointRadius = 4 * svgToScreenRatio
@@ -1426,7 +1425,7 @@ export default function ClientPage() {
     </div>
   )
 
-  const topBarRight = (
+  const topBarRight = !isMobile && (
     <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10, fontFamily: "sans-serif", color: "white" }}>
       
       <button 
@@ -1473,7 +1472,7 @@ export default function ClientPage() {
       {sidebar}
       {topBarRight}
 
-      {clippingEnabled && <Overlay2D segments={sliceSegments} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} />}
+      {clippingEnabled && !isMobile && <Overlay2D segments={sliceSegments} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} />}
 
       <Canvas
         orthographic
@@ -1517,7 +1516,7 @@ export default function ClientPage() {
           </Suspense>
         </group>
 
-        {clippingEnabled && (
+        {clippingEnabled && !isMobile && (
           <group ref={setPlaneGroup}>
             <mesh>
               <circleGeometry args={[planeRadius, 64]} />
@@ -1528,7 +1527,7 @@ export default function ClientPage() {
           </group>
         )}
 
-        {clippingEnabled && planeGroup && (
+        {clippingEnabled && !isMobile && planeGroup && (
           <TransformControls 
             ref={transformRotateRef}
             object={planeGroup}
@@ -1553,7 +1552,7 @@ export default function ClientPage() {
           />
         )}
 
-        {clippingEnabled && planeGroup && (
+        {clippingEnabled && !isMobile && planeGroup && (
           <TransformControls 
             ref={transformTranslateRef}
             object={planeGroup}
@@ -1578,7 +1577,7 @@ export default function ClientPage() {
           />
         )}
 
-        {clippingEnabled && (
+        {clippingEnabled && !isMobile && (
           <GizmoManager transformRefs={[transformRotateRef, transformTranslateRef]} trackballRef={trackballRef} />
         )}
 
