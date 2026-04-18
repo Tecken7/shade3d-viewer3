@@ -874,9 +874,11 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
             const padY = boundingBox.height * 0.1 || 10
             const vW = (boundingBox.width + padX * 2) / zoom
             const vH = (boundingBox.height + padY * 2) / zoom
-            const scaleX = vW / winSize.w
-            const scaleY = vH / winSize.h
-            setPan(p => ({ x: p.x - dx * scaleX, y: p.y + dy * scaleY }))
+            
+            // OPRAVA PANNINGU: Sjednocené měřítko posunu zamezuje zamrzávání ve vertikální ose
+            const uniformScale = Math.max(vW / winSize.w, vH / winSize.h)
+            
+            setPan(p => ({ x: p.x - dx * uniformScale, y: p.y + dy * uniformScale }))
         }
         lastPos.current = { x: e.clientX, y: e.clientY }
     } else if (measureState.active && segments.length > 0) {
@@ -948,8 +950,7 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
 
   const vBox = `${vX} ${vY} ${vW} ${vH}`
 
-  // Dynamický výpočet pro font textu přímo v SVG
-  const svgToScreenRatio = vW / winSize.w
+  const svgToScreenRatio = Math.max(vW / winSize.w, vH / winSize.h)
   const dynamicStrokeWidth = 1.5 * svgToScreenRatio
   const dynamicPointRadius = 4 * svgToScreenRatio
 
@@ -1007,7 +1008,7 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
             />
             <circle cx={measureState.snappedP2.x} cy={measureState.snappedP2.y} r={dynamicPointRadius} fill="#fbbf24" />
             
-            {/* Tímto jsme kompletně vyřešili bug s plavajícím textem. Text je nyní součástí vnitřního SVG nákresu! */}
+            {/* Odsazený a plynule škálovatelný text vložený čistě přes SVG text uzel */}
             <text
               x={ (measureState.p1.x + measureState.snappedP2.x) / 2 }
               y={ -((measureState.p1.y + measureState.snappedP2.y) / 2 + 15 * svgToScreenRatio) }
