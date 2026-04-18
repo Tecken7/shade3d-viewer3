@@ -109,7 +109,7 @@ function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
   return g
 }
 
-/* ---------- Heatmap Funkce ---------- */
+/* ---------- Heatmap Funkce (Čistě datová) ---------- */
 export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
   try {
     if (!meshB.geometry.boundsTree) {
@@ -128,13 +128,13 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
     }
 
     const colors = new Float32Array(posA.count * 3)
-    const distances = new Float32Array(posA.count) // NOVÉ: paměť pro hodnoty tooltipu
+    const distances = new Float32Array(posA.count)
     const vA = new THREE.Vector3()
     
-    const colorRed = new THREE.Color(0xff0000)
-    const colorYellow = new THREE.Color(0xffff00)
-    const colorGreen = new THREE.Color(0x00ff00)
-    const colorWhite = new THREE.Color(0xffffff)
+    const colorRed = new THREE.Color(0xff0000)    // 0.0 - 0.5 mm
+    const colorYellow = new THREE.Color(0xffff00) // 0.5 - 1.5 mm
+    const colorGreen = new THREE.Color(0x00ff00)  // 1.5 - 2.0 mm
+    const colorWhite = new THREE.Color(0xffffff)  // Nad limit
     
     const invMatB = new THREE.Matrix4().copy(meshB.matrixWorld).invert()
     const target = { point: new THREE.Vector3(), distance: 0 }
@@ -147,7 +147,7 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
       const distResult = meshB.geometry.boundsTree.closestPointToPoint(vA, target)
       const distance = typeof distResult === "number" ? distResult : target.distance
 
-      distances[i] = distance // Uložíme přesnou vzdálenost pro zobrazení na hover
+      distances[i] = distance 
 
       let finalColor = colorWhite
       
@@ -167,7 +167,6 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
     }
 
     meshA.userData._heatmapColors = new THREE.BufferAttribute(colors, 3)
-    // Uložíme pole vzdáleností do geometrie, abychom z něj mohli rychle číst
     geomA.setAttribute('_occlusionDist', new THREE.BufferAttribute(distances, 1))
     
   } catch (err) {
@@ -316,7 +315,8 @@ function AnyModel({
   keepMaterials = false,
   wireframe = false,
   showHeatmap = false,
-  onHoverDist, // NOVÉ: callback pro tooltip
+  onHoverDist,
+  onPinNote, // NOVÉ: callback pro připnutí štítku
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
@@ -476,10 +476,9 @@ function AnyModel({
   return visible ? (
     <primitive 
       object={object3D} 
-      // NOVÉ: Snímání myši pro tooltip
       onPointerMove={(e) => {
         if (!showHeatmap || !onHoverDist) return;
-        e.stopPropagation(); // Zabránit problikávání skrz objekty
+        e.stopPropagation(); 
         const distAttr = e.object.geometry.getAttribute('_occlusionDist');
         
         if (distAttr && e.face) {
@@ -494,6 +493,24 @@ function AnyModel({
       }}
       onPointerOut={() => {
         if (showHeatmap && onHoverDist) onHoverDist(null);
+      }}
+      onClick={(e) => {
+        // NOVÉ: Kliknutím uložíme hodnotu a 3D pozici
+        if (!showHeatmap || !onPinNote) return;
+        e.stopPropagation();
+        const distAttr = e.object.geometry.getAttribute('_occlusionDist');
+        let dist = null;
+        if (distAttr && e.face) {
+          const dA = distAttr.getX(e.face.a);
+          const dB = distAttr.getX(e.face.b);
+          const dC = distAttr.getX(e.face.c);
+          dist = (dA + dB + dC) / 3;
+        } else if (distAttr && e.index !== undefined) {
+          dist = distAttr.getX(e.index);
+        }
+        if (dist !== null) {
+           onPinNote(dist, e.point);
+        }
       }}
     />
   ) : null
@@ -1117,8 +1134,10 @@ export default function ClientPage() {
   
   const [hasComputedHeatmap, setHasComputedHeatmap] = useState(false)
   const [showHeatmap, setShowHeatmap] = useState(false)
+  
+  // NOVÉ: Stav pro připnuté poznámky (pins)
+  const [pinnedNotes, setPinnedNotes] = useState([])
 
-  // NOVÉ: Ref pro tooltip prvek (aktualizujeme ho ručně bez React renderu = 60 FPS plynulost)
   const tooltipRef = useRef(null)
 
   const [photos, setPhotos] = useState([])
@@ -1138,7 +1157,6 @@ export default function ClientPage() {
   const [loadedUrls, setLoadedUrls] = useState(new Set())
   const handleModelLoaded = (url) => setLoadedUrls((prev) => { const n = new Set(prev); n.add(url); return n; })
 
-  // -- Reference pro heatmapu --
   const meshesRef = useRef({})
   const handleMeshReady = useCallback((mesh, url) => {
     meshesRef.current[url] = mesh
@@ -1151,12 +1169,14 @@ export default function ClientPage() {
     })
     setHasComputedHeatmap(false)
     setShowHeatmap(false)
-    if (tooltipRef.current) tooltipRef.current.style.opacity = "0"; // skryje tooltip
+    setPinnedNotes([]) // Zruší připnuté poznámky při změně výběru
+    if (tooltipRef.current) tooltipRef.current.style.opacity = "0";
   }
 
   const handleApplyHeatmap = () => {
     if (heatmapSelection.length !== 2) return
     setIsCalculatingHeatmap(true);
+    setPinnedNotes([]); // Promaže poznámky při novém výpočtu
 
     setTimeout(() => {
       try {
@@ -1177,7 +1197,6 @@ export default function ClientPage() {
     }, 50)
   }
 
-  // NOVÉ: Funkce pro ruční pohyb Tooltipu bez zasekávání celé aplikace
   const handleHeatmapHover = useCallback((dist, x, y) => {
     if (!tooltipRef.current || !showHeatmap) return;
     if (dist === null) {
@@ -1185,10 +1204,22 @@ export default function ClientPage() {
     } else {
       tooltipRef.current.style.opacity = "1";
       tooltipRef.current.style.transform = `translate(${x + 15}px, ${y + 15}px)`;
-      // Změníme text přímo v DOMu
       tooltipRef.current.innerText = `Vzdálenost: ${dist.toFixed(2)} mm`;
     }
   }, [showHeatmap])
+
+  // NOVÉ: Handler pro uložení hodnoty po kliknutí
+  const handlePinNote = useCallback((dist, point) => {
+    setPinnedNotes(prev => [...prev, { 
+      id: Date.now() + Math.random(), 
+      value: dist, 
+      pos: [point.x, point.y, point.z] 
+    }]);
+  }, []);
+
+  const removeNote = useCallback((id) => {
+    setPinnedNotes(prev => prev.filter(n => n.id !== id));
+  }, []);
 
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
@@ -1613,13 +1644,10 @@ export default function ClientPage() {
   const topBarRight = !isMobile && (
     <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10, fontFamily: "sans-serif", color: "white" }}>
       
-      {/* Menu pro Heatmapu s Accordion CSS animací */}
+      {/* Menu pro Heatmapu s Accordion animací a zachováním dat po zavření */}
       <div>
         <button 
-          onClick={() => {
-            setHeatmapMenuOpen(prev => !prev);
-            if (heatmapMenuOpen) setHeatmapSelection([]);
-          }}
+          onClick={() => setHeatmapMenuOpen(prev => !prev)}
           style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
             background: heatmapMenuOpen ? "rgba(239,68,68,.8)" : "rgba(0,0,0,.25)",
@@ -1733,7 +1761,7 @@ export default function ClientPage() {
       {sidebar}
       {topBarRight}
 
-      {/* Rychlý tooltip (aktualizovaný přes DOM ref pro maximální výkon) */}
+      {/* Rychlý tooltip při pohybu myši nad modelem */}
       <div 
         ref={tooltipRef}
         style={{
@@ -1745,11 +1773,11 @@ export default function ClientPage() {
           boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
           transition: "opacity 0.15s ease",
           transformOrigin: "top left",
-          display: showHeatmap ? "block" : "none" // Zmizí, když vypneš heatmapu
+          display: showHeatmap ? "block" : "none" 
         }}
       />
 
-      {/* Vykreslení horní lišty s legendou barev (pokud je zapnutá) */}
+      {/* Vykreslení horní lišty s legendou barev */}
       {showHeatmap && hasComputedHeatmap && (
         <div style={{
           position: "absolute", top: 20, left: "50%", transform: "translateX(-50%)",
@@ -1815,10 +1843,33 @@ export default function ClientPage() {
                 useVertexColors={vertexColors[i]}
                 keepMaterials={!!f.km}
                 showHeatmap={showHeatmap && heatmapSelection[0] === f.url}
-                onHoverDist={handleHeatmapHover} // Předání callbacku na hover
+                onHoverDist={handleHeatmapHover} 
+                onPinNote={handlePinNote} // Předání callbacku na kliknutí
               />
             ))}
           </Suspense>
+          
+          {/* Vykreslení připnutých poznámek s křížkem */}
+          {showHeatmap && hasComputedHeatmap && pinnedNotes.map(note => (
+            <Html key={note.id} position={note.pos} center zIndexRange={[100, 0]}>
+              <div style={{
+                background: "rgba(0,0,0,0.85)", color: "#fbbf24", padding: "4px 8px",
+                borderRadius: 6, fontSize: 13, fontWeight: "bold", border: "1px solid rgba(251, 191, 36, 0.5)",
+                display: "flex", alignItems: "center", gap: 8, pointerEvents: "auto",
+                boxShadow: "0 4px 12px rgba(0,0,0,0.5)", userSelect: "none"
+              }}>
+                {note.value.toFixed(2)} mm
+                <button 
+                  onClick={(e) => { e.stopPropagation(); removeNote(note.id); }} 
+                  style={{
+                    background: "none", border: "none", color: "#ccc", cursor: "pointer", 
+                    padding: 0, fontSize: 16, lineHeight: 1, display: "flex", alignItems: "center"
+                  }}
+                  title="Smazat poznámku"
+                >&times;</button>
+              </div>
+            </Html>
+          ))}
         </group>
 
         {clippingEnabled && !isMobile && (
