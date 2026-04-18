@@ -174,6 +174,17 @@ export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
   }
 }
 
+/* ---------- Loader ---------- */
+function InlineLoader({ text }) {
+  return (
+    <Html center>
+      <div style={{ background: "rgba(0,0,0,0.7)", padding: "16px 28px", borderRadius: 10, color: "white", fontFamily: "sans-serif", fontSize: 16 }}>
+        ⏳ {text || "Načítám…"}
+      </div>
+    </Html>
+  )
+}
+
 /* ---------- 3D Auto Rotate (Cinematic Spin) ---------- */
 function AutoRotateScene({ enabled, target }) {
   const { camera, gl } = useThree()
@@ -1108,6 +1119,10 @@ export default function ClientPage() {
   
   const transformRotateRef = useRef(null) 
   const transformTranslateRef = useRef(null) 
+  
+  // -- NOVÉ: Paměť pro nástroj řezu --
+  const isPlaneInitialized = useRef(false)
+  const planeMatrixRef = useRef(new THREE.Matrix4())
 
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
@@ -1315,6 +1330,7 @@ export default function ClientPage() {
          setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev); 
          planeGroup.translateZ(step)
          planeGroup.updateMatrixWorld(true)
+         planeMatrixRef.current.copy(planeGroup.matrix) // Uložit pozici
          const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
          const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
          clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
@@ -1323,6 +1339,7 @@ export default function ClientPage() {
          setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev); 
          planeGroup.translateZ(-step)
          planeGroup.updateMatrixWorld(true)
+         planeMatrixRef.current.copy(planeGroup.matrix) // Uložit pozici
          const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
          const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
          clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
@@ -1333,29 +1350,66 @@ export default function ClientPage() {
     return () => window.removeEventListener("keydown", handleKeyDown)
   }, [clippingEnabled, updateClippingLogic, planeGroup])
 
+  // -- RESET PRŮŘEZU --
+  const handleResetPlane = useCallback(() => {
+    if (!rootGroupRef.current || !planeGroup) {
+       isPlaneInitialized.current = false;
+       return;
+    }
+    const box = new THREE.Box3().setFromObject(rootGroupRef.current)
+    if (!box.isEmpty()) {
+       const center = new THREE.Vector3()
+       box.getCenter(center)
+       
+       planeGroup.position.copy(center)
+       planeGroup.rotation.set(0, Math.PI / 2, 0)
+       planeGroup.scale.set(1, 1, 1)
+       planeGroup.updateMatrixWorld(true)
+       
+       planeMatrixRef.current.copy(planeGroup.matrix)
+       isPlaneInitialized.current = true
+       
+       const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
+       const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
+       clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
+       
+       updateClippingLogic()
+       setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
+    }
+  }, [planeGroup, updateClippingLogic])
+
   useEffect(() => {
      if (clippingEnabled && rootGroupRef.current && planeGroup) {
-        const box = new THREE.Box3().setFromObject(rootGroupRef.current)
-        if (!box.isEmpty()) {
-           const center = new THREE.Vector3()
-           box.getCenter(center)
+        // Inicializace nebo obnova pozice z paměti
+        if (!isPlaneInitialized.current) {
+            const box = new THREE.Box3().setFromObject(rootGroupRef.current)
+            if (!box.isEmpty()) {
+               const center = new THREE.Vector3()
+               box.getCenter(center)
 
-           const size = new THREE.Vector3()
-           box.getSize(size)
-           const maxDim = Math.max(size.x, size.y, size.z)
-           setPlaneRadius(maxDim * 0.6)
-           
-           planeGroup.position.copy(center)
-           
-           planeGroup.rotation.set(0, Math.PI / 2, 0)
-           planeGroup.updateMatrixWorld(true)
-           
-           const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
-           const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
-           clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-           
-           updateClippingLogic()
+               const size = new THREE.Vector3()
+               box.getSize(size)
+               const maxDim = Math.max(size.x, size.y, size.z)
+               setPlaneRadius(maxDim * 0.6)
+               
+               planeGroup.position.copy(center)
+               planeGroup.rotation.set(0, Math.PI / 2, 0)
+               planeGroup.updateMatrixWorld(true)
+               
+               planeMatrixRef.current.copy(planeGroup.matrix)
+               isPlaneInitialized.current = true
+            }
+        } else {
+            planeGroup.matrix.copy(planeMatrixRef.current)
+            planeGroup.matrix.decompose(planeGroup.position, planeGroup.quaternion, planeGroup.scale)
+            planeGroup.updateMatrixWorld(true)
         }
+
+        const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
+        const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
+        clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
+        
+        updateClippingLogic()
 
         setTimeout(() => {
             const desaturateMaterials = (obj) => {
@@ -1426,6 +1480,7 @@ export default function ClientPage() {
           }
           if (camState) setInitialCameraState(camState)
           setDidInitialFrame(false)
+          isPlaneInitialized.current = false // Reset řezu při nových modelech
         }
 
         if (mId) {
@@ -1537,6 +1592,7 @@ export default function ClientPage() {
         if (urlsChanged) { 
             setDidInitialFrame(false); 
             setInitialCameraState(null); 
+            isPlaneInitialized.current = false;
         }
       }
 
@@ -1727,7 +1783,22 @@ export default function ClientPage() {
       </button>
 
       <div style={{ background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 12 }}>
-        <Switch checked={clippingEnabled} onChange={setClippingEnabled} label="Nástroj řezu (Průřez)" />
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <Switch checked={clippingEnabled} onChange={setClippingEnabled} label="Nástroj řezu (Průřez)" />
+          {clippingEnabled && (
+            <button 
+              onClick={handleResetPlane}
+              style={{
+                background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)",
+                borderRadius: 6, color: "white", padding: "4px 8px", fontSize: 11, cursor: "pointer",
+                transition: "background 0.2s"
+              }}
+              title="Vrátí průřez do výchozí pozice uprostřed modelu"
+            >
+              Reset
+            </button>
+          )}
+        </div>
         {clippingEnabled && (
           <div style={{ marginTop: 12, fontSize: 12, width: 220 }}>
             <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>
@@ -1763,7 +1834,7 @@ export default function ClientPage() {
         </div>
       )}
 
-      {/* OVERLAY BĚHEM VÝPOČTU */}
+      {/* OVERLAY BĚHEM VÝPOČTU HEATMAPY */}
       {isCalculatingHeatmap && (
         <div style={{
           position: "absolute", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.7)", 
@@ -1929,6 +2000,7 @@ export default function ClientPage() {
                     setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
                 }
                 planeGroup.updateMatrixWorld(true)
+                planeMatrixRef.current.copy(planeGroup.matrix)
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
                 const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
                 clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
@@ -1954,6 +2026,7 @@ export default function ClientPage() {
                     setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
                 }
                 planeGroup.updateMatrixWorld(true)
+                planeMatrixRef.current.copy(planeGroup.matrix)
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
                 const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
                 clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
