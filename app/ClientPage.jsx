@@ -136,16 +136,15 @@ function AutoRotateScene({ enabled, target }) {
     if (!enabled || isInteracting.current) return
     
     vTarget.fromArray(target)
-    const speed = 1.0 * delta // O něco rychlejší cinematické tempo
+    const speed = 1.0 * delta 
     
-    // GÉNIUSOVÁ ÚPRAVA: Jako osu rotace použijeme UP vektor kamery.
-    // Tím zaručíme, že se to bude točit VŽDY perfektně zleva doprava podle toho, 
-    // co uživatel vidí na monitoru (osa odspodu nahoru obrazovky), nehledě na náklon.
     const axis = camera.up.clone().normalize()
     
     camera.position.sub(vTarget)
     camera.position.applyAxisAngle(axis, speed)
     camera.position.add(vTarget)
+    
+    camera.up.applyAxisAngle(axis, speed)
     
     camera.lookAt(vTarget)
   })
@@ -811,6 +810,11 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
 
   const vBox = `${vX} ${vY} ${vW} ${vH}`
 
+  // Výpočet přesné tloušťky na obrazovce nezávisle na zoomu
+  const svgToScreenRatio = vW / winSize.w
+  const dynamicStrokeWidth = 1.5 * svgToScreenRatio
+  const dynamicPointRadius = 4 * svgToScreenRatio
+
   const distVal = measureState.p1 && measureState.snappedP2 
       ? Math.sqrt(distSq(measureState.p1, measureState.snappedP2)).toFixed(2) 
       : null
@@ -875,10 +879,10 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
       >
-        <path d={pathData} stroke="#ffffff" strokeWidth={(boundingBox.width/300) * 1.5 || 0.5} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+        <path d={pathData} stroke="#ffffff" strokeWidth={dynamicStrokeWidth} strokeLinecap="round" strokeLinejoin="round" fill="none" />
 
         {measureState.p1 && (
-          <circle cx={measureState.p1.x} cy={measureState.p1.y} r={(boundingBox.width/300) * 4 || 1} fill="#fbbf24" />
+          <circle cx={measureState.p1.x} cy={measureState.p1.y} r={dynamicPointRadius} fill="#fbbf24" />
         )}
         
         {measureState.p1 && measureState.snappedP2 && (
@@ -886,9 +890,9 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
             <line 
               x1={measureState.p1.x} y1={measureState.p1.y} 
               x2={measureState.snappedP2.x} y2={measureState.snappedP2.y} 
-              stroke="#fbbf24" strokeWidth={(boundingBox.width/300) * 1.5 || 0.5} opacity={0.7}
+              stroke="#fbbf24" strokeWidth={dynamicStrokeWidth} opacity={0.7}
             />
-            <circle cx={measureState.snappedP2.x} cy={measureState.snappedP2.y} r={(boundingBox.width/300) * 4 || 1} fill="#fbbf24" />
+            <circle cx={measureState.snappedP2.x} cy={measureState.snappedP2.y} r={dynamicPointRadius} fill="#fbbf24" />
           </>
         )}
       </svg>
@@ -1536,7 +1540,6 @@ export default function ClientPage() {
             showZ={false}
             onChange={() => {
               if (planeGroup) {
-                // Bezpečně vymaže měření jen, když fyzicky táhneš myší!
                 if (transformRotateRef.current?.dragging) {
                     setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
                 }
@@ -1562,7 +1565,6 @@ export default function ClientPage() {
             showZ={true}
             onChange={() => {
               if (planeGroup) {
-                // Bezpečně vymaže měření jen, když fyzicky táhneš myší!
                 if (transformTranslateRef.current?.dragging) {
                     setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
                 }
