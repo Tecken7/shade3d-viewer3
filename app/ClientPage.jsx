@@ -735,10 +735,11 @@ function CustomCameraSetter({ camState, triggerKey, onFramed, setTarget }) {
   return null
 }
 
-/* ---------- SYNC STAVU POHLEDU DO FRAMERU ---------- */
+/* ---------- SYNC STAVU POHLEDU DO FRAMERU A ODESLÁNÍ SNAPSHOTU ---------- */
 function ViewStateSync({ trackballRef }) {
-  const { camera, size } = useThree()
+  const { gl, camera, size } = useThree()
 
+  // Pravidelný sync
   useEffect(() => {
     const interval = setInterval(() => {
       if (typeof window === "undefined" || !trackballRef?.current) return
@@ -765,6 +766,44 @@ function ViewStateSync({ trackballRef }) {
 
     return () => clearInterval(interval)
   }, [camera, trackballRef, size.width, size.height])
+
+  // Naslouchání na vyžádání snapshotu od rodiče
+  useEffect(() => {
+    const handleMessage = (e) => {
+      const d = e.data
+      if (d && d.type === "SHADE3D_REQUEST_SNAPSHOT") {
+        if (!trackballRef?.current) return
+        
+        const c = trackballRef.current
+        camera.updateMatrixWorld(true)
+        
+        const camData = {
+          matrix: camera.matrix.toArray(),
+          up: [camera.up.x, camera.up.y, camera.up.z],
+          zoom: camera.zoom,
+          canvasSize: [size.width, size.height],
+          target: [c.target.x, c.target.y, c.target.z] 
+        }
+
+        // Vygenerování Base64 z aktuálního WebGL plátna
+        const snapshotUrl = gl.domElement.toDataURL("image/jpeg", 0.75) 
+        
+        const targetWindow = window.top || window.parent;
+        if (targetWindow) {
+          targetWindow.postMessage({
+            type: "SHADE3D_SNAPSHOT_RESPONSE",
+            payload: { 
+              camera: camData,
+              snapshot: snapshotUrl
+            }
+          }, "*")
+        }
+      }
+    }
+    
+    window.addEventListener("message", handleMessage)
+    return () => window.removeEventListener("message", handleMessage)
+  }, [gl, camera, trackballRef, size.width, size.height])
 
   return null
 }
@@ -1896,6 +1935,7 @@ export default function ClientPage() {
       <Canvas
         orthographic
         camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }}
+        gl={{ preserveDrawingBuffer: true }}
         onCreated={({ gl }) => {
             gl.setClearAlpha(0)
             gl.localClippingEnabled = false
