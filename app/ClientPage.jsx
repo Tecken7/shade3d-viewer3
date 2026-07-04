@@ -13,7 +13,7 @@ import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from "three-
 /* ---------- Instalace BVH do Three.js ---------- */
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree
-THREE.Mesh.prototype.raycast = acceleratedRaycast // OPRAVA: Zrychlení hoveru o 1000%
+THREE.Mesh.prototype.raycast = acceleratedRaycast
 
 /* ---------- Konst + konfigurace ---------- */
 const LIVE_MSG_TYPES = new Set(["SHADE3D_LIVE", "SHADE3D_LIVE_V6", "SHADE3D_LIVE_V5"])
@@ -331,26 +331,11 @@ function AnyModel({
       opacity,
       side: THREE.DoubleSide,
       depthWrite: opacity === 1,
+      wireframe: !!wireframe,
       ...opts,
     })
 
   const forEachMesh = (obj, cb) => obj?.traverse?.((child) => { if (child.isMesh) cb(child) })
-
-  const rebuildWireOverlay = (mesh) => {
-    if (mesh.userData._edges) {
-      mesh.userData._edges.geometry?.dispose?.()
-      mesh.userData._edges.material?.dispose?.()
-      mesh.remove(mesh.userData._edges)
-      mesh.userData._edges = null
-    }
-    if (!wireframe) return
-    const wfGeom = new THREE.WireframeGeometry(mesh.geometry)
-    const wfMat = new THREE.LineBasicMaterial({ color: 0x000000, depthTest: true, depthWrite: false, transparent: true, opacity: 0.95, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })
-    const lines = new THREE.LineSegments(wfGeom, wfMat)
-    lines.renderOrder = (mesh.renderOrder || 0) + 10
-    mesh.add(lines)
-    mesh.userData._edges = lines
-  }
 
   useEffect(() => {
     let cancelled = false
@@ -385,6 +370,7 @@ function AnyModel({
                 if ("opacity" in m) m.opacity = opacity
                 if ("roughness" in m && typeof roughness === "number") m.roughness = roughness
                 if ("metalness" in m && typeof metalness === "number") m.metalness = metalness
+                m.wireframe = !!wireframe
                 m.side = THREE.DoubleSide
               }
             })
@@ -396,7 +382,6 @@ function AnyModel({
           }
         }
         if (!cancelled) {
-          forEachMesh(obj, (mesh) => rebuildWireOverlay(mesh))
           setObject3D(obj)
           onLoaded && onLoaded(url)
           
@@ -449,6 +434,7 @@ function AnyModel({
           m.opacity = opacity
           if (typeof roughness === "number") m.roughness = roughness
           if (typeof metalness === "number") m.metalness = metalness
+          m.wireframe = !!wireframe
 
           if (wantVertexColors) {
               m.vertexColors = true;
@@ -466,15 +452,11 @@ function AnyModel({
           if (child.material && child.material !== newMat) child.material.dispose()
           child.material = newMat
       }
-
-      if (child.userData._edges) child.userData._edges.visible = !!wireframe
-      else if (wireframe) rebuildWireOverlay(child)
     })
   }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, showHeatmap])
 
   if (!object3D) return null
 
-  // OPRAVA: Podmíněné přiřazení event handlerů zamezí zasekávání při běžném prohlížení
   return visible ? (
     <primitive 
       object={object3D} 
@@ -914,7 +896,6 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
             const vW = (boundingBox.width + padX * 2) / zoom
             const vH = (boundingBox.height + padY * 2) / zoom
             
-            // OPRAVA PANNINGU: Sjednocené měřítko posunu zamezuje zamrzávání ve vertikální ose
             const uniformScale = Math.max(vW / winSize.w, vH / winSize.h)
             
             setPan(p => ({ x: p.x - dx * uniformScale, y: p.y + dy * uniformScale }))
@@ -1047,7 +1028,6 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
             />
             <circle cx={measureState.snappedP2.x} cy={measureState.snappedP2.y} r={dynamicPointRadius} fill="#fbbf24" />
             
-            {/* Odsazený a plynule škálovatelný text vložený čistě přes SVG text uzel */}
             <text
               x={ (measureState.p1.x + measureState.snappedP2.x) / 2 }
               y={ -((measureState.p1.y + measureState.snappedP2.y) / 2 + 15 * svgToScreenRatio) }
@@ -1204,9 +1184,13 @@ export default function ClientPage() {
   const [loadedUrls, setLoadedUrls] = useState(new Set())
   const handleModelLoaded = (url) => setLoadedUrls((prev) => { const n = new Set(prev); n.add(url); return n; })
 
+  const [hasTexMap, setHasTexMap] = useState({})
   const meshesRef = useRef({})
+  
   const handleMeshReady = useCallback((mesh, url) => {
     meshesRef.current[url] = mesh
+    const hasC = !!(mesh.geometry.attributes.color || mesh.geometry.attributes.uv);
+    setHasTexMap(prev => ({ ...prev, [url]: hasC }))
   }, [])
 
   const toggleHeatmapModel = (url) => {
@@ -1367,7 +1351,6 @@ export default function ClientPage() {
     }
   }, [planeGroup])
 
-  // OPRAVA: Omezovač překreslování těžkého výpočtu řezu
   const lastClipTime = useRef(0)
   const clipTimeout = useRef(null)
 
@@ -1397,7 +1380,7 @@ export default function ClientPage() {
          const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
          const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
          clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-         requestClipUpdate() // Změněno na throttled verzi
+         requestClipUpdate() 
       } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
          setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev); 
          planeGroup.translateZ(-step)
@@ -1406,7 +1389,7 @@ export default function ClientPage() {
          const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
          const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
          clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-         requestClipUpdate() // Změněno na throttled verzi
+         requestClipUpdate() 
       }
     }
     window.addEventListener("keydown", handleKeyDown)
@@ -1435,7 +1418,7 @@ export default function ClientPage() {
        const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
        clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
        
-       updateClippingLogic() // Zde může zůstat hned napřímo
+       updateClippingLogic() 
        setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
     }
   }, [planeGroup, updateClippingLogic])
@@ -1688,31 +1671,41 @@ export default function ClientPage() {
     <div style={{ color: "#ff8b8b" }}>{fatal}</div>
   ) : (
     <>
-      {files.map((f, i) => (
-        <div key={`${f.url}-${i}`} className="control-row" style={{ display: "grid", gridTemplateColumns: "36px 1fr 32px 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
-          <div className="row-label" style={{ gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.rawName || f.name}>{stripExt(f.name)}:</div>
-          
-          <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} aria-label={`${f.name} color`} className="color-input" style={{ width: 36, height: 22, border: "1px solid #fff", borderRadius: 4, padding: 0, cursor: "pointer", background: "transparent" }}/>
-          
-          <input className="slider" type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => { const v = parseFloat(e.target.value); setOpacities((prev) => prev.map((x, idx) => (idx === i ? v : x))) }} style={{ width: "calc(100% - 12px)", minWidth: 110 }} aria-label={`${f.name} opacity`} />
-          
-          <button 
-            onClick={() => setVertexColors(prev => prev.map((v, idx) => idx === i ? !v : v))}
-            title="Přepnout texturu / vertex colors"
-            style={{
-                width: 32, height: 22, fontSize: 10, fontWeight: "bold",
-                background: vertexColors[i] ? "rgba(59,130,246,.45)" : "transparent",
-                border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, color: "#fff", cursor: "pointer", padding: 0
-            }}
-          >
-            TEX
-          </button>
+      {files.map((f, i) => {
+        // Kontrola dostupnosti textury z manifestu nebo přímo z načtené geometrie
+        const isTexAvailable = f.vc || hasTexMap[f.url];
 
-          <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 36, height: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: "transparent", border: "1px solid #fff", borderRadius: 4, cursor: "pointer" }}>
-            <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
-          </button>
-        </div>
-      ))}
+        return (
+          <div key={`${f.url}-${i}`} className="control-row" style={{ display: "grid", gridTemplateColumns: "36px 1fr 32px 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
+            <div className="row-label" style={{ gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.rawName || f.name}>{stripExt(f.name)}:</div>
+            
+            <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} aria-label={`${f.name} color`} className="color-input" style={{ width: 36, height: 22, border: "1px solid #fff", borderRadius: 4, padding: 0, cursor: "pointer", background: "transparent" }}/>
+            
+            <input className="slider" type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => { const v = parseFloat(e.target.value); setOpacities((prev) => prev.map((x, idx) => (idx === i ? v : x))) }} style={{ width: "calc(100% - 12px)", minWidth: 110 }} aria-label={`${f.name} opacity`} />
+            
+            <button 
+              onClick={() => { if (isTexAvailable) setVertexColors(prev => prev.map((v, idx) => idx === i ? !v : v)) }}
+              disabled={!isTexAvailable}
+              title={isTexAvailable ? "Přepnout texturu / vertex colors" : "Sken neobsahuje barevná data"}
+              style={{
+                  width: 32, height: 22, fontSize: 10, fontWeight: "bold",
+                  background: vertexColors[i] && isTexAvailable ? "rgba(59,130,246,.45)" : "transparent",
+                  border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, 
+                  color: isTexAvailable ? "#fff" : "rgba(255,255,255,0.25)", 
+                  cursor: isTexAvailable ? "pointer" : "not-allowed", 
+                  padding: 0,
+                  textDecoration: isTexAvailable ? "none" : "line-through"
+              }}
+            >
+              TEX
+            </button>
+
+            <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 36, height: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: "transparent", border: "1px solid #fff", borderRadius: 4, cursor: "pointer" }}>
+              <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
+            </button>
+          </div>
+        );
+      })}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
         <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
         <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
@@ -1757,9 +1750,9 @@ export default function ClientPage() {
             borderRadius: 10, padding: "10px 14px", color: "white", cursor: "pointer",
             fontWeight: "bold", fontSize: 14, transition: "background 0.2s", width: "100%"
           }}
-          title="Zobrazit vzdálenost (skus) mezi dvěma modely"
+          title="Zobrazit vzdálenost mezi dvěma modely"
         >
-          🔥 Mapa skusu
+          🔥 Porovnání
         </button>
 
         <div style={{
@@ -1812,7 +1805,7 @@ export default function ClientPage() {
 
             {hasComputedHeatmap && (
               <div style={{ marginTop: 12, borderTop: "1px solid rgba(255,255,255,.2)", paddingTop: 12 }}>
-                <Switch checked={showHeatmap} onChange={setShowHeatmap} label="Zobrazit vrstvu skusu" />
+                <Switch checked={showHeatmap} onChange={setShowHeatmap} label="Zobrazit barevnou mapu" />
                 <div style={{ fontSize: 10, color: "#888", marginTop: 8 }}>
                   Tip: Dvojklikem na model připnete hodnotu.
                 </div>
@@ -1845,7 +1838,7 @@ export default function ClientPage() {
 
       <div style={{ background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 12 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-          <Switch checked={clippingEnabled} onChange={setClippingEnabled} label="Nástroj řezu (Průřez)" />
+          <Switch checked={clippingEnabled} onChange={setClippingEnabled} label="Průřez" />
           {clippingEnabled && (
             <button 
               onClick={handleResetPlane}
@@ -2066,7 +2059,7 @@ export default function ClientPage() {
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
                 const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
                 clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-                requestClipUpdate() // Změněno na throttled verzi
+                requestClipUpdate() 
               }
             }}
           />
@@ -2092,7 +2085,7 @@ export default function ClientPage() {
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
                 const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
                 clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-                requestClipUpdate() // Změněno na throttled verzi
+                requestClipUpdate() 
               }
             }}
           />
