@@ -1136,6 +1136,7 @@ export default function ClientPage() {
   const [fatal, setFatal] = useState(null)
 
   const [autoSmooth, setAutoSmooth] = useState(true)
+  const [smoothAngle] = useState(30)
 
   // -- STAVY PRO ŘEZÁNÍ A ANIMACI --
   const [clippingEnabled, setClippingEnabled] = useState(false)
