@@ -187,7 +187,7 @@ function InlineLoader({ text }) {
 }
 
 /* ---------- 3D Auto Rotate (Cinematic Spin) ---------- */
-function AutoRotateScene({ enabled, target }) {
+function AutoRotateScene({ enabled, target, speedFactor = 1.0 }) {
   const { camera, gl } = useThree()
   const vTarget = useMemo(() => new THREE.Vector3(), [])
   const isInteracting = useRef(false)
@@ -207,7 +207,7 @@ function AutoRotateScene({ enabled, target }) {
     if (!enabled || isInteracting.current) return
     
     vTarget.fromArray(target)
-    const speed = 1.0 * delta 
+    const speed = 1.0 * speedFactor * delta 
     
     const axis = camera.up.clone().normalize()
     
@@ -1136,7 +1136,6 @@ export default function ClientPage() {
   const [fatal, setFatal] = useState(null)
 
   const [autoSmooth, setAutoSmooth] = useState(true)
-  const [smoothAngle] = useState(30)
 
   // -- STAVY PRO ŘEZÁNÍ A ANIMACI --
   const [clippingEnabled, setClippingEnabled] = useState(false)
@@ -1155,6 +1154,7 @@ export default function ClientPage() {
   const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
 
   const [isAutoRotating, setIsAutoRotating] = useState(false)
+  const [spinSpeed, setSpinSpeed] = useState(1.0)
 
   const [heatmapMenuOpen, setHeatmapMenuOpen] = useState(false)
   const [heatmapSelection, setHeatmapSelection] = useState([])
@@ -1720,8 +1720,19 @@ export default function ClientPage() {
           </div>
         );
       })}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", marginTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
         <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
+        <button 
+          onClick={() => setDidInitialFrame(false)}
+          style={{
+            background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)",
+            borderRadius: 6, color: "white", padding: "4px 10px", fontSize: 11, cursor: "pointer",
+            transition: "background 0.2s", fontWeight: "bold"
+          }}
+          title="Vrátí kameru do výchozí polohy"
+        >
+          Reset view
+        </button>
       </div>
     </>
   )
@@ -1828,26 +1839,56 @@ export default function ClientPage() {
         </div>
       </div>
 
-      <button 
-        onClick={() => setIsAutoRotating(p => !p)}
-        style={{
-          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-          background: isAutoRotating ? "rgba(59,130,246,.8)" : "rgba(0,0,0,.25)",
-          backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)",
-          borderRadius: 10, padding: "10px 14px", color: "white", cursor: "pointer",
-          fontWeight: "bold", fontSize: 14, transition: "background 0.2s"
-        }}
-      >
-        <svg 
-          width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" 
-          strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" 
-          style={{ animation: isAutoRotating ? "spin 4s linear infinite" : "none" }}
+      <div>
+        <button 
+          onClick={() => setIsAutoRotating(p => !p)}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            background: isAutoRotating ? "rgba(59,130,246,.8)" : "rgba(0,0,0,.25)",
+            backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)",
+            borderRadius: 10, padding: "10px 14px", color: "white", cursor: "pointer",
+            fontWeight: "bold", fontSize: 14, transition: "background 0.2s", width: "100%"
+          }}
         >
-          <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-          <path d="M3 3v5h5" />
-        </svg>
-        360° Spin
-      </button>
+          <svg 
+            width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" 
+            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" 
+            style={{ animation: isAutoRotating ? "spin 4s linear infinite" : "none" }}
+          >
+            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+            <path d="M3 3v5h5" />
+          </svg>
+          360° Spin
+        </button>
+
+        <div style={{
+          maxHeight: isAutoRotating ? "100px" : "0px",
+          opacity: isAutoRotating ? 1 : 0,
+          overflow: "hidden",
+          transition: "max-height 0.4s ease-in-out, opacity 0.3s ease",
+          pointerEvents: isAutoRotating ? "auto" : "none"
+        }}>
+          <div style={{
+            marginTop: 8,
+            background: "rgba(0,0,0,.85)", backdropFilter: "blur(8px)",
+            border: "1px solid rgba(255,255,255,.2)", borderRadius: 10,
+            padding: 12, width: 240, color: "white", boxShadow: "0 10px 30px rgba(0,0,0,0.5)"
+          }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 12, fontWeight: "bold", color: "#ccc" }}>
+              <span>Rychlost rotace</span>
+              <span>{Math.round(spinSpeed * 100)}%</span>
+            </div>
+            <input 
+              className="slider" 
+              type="range" 
+              min={0.05} max={1} step={0.05} 
+              value={spinSpeed} 
+              onChange={(e) => setSpinSpeed(parseFloat(e.target.value))} 
+              style={{ width: "100%" }} 
+            />
+          </div>
+        </div>
+      </div>
 
       <div style={{ background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 12 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", position: "relative", minHeight: 24 }}>
@@ -1975,7 +2016,7 @@ export default function ClientPage() {
 
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
 
-        <AutoRotateScene enabled={isAutoRotating} target={cameraTarget} />
+        <AutoRotateScene enabled={isAutoRotating} target={cameraTarget} speedFactor={spinSpeed} />
 
         <group ref={rootGroupRef}>
           <Suspense fallback={null}>
