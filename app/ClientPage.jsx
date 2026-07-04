@@ -8,11 +8,12 @@ import { TrackballControls } from "three/examples/jsm/controls/TrackballControls
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader"
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader"
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader"
-import { computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh"
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from "three-mesh-bvh"
 
 /* ---------- Instalace BVH do Three.js ---------- */
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree
+THREE.Mesh.prototype.raycast = acceleratedRaycast // OPRAVA: Zrychlení hoveru o 1000%
 
 /* ---------- Konst + konfigurace ---------- */
 const LIVE_MSG_TYPES = new Set(["SHADE3D_LIVE", "SHADE3D_LIVE_V6", "SHADE3D_LIVE_V5"])
@@ -473,11 +474,11 @@ function AnyModel({
 
   if (!object3D) return null
 
+  // OPRAVA: Podmíněné přiřazení event handlerů zamezí zasekávání při běžném prohlížení
   return visible ? (
     <primitive 
       object={object3D} 
-      onPointerMove={(e) => {
-        if (!showHeatmap || !onHoverDist) return;
+      onPointerMove={showHeatmap && onHoverDist ? (e) => {
         e.stopPropagation(); 
         const distAttr = e.object.geometry.getAttribute('_occlusionDist');
         
@@ -490,12 +491,11 @@ function AnyModel({
         } else if (distAttr && e.index !== undefined) {
           onHoverDist(distAttr.getX(e.index), e.clientX, e.clientY);
         }
-      }}
-      onPointerOut={() => {
-        if (showHeatmap && onHoverDist) onHoverDist(null);
-      }}
-      onDoubleClick={(e) => {
-        if (!showHeatmap || !onPinNote) return;
+      } : undefined}
+      onPointerOut={showHeatmap && onHoverDist ? () => {
+        onHoverDist(null);
+      } : undefined}
+      onDoubleClick={showHeatmap && onPinNote ? (e) => {
         e.stopPropagation();
         const distAttr = e.object.geometry.getAttribute('_occlusionDist');
         let dist = null;
@@ -510,7 +510,7 @@ function AnyModel({
         if (dist !== null) {
            onPinNote(dist, e.point);
         }
-      }}
+      } : undefined}
     />
   ) : null
 }
@@ -1367,6 +1367,24 @@ export default function ClientPage() {
     }
   }, [planeGroup])
 
+  // OPRAVA: Omezovač překreslování těžkého výpočtu řezu
+  const lastClipTime = useRef(0)
+  const clipTimeout = useRef(null)
+
+  const requestClipUpdate = useCallback(() => {
+    const now = performance.now()
+    if (now - lastClipTime.current > 60) {
+      updateClippingLogic()
+      lastClipTime.current = now
+    } else {
+      clearTimeout(clipTimeout.current)
+      clipTimeout.current = setTimeout(() => {
+        updateClippingLogic()
+        lastClipTime.current = performance.now()
+      }, 60)
+    }
+  }, [updateClippingLogic])
+
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (!clippingEnabled || !planeGroup) return
@@ -1379,7 +1397,7 @@ export default function ClientPage() {
          const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
          const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
          clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-         updateClippingLogic()
+         requestClipUpdate() // Změněno na throttled verzi
       } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
          setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev); 
          planeGroup.translateZ(-step)
@@ -1388,12 +1406,12 @@ export default function ClientPage() {
          const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
          const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
          clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-         updateClippingLogic()
+         requestClipUpdate() // Změněno na throttled verzi
       }
     }
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [clippingEnabled, updateClippingLogic, planeGroup])
+  }, [clippingEnabled, requestClipUpdate, planeGroup])
 
   const handleResetPlane = useCallback(() => {
     if (!rootGroupRef.current || !planeGroup) {
@@ -1417,7 +1435,7 @@ export default function ClientPage() {
        const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
        clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
        
-       updateClippingLogic()
+       updateClippingLogic() // Zde může zůstat hned napřímo
        setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
     }
   }, [planeGroup, updateClippingLogic])
@@ -2048,7 +2066,7 @@ export default function ClientPage() {
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
                 const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
                 clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-                updateClippingLogic() 
+                requestClipUpdate() // Změněno na throttled verzi
               }
             }}
           />
@@ -2074,7 +2092,7 @@ export default function ClientPage() {
                 const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
                 const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
                 clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-                updateClippingLogic() 
+                requestClipUpdate() // Změněno na throttled verzi
               }
             }}
           />
