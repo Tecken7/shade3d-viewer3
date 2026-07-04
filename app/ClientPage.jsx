@@ -1132,11 +1132,11 @@ export default function ClientPage() {
   const [roughnesses, setRoughnesses] = useState([])
   const [metalnesses, setMetalnesses] = useState([])
   const [vertexColors, setVertexColors] = useState([])
+  const [wireframes, setWireframes] = useState([])
   const [fatal, setFatal] = useState(null)
 
   const [autoSmooth, setAutoSmooth] = useState(true)
   const [smoothAngle] = useState(30)
-  const [wireframe, setWireframe] = useState(false)
 
   // -- STAVY PRO ŘEZÁNÍ A ANIMACI --
   const [clippingEnabled, setClippingEnabled] = useState(false)
@@ -1508,6 +1508,7 @@ export default function ClientPage() {
           setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
           setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
           setVertexColors(Fs.map((f) => !!f.vc))
+          setWireframes(Fs.map(() => false))
           
           setTitle(titleStr ?? (getParam("title") ?? null))
           setLogoCfg({
@@ -1579,7 +1580,7 @@ export default function ClientPage() {
           return
         }
 
-        setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([]); setVertexColors([])
+        setFiles([]); setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([]); setVertexColors([]); setWireframes([])
       } catch (e) {
         console.error(e)
         setFatal("Tento náhled není dostupný (chyba při načtení dat).")
@@ -1632,6 +1633,7 @@ export default function ClientPage() {
         setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
         setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
         setVertexColors(newFiles.map((f) => !!f.vc))
+        setWireframes(newFiles.map(() => false))
 
         if (urlsChanged) { 
             setDidInitialFrame(false); 
@@ -1672,11 +1674,10 @@ export default function ClientPage() {
   ) : (
     <>
       {files.map((f, i) => {
-        // Kontrola dostupnosti textury z manifestu nebo přímo z načtené geometrie
         const isTexAvailable = f.vc || hasTexMap[f.url];
 
         return (
-          <div key={`${f.url}-${i}`} className="control-row" style={{ display: "grid", gridTemplateColumns: "36px 1fr 32px 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
+          <div key={`${f.url}-${i}`} className="control-row" style={{ display: "grid", gridTemplateColumns: "36px 1fr 32px 32px 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
             <div className="row-label" style={{ gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.rawName || f.name}>{stripExt(f.name)}:</div>
             
             <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} aria-label={`${f.name} color`} className="color-input" style={{ width: 36, height: 22, border: "1px solid #fff", borderRadius: 4, padding: 0, cursor: "pointer", background: "transparent" }}/>
@@ -1686,7 +1687,7 @@ export default function ClientPage() {
             <button 
               onClick={() => { if (isTexAvailable) setVertexColors(prev => prev.map((v, idx) => idx === i ? !v : v)) }}
               disabled={!isTexAvailable}
-              title={isTexAvailable ? "Přepnout texturu / vertex colors" : "Sken neobsahuje barevná data"}
+              title={isTexAvailable ? "Přepnout texturu / barevná data" : "Sken neobsahuje barevná data"}
               style={{
                   width: 32, height: 22, fontSize: 10, fontWeight: "bold",
                   background: vertexColors[i] && isTexAvailable ? "rgba(59,130,246,.45)" : "transparent",
@@ -1700,15 +1701,27 @@ export default function ClientPage() {
               TEX
             </button>
 
+            <button 
+              onClick={() => setWireframes(prev => prev.map((v, idx) => idx === i ? !v : v))}
+              title="Přepnout drátěný model (Wireframe)"
+              style={{
+                  width: 32, height: 22, fontSize: 10, fontWeight: "bold",
+                  background: wireframes[i] ? "rgba(59,130,246,.45)" : "transparent",
+                  border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, 
+                  color: "#fff", cursor: "pointer", padding: 0
+              }}
+            >
+              WF
+            </button>
+
             <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 36, height: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: "transparent", border: "1px solid #fff", borderRadius: 4, cursor: "pointer" }}>
               <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
             </button>
           </div>
         );
       })}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", marginTop: 10 }}>
         <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
-        <Switch checked={wireframe} onChange={setWireframe} label="Wireframe" />
       </div>
     </>
   )
@@ -1752,7 +1765,7 @@ export default function ClientPage() {
           }}
           title="Zobrazit vzdálenost mezi dvěma modely"
         >
-          🔥 Porovnání
+          Porovnání
         </button>
 
         <div style={{
@@ -1837,12 +1850,13 @@ export default function ClientPage() {
       </button>
 
       <div style={{ background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 12 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", position: "relative", minHeight: 24 }}>
           <Switch checked={clippingEnabled} onChange={setClippingEnabled} label="Průřez" />
           {clippingEnabled && (
             <button 
               onClick={handleResetPlane}
               style={{
+                position: "absolute", right: 0,
                 background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)",
                 borderRadius: 6, color: "white", padding: "4px 8px", fontSize: 11, cursor: "pointer",
                 transition: "background 0.2s"
@@ -1977,7 +1991,7 @@ export default function ClientPage() {
                 onMeshReady={handleMeshReady}
                 autoSmooth={autoSmooth}
                 smoothAngle={smoothAngle}
-                wireframe={wireframe}
+                wireframe={wireframes[i] || false}
                 roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.5)}
                 metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
                 useVertexColors={vertexColors[i]}
