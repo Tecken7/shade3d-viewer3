@@ -1107,7 +1107,7 @@ function GizmoManager({ transformRefs, trackballRef }) {
 
 /* ---------- Hlavní komponenta ---------- */
 export default function ClientPage() {
-  const hideUI = getParam("ui") === "hidden";
+  const hideSidebar = getParam("hideSidebar") === "1"; // NOVÝ ŘÁDEK
   const [sceneIntensity, setSceneIntensity] = useState(1)
   const [highlightIntensity, setHighlightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
@@ -1635,7 +1635,7 @@ export default function ClientPage() {
         setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
         setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
         setVertexColors(newFiles.map((f) => !!f.vc))
-        setWireframes(newFiles.map(() => false))
+        setWireframes(newFiles.map((f) => !!f.wf)) // <-- OPRAVENO: místo () => false
 
         if (urlsChanged) { 
             setDidInitialFrame(false); 
@@ -1929,7 +1929,7 @@ export default function ClientPage() {
       <PreloadIcons />
       {logoEl}
       {!hideUI && sidebar}
-      {!hideUI && topBarRight}
+      {topBarRight}
 
       {/* OVERLAY BĚHEM NAČÍTÁNÍ MODELŮ */}
       {!allLoaded && files.length > 0 && (
