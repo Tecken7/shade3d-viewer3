@@ -335,8 +335,6 @@ function AnyModel({
       ...opts,
     })
 
-  const forEachMesh = (obj, cb) => obj?.traverse?.((child) => { if (child.isMesh) cb(child) })
-
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -721,7 +719,6 @@ function CustomCameraSetter({ camState, triggerKey, onFramed, setTarget }) {
 function ViewStateSync({ trackballRef }) {
   const { gl, camera, size } = useThree()
 
-  // Pravidelný sync
   useEffect(() => {
     const interval = setInterval(() => {
       if (typeof window === "undefined" || !trackballRef?.current) return
@@ -749,7 +746,6 @@ function ViewStateSync({ trackballRef }) {
     return () => clearInterval(interval)
   }, [camera, trackballRef, size.width, size.height])
 
-  // Naslouchání na vyžádání snapshotu od rodiče
   useEffect(() => {
     const handleMessage = (e) => {
       const d = e.data
@@ -767,7 +763,6 @@ function ViewStateSync({ trackballRef }) {
           target: [c.target.x, c.target.y, c.target.z] 
         }
 
-        // Vygenerování Base64 z aktuálního WebGL plátna
         const snapshotUrl = gl.domElement.toDataURL("image/jpeg", 0.75) 
         
         const targetWindow = window.top || window.parent;
@@ -815,7 +810,7 @@ function Switch({ checked, onChange, label }) {
   )
 }
 
-/* ---------- 2D OVERLAY (MĚŘENÍ, PAN/ZOOM A VEKTOROVÉ ČÁRY) ---------- */
+/* ---------- 2D OVERLAY ---------- */
 function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
   const svgRef = useRef(null)
 
@@ -1107,7 +1102,7 @@ function GizmoManager({ transformRefs, trackballRef }) {
 
 /* ---------- Hlavní komponenta ---------- */
 export default function ClientPage() {
-  const hideSidebar = getParam("hideSidebar") === "1"; // NOVÝ ŘÁDEK
+  const hideSidebar = getParam("hideSidebar") === "1";
   const [sceneIntensity, setSceneIntensity] = useState(1)
   const [highlightIntensity, setHighlightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
@@ -1510,7 +1505,7 @@ export default function ClientPage() {
           setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
           setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
           setVertexColors(Fs.map((f) => !!f.vc))
-          setWireframes(Fs.map(() => false))
+          setWireframes(Fs.map((f) => !!f.wf))
           
           setTitle(titleStr ?? (getParam("title") ?? null))
           setLogoCfg({
@@ -1538,7 +1533,7 @@ export default function ClientPage() {
             v: typeof x.v === "boolean" ? x.v : true,
             r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: !!x.vc, km: !!x.km,
+            vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
@@ -1554,7 +1549,7 @@ export default function ClientPage() {
             v: typeof x.v === "boolean" ? x.v : true,
             r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: !!x.vc, km: !!x.km,
+            vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
@@ -1576,7 +1571,7 @@ export default function ClientPage() {
             v: typeof x.v === "boolean" ? x.v : true,
             r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: !!x.vc, km: !!x.km,
+            vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
           }))
           applyFiles(Fs, getParam("title") ?? null, null, null, null)
           const li = parseFloat(getParam("li") || getParam("light") || "")
@@ -1620,13 +1615,13 @@ export default function ClientPage() {
       }
 
       if (Array.isArray(p.files)) {
-        const newFiles = p.files.filter(x => x && x.u).map((x, i) => ({ // Přidán filter
+        const newFiles = p.files.filter(x => x && x.u).map((x, i) => ({
           url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
           c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
           v: typeof x.v === "boolean" ? x.v : true,
           r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
           m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-          vc: !!x.vc, km: !!x.km,
+          vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
         }))
 
         const urlsChanged = filesChanged(files, newFiles)
@@ -1639,7 +1634,7 @@ export default function ClientPage() {
         setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
         setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
         setVertexColors(newFiles.map((f) => !!f.vc))
-        setWireframes(newFiles.map((f) => !!f.wf)) // <-- OPRAVENO: místo () => false
+        setWireframes(newFiles.map((f) => !!f.wf)) // Opraveno
 
         if (urlsChanged) { 
             setDidInitialFrame(false); 
@@ -1932,7 +1927,7 @@ export default function ClientPage() {
     <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
       <PreloadIcons />
       {logoEl}
-      {!hideUI && sidebar}
+      {!hideSidebar && sidebar}
       {topBarRight}
 
       {/* OVERLAY BĚHEM NAČÍTÁNÍ MODELŮ */}
