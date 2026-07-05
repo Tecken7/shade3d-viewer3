@@ -1102,12 +1102,16 @@ function GizmoManager({ transformRefs, trackballRef }) {
 
 /* ---------- Hlavní komponenta ---------- */
 export default function ClientPage() {
-  const hideSidebar = getParam("hideSidebar") === "1";
+  const hideSidebar = getParam("hideSidebar") === "1"; // ÚPRAVA 1: Zjištění, jestli máme schovat levý panel
   const [sceneIntensity, setSceneIntensity] = useState(1)
   const [highlightIntensity, setHighlightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
   const [isMobile, setIsMobile] = useState(false)
+
+  // ÚPRAVA 2: Zapnutý auto-spin ve výchozím stavu a rychlost nastavena na 0.25
+  const [isAutoRotating, setIsAutoRotating] = useState(true)
+  const [spinSpeed, setSpinSpeed] = useState(0.25)
 
   useEffect(() => {
     try {
@@ -1116,6 +1120,22 @@ export default function ClientPage() {
       const narrow = typeof window !== "undefined" && window.innerWidth < 768
       setIsMobile(uaMobile || coarse || narrow)
     } catch {}
+  }, [])
+
+  // ÚPRAVA 3: Jakmile uživatel klikne nebo zatočí kolečkem NA PLÁTNĚ, vypneme rotaci
+  useEffect(() => {
+    const stopSpin = (e) => {
+      // Chceme to vypnout jen, když uživatel zasáhne do samotného 3D renderu
+      if (e.target && e.target.tagName && e.target.tagName.toLowerCase() === 'canvas') {
+        setIsAutoRotating(false)
+      }
+    }
+    window.addEventListener('pointerdown', stopSpin, true)
+    window.addEventListener('wheel', stopSpin, true)
+    return () => {
+      window.removeEventListener('pointerdown', stopSpin, true)
+      window.removeEventListener('wheel', stopSpin, true)
+    }
   }, [])
 
   const [title, setTitle] = useState(null)
@@ -1149,9 +1169,6 @@ export default function ClientPage() {
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
   const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
-
-  const [isAutoRotating, setIsAutoRotating] = useState(false)
-  const [spinSpeed, setSpinSpeed] = useState(1.0)
 
   const [heatmapMenuOpen, setHeatmapMenuOpen] = useState(false)
   const [heatmapSelection, setHeatmapSelection] = useState([])
@@ -1557,6 +1574,7 @@ export default function ClientPage() {
           return
         }
 
+        // ÚPRAVA 4: Bezpečné dekódování z parametrů přes try/catch
         if (filesParam) {
           let arr = null; 
           try { 
@@ -1615,6 +1633,7 @@ export default function ClientPage() {
       }
 
       if (Array.isArray(p.files)) {
+        // ÚPRAVA 5: Odstranění prázdných položek, aby to nespadlo
         const newFiles = p.files.filter(x => x && x.u).map((x, i) => ({
           url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
           c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
@@ -1633,10 +1652,12 @@ export default function ClientPage() {
         setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
         setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
         setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
+        
+        // ÚPRAVA 6: Správné načítání textur a wireframe místo fixní hodnoty
         setVertexColors(newFiles.map((f) => !!f.vc))
-        setWireframes(newFiles.map((f) => !!f.wf)) // Opraveno
+        setWireframes(newFiles.map((f) => !!f.wf)) 
 
-        // Pokud rodič pošle keepCamera: true, nebudeme resetovat úhel pohledu
+        // ÚPRAVA 7: Zachování kamery, pokud posíláme keepCamera: true
         if (urlsChanged && !p.keepCamera) { 
             setDidInitialFrame(false); 
             setInitialCameraState(null); 
