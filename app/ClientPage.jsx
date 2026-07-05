@@ -1107,6 +1107,7 @@ function GizmoManager({ transformRefs, trackballRef }) {
 
 /* ---------- Hlavní komponenta ---------- */
 export default function ClientPage() {
+  const hideUI = getParam("ui") === "hidden";
   const [sceneIntensity, setSceneIntensity] = useState(1)
   const [highlightIntensity, setHighlightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
@@ -1927,8 +1928,8 @@ export default function ClientPage() {
     <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
       <PreloadIcons />
       {logoEl}
-      {sidebar}
-      {topBarRight}
+      {!hideUI && sidebar}
+      {!hideUI && topBarRight}
 
       {/* OVERLAY BĚHEM NAČÍTÁNÍ MODELŮ */}
       {!allLoaded && files.length > 0 && (
