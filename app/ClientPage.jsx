@@ -1563,8 +1563,12 @@ export default function ClientPage() {
         }
 
         if (filesParam) {
-          let arr = null; try { arr = JSON.parse(filesParam) } catch {}
-          if (!arr) { try { arr = JSON.parse(decodeURIComponent(filesParam)) } catch {} }
+          let arr = null; 
+          try { 
+              arr = JSON.parse(decodeURIComponent(filesParam)) 
+          } catch {
+              try { arr = JSON.parse(filesParam) } catch {}
+          }
           if (!Array.isArray(arr)) throw new Error("Neplatný formát parametru ?files=")
           const Fs = arr.filter((x) => x && x.u).map((x, i) => ({
             url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
@@ -1616,7 +1620,7 @@ export default function ClientPage() {
       }
 
       if (Array.isArray(p.files)) {
-        const newFiles = p.files.map((x, i) => ({
+        const newFiles = p.files.filter(x => x && x.u).map((x, i) => ({ // Přidán filter
           url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
           c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
           v: typeof x.v === "boolean" ? x.v : true,
