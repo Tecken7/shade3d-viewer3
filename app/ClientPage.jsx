@@ -1636,7 +1636,8 @@ export default function ClientPage() {
         setVertexColors(newFiles.map((f) => !!f.vc))
         setWireframes(newFiles.map((f) => !!f.wf)) // Opraveno
 
-        if (urlsChanged) { 
+        // Pokud rodič pošle keepCamera: true, nebudeme resetovat úhel pohledu
+        if (urlsChanged && !p.keepCamera) { 
             setDidInitialFrame(false); 
             setInitialCameraState(null); 
             isPlaneInitialized.current = false;
