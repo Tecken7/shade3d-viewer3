@@ -1102,16 +1102,25 @@ function GizmoManager({ transformRefs, trackballRef }) {
 
 /* ---------- Hlavní komponenta ---------- */
 export default function ClientPage() {
-  const hideSidebar = getParam("hideSidebar") === "1"; // ÚPRAVA 1: Zjištění, jestli máme schovat levý panel
+  const hideSidebar = getParam("hideSidebar") === "1";
   const [sceneIntensity, setSceneIntensity] = useState(1)
   const [highlightIntensity, setHighlightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
   const [isMobile, setIsMobile] = useState(false)
 
-  // ÚPRAVA 2: Zapnutý auto-spin ve výchozím stavu a rychlost nastavena na 0.25
   const [isAutoRotating, setIsAutoRotating] = useState(true)
   const [spinSpeed, setSpinSpeed] = useState(0.25)
+
+  // ODESÍLÁNÍ ZPRÁVY O TAŽENÍ DO RODIČOVSKÉHO OKNA (PRO FULLSCREEN DRAG DROP)
+  useEffect(() => {
+    const handleDragOver = (e) => {
+        e.preventDefault()
+        window.parent.postMessage({ type: "SHADE3D_DRAG_OVER" }, "*")
+    }
+    window.addEventListener("dragover", handleDragOver)
+    return () => window.removeEventListener("dragover", handleDragOver)
+  }, [])
 
   useEffect(() => {
     try {
@@ -1122,10 +1131,8 @@ export default function ClientPage() {
     } catch {}
   }, [])
 
-  // ÚPRAVA 3: Jakmile uživatel klikne nebo zatočí kolečkem NA PLÁTNĚ, vypneme rotaci
   useEffect(() => {
     const stopSpin = (e) => {
-      // Chceme to vypnout jen, když uživatel zasáhne do samotného 3D renderu
       if (e.target && e.target.tagName && e.target.tagName.toLowerCase() === 'canvas') {
         setIsAutoRotating(false)
       }
@@ -1519,9 +1526,9 @@ export default function ClientPage() {
           setColors(Fs.map((f, i) => f.c || palette[i % palette.length]))
           setOpacities(Fs.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
           setVisibles(Fs.map((f) => (typeof f.v === "boolean" ? f.v : true)))
-          setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
-          setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
-          setVertexColors(Fs.map((f) => !!f.vc))
+          setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.2)))
+          setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.1)))
+          setVertexColors(Fs.map((f) => f.vc !== undefined ? !!f.vc : true))
           setWireframes(Fs.map((f) => !!f.wf))
           
           setTitle(titleStr ?? (getParam("title") ?? null))
@@ -1548,8 +1555,8 @@ export default function ClientPage() {
             url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
             c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
             v: typeof x.v === "boolean" ? x.v : true,
-            r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
-            m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
+            r: typeof x.r === "number" ? clamp01(x.r) : 0.2,
+            m: typeof x.m === "number" ? clamp01(x.m) : 0.1,
             vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera)
@@ -1564,8 +1571,8 @@ export default function ClientPage() {
             url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
             c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
             v: typeof x.v === "boolean" ? x.v : true,
-            r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
-            m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
+            r: typeof x.r === "number" ? clamp01(x.r) : 0.2,
+            m: typeof x.m === "number" ? clamp01(x.m) : 0.1,
             vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera)
@@ -1574,7 +1581,6 @@ export default function ClientPage() {
           return
         }
 
-        // ÚPRAVA 4: Bezpečné dekódování z parametrů přes try/catch
         if (filesParam) {
           let arr = null; 
           try { 
@@ -1587,8 +1593,8 @@ export default function ClientPage() {
             url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
             c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
             v: typeof x.v === "boolean" ? x.v : true,
-            r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
-            m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
+            r: typeof x.r === "number" ? clamp01(x.r) : 0.2,
+            m: typeof x.m === "number" ? clamp01(x.m) : 0.1,
             vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
           }))
           applyFiles(Fs, getParam("title") ?? null, null, null, null)
@@ -1633,13 +1639,12 @@ export default function ClientPage() {
       }
 
       if (Array.isArray(p.files)) {
-        // ÚPRAVA 5: Odstranění prázdných položek, aby to nespadlo
         const newFiles = p.files.filter(x => x && x.u).map((x, i) => ({
           url: x.u, name: stripExt(x.n || `Model ${i + 1}`), rawName: x.n || `Model${i + 1}`,
           c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
           v: typeof x.v === "boolean" ? x.v : true,
-          r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
-          m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
+          r: typeof x.r === "number" ? clamp01(x.r) : 0.2,
+          m: typeof x.m === "number" ? clamp01(x.m) : 0.1,
           vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
         }))
 
@@ -1650,14 +1655,12 @@ export default function ClientPage() {
         setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
         setOpacities(newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
         setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
-        setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
-        setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
+        setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.2)))
+        setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.1)))
         
-        // ÚPRAVA 6: Správné načítání textur a wireframe místo fixní hodnoty
-        setVertexColors(newFiles.map((f) => !!f.vc))
+        setVertexColors(newFiles.map((f) => f.vc !== undefined ? !!f.vc : true))
         setWireframes(newFiles.map((f) => !!f.wf)) 
 
-        // ÚPRAVA 7: Zachování kamery, pokud posíláme keepCamera: true
         if (urlsChanged && !p.keepCamera) { 
             setDidInitialFrame(false); 
             setInitialCameraState(null); 
@@ -2056,8 +2059,8 @@ export default function ClientPage() {
                 autoSmooth={autoSmooth}
                 smoothAngle={smoothAngle}
                 wireframe={wireframes[i] || false}
-                roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.5)}
-                metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
+                roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.2)}
+                metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.1)}
                 useVertexColors={vertexColors[i]}
                 keepMaterials={!!f.km}
                 showHeatmap={showHeatmap && heatmapSelection[0] === f.url}
