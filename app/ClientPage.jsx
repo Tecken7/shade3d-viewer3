@@ -2177,26 +2177,13 @@ export default function ClientPage() {
   const trackballRef = useRef(null)
   const rootGroupRef = useRef(null)
   const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
-  const [cameraInteracting, setCameraInteracting] = useState(false)
   const [sliceOverlayInteracting, setSliceOverlayInteracting] = useState(false)
   const [trackballNonce, setTrackballNonce] = useState(0)
-  const cameraSettleTimerRef = useRef(null)
-  const handleCameraInteraction = useCallback((active) => {
-    clearTimeout(cameraSettleTimerRef.current)
-    if (active) {
-      setCameraInteracting(true)
-    } else {
-      cameraSettleTimerRef.current = setTimeout(() => setCameraInteracting(false), 220)
-    }
-  }, [])
   const handleSliceOverlayInteraction = useCallback((active) => {
-    clearTimeout(cameraSettleTimerRef.current)
-    setCameraInteracting(false)
     setSliceOverlayInteracting(active)
     if (trackballRef.current) trackballRef.current.enabled = !active
     if (!active) setTrackballNonce((value) => value + 1)
   }, [])
-  useEffect(() => () => clearTimeout(cameraSettleTimerRef.current), [])
   const [didInitialFrame, setDidInitialFrame] = useState(false)
   const [initialCameraState, setInitialCameraState] = useState(null)
   
@@ -3695,7 +3682,7 @@ export default function ClientPage() {
           <DicomVolume
             volume={dicomVolume}
             settings={dicomSettings}
-            interactive={cameraInteracting || isAutoRotating}
+            interactive={false}
           />
         )}
 
@@ -3795,8 +3782,8 @@ export default function ClientPage() {
           />
         )}
 
-        <TouchTrackballControls key={`trackball-${trackballNonce}`} ref={trackballRef} target={cameraTarget} onInteractionChange={handleCameraInteraction} enabled={!sliceOverlayInteracting} />
-        <RightButtonPan key={`pan-${trackballNonce}`} setTarget={setCameraTarget} trackballRef={trackballRef} onInteractionChange={handleCameraInteraction} />
+        <TouchTrackballControls key={`trackball-${trackballNonce}`} ref={trackballRef} target={cameraTarget} enabled={!sliceOverlayInteracting} />
+        <RightButtonPan key={`pan-${trackballNonce}`} setTarget={setCameraTarget} trackballRef={trackballRef} />
       </Canvas>
 
       <Lightbox open={lightbox.open} onClose={() => setLightbox({ open: false, src: null, alt: "" })} src={lightbox.src} alt={lightbox.alt} />
