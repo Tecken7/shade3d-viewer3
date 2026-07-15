@@ -396,6 +396,14 @@ const DICOM_FRAGMENT_SHADER = `
     return vec2(max(max(t1.x, t1.y), t1.z), min(min(t2.x, t2.y), t2.z));
   }
 
+  vec3 densityGradient(vec3 point) {
+    return vec3(
+      texture(uVolume, point + vec3(uVoxel.x, 0.0, 0.0)).r - texture(uVolume, point - vec3(uVoxel.x, 0.0, 0.0)).r,
+      texture(uVolume, point + vec3(0.0, uVoxel.y, 0.0)).r - texture(uVolume, point - vec3(0.0, uVoxel.y, 0.0)).r,
+      texture(uVolume, point + vec3(0.0, 0.0, uVoxel.z)).r - texture(uVolume, point - vec3(0.0, 0.0, uVoxel.z)).r
+    );
+  }
+
   void main() {
     vec3 direction = normalize(vDirection);
     vec2 bounds = hitBox(vOrigin, direction);
@@ -404,40 +412,62 @@ const DICOM_FRAGMENT_SHADER = `
     vec3 point = vOrigin + bounds.x * direction;
     float distanceTravelled = bounds.x;
     vec4 accumulated = vec4(0.0);
-    float low = (uDensityLow - ${DICOM_HU_MIN.toFixed(1)}) / ${(DICOM_HU_MAX - DICOM_HU_MIN).toFixed(1)};
-    float high = (uDensityHigh - ${DICOM_HU_MIN.toFixed(1)}) / ${(DICOM_HU_MAX - DICOM_HU_MIN).toFixed(1)};
+    float low = clamp((uDensityLow - ${DICOM_HU_MIN.toFixed(1)}) / ${(DICOM_HU_MAX - DICOM_HU_MIN).toFixed(1)}, 0.0, 0.998);
+    float high = clamp((uDensityHigh - ${DICOM_HU_MIN.toFixed(1)}) / ${(DICOM_HU_MAX - DICOM_HU_MIN).toFixed(1)}, low + 0.002, 1.0);
+    float isoLevel = mix(low, high, 0.16);
+    float previousDensity = 0.0;
+    vec3 previousPoint = point;
 
-    for (int i = 0; i < 768; i++) {
-      if (distanceTravelled > bounds.y || accumulated.a > 0.985) break;
+    for (int i = 0; i < 1024; i++) {
+      if (distanceTravelled > bounds.y || (uInteractive > 0.5 && accumulated.a > 0.985)) break;
       if (point.z >= uCropMin && point.z <= uCropMax) {
         float density = texture(uVolume, point).r;
-        float transfer = smoothstep(low, max(low + 0.002, high), density);
-        float alpha = pow(transfer, 1.35) * uOpacity * mix(0.09, 0.06, uInteractive);
-        if (alpha > 0.002) {
-          float shade = 0.78;
-          if (uInteractive < 0.5) {
-            vec3 gradient = vec3(
-              texture(uVolume, point + vec3(uVoxel.x, 0.0, 0.0)).r - texture(uVolume, point - vec3(uVoxel.x, 0.0, 0.0)).r,
-              texture(uVolume, point + vec3(0.0, uVoxel.y, 0.0)).r - texture(uVolume, point - vec3(0.0, uVoxel.y, 0.0)).r,
-              texture(uVolume, point + vec3(0.0, 0.0, uVoxel.z)).r - texture(uVolume, point - vec3(0.0, 0.0, uVoxel.z)).r
-            );
-            vec3 normal = normalize(gradient + vec3(0.0001));
-            float diffuse = abs(dot(normal, normalize(vec3(0.45, 0.65, 1.0))));
-            float facing = abs(dot(normal, -direction));
-            float specular = pow(max(facing, 0.0), 22.0);
-            float edgeStrength = clamp(length(gradient) * 16.0, 0.0, 1.0);
-            shade = 0.34 + diffuse * 0.56 + specular * 0.34;
-            alpha *= 0.62 + edgeStrength * 0.9;
+        if (uInteractive < 0.5) {
+          if (density >= isoLevel && previousDensity < isoLevel) {
+            vec3 lowerPoint = previousPoint;
+            vec3 upperPoint = point;
+            for (int refinement = 0; refinement < 5; refinement++) {
+              vec3 middlePoint = mix(lowerPoint, upperPoint, 0.5);
+              if (texture(uVolume, middlePoint).r >= isoLevel) upperPoint = middlePoint;
+              else lowerPoint = middlePoint;
+            }
+            vec3 surfacePoint = mix(lowerPoint, upperPoint, 0.5);
+            float surfaceDensity = texture(uVolume, surfacePoint).r;
+            vec3 normal = normalize(-densityGradient(surfacePoint) + vec3(0.00001));
+            vec3 viewDirection = normalize(-direction);
+            if (dot(normal, viewDirection) < 0.0) normal = -normal;
+            vec3 keyDirection = normalize(viewDirection + vec3(0.42, 0.58, 0.72));
+            vec3 halfDirection = normalize(keyDirection + viewDirection);
+            float diffuse = max(dot(normal, keyDirection), 0.0);
+            float fill = max(dot(normal, viewDirection), 0.0);
+            float rim = pow(1.0 - fill, 2.0);
+            float specular = pow(max(dot(normal, halfDirection), 0.0), 30.0);
+            float surfaceTone = smoothstep(isoLevel, max(isoLevel + 0.02, high), surfaceDensity);
+            vec3 boneColor = mix(vec3(0.62, 0.45, 0.27), vec3(0.98, 0.90, 0.70), surfaceTone);
+            vec3 color = boneColor * (0.34 + diffuse * 0.72 + fill * 0.16 + rim * 0.08);
+            color += vec3(1.0, 0.95, 0.82) * specular * 0.34;
+            outColor = vec4(color, clamp(uOpacity * 1.2, 0.08, 1.0));
+            return;
           }
-          vec3 boneColor = mix(vec3(0.72, 0.61, 0.43), vec3(1.0, 0.97, 0.86), transfer);
-          vec3 color = boneColor * shade;
-          accumulated.rgb += (1.0 - accumulated.a) * alpha * color;
-          accumulated.a += (1.0 - accumulated.a) * alpha;
+        } else {
+          float transfer = smoothstep(low, high, density);
+          float alpha = pow(transfer, 1.35) * uOpacity * 0.06;
+          if (alpha > 0.002) {
+            vec3 boneColor = mix(vec3(0.72, 0.61, 0.43), vec3(1.0, 0.97, 0.86), transfer);
+            accumulated.rgb += (1.0 - accumulated.a) * alpha * boneColor * 0.78;
+            accumulated.a += (1.0 - accumulated.a) * alpha;
+          }
         }
+        previousDensity = density;
+        previousPoint = point;
+      } else {
+        previousDensity = 0.0;
+        previousPoint = point;
       }
       point += direction * uStep;
       distanceTravelled += uStep;
     }
+    if (uInteractive < 0.5) discard;
     if (accumulated.a < 0.01) discard;
     outColor = accumulated;
   }
@@ -466,6 +496,7 @@ function DicomVolume({ volume, settings, interactive = false }) {
       transparent: true,
       depthTest: false,
       depthWrite: false,
+      toneMapped: false,
       uniforms: {
         uVolume: { value: texture },
         uSize: { value: new THREE.Vector3(...volume.size) },
@@ -1196,7 +1227,7 @@ function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
 }
 
 /* ---------- Trackball ---------- */
-const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], onInteractionChange }, ref) => {
+const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], onInteractionChange, enabled = true }, ref) => {
   const { camera, gl, size } = useThree()
   const controlsRef = useRef(null)
   
@@ -1209,6 +1240,7 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], onInterac
     c.panSpeed = 1.0
     c.staticMoving = true
     c.dynamicDampingFactor = 0.15
+    c.enabled = enabled
     c.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.ZOOM, RIGHT: THREE.MOUSE.PAN }
     const handleStart = () => onInteractionChange?.(true)
     const handleEnd = () => onInteractionChange?.(false)
@@ -1221,6 +1253,10 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], onInterac
       c.dispose()
     }
   }, [camera, gl, onInteractionChange])
+
+  useEffect(() => {
+    if (controlsRef.current) controlsRef.current.enabled = enabled
+  }, [enabled])
 
   useEffect(() => {
     const c = controlsRef.current; if (!c) return
@@ -1515,7 +1551,7 @@ function Switch({ checked, onChange, label }) {
 }
 
 /* ---------- 2D OVERLAY ---------- */
-function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasureState, dicomSlice, onResizeEnd }) {
+function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasureState, dicomSlice, onInteractionChange }) {
   const svgRef = useRef(null)
 
   const [winSize, setWinSize] = useState({ w: 550, h: 400 })
@@ -1600,12 +1636,34 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
   const lastPos = useRef({ x: 0, y: 0 })
   const hasMoved = useRef(false)
 
+  const stopPointerInteraction = useCallback(() => {
+    if (!isDragging.current) return
+    isDragging.current = false
+    onInteractionChange?.(false)
+  }, [onInteractionChange])
+
+  useEffect(() => {
+    const finish = () => stopPointerInteraction()
+    window.addEventListener('pointerup', finish)
+    window.addEventListener('pointercancel', finish)
+    window.addEventListener('blur', finish)
+    return () => {
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', finish)
+      window.removeEventListener('blur', finish)
+      stopPointerInteraction()
+    }
+  }, [stopPointerInteraction])
+
   const handlePointerDown = (e) => {
     if (e.button !== 0 && e.button !== 1 && e.button !== 2) return
+    e.preventDefault()
+    e.stopPropagation()
     isDragging.current = true
+    onInteractionChange?.(true)
     hasMoved.current = false
     lastPos.current = { x: e.clientX, y: e.clientY }
-    e.currentTarget.setPointerCapture(e.pointerId)
+    try { e.currentTarget.setPointerCapture(e.pointerId) } catch {}
   }
 
   const handlePointerMove = (e) => {
@@ -1633,9 +1691,12 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
   }
 
   const handlePointerUp = (e) => {
-    isDragging.current = false
-    e.currentTarget.releasePointerCapture(e.pointerId)
-    if (!hasMoved.current && e.button === 0) {
+    const wasDragging = isDragging.current
+    stopPointerInteraction()
+    try {
+      if (e.currentTarget.hasPointerCapture?.(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
+    } catch {}
+    if (wasDragging && !hasMoved.current && e.button === 0) {
         if (measureState.active) {
             const pos = getLogicalMousePos(e)
             const snap = getSnappedPoint(pos)
@@ -1662,6 +1723,7 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
       e.preventDefault()
       e.stopPropagation()
       userResizedRef.current = true
+      onInteractionChange?.(true)
       const resizeHandle = e.currentTarget
       const pointerId = e.pointerId
       resizeHandle.setPointerCapture?.(pointerId)
@@ -1693,7 +1755,7 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
           window.removeEventListener('blur', onUp)
           if (resizeHandle.hasPointerCapture?.(pointerId)) resizeHandle.releasePointerCapture(pointerId)
           document.body.style.userSelect = previousUserSelect
-          onResizeEnd?.()
+          onInteractionChange?.(false)
       }
       window.addEventListener('pointermove', onMove)
       window.addEventListener('pointerup', onUp)
@@ -1880,7 +1942,7 @@ function ThickRotationGizmo({ controlRef }) {
 }
 
 /* ---------- Manažer kolize gizma a ovládání kamery ---------- */
-function GizmoManager({ rotateRef, translateRef, trackballRef }) {
+function GizmoManager({ rotateRef, translateRef, trackballRef, interactionBlocked = false }) {
   const isCamDragging = useRef(false)
 
   useEffect(() => {
@@ -1909,6 +1971,10 @@ function GizmoManager({ rotateRef, translateRef, trackballRef }) {
     const isDragging = !!translate?.dragging || !!rotate?.dragging
 
     if (trackballRef.current) {
+      if (interactionBlocked) {
+        trackballRef.current.enabled = false
+        return
+      }
       if (isCamDragging.current) {
          trackballRef.current.enabled = true;
       } else {
@@ -2100,6 +2166,7 @@ export default function ClientPage() {
   const rootGroupRef = useRef(null)
   const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
   const [cameraInteracting, setCameraInteracting] = useState(false)
+  const [sliceOverlayInteracting, setSliceOverlayInteracting] = useState(false)
   const [trackballNonce, setTrackballNonce] = useState(0)
   const cameraSettleTimerRef = useRef(null)
   const handleCameraInteraction = useCallback((active) => {
@@ -2110,9 +2177,12 @@ export default function ClientPage() {
       cameraSettleTimerRef.current = setTimeout(() => setCameraInteracting(false), 220)
     }
   }, [])
-  const resetTrackballAfterSliceResize = useCallback(() => {
+  const handleSliceOverlayInteraction = useCallback((active) => {
+    clearTimeout(cameraSettleTimerRef.current)
     setCameraInteracting(false)
-    setTrackballNonce((value) => value + 1)
+    setSliceOverlayInteracting(active)
+    if (trackballRef.current) trackballRef.current.enabled = !active
+    if (!active) setTrackballNonce((value) => value + 1)
   }, [])
   useEffect(() => () => clearTimeout(cameraSettleTimerRef.current), [])
   const [didInitialFrame, setDidInitialFrame] = useState(false)
@@ -3490,7 +3560,7 @@ export default function ClientPage() {
         </div>
       )}
 
-      {clippingEnabled && !isMobile && <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onResizeEnd={resetTrackballAfterSliceResize} />}
+      {clippingEnabled && !isMobile && <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />}
 
       <Canvas
         orthographic
@@ -3659,7 +3729,7 @@ export default function ClientPage() {
         {clippingEnabled && !isMobile && (
           <>
             <ThickRotationGizmo controlRef={transformRotateRef} />
-            <GizmoManager rotateRef={transformRotateRef} translateRef={transformTranslateRef} trackballRef={trackballRef} />
+            <GizmoManager key={`gizmo-manager-${trackballNonce}`} rotateRef={transformRotateRef} translateRef={transformTranslateRef} trackballRef={trackballRef} interactionBlocked={sliceOverlayInteracting} />
           </>
         )}
 
@@ -3688,7 +3758,7 @@ export default function ClientPage() {
           />
         )}
 
-        <TouchTrackballControls key={`trackball-${trackballNonce}`} ref={trackballRef} target={cameraTarget} onInteractionChange={handleCameraInteraction} />
+        <TouchTrackballControls key={`trackball-${trackballNonce}`} ref={trackballRef} target={cameraTarget} onInteractionChange={handleCameraInteraction} enabled={!sliceOverlayInteracting} />
         <RightButtonPan key={`pan-${trackballNonce}`} setTarget={setCameraTarget} trackballRef={trackballRef} onInteractionChange={handleCameraInteraction} />
       </Canvas>
 
