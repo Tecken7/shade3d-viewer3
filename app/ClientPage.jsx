@@ -125,9 +125,12 @@ function rememberOriginalColors(mesh) {
 /* ---------- DICOM ZIP + 3D volume rendering ---------- */
 const DICOM_HU_MIN = -1024
 const DICOM_HU_MAX = 3071
+const DICOM_DETAIL_QUALITY = 512
+const DICOM_SLICE_INTERACTIVE_RESOLUTION = 256
+const DICOM_SLICE_DETAIL_RESOLUTION = 640
 const DEFAULT_DICOM_SETTINGS = {
   preset: "teeth",
-  quality: 384,
+  quality: DICOM_DETAIL_QUALITY,
   opacity: 0.82,
   densityMin: 350,
   densityMax: 2200,
@@ -1999,7 +2002,7 @@ export default function ClientPage() {
       ...DEFAULT_DICOM_SETTINGS,
       ...previous,
       ...(source.settings || {}),
-      quality: 384,
+      quality: DICOM_DETAIL_QUALITY,
       position: Array.isArray(source.settings?.position) ? source.settings.position : previous.position,
       rotation: Array.isArray(source.settings?.rotation) ? source.settings.rotation : previous.rotation,
     }))
@@ -2011,14 +2014,14 @@ export default function ClientPage() {
     dicomAbortRef.current?.abort()
     const controller = new AbortController()
     dicomAbortRef.current = controller
-    setDicomSettings((previous) => ({ ...previous, ...(source.settings || {}), quality: 384 }))
+    setDicomSettings((previous) => ({ ...previous, ...(source.settings || {}), quality: DICOM_DETAIL_QUALITY }))
     setDicomError("")
     setDicomProgress(0)
     setDicomStatus("downloading")
     try {
       const volume = await loadDicomZip(
         source.u,
-        384,
+        DICOM_DETAIL_QUALITY,
         source.size,
         (progress) => {
           setDicomProgress(progress.percent || 0)
@@ -2310,7 +2313,7 @@ export default function ClientPage() {
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
-  const updateClippingLogic = useCallback(() => {
+  const updateClippingLogic = useCallback((dicomResolution = DICOM_SLICE_DETAIL_RESOLUTION) => {
     if (!planeGroup || !rootGroupRef.current) return
 
     planeGroup.updateMatrixWorld(true)
@@ -2417,7 +2420,7 @@ export default function ClientPage() {
     }
 
     const dicomSlice = dicomVolume && dicomSettings.visible !== false
-      ? buildDicomSliceImage(dicomVolume, dicomSettings, planeGroup.matrixWorld, 224)
+      ? buildDicomSliceImage(dicomVolume, dicomSettings, planeGroup.matrixWorld, dicomResolution)
       : null
     setDicomSlice2D(dicomSlice)
 
@@ -2437,20 +2440,31 @@ export default function ClientPage() {
 
   const lastClipTime = useRef(0)
   const clipTimeout = useRef(null)
+  const clipDetailTimeout = useRef(null)
 
   const requestClipUpdate = useCallback(() => {
     const now = performance.now()
     if (now - lastClipTime.current > 60) {
-      updateClippingLogic()
+      updateClippingLogic(DICOM_SLICE_INTERACTIVE_RESOLUTION)
       lastClipTime.current = now
     } else {
       clearTimeout(clipTimeout.current)
       clipTimeout.current = setTimeout(() => {
-        updateClippingLogic()
+        updateClippingLogic(DICOM_SLICE_INTERACTIVE_RESOLUTION)
         lastClipTime.current = performance.now()
       }, 60)
     }
+    clearTimeout(clipDetailTimeout.current)
+    clipDetailTimeout.current = setTimeout(() => {
+      updateClippingLogic(DICOM_SLICE_DETAIL_RESOLUTION)
+      lastClipTime.current = performance.now()
+    }, 180)
   }, [updateClippingLogic])
+
+  useEffect(() => () => {
+    clearTimeout(clipTimeout.current)
+    clearTimeout(clipDetailTimeout.current)
+  }, [])
 
   useEffect(() => {
     if (!pendingViewerState || restoredViewerStateRef.current === pendingViewerState) return
@@ -2482,7 +2496,7 @@ export default function ClientPage() {
       setDicomSettings((previous) => ({
         ...previous,
         ...pendingViewerState.dicom.settings,
-        // Uložená viditelnost se použije až po ručním potvrzení stažení.
+        quality: DICOM_DETAIL_QUALITY,
         visible: pendingViewerState.dicom.visible !== false,
       }))
     }
