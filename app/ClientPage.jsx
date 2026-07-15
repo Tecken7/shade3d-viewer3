@@ -1318,6 +1318,7 @@ export default function ClientPage() {
   // ÚPRAVA 2: Zapnutý auto-spin ve výchozím stavu a rychlost nastavena na 0.25
   const [isAutoRotating, setIsAutoRotating] = useState(true)
   const [spinSpeed, setSpinSpeed] = useState(0.25)
+  const [spinIconNonce, setSpinIconNonce] = useState(0)
 
   useEffect(() => {
     try {
@@ -1415,6 +1416,24 @@ export default function ClientPage() {
   
   const [loadedUrls, setLoadedUrls] = useState(new Set())
   const handleModelLoaded = (url) => setLoadedUrls((prev) => { const n = new Set(prev); n.add(url); return n; })
+
+  useEffect(() => {
+    if (!isAutoRotating) return
+    let frameA = 0, frameB = 0
+    const restartSpinIcon = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return
+      frameA = requestAnimationFrame(() => {
+        frameB = requestAnimationFrame(() => setSpinIconNonce((value) => value + 1))
+      })
+    }
+    restartSpinIcon()
+    document.addEventListener("visibilitychange", restartSpinIcon)
+    return () => {
+      cancelAnimationFrame(frameA)
+      cancelAnimationFrame(frameB)
+      document.removeEventListener("visibilitychange", restartSpinIcon)
+    }
+  }, [isAutoRotating, files.length, loadedUrls.size])
 
   const [hasTexMap, setHasTexMap] = useState({})
   const meshesRef = useRef({})
@@ -2403,6 +2422,7 @@ export default function ClientPage() {
           }}
         >
           <svg 
+            key={`spin-icon-${isAutoRotating}-${spinIconNonce}`}
             width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" 
             strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" 
             style={{
