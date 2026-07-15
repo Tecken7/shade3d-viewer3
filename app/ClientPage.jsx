@@ -1390,6 +1390,7 @@ export default function ClientPage() {
   const [showComparison, setShowComparison] = useState(false)
   const [comparisonTolerance, setComparisonTolerance] = useState(0.25)
   const [comparisonStats, setComparisonStats] = useState(null)
+  const [restoringAnalysisMode, setRestoringAnalysisMode] = useState(null)
   
   const [pinnedNotes, setPinnedNotes] = useState([])
   const [pendingViewerState, setPendingViewerState] = useState(null)
@@ -1742,23 +1743,37 @@ export default function ClientPage() {
       setClippingEnabled(false)
     }
 
+    const restoringOcclusion = mode === "occlusion" && occlusionSelection.length === 2
+    const restoringComparison = mode === "comparison" && savedComparisonSelection.length === 2
+    if (!restoringOcclusion && !restoringComparison) return
+
+    setRestoringAnalysisMode(mode)
+    setIsCalculatingHeatmap(restoringOcclusion)
+    setIsCalculatingComparison(restoringComparison)
+
     setTimeout(() => {
-      if (mode === "occlusion" && occlusionSelection.length === 2) {
-        const meshA = meshesRef.current[occlusionSelection[0]]
-        const meshB = meshesRef.current[occlusionSelection[1]]
-        if (meshA && meshB) {
-          applyOcclusionHeatmap(meshA, meshB, 2.0, false)
-          setHasComputedHeatmap(true)
-          setShowHeatmap(pendingViewerState.occlusion?.visible !== false)
+      try {
+        if (restoringOcclusion) {
+          const meshA = meshesRef.current[occlusionSelection[0]]
+          const meshB = meshesRef.current[occlusionSelection[1]]
+          if (meshA && meshB) {
+            applyOcclusionHeatmap(meshA, meshB, 2.0, false)
+            setHasComputedHeatmap(true)
+            setShowHeatmap(pendingViewerState.occlusion?.visible !== false)
+          }
+        } else if (restoringComparison) {
+          const meshA = meshesRef.current[savedComparisonSelection[0]]
+          const meshB = meshesRef.current[savedComparisonSelection[1]]
+          if (meshA && meshB) {
+            setComparisonStats(applySurfaceComparison(meshA, meshB, savedTolerance))
+            setHasComputedComparison(true)
+            setShowComparison(pendingViewerState.comparison?.visible !== false)
+          }
         }
-      } else if (mode === "comparison" && savedComparisonSelection.length === 2) {
-        const meshA = meshesRef.current[savedComparisonSelection[0]]
-        const meshB = meshesRef.current[savedComparisonSelection[1]]
-        if (meshA && meshB) {
-          setComparisonStats(applySurfaceComparison(meshA, meshB, savedTolerance))
-          setHasComputedComparison(true)
-          setShowComparison(pendingViewerState.comparison?.visible !== false)
-        }
+      } finally {
+        setIsCalculatingHeatmap(false)
+        setIsCalculatingComparison(false)
+        setRestoringAnalysisMode(null)
       }
     }, 100)
   }, [pendingViewerState, files, loadedUrls])
@@ -2390,7 +2405,12 @@ export default function ClientPage() {
           <svg 
             width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" 
             strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" 
-            style={{ animation: isAutoRotating ? "spin 4s linear infinite" : "none" }}
+            style={{
+              animation: isAutoRotating ? "shade3dSpin360 4s linear infinite" : "none",
+              transformOrigin: "50% 50%",
+              transformBox: "fill-box",
+              willChange: "transform",
+            }}
           >
             <g transform="translate(24 0) scale(-1 1)">
               <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
@@ -2475,7 +2495,7 @@ export default function ClientPage() {
           display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", 
           color: "white", fontFamily: "sans-serif"
         }}>
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "spin 1s linear infinite", marginBottom: 16 }}>
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "shade3dSpin360 1s linear infinite", transformOrigin: "50% 50%", marginBottom: 16 }}>
             <path d="M21 12a9 9 0 1 1-6.219-8.56" />
           </svg>
           <div style={{ fontSize: 18, fontWeight: "bold" }}>Načítám modely...</div>
@@ -2489,11 +2509,17 @@ export default function ClientPage() {
           display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", 
           color: "white", fontFamily: "sans-serif"
         }}>
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "spin 1s linear infinite", marginBottom: 16 }}>
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "shade3dSpin360 1s linear infinite", transformOrigin: "50% 50%", marginBottom: 16 }}>
             <path d="M21 12a9 9 0 1 1-6.219-8.56" />
           </svg>
           <div style={{ fontSize: 18, fontWeight: "bold" }}>
-            {isCalculatingComparison ? "Porovnávám povrchy..." : "Vypočítávám mapu okluze..."}
+            {restoringAnalysisMode === "comparison"
+              ? "Načítám uložené porovnání..."
+              : restoringAnalysisMode === "occlusion"
+                ? "Načítám uloženou okluzi..."
+                : isCalculatingComparison
+                  ? "Porovnávám povrchy..."
+                  : "Vypočítávám mapu okluze..."}
           </div>
         </div>
       )}
@@ -2747,7 +2773,7 @@ export default function ClientPage() {
       <Lightbox open={lightbox.open} onClose={() => setLightbox({ open: false, src: null, alt: "" })} src={lightbox.src} alt={lightbox.alt} />
 
       <style jsx global>{`
-        @keyframes spin { 
+        @keyframes shade3dSpin360 { 
           100% { transform: rotate(360deg); } 
         }
 
