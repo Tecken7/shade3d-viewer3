@@ -130,6 +130,7 @@ const DICOM_SLICE_INTERACTIVE_RESOLUTION = 256
 const DICOM_SLICE_DETAIL_RESOLUTION = 640
 const DEFAULT_DICOM_SETTINGS = {
   preset: "teeth",
+  viewMode: "solid",
   quality: DICOM_DETAIL_QUALITY,
   opacity: 0.82,
   densityMin: 350,
@@ -385,6 +386,7 @@ const DICOM_FRAGMENT_SHADER = `
   uniform float uCropMax;
   uniform float uStep;
   uniform float uInteractive;
+  uniform float uViewMode;
   uniform vec3 uVoxel;
 
   vec2 hitBox(vec3 origin, vec3 direction) {
@@ -422,7 +424,7 @@ const DICOM_FRAGMENT_SHADER = `
       if (distanceTravelled > bounds.y || (uInteractive > 0.5 && accumulated.a > 0.985)) break;
       if (point.z >= uCropMin && point.z <= uCropMax) {
         float density = texture(uVolume, point).r;
-        if (uInteractive < 0.5) {
+        if (uInteractive < 0.5 && uViewMode > 0.5) {
           if (density >= isoLevel && previousDensity < isoLevel) {
             vec3 lowerPoint = previousPoint;
             vec3 upperPoint = point;
@@ -451,10 +453,21 @@ const DICOM_FRAGMENT_SHADER = `
           }
         } else {
           float transfer = smoothstep(low, high, density);
-          float alpha = pow(transfer, 1.35) * uOpacity * 0.06;
+          float alpha = pow(transfer, 1.35) * uOpacity * (uInteractive > 0.5 ? 0.06 : 0.09);
           if (alpha > 0.002) {
             vec3 boneColor = mix(vec3(0.72, 0.61, 0.43), vec3(1.0, 0.97, 0.86), transfer);
-            accumulated.rgb += (1.0 - accumulated.a) * alpha * boneColor * 0.78;
+            float shade = 0.78;
+            if (uInteractive < 0.5) {
+              vec3 gradient = densityGradient(point);
+              vec3 normal = normalize(gradient + vec3(0.0001));
+              float diffuse = abs(dot(normal, normalize(vec3(0.45, 0.65, 1.0))));
+              float facing = abs(dot(normal, -direction));
+              float specular = pow(max(facing, 0.0), 22.0);
+              float edgeStrength = clamp(length(gradient) * 16.0, 0.0, 1.0);
+              shade = 0.34 + diffuse * 0.56 + specular * 0.34;
+              alpha *= 0.62 + edgeStrength * 0.9;
+            }
+            accumulated.rgb += (1.0 - accumulated.a) * alpha * boneColor * shade;
             accumulated.a += (1.0 - accumulated.a) * alpha;
           }
         }
@@ -467,7 +480,7 @@ const DICOM_FRAGMENT_SHADER = `
       point += direction * uStep;
       distanceTravelled += uStep;
     }
-    if (uInteractive < 0.5) discard;
+    if (uInteractive < 0.5 && uViewMode > 0.5) discard;
     if (accumulated.a < 0.01) discard;
     outColor = accumulated;
   }
@@ -507,6 +520,7 @@ function DicomVolume({ volume, settings, interactive = false }) {
         uCropMax: { value: settings.cropMax },
         uStep: { value: 1.1 / Math.max(volume.width, volume.height, volume.depth) },
         uInteractive: { value: 0 },
+        uViewMode: { value: settings.viewMode === "light" ? 0 : 1 },
         uVoxel: { value: new THREE.Vector3(1 / volume.width, 1 / volume.height, 1 / volume.depth) },
       },
     })
@@ -525,8 +539,9 @@ function DicomVolume({ volume, settings, interactive = false }) {
     material.uniforms.uCropMin.value = Math.min(settings.cropMin, settings.cropMax - 0.01)
     material.uniforms.uCropMax.value = Math.max(settings.cropMax, settings.cropMin + 0.01)
     material.uniforms.uInteractive.value = interactive ? 1 : 0
+    material.uniforms.uViewMode.value = settings.viewMode === "light" ? 0 : 1
     material.uniforms.uStep.value = (interactive ? 2.5 : 0.9) / Math.max(volume.width, volume.height, volume.depth)
-  }, [material, volume, interactive, settings.densityMin, settings.densityMax, settings.opacity, settings.cropMin, settings.cropMax])
+  }, [material, volume, interactive, settings.viewMode, settings.densityMin, settings.densityMax, settings.opacity, settings.cropMin, settings.cropMax])
 
   if (!volume || !material || settings.visible === false) return null
   const rotation = (settings.rotation || [0, 0, 0]).map((value) => THREE.MathUtils.degToRad(value || 0))
@@ -2111,9 +2126,6 @@ export default function ClientPage() {
 
   useEffect(() => () => dicomAbortRef.current?.abort(), [])
 
-  const [autoSmooth, setAutoSmooth] = useState(true)
-  const [smoothAngle] = useState(30)
-
   // -- STAVY PRO ŘEZÁNÍ A ANIMACI --
   const [clippingEnabled, setClippingEnabled] = useState(false)
   const [planeGroup, setPlaneGroup] = useState(null) 
@@ -2762,8 +2774,6 @@ export default function ClientPage() {
         const mId = getParam("m")
         const manifestUrlParam = getParam("manifest")
         const filesParam = getParam("files")
-        const smoothParam = getParam("smooth")
-        if (smoothParam === "0") setAutoSmooth(false)
 
         const applyFiles = (Fs, titleStr, logoUrl, headlight, camState, viewerState = null) => {
           setFiles(Fs)
@@ -3047,6 +3057,34 @@ export default function ClientPage() {
             ))}
           </div>
 
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ marginBottom: 5, color: "#9ca3af", fontSize: 9, fontWeight: 800, letterSpacing: ".08em" }}>VIEWING MODE</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+              {[
+                ["light", "Light"],
+                ["solid", "Solid"],
+              ].map(([mode, label]) => (
+                <button
+                  key={mode}
+                  onClick={() => setDicomSettings((previous) => ({ ...previous, viewMode: mode }))}
+                  style={{
+                    minHeight: 32,
+                    padding: "6px 8px",
+                    borderRadius: 6,
+                    border: dicomSettings.viewMode === mode ? "1px solid #60a5fa" : "1px solid #444",
+                    background: dicomSettings.viewMode === mode ? "rgba(37,99,235,.4)" : "#151515",
+                    color: "white",
+                    fontSize: 10,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {[
             ["Krytí", "opacity", 0.05, 1, 0.01, `${Math.round(dicomSettings.opacity * 100)} %`],
             ["Hustota od", "densityMin", -1000, 2500, 10, `${dicomSettings.densityMin} HU`],
@@ -3117,8 +3155,7 @@ export default function ClientPage() {
         );
       })}
       {dicomControls}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
-        <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginTop: 10 }}>
         <button 
           onClick={() => setDidInitialFrame(false)}
           style={{
@@ -3594,8 +3631,8 @@ export default function ClientPage() {
                 visible={visibles[i] ?? true}
                 onLoaded={handleModelLoaded}
                 onMeshReady={handleMeshReady}
-                autoSmooth={autoSmooth}
-                smoothAngle={smoothAngle}
+                autoSmooth={true}
+                smoothAngle={DEFAULT_SMOOTH_ANGLE}
                 wireframe={wireframes[i] || false}
                 roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.5)}
                 metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
