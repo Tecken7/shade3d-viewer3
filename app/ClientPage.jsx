@@ -127,7 +127,7 @@ const DICOM_HU_MIN = -1024
 const DICOM_HU_MAX = 3071
 const DEFAULT_DICOM_SETTINGS = {
   preset: "teeth",
-  quality: 256,
+  quality: 384,
   opacity: 0.82,
   densityMin: 350,
   densityMax: 2200,
@@ -1512,12 +1512,33 @@ function Switch({ checked, onChange, label }) {
 }
 
 /* ---------- 2D OVERLAY ---------- */
-function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasureState, dicomSlice }) {
+function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasureState, dicomSlice, onResizeEnd }) {
   const svgRef = useRef(null)
 
   const [winSize, setWinSize] = useState({ w: 550, h: 400 })
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [zoom, setZoom] = useState(1)
+  const userResizedRef = useRef(false)
+
+  const setDefaultWindowSize = useCallback(() => {
+    if (userResizedRef.current || typeof window === "undefined") return
+    const anchor = document.querySelector('[data-slice-window-anchor="true"]')
+    const anchorBottom = anchor?.getBoundingClientRect().bottom ?? 140
+    const availableHeight = window.innerHeight - anchorBottom - 30
+    setWinSize({
+      w: Math.min(550, Math.max(320, window.innerWidth - 40)),
+      h: Math.max(220, availableHeight),
+    })
+  }, [])
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(setDefaultWindowSize)
+    window.addEventListener("resize", setDefaultWindowSize)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener("resize", setDefaultWindowSize)
+    }
+  }, [setDefaultWindowSize])
 
   const pathDataByModel = useMemo(() => {
       const grouped = new Map()
@@ -1635,12 +1656,20 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
   }
 
   const startResize = (e, dir) => {
+      e.preventDefault()
       e.stopPropagation()
+      userResizedRef.current = true
+      const resizeHandle = e.currentTarget
+      const pointerId = e.pointerId
+      resizeHandle.setPointerCapture?.(pointerId)
       const startW = winSize.w
       const startH = winSize.h
       const startX = e.clientX
       const startY = e.clientY
+      const previousUserSelect = document.body.style.userSelect
+      document.body.style.userSelect = 'none'
       const onMove = (me) => {
+          me.preventDefault()
           let newW = startW
           let newH = startH
           if (dir.includes('left')) newW = startW + (startX - me.clientX)
@@ -1649,12 +1678,24 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
 
           setWinSize({ w: Math.max(250, newW), h: Math.max(200, newH) })
       }
-      const onUp = () => {
+      let finished = false
+      const onUp = (upEvent) => {
+          if (finished) return
+          finished = true
+          upEvent?.preventDefault?.()
+          upEvent?.stopPropagation?.()
           window.removeEventListener('pointermove', onMove)
           window.removeEventListener('pointerup', onUp)
+          window.removeEventListener('pointercancel', onUp)
+          window.removeEventListener('blur', onUp)
+          if (resizeHandle.hasPointerCapture?.(pointerId)) resizeHandle.releasePointerCapture(pointerId)
+          document.body.style.userSelect = previousUserSelect
+          onResizeEnd?.()
       }
       window.addEventListener('pointermove', onMove)
       window.addEventListener('pointerup', onUp)
+      window.addEventListener('pointercancel', onUp)
+      window.addEventListener('blur', onUp)
   }
 
   if (!boundingBox) return null
@@ -1934,7 +1975,6 @@ export default function ClientPage() {
   const [dicomProgress, setDicomProgress] = useState(0)
   const [dicomError, setDicomError] = useState("")
   const dicomAbortRef = useRef(null)
-  const dicomLoadedQualityRef = useRef(null)
 
   const applyDicomSource = useCallback((source) => {
     if (!source?.u) {
@@ -1952,7 +1992,6 @@ export default function ClientPage() {
         setDicomVolume(null)
         setDicomStatus("idle")
         setDicomError("")
-        dicomLoadedQualityRef.current = null
       }
       return source
     })
@@ -1960,6 +1999,7 @@ export default function ClientPage() {
       ...DEFAULT_DICOM_SETTINGS,
       ...previous,
       ...(source.settings || {}),
+      quality: 384,
       position: Array.isArray(source.settings?.position) ? source.settings.position : previous.position,
       rotation: Array.isArray(source.settings?.rotation) ? source.settings.rotation : previous.rotation,
     }))
@@ -1971,18 +2011,14 @@ export default function ClientPage() {
     dicomAbortRef.current?.abort()
     const controller = new AbortController()
     dicomAbortRef.current = controller
-    const effectiveSettings = {
-      ...dicomSettings,
-      ...(source.settings || {}),
-    }
-    setDicomSettings((previous) => ({ ...previous, ...(source.settings || {}) }))
+    setDicomSettings((previous) => ({ ...previous, ...(source.settings || {}), quality: 384 }))
     setDicomError("")
     setDicomProgress(0)
     setDicomStatus("downloading")
     try {
       const volume = await loadDicomZip(
         source.u,
-        Number(effectiveSettings.quality) || 256,
+        384,
         source.size,
         (progress) => {
           setDicomProgress(progress.percent || 0)
@@ -1992,7 +2028,6 @@ export default function ClientPage() {
       )
       if (controller.signal.aborted) return
       setDicomVolume(volume)
-      dicomLoadedQualityRef.current = Number(effectiveSettings.quality) || 256
       setDicomStatus("ready")
     } catch (error) {
       if (error?.name === "AbortError") {
@@ -2004,16 +2039,6 @@ export default function ClientPage() {
       setDicomStatus("error")
     }
   }, [dicomSource, dicomSettings, dicomStatus])
-
-  const releaseDicom = useCallback(() => {
-    dicomAbortRef.current?.abort()
-    dicomAbortRef.current = null
-    setDicomVolume(null)
-    setDicomStatus("idle")
-    setDicomProgress(0)
-    setDicomError("")
-    dicomLoadedQualityRef.current = null
-  }, [])
 
   useEffect(() => () => dicomAbortRef.current?.abort(), [])
 
@@ -2072,6 +2097,7 @@ export default function ClientPage() {
   const rootGroupRef = useRef(null)
   const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
   const [cameraInteracting, setCameraInteracting] = useState(false)
+  const [trackballNonce, setTrackballNonce] = useState(0)
   const cameraSettleTimerRef = useRef(null)
   const handleCameraInteraction = useCallback((active) => {
     clearTimeout(cameraSettleTimerRef.current)
@@ -2080,6 +2106,10 @@ export default function ClientPage() {
     } else {
       cameraSettleTimerRef.current = setTimeout(() => setCameraInteracting(false), 220)
     }
+  }, [])
+  const resetTrackballAfterSliceResize = useCallback(() => {
+    setCameraInteracting(false)
+    setTrackballNonce((value) => value + 1)
   }, [])
   useEffect(() => () => clearTimeout(cameraSettleTimerRef.current), [])
   const [didInitialFrame, setDidInitialFrame] = useState(false)
@@ -2883,38 +2913,54 @@ export default function ClientPage() {
 
       {dicomStatus !== "ready" ? (
         <div>
-          <button
-            onClick={() => startDicomLoad()}
-            disabled={dicomStatus === "downloading" || dicomStatus === "processing"}
-            style={{ width: "100%", border: 0, borderRadius: 7, padding: "9px 10px", background: "#2563eb", color: "white", fontWeight: 800, cursor: "pointer" }}
-          >
+          <div style={{ padding: "8px 9px", borderRadius: 7, background: "rgba(96,165,250,.1)", color: "#dbeafe", fontSize: 11, lineHeight: 1.4 }}>
             {dicomStatus === "downloading"
               ? `Stahuji DICOM data - ${Math.round(dicomProgress)}%`
               : dicomStatus === "processing"
                 ? "Zpracovávám DICOM data..."
-                : "Zobrazit DICOM data"}
-          </button>
+                : dicomStatus === "error"
+                  ? "DICOM data se nepodařilo načíst."
+                  : "DICOM data se automaticky připraví po načtení scény."}
+          </div>
           {(dicomStatus === "downloading" || dicomStatus === "processing") && (
             <div style={{ height: 4, marginTop: 7, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.12)" }}>
               <div style={{ width: `${Math.max(2, dicomProgress)}%`, height: "100%", background: "#60a5fa", transition: "width .2s" }} />
             </div>
           )}
           {dicomError && <div style={{ marginTop: 7, color: "#fca5a5", fontSize: 11, lineHeight: 1.35 }}>{dicomError}</div>}
+          {dicomStatus === "error" && (
+            <button onClick={() => startDicomLoad(null, true)} style={{ width: "100%", marginTop: 8, border: 0, borderRadius: 7, padding: "8px 10px", background: "#2563eb", color: "white", fontWeight: 800, cursor: "pointer" }}>
+              Zkusit znovu
+            </button>
+          )}
         </div>
       ) : (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, marginBottom: 10 }}>
-            <select value={dicomSettings.preset} onChange={(e) => setDicomPreset(e.target.value)} style={{ background: "#151515", color: "white", border: "1px solid #444", borderRadius: 6, padding: 6, fontSize: 11 }}>
-              <option value="teeth">Zuby</option>
-              <option value="bone">Kost</option>
-              <option value="soft">Měkké tkáně</option>
-              <option value="custom">Vlastní</option>
-            </select>
-            <select value={dicomSettings.quality} onChange={(e) => setDicomSettings((previous) => ({ ...previous, quality: Number(e.target.value) }))} style={{ background: "#151515", color: "white", border: "1px solid #444", borderRadius: 6, padding: 6, fontSize: 11 }}>
-              <option value={192}>Rychlá</option>
-              <option value={256}>Vyvážená</option>
-              <option value={384}>Detailní</option>
-            </select>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 6, marginBottom: 10 }}>
+            {[
+              ["teeth", "Zuby"],
+              ["bone", "Kost"],
+              ["soft", "Měkké tkáně"],
+            ].map(([preset, label]) => (
+              <button
+                key={preset}
+                onClick={() => setDicomPreset(preset)}
+                style={{
+                  minHeight: 34,
+                  padding: "6px 4px",
+                  borderRadius: 6,
+                  border: dicomSettings.preset === preset ? "1px solid #60a5fa" : "1px solid #444",
+                  background: dicomSettings.preset === preset ? "rgba(37,99,235,.4)" : "#151515",
+                  color: "white",
+                  fontSize: 10,
+                  lineHeight: 1.15,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                {label}
+              </button>
+            ))}
           </div>
 
           {[
@@ -2930,32 +2976,6 @@ export default function ClientPage() {
             </label>
           ))}
 
-          <details style={{ marginTop: 9 }}>
-            <summary style={{ cursor: "pointer", color: "#ddd", fontSize: 11 }}>Umístění objemu</summary>
-            <div style={{ marginTop: 7 }}>
-              {["X", "Y", "Z"].map((axis, index) => (
-                <label key={`dicom-pos-${axis}`} style={{ display: "block", marginTop: 6, fontSize: 10, color: "#bbb" }}>
-                  <span style={{ display: "flex", justifyContent: "space-between" }}><span>Posun {axis}</span><b>{dicomSettings.position[index].toFixed(1)} mm</b></span>
-                  <input type="range" min={-150} max={150} step={0.5} value={dicomSettings.position[index]} onChange={(e) => setDicomSettings((previous) => { const position = [...previous.position]; position[index] = Number(e.target.value); return { ...previous, position } })} style={{ width: "100%" }} />
-                </label>
-              ))}
-              {["X", "Y", "Z"].map((axis, index) => (
-                <label key={`dicom-rot-${axis}`} style={{ display: "block", marginTop: 6, fontSize: 10, color: "#bbb" }}>
-                  <span style={{ display: "flex", justifyContent: "space-between" }}><span>Rotace {axis}</span><b>{dicomSettings.rotation[index].toFixed(0)}°</b></span>
-                  <input type="range" min={-180} max={180} step={1} value={dicomSettings.rotation[index]} onChange={(e) => setDicomSettings((previous) => { const rotation = [...previous.rotation]; rotation[index] = Number(e.target.value); return { ...previous, rotation } })} style={{ width: "100%" }} />
-                </label>
-              ))}
-              <label style={{ display: "block", marginTop: 6, fontSize: 10, color: "#bbb" }}>
-                <span style={{ display: "flex", justifyContent: "space-between" }}><span>Měřítko</span><b>{dicomSettings.scale.toFixed(2)}×</b></span>
-                <input type="range" min={0.25} max={2.5} step={0.01} value={dicomSettings.scale} onChange={(e) => setDicomSettings((previous) => ({ ...previous, scale: Number(e.target.value) }))} style={{ width: "100%" }} />
-              </label>
-            </div>
-          </details>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, marginTop: 10 }}>
-            <button onClick={() => startDicomLoad(null, true)} disabled={dicomLoadedQualityRef.current === Number(dicomSettings.quality)} style={{ padding: "7px 5px", borderRadius: 6, border: "1px solid rgba(255,255,255,.2)", background: "rgba(255,255,255,.08)", color: "white", fontSize: 10, cursor: "pointer", opacity: dicomLoadedQualityRef.current === Number(dicomSettings.quality) ? 0.45 : 1 }}>Načíst novou kvalitu</button>
-            <button onClick={releaseDicom} style={{ padding: "7px 5px", borderRadius: 6, border: "1px solid rgba(248,113,113,.35)", background: "rgba(127,29,29,.2)", color: "#fca5a5", fontSize: 10, cursor: "pointer" }}>Uvolnit z paměti</button>
-          </div>
         </>
       )}
     </div>
@@ -3298,7 +3318,7 @@ export default function ClientPage() {
       </div>
 
       <div style={{ background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 12 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", position: "relative", minHeight: 24 }}>
+        <div data-slice-window-anchor="true" style={{ display: "flex", alignItems: "center", justifyContent: "center", position: "relative", minHeight: 24 }}>
           <Switch checked={clippingEnabled} onChange={setClippingEnabled} label="Průřez" />
           {clippingEnabled && (
             <button 
@@ -3330,6 +3350,11 @@ export default function ClientPage() {
   const frameKey = allLoaded && !didInitialFrame ? `frame-${files.length}` : ""
   const sceneReadyForDicom = (files.length === 0 || (allLoaded && didInitialFrame)) &&
     !isCalculatingHeatmap && !isCalculatingComparison && !restoringAnalysisMode
+
+  useEffect(() => {
+    if (!sceneReadyForDicom || !dicomSource || dicomStatus !== "idle") return
+    startDicomLoad()
+  }, [sceneReadyForDicom, dicomSource, dicomStatus, startDicomLoad])
 
   return (
     <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
@@ -3410,26 +3435,6 @@ export default function ClientPage() {
         </div>
       )}
 
-      {/* DICOM se nabízí teprve po zobrazení běžných modelů a uložených analýz. */}
-      {sceneReadyForDicom && dicomSource && (dicomStatus === "idle" || dicomStatus === "error") && (
-        <div style={{
-          position: "absolute", left: "50%", bottom: 24, transform: "translateX(-50%)",
-          zIndex: 9997, width: "min(440px, calc(100vw - 28px))", boxSizing: "border-box",
-          padding: 16, borderRadius: 12, background: "rgba(9,9,11,.92)", color: "white",
-          border: "1px solid rgba(96,165,250,.45)", boxShadow: "0 16px 45px rgba(0,0,0,.55)",
-          fontFamily: "sans-serif", backdropFilter: "blur(10px)"
-        }}>
-          <div style={{ fontSize: 14, fontWeight: 800, marginBottom: 5 }}>Zakázka obsahuje DICOM data</div>
-          <div style={{ color: "#cbd5e1", fontSize: 12, lineHeight: 1.45, marginBottom: 12 }}>
-            Běžné modely jsou připravené. DICOM ZIP má přibližně {dicomSource.size ? `${Math.round(dicomSource.size / 1024 / 1024)} MB` : "stovky MB"} a stáhne se pouze po vašem potvrzení.
-          </div>
-          {dicomError && <div style={{ color: "#fca5a5", fontSize: 11, marginBottom: 9 }}>{dicomError}</div>}
-          <button onClick={() => startDicomLoad()} style={{ width: "100%", padding: "10px 12px", border: 0, borderRadius: 8, background: "#2563eb", color: "white", fontWeight: 800, cursor: "pointer" }}>
-            Zobrazit DICOM data
-          </button>
-        </div>
-      )}
-
       {(dicomStatus === "downloading" || dicomStatus === "processing") && (
         <div style={{
           position: "absolute", inset: 0, zIndex: 10000, background: "rgba(0,0,0,.76)",
@@ -3450,7 +3455,6 @@ export default function ClientPage() {
             <div style={{ marginTop: 9, fontSize: 11, color: "#cbd5e1" }}>
               {dicomStatus === "downloading" ? "Modely zůstávají načtené; probíhá pouze přenos CT archivu." : "Sestavuji 3D objem z jednotlivých řezů."}
             </div>
-            <button onClick={releaseDicom} style={{ marginTop: 14, padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(255,255,255,.3)", background: "rgba(255,255,255,.08)", color: "white", cursor: "pointer" }}>Zrušit</button>
           </div>
         </div>
       )}
@@ -3472,7 +3476,7 @@ export default function ClientPage() {
         </div>
       )}
 
-      {clippingEnabled && !isMobile && <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} />}
+      {clippingEnabled && !isMobile && <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onResizeEnd={resetTrackballAfterSliceResize} />}
 
       <Canvas
         orthographic
@@ -3670,8 +3674,8 @@ export default function ClientPage() {
           />
         )}
 
-        <TouchTrackballControls key="trackball" ref={trackballRef} target={cameraTarget} onInteractionChange={handleCameraInteraction} />
-        <RightButtonPan key="pan" setTarget={setCameraTarget} trackballRef={trackballRef} onInteractionChange={handleCameraInteraction} />
+        <TouchTrackballControls key={`trackball-${trackballNonce}`} ref={trackballRef} target={cameraTarget} onInteractionChange={handleCameraInteraction} />
+        <RightButtonPan key={`pan-${trackballNonce}`} setTarget={setCameraTarget} trackballRef={trackballRef} onInteractionChange={handleCameraInteraction} />
       </Canvas>
 
       <Lightbox open={lightbox.open} onClose={() => setLightbox({ open: false, src: null, alt: "" })} src={lightbox.src} alt={lightbox.alt} />
