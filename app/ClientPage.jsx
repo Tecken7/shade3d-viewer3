@@ -110,68 +110,175 @@ function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
   return g
 }
 
-/* ---------- Heatmap Funkce ---------- */
-export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0) {
-  try {
-    if (!meshB.geometry.boundsTree) {
-      meshB.geometry.computeBoundsTree()
-    }
+/* ---------- Analýzy povrchu a heatmapy ---------- */
+function rememberOriginalColors(mesh) {
+  if (mesh.userData._originalColors !== undefined) return
+  mesh.userData._originalColors = mesh.geometry.attributes.color
+    ? mesh.geometry.attributes.color.clone()
+    : null
+}
 
-    const geomA = meshA.geometry
-    const posA = geomA.attributes.position
+function configureMaterialTransparency(material, opacity) {
+  if (!material) return
+  const translucent = opacity < 0.999
+  material.opacity = opacity
+  material.depthTest = true
+  material.side = THREE.DoubleSide
 
-    if (meshA.userData._originalColors === undefined) {
-      if (geomA.attributes.color) {
-        meshA.userData._originalColors = geomA.attributes.color.clone()
-      } else {
-        meshA.userData._originalColors = null
-      }
-    }
+  // Alpha hash je stabilní při změně úhlu kamery a nevyžaduje řazení průhledných meshů.
+  if ("alphaHash" in material) {
+    material.alphaHash = translucent
+    material.transparent = false
+    material.depthWrite = true
+    if ("forceSinglePass" in material) material.forceSinglePass = true
+  } else {
+    // Záloha pro starší Three.js: alespoň pevné pořadí a správné depth nastavení.
+    material.transparent = translucent
+    material.depthWrite = !translucent
+    if ("premultipliedAlpha" in material) material.premultipliedAlpha = translucent
+  }
+}
 
-    const colors = new Float32Array(posA.count * 3)
-    const distances = new Float32Array(posA.count)
-    const vA = new THREE.Vector3()
-    
-    const colorRed = new THREE.Color(0xff0000)
-    const colorYellow = new THREE.Color(0xffff00)
-    const colorGreen = new THREE.Color(0x00ff00)
-    const colorWhite = new THREE.Color(0xffffff)
-    
-    const invMatB = new THREE.Matrix4().copy(meshB.matrixWorld).invert()
-    const target = { point: new THREE.Vector3(), distance: 0 }
+function faceNormalLocal(geometry, faceIndex, target, a, b, c) {
+  if (!Number.isFinite(faceIndex) || faceIndex < 0) return target.set(0, 0, 1)
+  const pos = geometry.attributes.position
+  const index = geometry.index
+  const offset = faceIndex * 3
+  const ia = index ? index.getX(offset) : offset
+  const ib = index ? index.getX(offset + 1) : offset + 1
+  const ic = index ? index.getX(offset + 2) : offset + 2
+  a.fromBufferAttribute(pos, ia)
+  b.fromBufferAttribute(pos, ib)
+  c.fromBufferAttribute(pos, ic)
+  return target.subVectors(b, a).cross(c.sub(a)).normalize()
+}
 
-    for (let i = 0; i < posA.count; i++) {
-      vA.fromBufferAttribute(posA, i)
-      vA.applyMatrix4(meshA.matrixWorld)
-      vA.applyMatrix4(invMatB)
+function makeClosestSurfaceSampler(targetMesh) {
+  targetMesh.updateMatrixWorld(true)
+  if (!targetMesh.geometry.boundsTree) targetMesh.geometry.computeBoundsTree()
 
-      const distResult = meshB.geometry.boundsTree.closestPointToPoint(vA, target)
-      const distance = typeof distResult === "number" ? distResult : target.distance
+  const inverseTarget = new THREE.Matrix4().copy(targetMesh.matrixWorld).invert()
+  const normalMatrix = new THREE.Matrix3().getNormalMatrix(targetMesh.matrixWorld)
+  const localPoint = new THREE.Vector3()
+  const closestWorld = new THREE.Vector3()
+  const deltaWorld = new THREE.Vector3()
+  const normalWorld = new THREE.Vector3()
+  const triangleA = new THREE.Vector3()
+  const triangleB = new THREE.Vector3()
+  const triangleC = new THREE.Vector3()
+  const result = { point: new THREE.Vector3(), distance: Infinity, faceIndex: -1 }
+  const sampleResult = { distance: 0, signedDistance: 0 }
 
-      distances[i] = distance 
+  return (worldPoint) => {
+    localPoint.copy(worldPoint).applyMatrix4(inverseTarget)
+    result.distance = Infinity
+    result.faceIndex = -1
+    targetMesh.geometry.boundsTree.closestPointToPoint(localPoint, result)
+    closestWorld.copy(result.point).applyMatrix4(targetMesh.matrixWorld)
+    deltaWorld.subVectors(worldPoint, closestWorld)
+    faceNormalLocal(targetMesh.geometry, result.faceIndex, normalWorld, triangleA, triangleB, triangleC)
+      .applyMatrix3(normalMatrix)
+      .normalize()
+    const distance = deltaWorld.length()
+    const sign = deltaWorld.dot(normalWorld) < 0 ? -1 : 1
+    sampleResult.distance = distance
+    sampleResult.signedDistance = distance * sign
+    return sampleResult
+  }
+}
 
-      let finalColor = colorWhite
-      
-      if (distance < maxDist) {
-        if (distance < 0.5) {
-          finalColor = new THREE.Color().lerpColors(colorRed, colorYellow, distance / 0.5)
-        } else if (distance < 1.5) {
-          finalColor = new THREE.Color().lerpColors(colorYellow, colorGreen, (distance - 0.5) / 1.0)
-        } else {
-          finalColor = new THREE.Color().lerpColors(colorGreen, colorWhite, (distance - 1.5) / 0.5)
-        }
-      }
+function writeColor(target, index, color) {
+  target[index * 3] = color.r
+  target[index * 3 + 1] = color.g
+  target[index * 3 + 2] = color.b
+}
 
-      colors[i * 3] = finalColor.r
-      colors[i * 3 + 1] = finalColor.g
-      colors[i * 3 + 2] = finalColor.b
-    }
+const OCCLUSION_COLORS = ["#7e22ce", "#ef4444", "#facc15", "#22c55e", "#ffffff"].map((value) => new THREE.Color(value))
+const COMPARISON_COLORS = ["#2563eb", "#22c55e", "#facc15", "#ef4444", "#a21caf"].map((value) => new THREE.Color(value))
 
-    meshA.userData._heatmapColors = new THREE.BufferAttribute(colors, 3)
-    geomA.setAttribute('_occlusionDist', new THREE.BufferAttribute(distances, 1))
-    
-  } catch (err) {
-    console.error("Chyba výpočtu heatmapy: ", err)
+function occlusionColor(distance, maxDist, target) {
+  const [deep, penetration, contact, clearance, far] = OCCLUSION_COLORS
+  if (distance < -1) return target.copy(deep)
+  if (distance < 0) return target.lerpColors(deep, penetration, distance + 1)
+  if (distance < 0.25) return target.lerpColors(penetration, contact, distance / 0.25)
+  if (distance < 1) return target.lerpColors(contact, clearance, (distance - 0.25) / 0.75)
+  if (distance < maxDist) return target.lerpColors(clearance, far, (distance - 1) / Math.max(0.001, maxDist - 1))
+  return target.copy(far)
+}
+
+export function applyOcclusionHeatmap(meshA, meshB, maxDist = 2.0, invertSign = false) {
+  meshA.updateMatrixWorld(true)
+  rememberOriginalColors(meshA)
+  const posA = meshA.geometry.attributes.position
+  const colors = new Float32Array(posA.count * 3)
+  const distances = new Float32Array(posA.count)
+  const sourceWorld = new THREE.Vector3()
+  const color = new THREE.Color()
+  const sample = makeClosestSurfaceSampler(meshB)
+
+  for (let i = 0; i < posA.count; i++) {
+    sourceWorld.fromBufferAttribute(posA, i).applyMatrix4(meshA.matrixWorld)
+    const hit = sample(sourceWorld)
+    const signedDistance = hit.signedDistance * (invertSign ? -1 : 1)
+    distances[i] = signedDistance
+    writeColor(colors, i, occlusionColor(signedDistance, maxDist, color))
+  }
+
+  meshA.userData._occlusionColors = new THREE.BufferAttribute(colors, 3)
+  meshA.userData._occlusionDistances = new THREE.BufferAttribute(distances, 1)
+}
+
+function comparisonColor(distance, tolerance, target) {
+  const [excellent, within, warning, mismatch, severe] = COMPARISON_COLORS
+  if (distance <= tolerance) return target.lerpColors(excellent, within, distance / tolerance)
+  if (distance <= tolerance * 2) return target.lerpColors(within, warning, (distance - tolerance) / tolerance)
+  if (distance <= tolerance * 4) return target.lerpColors(warning, mismatch, (distance - tolerance * 2) / (tolerance * 2))
+  return target.lerpColors(mismatch, severe, Math.min(1, (distance - tolerance * 4) / (tolerance * 4)))
+}
+
+function applyComparisonPass(sourceMesh, targetMesh, tolerance) {
+  sourceMesh.updateMatrixWorld(true)
+  rememberOriginalColors(sourceMesh)
+  const positions = sourceMesh.geometry.attributes.position
+  const colors = new Float32Array(positions.count * 3)
+  const distances = new Float32Array(positions.count)
+  const values = []
+  const sourceWorld = new THREE.Vector3()
+  const color = new THREE.Color()
+  const sample = makeClosestSurfaceSampler(targetMesh)
+  const stride = Math.max(1, Math.ceil(positions.count / 100000))
+  let sum = 0, sumSq = 0, max = 0, within = 0
+
+  for (let i = 0; i < positions.count; i++) {
+    sourceWorld.fromBufferAttribute(positions, i).applyMatrix4(sourceMesh.matrixWorld)
+    const distance = sample(sourceWorld).distance
+    distances[i] = distance
+    sum += distance
+    sumSq += distance * distance
+    max = Math.max(max, distance)
+    if (distance <= tolerance) within++
+    if (i % stride === 0) values.push(distance)
+    writeColor(colors, i, comparisonColor(distance, tolerance, color))
+  }
+
+  sourceMesh.userData._comparisonColors = new THREE.BufferAttribute(colors, 3)
+  sourceMesh.userData._comparisonDistances = new THREE.BufferAttribute(distances, 1)
+  return { count: positions.count, sum, sumSq, max, within, values }
+}
+
+export function applySurfaceComparison(meshA, meshB, tolerance = 0.25) {
+  const aToB = applyComparisonPass(meshA, meshB, tolerance)
+  const bToA = applyComparisonPass(meshB, meshA, tolerance)
+  const count = aToB.count + bToA.count
+  const values = [...aToB.values, ...bToA.values].sort((a, b) => a - b)
+  const percentile95 = values.length ? values[Math.min(values.length - 1, Math.floor(values.length * 0.95))] : 0
+  return {
+    mean: (aToB.sum + bToA.sum) / Math.max(1, count),
+    rms: Math.sqrt((aToB.sumSq + bToA.sumSq) / Math.max(1, count)),
+    percentile95,
+    max: Math.max(aToB.max, bToA.max),
+    withinTolerance: ((aToB.within + bToA.within) / Math.max(1, count)) * 100,
+    samples: count,
   }
 }
 
@@ -223,28 +330,37 @@ function AutoRotateScene({ enabled, target, speedFactor = 1.0 }) {
 }
 
 /* ---------- 3D Vektorová linie na rovině řezu ---------- */
+const segmentStart = (segment) => segment.a || segment[0]
+const segmentEnd = (segment) => segment.b || segment[1]
+
 function SliceOutline3D({ segments, color = "#fbbf24" }) {
   const geomRef = useRef(null)
 
   useEffect(() => {
     if (geomRef.current) {
       const pts = []
+      const vertexColors = []
       for (let i = 0; i < segments.length; i++) {
-        pts.push(segments[i][0].x, segments[i][0].y, 0)
-        pts.push(segments[i][1].x, segments[i][1].y, 0)
+        const start = segmentStart(segments[i])
+        const end = segmentEnd(segments[i])
+        const lineColor = new THREE.Color(segments[i].color || color)
+        pts.push(start.x, start.y, 0)
+        pts.push(end.x, end.y, 0)
+        vertexColors.push(lineColor.r, lineColor.g, lineColor.b, lineColor.r, lineColor.g, lineColor.b)
       }
       geomRef.current.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3))
+      geomRef.current.setAttribute('color', new THREE.Float32BufferAttribute(vertexColors, 3))
       geomRef.current.computeBoundingBox()
       geomRef.current.computeBoundingSphere()
     }
-  }, [segments])
+  }, [segments, color])
 
   if (!segments || segments.length === 0) return null
 
   return (
     <lineSegments renderOrder={998}>
       <bufferGeometry ref={geomRef} />
-      <lineBasicMaterial color={color} depthTest={false} depthWrite={false} transparent opacity={0.9} />
+      <lineBasicMaterial vertexColors depthTest={false} depthWrite={false} transparent opacity={0.95} />
     </lineSegments>
   )
 }
@@ -315,25 +431,27 @@ function AnyModel({
   useVertexColors = false,
   keepMaterials = false,
   wireframe = false,
-  showHeatmap = false,
+  analysisMode = null,
+  renderOrder = 0,
   onHoverDist,
   onPinNote,
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
 
-  const makeMat = (opts = {}) =>
-    new THREE.MeshStandardMaterial({
+  const makeMat = (opts = {}) => {
+    const material = new THREE.MeshStandardMaterial({
       color: new THREE.Color(color || "#ffffff"),
       roughness: typeof roughness === "number" ? roughness : 0.5,
       metalness: typeof metalness === "number" ? metalness : 0.5,
-      transparent: opacity < 1,
       opacity,
       side: THREE.DoubleSide,
-      depthWrite: opacity === 1,
       wireframe: !!wireframe,
       ...opts,
     })
+    configureMaterialTransparency(material, opacity)
+    return material
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -363,13 +481,14 @@ function AnyModel({
           if (keepMaterials) {
             loaded.traverse((ch) => {
               if (ch.isMesh && ch.material) {
-                const m = ch.material
-                if ("transparent" in m) m.transparent = opacity < 1
-                if ("opacity" in m) m.opacity = opacity
-                if ("roughness" in m && typeof roughness === "number") m.roughness = roughness
-                if ("metalness" in m && typeof metalness === "number") m.metalness = metalness
-                m.wireframe = !!wireframe
-                m.side = THREE.DoubleSide
+                const materials = Array.isArray(ch.material) ? ch.material : [ch.material]
+                materials.forEach((m) => {
+                  configureMaterialTransparency(m, opacity)
+                  if ("roughness" in m && typeof roughness === "number") m.roughness = roughness
+                  if ("metalness" in m && typeof metalness === "number") m.metalness = metalness
+                  m.wireframe = !!wireframe
+                  m.needsUpdate = true
+                })
               }
             })
             obj = loaded
@@ -380,6 +499,13 @@ function AnyModel({
           }
         }
         if (!cancelled) {
+          obj.userData._viewerColor = color || "#ffffff"
+          obj.renderOrder = renderOrder
+          obj.traverse((child) => {
+            if (!child.isMesh) return
+            child.userData._viewerColor = color || "#ffffff"
+            child.renderOrder = renderOrder
+          })
           setObject3D(obj)
           onLoaded && onLoaded(url)
           
@@ -406,16 +532,30 @@ function AnyModel({
           }
       }
 
-      const isHeatmapActive = showHeatmap && child.userData._heatmapColors;
+      child.userData._viewerColor = color || "#ffffff"
+      child.renderOrder = renderOrder
+      const analysisColors = analysisMode === "occlusion"
+        ? child.userData._occlusionColors
+        : analysisMode === "comparison"
+          ? child.userData._comparisonColors
+          : null
+      const analysisDistances = analysisMode === "occlusion"
+        ? child.userData._occlusionDistances
+        : analysisMode === "comparison"
+          ? child.userData._comparisonDistances
+          : null
+      const isHeatmapActive = !!analysisColors
       
       if (isHeatmapActive) {
-          child.geometry.setAttribute('color', child.userData._heatmapColors);
+          child.geometry.setAttribute('color', analysisColors);
+          child.geometry.setAttribute('_analysisDist', analysisDistances);
       } else {
           if (child.userData._originalColors) {
               child.geometry.setAttribute('color', child.userData._originalColors);
           } else {
               child.geometry.deleteAttribute('color');
           }
+          child.geometry.deleteAttribute('_analysisDist');
       }
       
       if (child.geometry.attributes.color) {
@@ -426,22 +566,16 @@ function AnyModel({
       const wantVertexColors = isHeatmapActive || isOriginalTexActive;
 
       if (keepMaterials) {
-          const m = child.material
-          if (!m) return
-          m.transparent = opacity < 1
-          m.opacity = opacity
-          if (typeof roughness === "number") m.roughness = roughness
-          if (typeof metalness === "number") m.metalness = metalness
-          m.wireframe = !!wireframe
-
-          if (wantVertexColors) {
-              m.vertexColors = true;
-              if ("color" in m) m.color = new THREE.Color("#ffffff");
-          } else {
-              m.vertexColors = false;
-              if ("color" in m) m.color = new THREE.Color(color);
-          }
-          m.needsUpdate = true
+          const materials = Array.isArray(child.material) ? child.material : [child.material]
+          materials.filter(Boolean).forEach((m) => {
+            configureMaterialTransparency(m, opacity)
+            if (typeof roughness === "number" && "roughness" in m) m.roughness = roughness
+            if (typeof metalness === "number" && "metalness" in m) m.metalness = metalness
+            m.wireframe = !!wireframe
+            m.vertexColors = wantVertexColors
+            if ("color" in m) m.color = new THREE.Color(wantVertexColors ? "#ffffff" : color)
+            m.needsUpdate = true
+          })
       } else {
           const newMat = wantVertexColors 
               ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") }) 
@@ -451,16 +585,17 @@ function AnyModel({
           child.material = newMat
       }
     })
-  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, showHeatmap])
+  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, analysisMode, renderOrder])
 
   if (!object3D) return null
 
   return visible ? (
     <primitive 
       object={object3D} 
-      onPointerMove={showHeatmap && onHoverDist ? (e) => {
+      renderOrder={renderOrder}
+      onPointerMove={analysisMode && onHoverDist ? (e) => {
         e.stopPropagation(); 
-        const distAttr = e.object.geometry.getAttribute('_occlusionDist');
+        const distAttr = e.object.geometry.getAttribute('_analysisDist');
         
         if (distAttr && e.face) {
           const dA = distAttr.getX(e.face.a);
@@ -472,12 +607,12 @@ function AnyModel({
           onHoverDist(distAttr.getX(e.index), e.clientX, e.clientY);
         }
       } : undefined}
-      onPointerOut={showHeatmap && onHoverDist ? () => {
+      onPointerOut={analysisMode && onHoverDist ? () => {
         onHoverDist(null);
       } : undefined}
-      onDoubleClick={showHeatmap && onPinNote ? (e) => {
+      onDoubleClick={analysisMode && onPinNote ? (e) => {
         e.stopPropagation();
-        const distAttr = e.object.geometry.getAttribute('_occlusionDist');
+        const distAttr = e.object.geometry.getAttribute('_analysisDist');
         let dist = null;
         if (distAttr && e.face) {
           const dA = distAttr.getX(e.face.a);
@@ -818,14 +953,18 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [zoom, setZoom] = useState(1)
 
-  const pathData = useMemo(() => {
-      if (!segments || segments.length === 0) return ""
-      let d = ""
+  const pathDataByColor = useMemo(() => {
+      const grouped = new Map()
+      if (!segments || segments.length === 0) return []
       for (let i = 0; i < segments.length; i++) {
           const s = segments[i]
-          d += `M${s[0].x.toFixed(2)},${s[0].y.toFixed(2)}L${s[1].x.toFixed(2)},${s[1].y.toFixed(2)}`
+          const start = segmentStart(s)
+          const end = segmentEnd(s)
+          const color = s.color || "#ffffff"
+          const d = `${grouped.get(color) || ""}M${start.x.toFixed(2)},${start.y.toFixed(2)}L${end.x.toFixed(2)},${end.y.toFixed(2)}`
+          grouped.set(color, d)
       }
-      return d
+      return Array.from(grouped, ([color, d]) => ({ color, d }))
   }, [segments])
 
   const distSq = (v, w) => Math.pow(v.x - w.x, 2) + Math.pow(v.y - w.y, 2)
@@ -841,7 +980,7 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
     let bestPoint = null
     let minDist = Infinity
     for(let i = 0; i < segments.length; i++) {
-      const pt = closestPointOnSegment(mousePoint, segments[i][0], segments[i][1])
+      const pt = closestPointOnSegment(mousePoint, segmentStart(segments[i]), segmentEnd(segments[i]))
       const d = distSq(mousePoint, pt)
       if (d < minDist) { minDist = d; bestPoint = pt }
     }
@@ -1008,7 +1147,9 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
       >
-        <path d={pathData} stroke="#ffffff" strokeWidth={dynamicStrokeWidth} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+        {pathDataByColor.map(({ color, d }) => (
+          <path key={color} d={d} stroke={color} strokeWidth={dynamicStrokeWidth} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+        ))}
 
         {measureState.p1 && (
           <circle cx={measureState.p1.x} cy={measureState.p1.y} r={dynamicPointRadius} fill="#fbbf24" />
@@ -1176,6 +1317,15 @@ export default function ClientPage() {
   
   const [hasComputedHeatmap, setHasComputedHeatmap] = useState(false)
   const [showHeatmap, setShowHeatmap] = useState(false)
+  const [invertOcclusionSign, setInvertOcclusionSign] = useState(false)
+
+  const [comparisonMenuOpen, setComparisonMenuOpen] = useState(false)
+  const [comparisonSelection, setComparisonSelection] = useState([])
+  const [isCalculatingComparison, setIsCalculatingComparison] = useState(false)
+  const [hasComputedComparison, setHasComputedComparison] = useState(false)
+  const [showComparison, setShowComparison] = useState(false)
+  const [comparisonTolerance, setComparisonTolerance] = useState(0.25)
+  const [comparisonStats, setComparisonStats] = useState(null)
   
   const [pinnedNotes, setPinnedNotes] = useState([])
 
@@ -1200,6 +1350,19 @@ export default function ClientPage() {
 
   const [hasTexMap, setHasTexMap] = useState({})
   const meshesRef = useRef({})
+  const analysisFilesKey = files.map((file) => file.url).join("|")
+
+  useEffect(() => {
+    setHeatmapSelection([])
+    setComparisonSelection([])
+    setHasComputedHeatmap(false)
+    setHasComputedComparison(false)
+    setShowHeatmap(false)
+    setShowComparison(false)
+    setComparisonStats(null)
+    setPinnedNotes([])
+    meshesRef.current = {}
+  }, [analysisFilesKey])
   
   const handleMeshReady = useCallback((mesh, url) => {
     meshesRef.current[url] = mesh
@@ -1218,6 +1381,17 @@ export default function ClientPage() {
     if (tooltipRef.current) tooltipRef.current.style.opacity = "0";
   }
 
+  const toggleComparisonModel = (url) => {
+    setComparisonSelection((prev) => prev.includes(url)
+      ? prev.filter((item) => item !== url)
+      : (prev.length >= 2 ? prev : [...prev, url]))
+    setHasComputedComparison(false)
+    setShowComparison(false)
+    setComparisonStats(null)
+    setPinnedNotes([])
+    if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
+  }
+
   const handleApplyHeatmap = () => {
     if (heatmapSelection.length !== 2) return
     setIsCalculatingHeatmap(true);
@@ -1229,10 +1403,11 @@ export default function ClientPage() {
         const meshB = meshesRef.current[heatmapSelection[1]]
 
         if (meshA && meshB) {
-          applyOcclusionHeatmap(meshA, meshB, 2.0)
+          applyOcclusionHeatmap(meshA, meshB, 2.0, invertOcclusionSign)
           
           setHasComputedHeatmap(true)
-          setShowHeatmap(true) 
+          setShowHeatmap(true)
+          setShowComparison(false)
         }
       } catch(e) {
         console.error("Heatmap chyba:", e)
@@ -1242,24 +1417,56 @@ export default function ClientPage() {
     }, 150) 
   }
 
+  const handleApplyComparison = () => {
+    if (comparisonSelection.length !== 2) return
+    setIsCalculatingComparison(true)
+    setPinnedNotes([])
+
+    setTimeout(() => {
+      try {
+        const meshA = meshesRef.current[comparisonSelection[0]]
+        const meshB = meshesRef.current[comparisonSelection[1]]
+        if (meshA && meshB) {
+          const stats = applySurfaceComparison(meshA, meshB, comparisonTolerance)
+          setComparisonStats(stats)
+          setHasComputedComparison(true)
+          setShowComparison(true)
+          setShowHeatmap(false)
+        }
+      } catch (e) {
+        console.error("Chyba porovnání povrchů:", e)
+      } finally {
+        setIsCalculatingComparison(false)
+      }
+    }, 150)
+  }
+
+  const activeAnalysisMode = showHeatmap ? "occlusion" : showComparison ? "comparison" : null
+
   const handleHeatmapHover = useCallback((dist, x, y) => {
-    if (!tooltipRef.current || !showHeatmap) return;
+    if (!tooltipRef.current || !activeAnalysisMode) return;
     if (dist === null) {
       tooltipRef.current.style.opacity = "0";
     } else {
       tooltipRef.current.style.opacity = "1";
       tooltipRef.current.style.transform = `translate(${x + 15}px, ${y + 15}px)`;
-      tooltipRef.current.innerText = `Vzdálenost: ${dist.toFixed(2)} mm`;
+      if (activeAnalysisMode === "occlusion") {
+        const kind = dist < -0.01 ? "Průnik" : dist > 0.01 ? "Mezera" : "Kontakt"
+        tooltipRef.current.innerText = `${kind}: ${dist > 0 ? "+" : ""}${dist.toFixed(2)} mm`
+      } else {
+        tooltipRef.current.innerText = `Odchylka povrchu: ${dist.toFixed(2)} mm`
+      }
     }
-  }, [showHeatmap])
+  }, [activeAnalysisMode])
 
   const handlePinNote = useCallback((dist, point) => {
     setPinnedNotes(prev => [...prev, { 
       id: Date.now() + Math.random(), 
       value: dist, 
+      mode: activeAnalysisMode,
       pos: [point.x, point.y, point.z] 
     }]);
-  }, []);
+  }, [activeAnalysisMode]);
 
   const removeNote = useCallback((id) => {
     setPinnedNotes(prev => prev.filter(n => n.id !== id));
@@ -1283,13 +1490,16 @@ export default function ClientPage() {
     const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3()
     const edgePt = new THREE.Vector3(), locPt = new THREE.Vector3()
 
-    rootGroupRef.current.children.forEach(child => {
+    rootGroupRef.current.children.forEach(modelRoot => {
+      if (!modelRoot.visible) return
+      modelRoot.traverse(child => {
        if (!child.isMesh || !child.visible) return
        child.updateMatrixWorld(true)
        const matrix = child.matrixWorld
        const geom = child.geometry
        const posAttr = geom.attributes.position
        const index = geom.index
+       const outlineColor = child.userData._viewerColor || modelRoot.userData._viewerColor || "#ffffff"
 
        const checkEdge = (v1, v2, d1, d2) => {
            if (d1 * d2 < 0) {
@@ -1337,7 +1547,11 @@ export default function ClientPage() {
            }
 
            if (pts.length >= 4) {
-               segments2D.push([ { x: pts[0], y: pts[1] }, { x: pts[2], y: pts[3] } ])
+               segments2D.push({
+                 a: { x: pts[0], y: pts[1] },
+                 b: { x: pts[2], y: pts[3] },
+                 color: outlineColor,
+               })
            }
        }
 
@@ -1346,6 +1560,7 @@ export default function ClientPage() {
        } else {
            for(let i=0; i<posAttr.count; i+=3) processTri(i, i+1, i+2)
        }
+      })
     })
 
     setSliceSegments(segments2D)
@@ -1354,16 +1569,17 @@ export default function ClientPage() {
        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
        for(let i=0; i<segments2D.length; i++){
            const s = segments2D[i]
-           if(s[0].x < minX) minX = s[0].x; if(s[0].x > maxX) maxX = s[0].x;
-           if(s[0].y < minY) minY = s[0].y; if(s[0].y > maxY) maxY = s[0].y;
-           if(s[1].x < minX) minX = s[1].x; if(s[1].x > maxX) maxX = s[1].x;
-           if(s[1].y < minY) minY = s[1].y; if(s[1].y > maxY) maxY = s[1].y;
+           const start = segmentStart(s), end = segmentEnd(s)
+           if(start.x < minX) minX = start.x; if(start.x > maxX) maxX = start.x;
+           if(start.y < minY) minY = start.y; if(start.y > maxY) maxY = start.y;
+           if(end.x < minX) minX = end.x; if(end.x > maxX) maxX = end.x;
+           if(end.y < minY) minY = end.y; if(end.y > maxY) maxY = end.y;
        }
        setSliceBBox({ minX, minY, width: maxX - minX, height: maxY - minY })
     } else {
        setSliceBBox(null)
     }
-  }, [planeGroup])
+  }, [planeGroup, colors, visibles])
 
   const lastClipTime = useRef(0)
   const clipTimeout = useRef(null)
@@ -1787,9 +2003,9 @@ export default function ClientPage() {
   const topBarRight = !isMobile && (
     <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10, fontFamily: "sans-serif", color: "white" }}>
       
-      <div>
+      <div style={{ width: 270 }}>
         <button 
-          onClick={() => setHeatmapMenuOpen(prev => !prev)}
+          onClick={() => { setHeatmapMenuOpen(prev => !prev); setComparisonMenuOpen(false) }}
           style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
             background: heatmapMenuOpen ? "rgba(239,68,68,.8)" : "rgba(0,0,0,.25)",
@@ -1797,9 +2013,9 @@ export default function ClientPage() {
             borderRadius: 10, padding: "10px 14px", color: "white", cursor: "pointer",
             fontWeight: "bold", fontSize: 14, transition: "background 0.2s", width: "100%"
           }}
-          title="Zobrazit vzdálenost mezi dvěma modely"
+          title="Změřit mezeru a průnik mezi horním a dolním modelem"
         >
-          Porovnání
+          Okluze
         </button>
 
         <div style={{
@@ -1816,8 +2032,13 @@ export default function ClientPage() {
             padding: 12, width: 240, color: "white", boxShadow: "0 10px 30px rgba(0,0,0,0.5)"
           }}>
             <div style={{ marginBottom: 12, fontSize: 13, fontWeight: "bold", color: "#ccc" }}>
-              Vyberte 2 modely k porovnání:
+              Vyberte analyzovaný model a protilehlý model:
             </div>
+
+            <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 11, color: "#bbb", cursor: "pointer" }}>
+              <input type="checkbox" checked={invertOcclusionSign} onChange={(e) => setInvertOcclusionSign(e.target.checked)} />
+              Obrátit znaménko (pro model s opačnými normálami)
+            </label>
             
             <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 180, overflowY: "auto", marginBottom: 16 }}>
               {files.map((f) => (
@@ -1852,9 +2073,89 @@ export default function ClientPage() {
 
             {hasComputedHeatmap && (
               <div style={{ marginTop: 12, borderTop: "1px solid rgba(255,255,255,.2)", paddingTop: 12 }}>
-                <Switch checked={showHeatmap} onChange={setShowHeatmap} label="Zobrazit barevnou mapu" />
+                <Switch checked={showHeatmap} onChange={(checked) => { setShowHeatmap(checked); if (checked) setShowComparison(false) }} label="Zobrazit mapu okluze" />
                 <div style={{ fontSize: 10, color: "#888", marginTop: 8 }}>
-                  Tip: Dvojklikem na model připnete hodnotu.
+                  Záporná hodnota = průnik. Dvojklikem připnete hodnotu.
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ width: 270 }}>
+        <button
+          onClick={() => { setComparisonMenuOpen(prev => !prev); setHeatmapMenuOpen(false) }}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            background: comparisonMenuOpen ? "rgba(37,99,235,.85)" : "rgba(0,0,0,.25)",
+            backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)",
+            borderRadius: 10, padding: "10px 14px", color: "white", cursor: "pointer",
+            fontWeight: "bold", fontSize: 14, transition: "background 0.2s", width: "100%"
+          }}
+          title="Oboustranně porovnat podobnost povrchů dvou modelů"
+        >
+          Porovnání
+        </button>
+
+        <div style={{
+          maxHeight: comparisonMenuOpen ? "720px" : "0px",
+          opacity: comparisonMenuOpen ? 1 : 0,
+          overflow: "hidden",
+          transition: "max-height 0.4s ease-in-out, opacity 0.3s ease",
+          pointerEvents: comparisonMenuOpen ? "auto" : "none"
+        }}>
+          <div style={{
+            marginTop: 8, background: "rgba(0,0,0,.88)", backdropFilter: "blur(8px)",
+            border: "1px solid rgba(255,255,255,.2)", borderRadius: 10,
+            padding: 12, width: 270, boxSizing: "border-box", color: "white", boxShadow: "0 10px 30px rgba(0,0,0,0.5)"
+          }}>
+            <div style={{ marginBottom: 12, fontSize: 13, fontWeight: "bold", color: "#ccc" }}>
+              Vyberte 2 modely pro porovnání povrchů:
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 160, overflowY: "auto", marginBottom: 14 }}>
+              {files.map((f) => (
+                <label key={f.url} style={{ display: "flex", alignItems: "center", gap: 8, cursor: comparisonSelection.length >= 2 && !comparisonSelection.includes(f.url) ? "not-allowed" : "pointer", fontSize: 13, opacity: comparisonSelection.length >= 2 && !comparisonSelection.includes(f.url) ? 0.5 : 1 }}>
+                  <input
+                    type="checkbox"
+                    checked={comparisonSelection.includes(f.url)}
+                    onChange={() => toggleComparisonModel(f.url)}
+                    disabled={comparisonSelection.length >= 2 && !comparisonSelection.includes(f.url)}
+                    style={{ width: 16, height: 16, cursor: "inherit" }}
+                  />
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stripExt(f.name)}</span>
+                </label>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, fontSize: 11, color: "#bbb" }}>
+              <span>Tolerance shody</span><b>{comparisonTolerance.toFixed(2)} mm</b>
+            </div>
+            <input type="range" min={0.05} max={1} step={0.05} value={comparisonTolerance} onChange={(e) => { setComparisonTolerance(Number(e.target.value)); setHasComputedComparison(false); setShowComparison(false) }} style={{ width: "100%", marginBottom: 12 }} />
+
+            <button
+              onClick={handleApplyComparison}
+              disabled={comparisonSelection.length !== 2 || isCalculatingComparison}
+              style={{
+                width: "100%", padding: "10px 0", borderRadius: 6,
+                background: comparisonSelection.length === 2 && !isCalculatingComparison ? "#60a5fa" : "rgba(255,255,255,0.1)",
+                color: comparisonSelection.length === 2 && !isCalculatingComparison ? "#07111f" : "#888",
+                fontWeight: "bold", border: "none", cursor: comparisonSelection.length === 2 && !isCalculatingComparison ? "pointer" : "not-allowed"
+              }}
+            >Vypočítat podobnost</button>
+
+            {hasComputedComparison && comparisonStats && (
+              <div style={{ marginTop: 12, borderTop: "1px solid rgba(255,255,255,.2)", paddingTop: 12 }}>
+                <Switch checked={showComparison} onChange={(checked) => { setShowComparison(checked); if (checked) setShowHeatmap(false) }} label="Zobrazit mapu odchylek" />
+                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "5px 12px", marginTop: 12, fontSize: 11 }}>
+                  <span>Průměrná odchylka</span><b>{comparisonStats.mean.toFixed(3)} mm</b>
+                  <span>RMS</span><b>{comparisonStats.rms.toFixed(3)} mm</b>
+                  <span>95. percentil</span><b>{comparisonStats.percentile95.toFixed(3)} mm</b>
+                  <span>Maximum</span><b>{comparisonStats.max.toFixed(3)} mm</b>
+                  <span>V toleranci</span><b>{comparisonStats.withinTolerance.toFixed(1)} %</b>
+                </div>
+                <div style={{ fontSize: 10, color: "#888", marginTop: 9, lineHeight: 1.35 }}>
+                  Oboustranná povrchová odchylka v aktuální poloze modelů.
                 </div>
               </div>
             )}
@@ -1966,8 +2267,8 @@ export default function ClientPage() {
         </div>
       )}
 
-      {/* OVERLAY BĚHEM VÝPOČTU HEATMAPY */}
-      {isCalculatingHeatmap && (
+      {/* OVERLAY BĚHEM VÝPOČTU ANALÝZY */}
+      {(isCalculatingHeatmap || isCalculatingComparison) && (
         <div style={{
           position: "absolute", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.7)", 
           display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", 
@@ -1976,7 +2277,9 @@ export default function ClientPage() {
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "spin 1s linear infinite", marginBottom: 16 }}>
             <path d="M21 12a9 9 0 1 1-6.219-8.56" />
           </svg>
-          <div style={{ fontSize: 18, fontWeight: "bold" }}>Vypočítávám mapu skusu...</div>
+          <div style={{ fontSize: 18, fontWeight: "bold" }}>
+            {isCalculatingComparison ? "Porovnávám povrchy..." : "Vypočítávám mapu okluze..."}
+          </div>
         </div>
       )}
 
@@ -1991,7 +2294,7 @@ export default function ClientPage() {
           boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
           transition: "opacity 0.15s ease",
           transformOrigin: "top left",
-          display: showHeatmap ? "block" : "none" 
+          display: activeAnalysisMode ? "block" : "none" 
         }}
       />
 
@@ -2004,17 +2307,31 @@ export default function ClientPage() {
           display: "flex", flexDirection: "column", alignItems: "center", gap: 8,
           backdropFilter: "blur(6px)", boxShadow: "0 4px 12px rgba(0,0,0,0.5)"
         }}>
-          <span style={{ fontWeight: "bold", fontSize: 14 }}>Vzdálenost a kontakt (mm)</span>
+          <span style={{ fontWeight: "bold", fontSize: 14 }}>Okluze – průnik a mezera (mm)</span>
           <div style={{
-            width: 250, height: 12, borderRadius: 6,
-            background: "linear-gradient(to right, #ff0000 0%, #ffff00 25%, #00ff00 75%, #ffffff 100%)",
+            width: 300, height: 12, borderRadius: 6,
+            background: "linear-gradient(to right, #7e22ce 0%, #ef4444 25%, #facc15 37.5%, #22c55e 62.5%, #ffffff 100%)",
             boxShadow: "inset 0 1px 3px rgba(0,0,0,0.4)"
           }} />
-          <div style={{ display: "flex", justifyContent: "space-between", width: 250, fontSize: 11, fontWeight: "bold", opacity: 0.8 }}>
-            <span>0.0</span>
-            <span style={{ marginLeft: "-15px" }}>0.5</span>
-            <span style={{ marginLeft: "15px" }}>1.5</span>
-            <span>2.0+</span>
+          <div style={{ display: "flex", justifyContent: "space-between", width: 300, fontSize: 11, fontWeight: "bold", opacity: 0.8 }}>
+            <span>-1.0−</span><span>-0.5</span><span>0</span><span>1.0</span><span>2.0+</span>
+          </div>
+        </div>
+      )}
+
+      {showComparison && hasComputedComparison && (
+        <div style={{
+          position: "absolute", top: 20, left: "50%", transform: "translateX(-50%)",
+          zIndex: 100, background: "rgba(0,0,0,0.65)", padding: "12px 24px",
+          borderRadius: 12, border: "1px solid rgba(255,255,255,0.2)",
+          color: "white", fontFamily: "sans-serif", fontSize: 12,
+          display: "flex", flexDirection: "column", alignItems: "center", gap: 8,
+          backdropFilter: "blur(6px)", boxShadow: "0 4px 12px rgba(0,0,0,0.5)"
+        }}>
+          <span style={{ fontWeight: "bold", fontSize: 14 }}>Porovnání povrchů – absolutní odchylka (mm)</span>
+          <div style={{ width: 300, height: 12, borderRadius: 6, background: "linear-gradient(to right, #2563eb 0%, #22c55e 25%, #facc15 50%, #ef4444 75%, #a21caf 100%)" }} />
+          <div style={{ display: "flex", justifyContent: "space-between", width: 300, fontSize: 11, fontWeight: "bold", opacity: 0.8 }}>
+            <span>0</span><span>{comparisonTolerance.toFixed(2)}</span><span>{(comparisonTolerance * 2).toFixed(2)}</span><span>{(comparisonTolerance * 4).toFixed(2)}</span><span>více</span>
           </div>
         </div>
       )}
@@ -2060,14 +2377,21 @@ export default function ClientPage() {
                 metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
                 useVertexColors={vertexColors[i]}
                 keepMaterials={!!f.km}
-                showHeatmap={showHeatmap && heatmapSelection[0] === f.url}
+                renderOrder={i}
+                analysisMode={
+                  showHeatmap && heatmapSelection[0] === f.url
+                    ? "occlusion"
+                    : showComparison && comparisonSelection.includes(f.url)
+                      ? "comparison"
+                      : null
+                }
                 onHoverDist={handleHeatmapHover} 
                 onPinNote={handlePinNote}
               />
             ))}
           </Suspense>
           
-          {showHeatmap && hasComputedHeatmap && pinnedNotes.map(note => (
+          {activeAnalysisMode && pinnedNotes.filter((note) => note.mode === activeAnalysisMode).map(note => (
             <Html key={note.id} position={note.pos} zIndexRange={[100, 0]}>
               <div style={{ position: 'relative' }}>
                 <div style={{
@@ -2091,7 +2415,7 @@ export default function ClientPage() {
                   boxShadow: "0 4px 12px rgba(0,0,0,0.5)", userSelect: "none",
                   whiteSpace: "nowrap"
                 }}>
-                  {note.value.toFixed(2)} mm
+                  {note.mode === "occlusion" && note.value > 0 ? "+" : ""}{note.value.toFixed(2)} mm
                   <button 
                     onClick={(e) => { e.stopPropagation(); removeNote(note.id); }} 
                     style={{
