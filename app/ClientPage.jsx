@@ -858,7 +858,7 @@ function CustomCameraSetter({ camState, triggerKey, onFramed, setTarget }) {
 }
 
 /* ---------- SYNC STAVU POHLEDU DO FRAMERU A ODESLÁNÍ SNAPSHOTU ---------- */
-function ViewStateSync({ trackballRef }) {
+function ViewStateSync({ trackballRef, getViewerState }) {
   const { gl, camera, size } = useThree()
 
   useEffect(() => {
@@ -906,6 +906,7 @@ function ViewStateSync({ trackballRef }) {
         }
 
         const snapshotUrl = gl.domElement.toDataURL("image/jpeg", 0.75) 
+        const viewerState = getViewerState ? getViewerState() : null
         
         const targetWindow = window.top || window.parent;
         if (targetWindow) {
@@ -913,7 +914,8 @@ function ViewStateSync({ trackballRef }) {
             type: "SHADE3D_SNAPSHOT_RESPONSE",
             payload: { 
               camera: camData,
-              snapshot: snapshotUrl
+              snapshot: snapshotUrl,
+              viewerState,
             }
           }, "*")
         }
@@ -922,7 +924,7 @@ function ViewStateSync({ trackballRef }) {
     
     window.addEventListener("message", handleMessage)
     return () => window.removeEventListener("message", handleMessage)
-  }, [gl, camera, trackballRef, size.width, size.height])
+  }, [gl, camera, trackballRef, size.width, size.height, getViewerState])
 
   return null
 }
@@ -1380,7 +1382,6 @@ export default function ClientPage() {
   
   const [hasComputedHeatmap, setHasComputedHeatmap] = useState(false)
   const [showHeatmap, setShowHeatmap] = useState(false)
-  const [invertOcclusionSign, setInvertOcclusionSign] = useState(false)
 
   const [comparisonMenuOpen, setComparisonMenuOpen] = useState(false)
   const [comparisonSelection, setComparisonSelection] = useState([])
@@ -1391,6 +1392,9 @@ export default function ClientPage() {
   const [comparisonStats, setComparisonStats] = useState(null)
   
   const [pinnedNotes, setPinnedNotes] = useState([])
+  const [pendingViewerState, setPendingViewerState] = useState(null)
+  const restoredViewerStateRef = useRef(null)
+  const pendingClipStateRef = useRef(null)
 
   const tooltipRef = useRef(null)
 
@@ -1466,7 +1470,7 @@ export default function ClientPage() {
         const meshB = meshesRef.current[heatmapSelection[1]]
 
         if (meshA && meshB) {
-          applyOcclusionHeatmap(meshA, meshB, 2.0, invertOcclusionSign)
+          applyOcclusionHeatmap(meshA, meshB, 2.0, false)
           
           setHasComputedHeatmap(true)
           setShowHeatmap(true)
@@ -1505,6 +1509,48 @@ export default function ClientPage() {
   }
 
   const activeAnalysisMode = showHeatmap ? "occlusion" : showComparison ? "comparison" : null
+
+  const buildViewerState = useCallback(() => {
+    const selectionNames = (selection) => selection.map((url) => {
+      const file = files.find((item) => item.url === url)
+      return file?.rawName || file?.name || url
+    })
+    if (planeGroup) planeGroup.updateMatrix()
+
+    return {
+      version: 1,
+      activeAnalysisMode,
+      occlusion: {
+        files: selectionNames(heatmapSelection),
+        visible: showHeatmap && hasComputedHeatmap,
+      },
+      comparison: {
+        files: selectionNames(comparisonSelection),
+        tolerance: comparisonTolerance,
+        visible: showComparison && hasComputedComparison,
+      },
+      pinnedNotes: pinnedNotes.map((note) => ({
+        id: note.id,
+        mode: note.mode,
+        value: note.value,
+        pos: Array.isArray(note.pos) ? note.pos.slice(0, 3) : note.pos,
+      })),
+      clipping: {
+        enabled: clippingEnabled,
+        matrix: clippingEnabled && planeGroup ? planeGroup.matrix.toArray() : null,
+        measurement: measureState?.p1 ? {
+          active: false,
+          p1: measureState.p1,
+          p2: measureState.p2,
+          snappedP2: measureState.snappedP2,
+        } : null,
+      },
+    }
+  }, [
+    activeAnalysisMode, files, heatmapSelection, showHeatmap, hasComputedHeatmap,
+    comparisonSelection, comparisonTolerance, showComparison, hasComputedComparison,
+    pinnedNotes, clippingEnabled, planeGroup, measureState,
+  ])
 
   const handleHeatmapHover = useCallback((dist, x, y) => {
     if (!tooltipRef.current || !activeAnalysisMode) return;
@@ -1663,6 +1709,83 @@ export default function ClientPage() {
     }
   }, [updateClippingLogic])
 
+  useEffect(() => {
+    if (!pendingViewerState || restoredViewerStateRef.current === pendingViewerState) return
+    if (!files.length || !files.every((file) => loadedUrls.has(file.url))) return
+
+    const resolveSelection = (savedFiles) => (Array.isArray(savedFiles) ? savedFiles : [])
+      .map((saved) => files.find((file) =>
+        file.url === saved || file.rawName === saved || file.name === stripExt(saved)
+      )?.url)
+      .filter(Boolean)
+      .slice(0, 2)
+
+    restoredViewerStateRef.current = pendingViewerState
+    const occlusionSelection = resolveSelection(pendingViewerState.occlusion?.files)
+    const savedComparisonSelection = resolveSelection(pendingViewerState.comparison?.files)
+    const savedTolerance = Math.max(0.05, Math.min(1, Number(pendingViewerState.comparison?.tolerance) || 0.25))
+    const mode = pendingViewerState.activeAnalysisMode
+
+    setHeatmapSelection(occlusionSelection)
+    setComparisonSelection(savedComparisonSelection)
+    setComparisonTolerance(savedTolerance)
+    setShowHeatmap(false)
+    setShowComparison(false)
+    setHasComputedHeatmap(false)
+    setHasComputedComparison(false)
+    setPinnedNotes(Array.isArray(pendingViewerState.pinnedNotes) ? pendingViewerState.pinnedNotes : [])
+
+    if (pendingViewerState.clipping?.enabled) {
+      pendingClipStateRef.current = pendingViewerState.clipping
+      setClippingEnabled(true)
+    } else {
+      setClippingEnabled(false)
+    }
+
+    setTimeout(() => {
+      if (mode === "occlusion" && occlusionSelection.length === 2) {
+        const meshA = meshesRef.current[occlusionSelection[0]]
+        const meshB = meshesRef.current[occlusionSelection[1]]
+        if (meshA && meshB) {
+          applyOcclusionHeatmap(meshA, meshB, 2.0, false)
+          setHasComputedHeatmap(true)
+          setShowHeatmap(pendingViewerState.occlusion?.visible !== false)
+        }
+      } else if (mode === "comparison" && savedComparisonSelection.length === 2) {
+        const meshA = meshesRef.current[savedComparisonSelection[0]]
+        const meshB = meshesRef.current[savedComparisonSelection[1]]
+        if (meshA && meshB) {
+          setComparisonStats(applySurfaceComparison(meshA, meshB, savedTolerance))
+          setHasComputedComparison(true)
+          setShowComparison(pendingViewerState.comparison?.visible !== false)
+        }
+      }
+    }, 100)
+  }, [pendingViewerState, files, loadedUrls])
+
+  useEffect(() => {
+    const savedClip = pendingClipStateRef.current
+    if (!savedClip || !clippingEnabled || !planeGroup) return
+
+    if (Array.isArray(savedClip.matrix) && savedClip.matrix.length === 16) {
+      planeGroup.matrix.fromArray(savedClip.matrix)
+      planeGroup.matrix.decompose(planeGroup.position, planeGroup.quaternion, planeGroup.scale)
+      planeGroup.updateMatrixWorld(true)
+      planeMatrixRef.current.copy(planeGroup.matrix)
+      isPlaneInitialized.current = true
+    }
+    if (savedClip.measurement?.p1) {
+      setMeasureState({
+        active: false,
+        p1: savedClip.measurement.p1,
+        p2: savedClip.measurement.p2 || savedClip.measurement.snappedP2,
+        snappedP2: savedClip.measurement.snappedP2 || savedClip.measurement.p2,
+      })
+    }
+    pendingClipStateRef.current = null
+    requestClipUpdate()
+  }, [clippingEnabled, planeGroup, requestClipUpdate])
+
   const moveSliceBy = useCallback((step) => {
     if (!clippingEnabled || !planeGroup) return
     setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
@@ -1791,7 +1914,7 @@ export default function ClientPage() {
         const smoothParam = getParam("smooth")
         if (smoothParam === "0") setAutoSmooth(false)
 
-        const applyFiles = (Fs, titleStr, logoUrl, headlight, camState) => {
+        const applyFiles = (Fs, titleStr, logoUrl, headlight, camState, viewerState = null) => {
           if (!Fs.length) throw new Error("Manifest je prázdný.")
           setFiles(Fs)
           const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
@@ -1817,6 +1940,8 @@ export default function ClientPage() {
             })
           }
           if (camState) setInitialCameraState(camState)
+          restoredViewerStateRef.current = null
+          setPendingViewerState(viewerState)
           setDidInitialFrame(false)
           isPlaneInitialized.current = false 
         }
@@ -1831,7 +1956,7 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
           }))
-          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera)
+          applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera, m?.viewer_state)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -1847,7 +1972,7 @@ export default function ClientPage() {
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
             vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
           }))
-          applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera)
+          applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera, m?.viewer_state)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -1902,6 +2027,10 @@ export default function ClientPage() {
       }
 
       if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
+      if (p.viewer_state) {
+        restoredViewerStateRef.current = null
+        setPendingViewerState(p.viewer_state)
+      }
       if (p.logo) {
         setLogoCfg((old) => ({
           url: p.logo?.url ?? old.url,
@@ -2094,17 +2223,24 @@ export default function ClientPage() {
             border: "1px solid rgba(255,255,255,.2)", borderRadius: 10,
             padding: 12, width: 240, color: "white", boxShadow: "0 10px 30px rgba(0,0,0,0.5)"
           }}>
-            <div style={{ marginBottom: 12, fontSize: 13, fontWeight: "bold", color: "#ccc" }}>
-              Vyberte analyzovaný model a protilehlý model:
+            <div style={{ marginBottom: 10, fontSize: 13, fontWeight: "bold", color: "#ccc" }}>
+              Směr měření okluze
             </div>
-
-            <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 11, color: "#bbb", cursor: "pointer" }}>
-              <input type="checkbox" checked={invertOcclusionSign} onChange={(e) => setInvertOcclusionSign(e.target.checked)} />
-              Obrátit znaménko (pro model s opačnými normálami)
-            </label>
+            <div style={{ display: "grid", gap: 5, marginBottom: 12, fontSize: 11 }}>
+              <div style={{ padding: "6px 8px", borderRadius: 6, background: "rgba(251,191,36,.12)", border: "1px solid rgba(251,191,36,.28)" }}>
+                <b style={{ color: "#fbbf24" }}>1 · Barevná mapa na:</b>{" "}
+                {heatmapSelection[0] ? stripExt(files.find((f) => f.url === heatmapSelection[0])?.name || "") : "— vyberte model"}
+              </div>
+              <div style={{ padding: "6px 8px", borderRadius: 6, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.14)" }}>
+                <b>2 · Vzdálenost vůči:</b>{" "}
+                {heatmapSelection[1] ? stripExt(files.find((f) => f.url === heatmapSelection[1])?.name || "") : "— vyberte model"}
+              </div>
+            </div>
             
             <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 180, overflowY: "auto", marginBottom: 16 }}>
-              {files.map((f) => (
+              {files.map((f) => {
+                const selectionOrder = heatmapSelection.indexOf(f.url)
+                return (
                 <label key={f.url} style={{ display: "flex", alignItems: "center", gap: 8, cursor: heatmapSelection.length >= 2 && !heatmapSelection.includes(f.url) ? "not-allowed" : "pointer", fontSize: 13, opacity: heatmapSelection.length >= 2 && !heatmapSelection.includes(f.url) ? 0.5 : 1 }}>
                   <input 
                     type="checkbox" 
@@ -2116,8 +2252,10 @@ export default function ClientPage() {
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {stripExt(f.name)}
                   </span>
+                  {selectionOrder >= 0 && <b style={{ marginLeft: "auto", color: "#fbbf24" }}>{selectionOrder + 1}</b>}
                 </label>
-              ))}
+                )
+              })}
             </div>
 
             <button 
@@ -2173,11 +2311,21 @@ export default function ClientPage() {
             border: "1px solid rgba(255,255,255,.2)", borderRadius: 10,
             padding: 12, width: 270, boxSizing: "border-box", color: "white", boxShadow: "0 10px 30px rgba(0,0,0,0.5)"
           }}>
-            <div style={{ marginBottom: 12, fontSize: 13, fontWeight: "bold", color: "#ccc" }}>
-              Vyberte 2 modely pro porovnání povrchů:
+            <div style={{ marginBottom: 9, fontSize: 13, fontWeight: "bold", color: "#ccc" }}>
+              Porovnávaná dvojice
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5, marginBottom: 11, fontSize: 11 }}>
+              <div style={{ padding: "6px 8px", borderRadius: 6, background: "rgba(37,99,235,.14)", border: "1px solid rgba(96,165,250,.3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <b style={{ color: "#60a5fa" }}>A:</b>{" "}{comparisonSelection[0] ? stripExt(files.find((f) => f.url === comparisonSelection[0])?.name || "") : "—"}
+              </div>
+              <div style={{ padding: "6px 8px", borderRadius: 6, background: "rgba(37,99,235,.14)", border: "1px solid rgba(96,165,250,.3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <b style={{ color: "#60a5fa" }}>B:</b>{" "}{comparisonSelection[1] ? stripExt(files.find((f) => f.url === comparisonSelection[1])?.name || "") : "—"}
+              </div>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 160, overflowY: "auto", marginBottom: 14 }}>
-              {files.map((f) => (
+              {files.map((f) => {
+                const selectionOrder = comparisonSelection.indexOf(f.url)
+                return (
                 <label key={f.url} style={{ display: "flex", alignItems: "center", gap: 8, cursor: comparisonSelection.length >= 2 && !comparisonSelection.includes(f.url) ? "not-allowed" : "pointer", fontSize: 13, opacity: comparisonSelection.length >= 2 && !comparisonSelection.includes(f.url) ? 0.5 : 1 }}>
                   <input
                     type="checkbox"
@@ -2187,8 +2335,10 @@ export default function ClientPage() {
                     style={{ width: 16, height: 16, cursor: "inherit" }}
                   />
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stripExt(f.name)}</span>
+                  {selectionOrder >= 0 && <b style={{ marginLeft: "auto", color: "#60a5fa" }}>{selectionOrder === 0 ? "A" : "B"}</b>}
                 </label>
-              ))}
+                )
+              })}
             </div>
 
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, fontSize: 11, color: "#bbb" }}>
@@ -2242,8 +2392,10 @@ export default function ClientPage() {
             strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" 
             style={{ animation: isAutoRotating ? "spin 4s linear infinite" : "none" }}
           >
-            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-            <path d="M3 3v5h5" />
+            <g transform="translate(24 0) scale(-1 1)">
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+              <path d="M3 3v5h5" />
+            </g>
           </svg>
           360° Spin
         </button>
@@ -2563,7 +2715,7 @@ export default function ClientPage() {
           </>
         )}
 
-        <ViewStateSync trackballRef={trackballRef} />
+        <ViewStateSync trackballRef={trackballRef} getViewerState={buildViewerState} />
 
         {frameKey && !initialCameraState && (
           <AutoCenterAndFrame
