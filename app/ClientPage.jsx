@@ -125,18 +125,13 @@ function configureMaterialTransparency(material, opacity) {
   material.depthTest = true
   material.side = THREE.DoubleSide
 
-  // Alpha hash je stabilní při změně úhlu kamery a nevyžaduje řazení průhledných meshů.
-  if ("alphaHash" in material) {
-    material.alphaHash = translucent
-    material.transparent = false
-    material.depthWrite = true
-    if ("forceSinglePass" in material) material.forceSinglePass = true
-  } else {
-    // Záloha pro starší Three.js: alespoň pevné pořadí a správné depth nastavení.
-    material.transparent = translucent
-    material.depthWrite = !translucent
-    if ("premultipliedAlpha" in material) material.premultipliedAlpha = translucent
-  }
+  // Plynulé alpha blending bez bodového rastru. Stabilitu mezi modely drží renderOrder.
+  if ("alphaHash" in material) material.alphaHash = false
+  material.transparent = translucent
+  material.depthWrite = !translucent
+  material.blending = THREE.NormalBlending
+  if ("premultipliedAlpha" in material) material.premultipliedAlpha = false
+  if ("forceSinglePass" in material) material.forceSinglePass = false
 }
 
 function faceNormalLocal(geometry, faceIndex, target, a, b, c) {
@@ -333,35 +328,47 @@ function AutoRotateScene({ enabled, target, speedFactor = 1.0 }) {
 const segmentStart = (segment) => segment.a || segment[0]
 const segmentEnd = (segment) => segment.b || segment[1]
 
-function SliceOutline3D({ segments, color = "#fbbf24" }) {
-  const geomRef = useRef(null)
+function SliceLineGroup({ points, color }) {
+  const geometry = useMemo(() => {
+    const result = new THREE.BufferGeometry()
+    result.setAttribute("position", new THREE.Float32BufferAttribute(points, 3))
+    result.computeBoundingBox()
+    result.computeBoundingSphere()
+    return result
+  }, [points])
 
-  useEffect(() => {
-    if (geomRef.current) {
-      const pts = []
-      const vertexColors = []
-      for (let i = 0; i < segments.length; i++) {
-        const start = segmentStart(segments[i])
-        const end = segmentEnd(segments[i])
-        const lineColor = new THREE.Color(segments[i].color || color)
-        pts.push(start.x, start.y, 0)
-        pts.push(end.x, end.y, 0)
-        vertexColors.push(lineColor.r, lineColor.g, lineColor.b, lineColor.r, lineColor.g, lineColor.b)
-      }
-      geomRef.current.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3))
-      geomRef.current.setAttribute('color', new THREE.Float32BufferAttribute(vertexColors, 3))
-      geomRef.current.computeBoundingBox()
-      geomRef.current.computeBoundingSphere()
+  useEffect(() => () => geometry.dispose(), [geometry])
+
+  return (
+    <lineSegments geometry={geometry} renderOrder={998}>
+      <lineBasicMaterial color={color} depthTest={false} depthWrite={false} transparent opacity={0.95} />
+    </lineSegments>
+  )
+}
+
+function SliceOutline3D({ segments, modelColors, color = "#fbbf24" }) {
+  const groups = useMemo(() => {
+    const grouped = new Map()
+    for (let i = 0; i < segments.length; i++) {
+      const segment = segments[i]
+      const modelIndex = Number.isInteger(segment.modelIndex) ? segment.modelIndex : -1
+      if (!grouped.has(modelIndex)) grouped.set(modelIndex, [])
+      const points = grouped.get(modelIndex)
+      const start = segmentStart(segment)
+      const end = segmentEnd(segment)
+      points.push(start.x, start.y, 0, end.x, end.y, 0)
     }
-  }, [segments, color])
+    return Array.from(grouped, ([modelIndex, points]) => ({ modelIndex, points }))
+  }, [segments])
 
   if (!segments || segments.length === 0) return null
 
   return (
-    <lineSegments renderOrder={998}>
-      <bufferGeometry ref={geomRef} />
-      <lineBasicMaterial vertexColors depthTest={false} depthWrite={false} transparent opacity={0.95} />
-    </lineSegments>
+    <group>
+      {groups.map(({ modelIndex, points }) => (
+        <SliceLineGroup key={modelIndex} points={points} color={modelColors?.[modelIndex] || color} />
+      ))}
+    </group>
   )
 }
 
@@ -946,25 +953,25 @@ function Switch({ checked, onChange, label }) {
 }
 
 /* ---------- 2D OVERLAY ---------- */
-function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
+function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasureState }) {
   const svgRef = useRef(null)
 
   const [winSize, setWinSize] = useState({ w: 550, h: 400 })
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [zoom, setZoom] = useState(1)
 
-  const pathDataByColor = useMemo(() => {
+  const pathDataByModel = useMemo(() => {
       const grouped = new Map()
       if (!segments || segments.length === 0) return []
       for (let i = 0; i < segments.length; i++) {
           const s = segments[i]
           const start = segmentStart(s)
           const end = segmentEnd(s)
-          const color = s.color || "#ffffff"
-          const d = `${grouped.get(color) || ""}M${start.x.toFixed(2)},${start.y.toFixed(2)}L${end.x.toFixed(2)},${end.y.toFixed(2)}`
-          grouped.set(color, d)
+          const modelIndex = Number.isInteger(s.modelIndex) ? s.modelIndex : -1
+          const d = `${grouped.get(modelIndex) || ""}M${start.x.toFixed(2)},${start.y.toFixed(2)}L${end.x.toFixed(2)},${end.y.toFixed(2)}`
+          grouped.set(modelIndex, d)
       }
-      return Array.from(grouped, ([color, d]) => ({ color, d }))
+      return Array.from(grouped, ([modelIndex, d]) => ({ modelIndex, d }))
   }, [segments])
 
   const distSq = (v, w) => Math.pow(v.x - w.x, 2) + Math.pow(v.y - w.y, 2)
@@ -1147,8 +1154,8 @@ function Overlay2D({ segments, boundingBox, measureState, setMeasureState }) {
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
       >
-        {pathDataByColor.map(({ color, d }) => (
-          <path key={color} d={d} stroke={color} strokeWidth={dynamicStrokeWidth} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+        {pathDataByModel.map(({ modelIndex, d }) => (
+          <path key={modelIndex} d={d} stroke={modelColors?.[modelIndex] || "#ffffff"} strokeWidth={dynamicStrokeWidth} strokeLinecap="round" strokeLinejoin="round" fill="none" />
         ))}
 
         {measureState.p1 && (
@@ -1303,6 +1310,7 @@ export default function ClientPage() {
   
   const transformRotateRef = useRef(null) 
   const transformTranslateRef = useRef(null) 
+  const [sliceControlMode, setSliceControlMode] = useState("translate")
   
   const isPlaneInitialized = useRef(false)
   const planeMatrixRef = useRef(new THREE.Matrix4())
@@ -1500,6 +1508,7 @@ export default function ClientPage() {
        const posAttr = geom.attributes.position
        const index = geom.index
        const outlineColor = child.userData._viewerColor || modelRoot.userData._viewerColor || "#ffffff"
+       const modelIndex = Number.isInteger(child.renderOrder) ? child.renderOrder : -1
 
        const checkEdge = (v1, v2, d1, d2) => {
            if (d1 * d2 < 0) {
@@ -1551,6 +1560,7 @@ export default function ClientPage() {
                  a: { x: pts[0], y: pts[1] },
                  b: { x: pts[2], y: pts[3] },
                  color: outlineColor,
+                 modelIndex,
                })
            }
        }
@@ -1579,7 +1589,7 @@ export default function ClientPage() {
     } else {
        setSliceBBox(null)
     }
-  }, [planeGroup, colors, visibles])
+  }, [planeGroup, visibles])
 
   const lastClipTime = useRef(0)
   const clipTimeout = useRef(null)
@@ -1598,33 +1608,31 @@ export default function ClientPage() {
     }
   }, [updateClippingLogic])
 
+  const moveSliceBy = useCallback((step) => {
+    if (!clippingEnabled || !planeGroup) return
+    setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
+    planeGroup.translateZ(step)
+    planeGroup.updateMatrixWorld(true)
+    planeMatrixRef.current.copy(planeGroup.matrix)
+    const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
+    const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
+    clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
+    requestClipUpdate()
+  }, [clippingEnabled, planeGroup, requestClipUpdate])
+
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (!clippingEnabled || !planeGroup) return
       const step = 0.5 
       if (e.key === "ArrowUp" || e.key === "ArrowRight") {
-         setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev); 
-         planeGroup.translateZ(step)
-         planeGroup.updateMatrixWorld(true)
-         planeMatrixRef.current.copy(planeGroup.matrix)
-         const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
-         const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
-         clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-         requestClipUpdate() 
+         moveSliceBy(step)
       } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
-         setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev); 
-         planeGroup.translateZ(-step)
-         planeGroup.updateMatrixWorld(true)
-         planeMatrixRef.current.copy(planeGroup.matrix)
-         const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
-         const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
-         clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-         requestClipUpdate() 
+         moveSliceBy(-step)
       }
     }
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [clippingEnabled, requestClipUpdate, planeGroup])
+  }, [clippingEnabled, moveSliceBy, planeGroup])
 
   const handleResetPlane = useCallback(() => {
     if (!rootGroupRef.current || !planeGroup) {
@@ -1717,7 +1725,7 @@ export default function ClientPage() {
         setSliceBBox(null)
         setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
      }
-  }, [clippingEnabled, planeGroup, updateClippingLogic]) 
+  }, [clippingEnabled, planeGroup, updateClippingLogic, sliceControlMode]) 
 
   useEffect(() => {
     ;(async () => {
@@ -2233,9 +2241,37 @@ export default function ClientPage() {
           )}
         </div>
         {clippingEnabled && (
-          <div style={{ marginTop: 12, fontSize: 12, width: 220 }}>
+          <div style={{ marginTop: 12, fontSize: 12, width: 240 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+              {[
+                { value: "translate", label: "↕ Posun" },
+                { value: "rotate", label: "⟳ Rotace" },
+              ].map((option) => {
+                const active = sliceControlMode === option.value
+                return (
+                  <button
+                    key={option.value}
+                    onClick={() => setSliceControlMode(option.value)}
+                    style={{
+                      padding: "7px 8px", borderRadius: 7, cursor: "pointer", color: "white",
+                      border: active ? "1px solid #60a5fa" : "1px solid rgba(255,255,255,.2)",
+                      background: active ? "rgba(59,130,246,.38)" : "rgba(255,255,255,.07)",
+                      fontWeight: 700, fontSize: 12,
+                    }}
+                  >{option.label}</button>
+                )
+              })}
+            </div>
+            {sliceControlMode === "translate" && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+                <button onClick={() => moveSliceBy(-0.5)} style={{ padding: "6px", borderRadius: 6, border: "1px solid rgba(255,255,255,.18)", background: "rgba(255,255,255,.07)", color: "white", cursor: "pointer", fontSize: 11 }}>− 0,5 mm</button>
+                <button onClick={() => moveSliceBy(0.5)} style={{ padding: "6px", borderRadius: 6, border: "1px solid rgba(255,255,255,.18)", background: "rgba(255,255,255,.07)", color: "white", cursor: "pointer", fontSize: 11 }}>+ 0,5 mm</button>
+              </div>
+            )}
             <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>
-              Najetím myší na barevné kruhy měníte rotaci. Taháním za <b>modrou šipku</b> posouváte řez vpřed a vzad.
+              {sliceControlMode === "translate"
+                ? <>Táhněte za <b>modrou osu</b>, použijte tlačítka nebo šipky na klávesnici.</>
+                : <>Táhněte za barevný kruh pro natočení roviny řezu.</>}
             </p>
           </div>
         )}
@@ -2336,7 +2372,7 @@ export default function ClientPage() {
         </div>
       )}
 
-      {clippingEnabled && !isMobile && <Overlay2D segments={sliceSegments} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} />}
+      {clippingEnabled && !isMobile && <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} />}
 
       <Canvas
         orthographic
@@ -2436,18 +2472,18 @@ export default function ClientPage() {
               <circleGeometry args={[planeRadius, 64]} />
               <meshBasicMaterial color="#b88f8f" transparent opacity={0.25} side={THREE.DoubleSide} depthWrite={false} />
             </mesh>
-            <SliceOutline3D segments={sliceSegments} color="#eab308" />
+            <SliceOutline3D segments={sliceSegments} modelColors={colors} color="#eab308" />
             <Measurement3D measureState={measureState} boundingBox={sliceBBox} />
           </group>
         )}
 
-        {clippingEnabled && !isMobile && planeGroup && (
+        {clippingEnabled && !isMobile && planeGroup && sliceControlMode === "rotate" && (
           <TransformControls 
             ref={transformRotateRef}
             object={planeGroup}
             mode="rotate"
             space="local"
-            size={1.1}
+            size={1.18}
             showX={true}
             showY={true}
             showZ={false}
@@ -2467,13 +2503,14 @@ export default function ClientPage() {
           />
         )}
 
-        {clippingEnabled && !isMobile && planeGroup && (
+        {clippingEnabled && !isMobile && planeGroup && sliceControlMode === "translate" && (
           <TransformControls 
             ref={transformTranslateRef}
             object={planeGroup}
             mode="translate"
             space="local"
-            size={1.1}
+            size={1.35}
+            translationSnap={0.1}
             showX={false}
             showY={false}
             showZ={true}
@@ -2494,7 +2531,10 @@ export default function ClientPage() {
         )}
 
         {clippingEnabled && !isMobile && (
-          <GizmoManager transformRefs={[transformRotateRef, transformTranslateRef]} trackballRef={trackballRef} />
+          <GizmoManager
+            transformRefs={[sliceControlMode === "translate" ? transformTranslateRef : transformRotateRef]}
+            trackballRef={trackballRef}
+          />
         )}
 
         <ViewStateSync trackballRef={trackballRef} />
