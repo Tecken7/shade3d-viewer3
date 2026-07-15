@@ -381,6 +381,7 @@ const DICOM_FRAGMENT_SHADER = `
   uniform float uCropMin;
   uniform float uCropMax;
   uniform float uStep;
+  uniform float uInteractive;
   uniform vec3 uVoxel;
 
   vec2 hitBox(vec3 origin, vec3 direction) {
@@ -408,15 +409,25 @@ const DICOM_FRAGMENT_SHADER = `
       if (point.z >= uCropMin && point.z <= uCropMax) {
         float density = texture(uVolume, point).r;
         float transfer = smoothstep(low, max(low + 0.002, high), density);
-        float alpha = pow(transfer, 1.35) * uOpacity * 0.075;
+        float alpha = pow(transfer, 1.35) * uOpacity * mix(0.09, 0.06, uInteractive);
         if (alpha > 0.002) {
-          vec3 gradient = vec3(
-            texture(uVolume, point + vec3(uVoxel.x, 0.0, 0.0)).r - texture(uVolume, point - vec3(uVoxel.x, 0.0, 0.0)).r,
-            texture(uVolume, point + vec3(0.0, uVoxel.y, 0.0)).r - texture(uVolume, point - vec3(0.0, uVoxel.y, 0.0)).r,
-            texture(uVolume, point + vec3(0.0, 0.0, uVoxel.z)).r - texture(uVolume, point - vec3(0.0, 0.0, uVoxel.z)).r
-          );
-          float shade = 0.48 + 0.52 * abs(dot(normalize(gradient + vec3(0.0001)), normalize(vec3(0.45, 0.65, 1.0))));
-          vec3 color = mix(vec3(0.78, 0.68, 0.52), vec3(1.0, 0.96, 0.84), transfer) * shade;
+          float shade = 0.78;
+          if (uInteractive < 0.5) {
+            vec3 gradient = vec3(
+              texture(uVolume, point + vec3(uVoxel.x, 0.0, 0.0)).r - texture(uVolume, point - vec3(uVoxel.x, 0.0, 0.0)).r,
+              texture(uVolume, point + vec3(0.0, uVoxel.y, 0.0)).r - texture(uVolume, point - vec3(0.0, uVoxel.y, 0.0)).r,
+              texture(uVolume, point + vec3(0.0, 0.0, uVoxel.z)).r - texture(uVolume, point - vec3(0.0, 0.0, uVoxel.z)).r
+            );
+            vec3 normal = normalize(gradient + vec3(0.0001));
+            float diffuse = abs(dot(normal, normalize(vec3(0.45, 0.65, 1.0))));
+            float facing = abs(dot(normal, -direction));
+            float specular = pow(max(facing, 0.0), 22.0);
+            float edgeStrength = clamp(length(gradient) * 16.0, 0.0, 1.0);
+            shade = 0.34 + diffuse * 0.56 + specular * 0.34;
+            alpha *= 0.62 + edgeStrength * 0.9;
+          }
+          vec3 boneColor = mix(vec3(0.72, 0.61, 0.43), vec3(1.0, 0.97, 0.86), transfer);
+          vec3 color = boneColor * shade;
           accumulated.rgb += (1.0 - accumulated.a) * alpha * color;
           accumulated.a += (1.0 - accumulated.a) * alpha;
         }
@@ -429,7 +440,7 @@ const DICOM_FRAGMENT_SHADER = `
   }
 `
 
-function DicomVolume({ volume, settings }) {
+function DicomVolume({ volume, settings, interactive = false }) {
   const texture = useMemo(() => {
     if (!volume) return null
     const value = new THREE.Data3DTexture(volume.data, volume.width, volume.height, volume.depth)
@@ -461,6 +472,7 @@ function DicomVolume({ volume, settings }) {
         uCropMin: { value: settings.cropMin },
         uCropMax: { value: settings.cropMax },
         uStep: { value: 1.1 / Math.max(volume.width, volume.height, volume.depth) },
+        uInteractive: { value: 0 },
         uVoxel: { value: new THREE.Vector3(1 / volume.width, 1 / volume.height, 1 / volume.depth) },
       },
     })
@@ -478,7 +490,9 @@ function DicomVolume({ volume, settings }) {
     material.uniforms.uOpacity.value = settings.opacity
     material.uniforms.uCropMin.value = Math.min(settings.cropMin, settings.cropMax - 0.01)
     material.uniforms.uCropMax.value = Math.max(settings.cropMax, settings.cropMin + 0.01)
-  }, [material, settings.densityMin, settings.densityMax, settings.opacity, settings.cropMin, settings.cropMax])
+    material.uniforms.uInteractive.value = interactive ? 1 : 0
+    material.uniforms.uStep.value = (interactive ? 2.5 : 0.9) / Math.max(volume.width, volume.height, volume.depth)
+  }, [material, volume, interactive, settings.densityMin, settings.densityMax, settings.opacity, settings.cropMin, settings.cropMax])
 
   if (!volume || !material || settings.visible === false) return null
   const rotation = (settings.rotation || [0, 0, 0]).map((value) => THREE.MathUtils.degToRad(value || 0))
@@ -491,6 +505,162 @@ function DicomVolume({ volume, settings }) {
       renderOrder={-1000}
     >
       <boxGeometry args={volume.size} />
+    </mesh>
+  )
+}
+
+function sampleDicomTrilinear(volume, tx, ty, tz) {
+  const x = Math.max(0, Math.min(volume.width - 1, tx * (volume.width - 1)))
+  const y = Math.max(0, Math.min(volume.height - 1, ty * (volume.height - 1)))
+  const z = Math.max(0, Math.min(volume.depth - 1, tz * (volume.depth - 1)))
+  const x0 = Math.floor(x), y0 = Math.floor(y), z0 = Math.floor(z)
+  const x1 = Math.min(volume.width - 1, x0 + 1)
+  const y1 = Math.min(volume.height - 1, y0 + 1)
+  const z1 = Math.min(volume.depth - 1, z0 + 1)
+  const fx = x - x0, fy = y - y0, fz = z - z0
+  const row = volume.width
+  const layer = volume.width * volume.height
+  const data = volume.data
+  const value = (ix, iy, iz) => data[iz * layer + iy * row + ix]
+  const c00 = value(x0, y0, z0) * (1 - fx) + value(x1, y0, z0) * fx
+  const c10 = value(x0, y1, z0) * (1 - fx) + value(x1, y1, z0) * fx
+  const c01 = value(x0, y0, z1) * (1 - fx) + value(x1, y0, z1) * fx
+  const c11 = value(x0, y1, z1) * (1 - fx) + value(x1, y1, z1) * fx
+  const c0 = c00 * (1 - fy) + c10 * fy
+  const c1 = c01 * (1 - fy) + c11 * fy
+  return c0 * (1 - fz) + c1 * fz
+}
+
+function buildDicomSliceImage(volume, settings, planeMatrixWorld, maxResolution = 224) {
+  if (!volume || !planeMatrixWorld || settings.visible === false || typeof document === "undefined") return null
+
+  const position = new THREE.Vector3(...(settings.position || [0, 0, 0]))
+  const rotationValues = settings.rotation || [0, 0, 0]
+  const rotation = new THREE.Euler(
+    THREE.MathUtils.degToRad(rotationValues[0] || 0),
+    THREE.MathUtils.degToRad(rotationValues[1] || 0),
+    THREE.MathUtils.degToRad(rotationValues[2] || 0)
+  )
+  const scaleValue = settings.scale || 1
+  const dicomMatrix = new THREE.Matrix4().compose(
+    position,
+    new THREE.Quaternion().setFromEuler(rotation),
+    new THREE.Vector3(scaleValue, scaleValue, scaleValue)
+  )
+  const inversePlane = planeMatrixWorld.clone().invert()
+  const planeToDicom = dicomMatrix.clone().invert().multiply(planeMatrixWorld)
+  const half = new THREE.Vector3(volume.size[0] / 2, volume.size[1] / 2, volume.size[2] / 2)
+
+  const corners = []
+  for (let z = -1; z <= 1; z += 2) {
+    for (let y = -1; y <= 1; y += 2) {
+      for (let x = -1; x <= 1; x += 2) {
+        corners.push(
+          new THREE.Vector3(x * half.x, y * half.y, z * half.z)
+            .applyMatrix4(dicomMatrix)
+            .applyMatrix4(inversePlane)
+        )
+      }
+    }
+  }
+  const edges = [
+    [0, 1], [0, 2], [0, 4], [1, 3], [1, 5], [2, 3],
+    [2, 6], [3, 7], [4, 5], [4, 6], [5, 7], [6, 7],
+  ]
+  const intersections = []
+  edges.forEach(([aIndex, bIndex]) => {
+    const a = corners[aIndex], b = corners[bIndex]
+    if (Math.abs(a.z) < 1e-5) intersections.push(a.clone())
+    if (a.z * b.z < 0) {
+      const t = a.z / (a.z - b.z)
+      intersections.push(a.clone().lerp(b, t))
+    }
+  })
+  if (intersections.length < 3) return null
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  intersections.forEach((point) => {
+    minX = Math.min(minX, point.x); maxX = Math.max(maxX, point.x)
+    minY = Math.min(minY, point.y); maxY = Math.max(maxY, point.y)
+  })
+  const physicalWidth = maxX - minX
+  const physicalHeight = maxY - minY
+  if (!(physicalWidth > 0.01 && physicalHeight > 0.01)) return null
+
+  const largestSide = Math.max(physicalWidth, physicalHeight)
+  const width = Math.max(48, Math.round(maxResolution * physicalWidth / largestSide))
+  const height = Math.max(48, Math.round(maxResolution * physicalHeight / largestSide))
+  const canvas = document.createElement("canvas")
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext("2d")
+  if (!context) return null
+  const image = context.createImageData(width, height)
+  const elements = planeToDicom.elements
+  const huSpan = DICOM_HU_MAX - DICOM_HU_MIN
+  const densitySpan = Math.max(10, settings.densityMax - settings.densityMin)
+
+  for (let py = 0; py < height; py++) {
+    const planeY = maxY - ((py + 0.5) / height) * physicalHeight
+    for (let px = 0; px < width; px++) {
+      const planeX = minX + ((px + 0.5) / width) * physicalWidth
+      const localX = elements[0] * planeX + elements[4] * planeY + elements[12]
+      const localY = elements[1] * planeX + elements[5] * planeY + elements[13]
+      const localZ = elements[2] * planeX + elements[6] * planeY + elements[14]
+      const tx = localX / volume.size[0] + 0.5
+      const ty = localY / volume.size[1] + 0.5
+      const tz = localZ / volume.size[2] + 0.5
+      const outputIndex = (py * width + px) * 4
+      if (tx < 0 || tx > 1 || ty < 0 || ty > 1 || tz < 0 || tz > 1 || tz < settings.cropMin || tz > settings.cropMax) {
+        image.data[outputIndex + 3] = 0
+        continue
+      }
+      const encoded = sampleDicomTrilinear(volume, tx, ty, tz)
+      const hu = DICOM_HU_MIN + (encoded / 255) * huSpan
+      const normalized = clamp01((hu - settings.densityMin) / densitySpan)
+      const gray = Math.round(Math.pow(normalized, 0.72) * 255)
+      image.data[outputIndex] = gray
+      image.data[outputIndex + 1] = gray
+      image.data[outputIndex + 2] = gray
+      image.data[outputIndex + 3] = 255
+    }
+  }
+  context.putImageData(image, 0, 0)
+  return {
+    canvas,
+    url: canvas.toDataURL("image/png"),
+    bounds: { minX, minY, width: physicalWidth, height: physicalHeight },
+  }
+}
+
+function DicomSlicePlane3D({ slice }) {
+  const texture = useMemo(() => {
+    if (!slice?.canvas) return null
+    const value = new THREE.CanvasTexture(slice.canvas)
+    value.colorSpace = THREE.SRGBColorSpace
+    value.minFilter = THREE.LinearFilter
+    value.magFilter = THREE.LinearFilter
+    value.needsUpdate = true
+    return value
+  }, [slice])
+  useEffect(() => () => texture?.dispose(), [texture])
+  if (!slice || !texture) return null
+  const { bounds } = slice
+  return (
+    <mesh
+      position={[bounds.minX + bounds.width / 2, bounds.minY + bounds.height / 2, 0.015]}
+      renderOrder={997}
+    >
+      <planeGeometry args={[bounds.width, bounds.height]} />
+      <meshBasicMaterial
+        map={texture}
+        side={THREE.DoubleSide}
+        transparent
+        opacity={0.9}
+        depthTest={false}
+        depthWrite={false}
+        toneMapped={false}
+      />
     </mesh>
   )
 }
@@ -1023,7 +1193,7 @@ function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
 }
 
 /* ---------- Trackball ---------- */
-const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0] }, ref) => {
+const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], onInteractionChange }, ref) => {
   const { camera, gl, size } = useThree()
   const controlsRef = useRef(null)
   
@@ -1037,9 +1207,17 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0] }, ref) =>
     c.staticMoving = true
     c.dynamicDampingFactor = 0.15
     c.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.ZOOM, RIGHT: THREE.MOUSE.PAN }
+    const handleStart = () => onInteractionChange?.(true)
+    const handleEnd = () => onInteractionChange?.(false)
+    c.addEventListener("start", handleStart)
+    c.addEventListener("end", handleEnd)
     controlsRef.current = c
-    return () => c.dispose()
-  }, [camera, gl])
+    return () => {
+      c.removeEventListener("start", handleStart)
+      c.removeEventListener("end", handleEnd)
+      c.dispose()
+    }
+  }, [camera, gl, onInteractionChange])
 
   useEffect(() => {
     const c = controlsRef.current; if (!c) return
@@ -1053,7 +1231,7 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0] }, ref) =>
 })
 
 /* ---------- Vlastní pan ---------- */
-function RightButtonPan({ setTarget, trackballRef }) {
+function RightButtonPan({ setTarget, trackballRef, onInteractionChange }) {
   const { camera, gl, size } = useThree()
   const isPanning = useRef(false)
   const last = useRef({ x: 0, y: 0 })
@@ -1074,6 +1252,7 @@ function RightButtonPan({ setTarget, trackballRef }) {
       e.preventDefault()
       e.stopPropagation()
       isPanning.current = true
+      onInteractionChange?.(true)
       last.current = { x: e.clientX, y: e.clientY }
       try { 
         el.setPointerCapture?.(e.pointerId); 
@@ -1117,6 +1296,7 @@ function RightButtonPan({ setTarget, trackballRef }) {
       e.preventDefault()
       e.stopPropagation()
       isPanning.current = false
+      onInteractionChange?.(false)
       if (pointerIdRef.current !== null) {
           try { el.releasePointerCapture?.(pointerIdRef.current) } catch {}
           pointerIdRef.current = null
@@ -1138,7 +1318,7 @@ function RightButtonPan({ setTarget, trackballRef }) {
       el.removeEventListener("pointercancel", onUp)
       el.removeEventListener("pointerleave", onUp)
     }
-  }, [camera, gl, size.width, size.height, setTarget, trackballRef])
+  }, [camera, gl, size.width, size.height, setTarget, trackballRef, onInteractionChange])
 
   return null
 }
@@ -1332,7 +1512,7 @@ function Switch({ checked, onChange, label }) {
 }
 
 /* ---------- 2D OVERLAY ---------- */
-function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasureState }) {
+function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasureState, dicomSlice }) {
   const svgRef = useRef(null)
 
   const [winSize, setWinSize] = useState({ w: 550, h: 400 })
@@ -1513,7 +1693,7 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
       }}
     >
       <div style={{ position: 'absolute', top: 8, left: 16, fontSize: 11, color: '#aaa', pointerEvents: 'none', zIndex: 11 }}>
-        Levé tl. = posun, Kolečko = zoom<br/>Dvojklik = měření
+        {dicomSlice ? "DICOM řez + obrysy modelů" : "Obrysy modelů"}<br/>Levé tl. = posun, Kolečko = zoom, Dvojklik = měření
       </div>
 
       <div 
@@ -1533,6 +1713,18 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
         onDoubleClick={handleDoubleClick}
         onContextMenu={handleContextMenu}
       >
+        {dicomSlice && (
+          <image
+            href={dicomSlice.url}
+            x={dicomSlice.bounds.minX}
+            y={dicomSlice.bounds.minY}
+            width={dicomSlice.bounds.width}
+            height={dicomSlice.bounds.height}
+            preserveAspectRatio="none"
+            transform={`translate(0 ${dicomSlice.bounds.minY * 2 + dicomSlice.bounds.height}) scale(1 -1)`}
+            opacity={0.96}
+          />
+        )}
         {pathDataByModel.map(({ modelIndex, d }) => (
           <path key={modelIndex} d={d} stroke={modelColors?.[modelIndex] || "#ffffff"} strokeWidth={dynamicStrokeWidth} strokeLinecap="round" strokeLinejoin="round" fill="none" />
         ))}
@@ -1842,6 +2034,7 @@ export default function ClientPage() {
 
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
+  const [dicomSlice2D, setDicomSlice2D] = useState(null)
   const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
 
   const [heatmapMenuOpen, setHeatmapMenuOpen] = useState(false)
@@ -1878,6 +2071,17 @@ export default function ClientPage() {
   const trackballRef = useRef(null)
   const rootGroupRef = useRef(null)
   const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
+  const [cameraInteracting, setCameraInteracting] = useState(false)
+  const cameraSettleTimerRef = useRef(null)
+  const handleCameraInteraction = useCallback((active) => {
+    clearTimeout(cameraSettleTimerRef.current)
+    if (active) {
+      setCameraInteracting(true)
+    } else {
+      cameraSettleTimerRef.current = setTimeout(() => setCameraInteracting(false), 220)
+    }
+  }, [])
+  useEffect(() => () => clearTimeout(cameraSettleTimerRef.current), [])
   const [didInitialFrame, setDidInitialFrame] = useState(false)
   const [initialCameraState, setInitialCameraState] = useState(null)
   
@@ -2168,6 +2372,7 @@ export default function ClientPage() {
 
     setSliceSegments(segments2D)
 
+    let combinedBounds = null
     if (segments2D.length > 0) {
        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
        for(let i=0; i<segments2D.length; i++){
@@ -2178,11 +2383,27 @@ export default function ClientPage() {
            if(end.x < minX) minX = end.x; if(end.x > maxX) maxX = end.x;
            if(end.y < minY) minY = end.y; if(end.y > maxY) maxY = end.y;
        }
-       setSliceBBox({ minX, minY, width: maxX - minX, height: maxY - minY })
-    } else {
-       setSliceBBox(null)
+       combinedBounds = { minX, minY, width: maxX - minX, height: maxY - minY }
     }
-  }, [planeGroup, visibles])
+
+    const dicomSlice = dicomVolume && dicomSettings.visible !== false
+      ? buildDicomSliceImage(dicomVolume, dicomSettings, planeGroup.matrixWorld, 224)
+      : null
+    setDicomSlice2D(dicomSlice)
+
+    if (dicomSlice?.bounds) {
+      const bounds = dicomSlice.bounds
+      if (!combinedBounds) combinedBounds = { ...bounds }
+      else {
+        const minX = Math.min(combinedBounds.minX, bounds.minX)
+        const minY = Math.min(combinedBounds.minY, bounds.minY)
+        const maxX = Math.max(combinedBounds.minX + combinedBounds.width, bounds.minX + bounds.width)
+        const maxY = Math.max(combinedBounds.minY + combinedBounds.height, bounds.minY + bounds.height)
+        combinedBounds = { minX, minY, width: maxX - minX, height: maxY - minY }
+      }
+    }
+    setSliceBBox(combinedBounds)
+  }, [planeGroup, visibles, dicomVolume, dicomSettings])
 
   const lastClipTime = useRef(0)
   const clipTimeout = useRef(null)
@@ -2416,6 +2637,7 @@ export default function ClientPage() {
      } else if (!clippingEnabled) {
         setSliceSegments([])
         setSliceBBox(null)
+        setDicomSlice2D(null)
         setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
      }
   }, [clippingEnabled, planeGroup, updateClippingLogic]) 
@@ -3250,7 +3472,7 @@ export default function ClientPage() {
         </div>
       )}
 
-      {clippingEnabled && !isMobile && <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} />}
+      {clippingEnabled && !isMobile && <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} />}
 
       <Canvas
         orthographic
@@ -3345,7 +3567,11 @@ export default function ClientPage() {
         </group>
 
         {dicomVolume && (
-          <DicomVolume volume={dicomVolume} settings={dicomSettings} />
+          <DicomVolume
+            volume={dicomVolume}
+            settings={dicomSettings}
+            interactive={cameraInteracting || isAutoRotating}
+          />
         )}
 
         {clippingEnabled && !isMobile && (
@@ -3354,6 +3580,7 @@ export default function ClientPage() {
               <circleGeometry args={[planeRadius, 64]} />
               <meshBasicMaterial color="#b88f8f" transparent opacity={0.25} side={THREE.DoubleSide} depthWrite={false} />
             </mesh>
+            {dicomSlice2D && <DicomSlicePlane3D slice={dicomSlice2D} />}
             <SliceOutline3D segments={sliceSegments} modelColors={colors} color="#eab308" />
             <Measurement3D measureState={measureState} boundingBox={sliceBBox} />
           </group>
@@ -3443,8 +3670,8 @@ export default function ClientPage() {
           />
         )}
 
-        <TouchTrackballControls key="trackball" ref={trackballRef} target={cameraTarget} />
-        <RightButtonPan key="pan" setTarget={setCameraTarget} trackballRef={trackballRef} />
+        <TouchTrackballControls key="trackball" ref={trackballRef} target={cameraTarget} onInteractionChange={handleCameraInteraction} />
+        <RightButtonPan key="pan" setTarget={setCameraTarget} trackballRef={trackballRef} onInteractionChange={handleCameraInteraction} />
       </Canvas>
 
       <Lightbox open={lightbox.open} onClose={() => setLightbox({ open: false, src: null, alt: "" })} src={lightbox.src} alt={lightbox.alt} />
