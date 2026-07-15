@@ -1207,8 +1207,65 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
   )
 }
 
-/* ---------- Manažer pro detekci hoveru na obou Gimbalech ---------- */
-function GizmoManager({ transformRefs, trackballRef }) {
+/* ---------- Silnější vizuál rotačních oblouků ---------- */
+function ThickRotationGizmo({ controlRef }) {
+  const helpersRef = useRef([])
+
+  useEffect(() => {
+    const control = controlRef.current
+    const root = control?.getHelper ? control.getHelper() : control
+    if (!root?.traverse) return
+
+    const helpers = []
+    const orbitNames = new Set(["X", "Y", "Z", "E", "XYZE"])
+    root.traverse((child) => {
+      if (!child.isLine || !orbitNames.has(child.name) || child.userData._thickOrbitSource) return
+      const position = child.geometry?.attributes?.position
+      if (!position || position.count < 8) return
+
+      const points = []
+      for (let i = 0; i < position.count; i++) points.push(new THREE.Vector3().fromBufferAttribute(position, i))
+      const curve = new THREE.CatmullRomCurve3(points, false, "centripetal")
+      const geometry = new THREE.TubeGeometry(curve, Math.max(32, position.count * 2), 0.022, 6, false)
+      const material = new THREE.MeshBasicMaterial({
+        color: child.material?.color || "#ffffff",
+        transparent: true,
+        opacity: child.material?.opacity ?? 1,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false,
+      })
+      const helper = new THREE.Mesh(geometry, material)
+      helper.name = "_thickOrbit"
+      helper.userData._thickOrbitSource = true
+      helper.raycast = () => {}
+      child.add(helper)
+      helpers.push({ source: child, helper })
+    })
+    helpersRef.current = helpers
+
+    return () => {
+      helpers.forEach(({ source, helper }) => {
+        source.remove(helper)
+        helper.geometry.dispose()
+        helper.material.dispose()
+      })
+      helpersRef.current = []
+    }
+  }, [controlRef])
+
+  useFrame(() => {
+    helpersRef.current.forEach(({ source, helper }) => {
+      if (source.material?.color) helper.material.color.copy(source.material.color)
+      helper.material.opacity = source.material?.opacity ?? 1
+    })
+  })
+
+  return null
+}
+
+/* ---------- Manažer kolize gizma a ovládání kamery ---------- */
+function GizmoManager({ rotateRef, translateRef, trackballRef }) {
   const isCamDragging = useRef(false)
 
   useEffect(() => {
@@ -1225,17 +1282,16 @@ function GizmoManager({ transformRefs, trackballRef }) {
   }, [trackballRef])
 
   useFrame(() => {
-    let isHovered = false;
-    let isDragging = false;
-    
-    if (transformRefs) {
-      transformRefs.forEach(ref => {
-        if (ref.current) {
-          if (ref.current.axis !== null) isHovered = true;
-          if (ref.current.dragging) isDragging = true;
-        }
-      });
-    }
+    const rotate = rotateRef?.current
+    const translate = translateRef?.current
+    const translateActive = !!translate && (translate.axis !== null || translate.dragging)
+    const rotateActive = !!rotate && (rotate.axis !== null || rotate.dragging)
+
+    // Při překryvu má modrá posuvná osa přednost před rotačním kruhem.
+    if (rotate) rotate.enabled = !translateActive || !!rotate.dragging
+    if (translate) translate.enabled = !rotate?.dragging
+    const isHovered = translateActive || rotateActive
+    const isDragging = !!translate?.dragging || !!rotate?.dragging
 
     if (trackballRef.current) {
       if (isCamDragging.current) {
@@ -1310,7 +1366,6 @@ export default function ClientPage() {
   
   const transformRotateRef = useRef(null) 
   const transformTranslateRef = useRef(null) 
-  const [sliceControlMode, setSliceControlMode] = useState("translate")
   
   const isPlaneInitialized = useRef(false)
   const planeMatrixRef = useRef(new THREE.Matrix4())
@@ -1725,7 +1780,7 @@ export default function ClientPage() {
         setSliceBBox(null)
         setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
      }
-  }, [clippingEnabled, planeGroup, updateClippingLogic, sliceControlMode]) 
+  }, [clippingEnabled, planeGroup, updateClippingLogic]) 
 
   useEffect(() => {
     ;(async () => {
@@ -2241,37 +2296,9 @@ export default function ClientPage() {
           )}
         </div>
         {clippingEnabled && (
-          <div style={{ marginTop: 12, fontSize: 12, width: 240 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
-              {[
-                { value: "translate", label: "↕ Posun" },
-                { value: "rotate", label: "⟳ Rotace" },
-              ].map((option) => {
-                const active = sliceControlMode === option.value
-                return (
-                  <button
-                    key={option.value}
-                    onClick={() => setSliceControlMode(option.value)}
-                    style={{
-                      padding: "7px 8px", borderRadius: 7, cursor: "pointer", color: "white",
-                      border: active ? "1px solid #60a5fa" : "1px solid rgba(255,255,255,.2)",
-                      background: active ? "rgba(59,130,246,.38)" : "rgba(255,255,255,.07)",
-                      fontWeight: 700, fontSize: 12,
-                    }}
-                  >{option.label}</button>
-                )
-              })}
-            </div>
-            {sliceControlMode === "translate" && (
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
-                <button onClick={() => moveSliceBy(-0.5)} style={{ padding: "6px", borderRadius: 6, border: "1px solid rgba(255,255,255,.18)", background: "rgba(255,255,255,.07)", color: "white", cursor: "pointer", fontSize: 11 }}>− 0,5 mm</button>
-                <button onClick={() => moveSliceBy(0.5)} style={{ padding: "6px", borderRadius: 6, border: "1px solid rgba(255,255,255,.18)", background: "rgba(255,255,255,.07)", color: "white", cursor: "pointer", fontSize: 11 }}>+ 0,5 mm</button>
-              </div>
-            )}
+          <div style={{ marginTop: 12, fontSize: 12, width: 220 }}>
             <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>
-              {sliceControlMode === "translate"
-                ? <>Táhněte za <b>modrou osu</b>, použijte tlačítka nebo šipky na klávesnici.</>
-                : <>Táhněte za barevný kruh pro natočení roviny řezu.</>}
+              Táhněte za <b>modrou osu</b> pro posun nebo za barevný kruh pro natočení roviny řezu.
             </p>
           </div>
         )}
@@ -2477,13 +2504,13 @@ export default function ClientPage() {
           </group>
         )}
 
-        {clippingEnabled && !isMobile && planeGroup && sliceControlMode === "rotate" && (
+        {clippingEnabled && !isMobile && planeGroup && (
           <TransformControls 
             ref={transformRotateRef}
             object={planeGroup}
             mode="rotate"
             space="local"
-            size={1.18}
+            size={0.72}
             showX={true}
             showY={true}
             showZ={false}
@@ -2503,14 +2530,13 @@ export default function ClientPage() {
           />
         )}
 
-        {clippingEnabled && !isMobile && planeGroup && sliceControlMode === "translate" && (
+        {clippingEnabled && !isMobile && planeGroup && (
           <TransformControls 
             ref={transformTranslateRef}
             object={planeGroup}
             mode="translate"
             space="local"
-            size={1.35}
-            translationSnap={0.1}
+            size={1.18}
             showX={false}
             showY={false}
             showZ={true}
@@ -2531,10 +2557,10 @@ export default function ClientPage() {
         )}
 
         {clippingEnabled && !isMobile && (
-          <GizmoManager
-            transformRefs={[sliceControlMode === "translate" ? transformTranslateRef : transformRotateRef]}
-            trackballRef={trackballRef}
-          />
+          <>
+            <ThickRotationGizmo controlRef={transformRotateRef} />
+            <GizmoManager rotateRef={transformRotateRef} translateRef={transformTranslateRef} trackballRef={trackballRef} />
+          </>
         )}
 
         <ViewStateSync trackballRef={trackballRef} />
