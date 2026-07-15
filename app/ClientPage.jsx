@@ -9,6 +9,10 @@ import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader"
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader"
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader"
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from "three-mesh-bvh"
+import { Unzip, UnzipInflate } from "fflate"
+import * as dicomParser from "dicom-parser"
+
+// DICOM podpora vyžaduje v projektu balíčky: fflate a dicom-parser.
 
 /* ---------- Instalace BVH do Three.js ---------- */
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree
@@ -116,6 +120,379 @@ function rememberOriginalColors(mesh) {
   mesh.userData._originalColors = mesh.geometry.attributes.color
     ? mesh.geometry.attributes.color.clone()
     : null
+}
+
+/* ---------- DICOM ZIP + 3D volume rendering ---------- */
+const DICOM_HU_MIN = -1024
+const DICOM_HU_MAX = 3071
+const DEFAULT_DICOM_SETTINGS = {
+  preset: "teeth",
+  quality: 256,
+  opacity: 0.82,
+  densityMin: 350,
+  densityMax: 2200,
+  cropMin: 0,
+  cropMax: 1,
+  visible: true,
+  position: [0, 0, 0],
+  rotation: [0, 0, 0],
+  scale: 1,
+}
+
+const parseDicomNumbers = (value, fallback = []) => {
+  if (typeof value !== "string") return fallback
+  const parsed = value.split("\\").map(Number)
+  return parsed.every(Number.isFinite) ? parsed : fallback
+}
+
+function dicomSlicePosition(dataSet) {
+  const position = parseDicomNumbers(dataSet.string("x00200032"), [])
+  const orientation = parseDicomNumbers(dataSet.string("x00200037"), [])
+  if (position.length === 3 && orientation.length === 6) {
+    const row = new THREE.Vector3(orientation[0], orientation[1], orientation[2])
+    const column = new THREE.Vector3(orientation[3], orientation[4], orientation[5])
+    const normal = row.cross(column).normalize()
+    return normal.dot(new THREE.Vector3(position[0], position[1], position[2]))
+  }
+  const instance = dataSet.intString("x00200013")
+  return Number.isFinite(instance) ? instance : 0
+}
+
+function decodeDicomSlice(bytes, targetSize) {
+  let dataSet
+  try {
+    dataSet = dicomParser.parseDicom(bytes)
+  } catch {
+    return null
+  }
+  const pixelElement = dataSet.elements.x7fe00010
+  const rows = dataSet.uint16("x00280010")
+  const columns = dataSet.uint16("x00280011")
+  if (!pixelElement || !rows || !columns) return null
+
+  const transferSyntax = (dataSet.string("x00020010") || "").trim()
+  const supportedSyntax = !transferSyntax || [
+    "1.2.840.10008.1.2",
+    "1.2.840.10008.1.2.1",
+  ].includes(transferSyntax)
+  if (!supportedSyntax || pixelElement.encapsulatedPixelData) {
+    return { unsupported: true, transferSyntax }
+  }
+
+  const bitsAllocated = dataSet.uint16("x00280100") || 16
+  const signed = (dataSet.uint16("x00280103") || 0) === 1
+  if (bitsAllocated !== 8 && bitsAllocated !== 16) return null
+
+  const slope = dataSet.floatString("x00281053") || 1
+  const intercept = dataSet.floatString("x00281052") || 0
+  const maxXY = Math.max(rows, columns)
+  const width = Math.max(16, Math.round(columns * Math.min(1, targetSize / maxXY)))
+  const height = Math.max(16, Math.round(rows * Math.min(1, targetSize / maxXY)))
+  const pixels = new Uint8Array(width * height)
+  const view = new DataView(
+    bytes.buffer,
+    bytes.byteOffset + pixelElement.dataOffset,
+    pixelElement.length
+  )
+  const bytesPerPixel = bitsAllocated / 8
+  const huRange = DICOM_HU_MAX - DICOM_HU_MIN
+
+  for (let y = 0; y < height; y++) {
+    const sourceY = Math.min(rows - 1, Math.floor((y + 0.5) * rows / height))
+    for (let x = 0; x < width; x++) {
+      const sourceX = Math.min(columns - 1, Math.floor((x + 0.5) * columns / width))
+      const offset = (sourceY * columns + sourceX) * bytesPerPixel
+      let stored
+      if (bitsAllocated === 16) stored = signed ? view.getInt16(offset, true) : view.getUint16(offset, true)
+      else stored = signed ? view.getInt8(offset) : view.getUint8(offset)
+      const hu = stored * slope + intercept
+      pixels[y * width + x] = Math.max(0, Math.min(255, Math.round(((hu - DICOM_HU_MIN) / huRange) * 255)))
+    }
+  }
+
+  const spacing = parseDicomNumbers(dataSet.string("x00280030"), [1, 1])
+  const thickness = dataSet.floatString("x00180050") || 1
+  return {
+    unsupported: false,
+    series: dataSet.string("x0020000e") || "default",
+    rows,
+    columns,
+    width,
+    height,
+    pixels,
+    position: dicomSlicePosition(dataSet),
+    spacingX: Math.abs(spacing[1] || spacing[0] || 1),
+    spacingY: Math.abs(spacing[0] || 1),
+    thickness: Math.abs(thickness || 1),
+  }
+}
+
+async function loadDicomZip(url, quality, expectedSize, onProgress, signal) {
+  const response = await fetch(url, { cache: "no-store", signal })
+  if (!response.ok) throw new Error(`DICOM ZIP nelze stáhnout (HTTP ${response.status}).`)
+  if (!response.body) throw new Error("Prohlížeč nepodporuje průběžné načítání DICOM dat.")
+
+  const total = Number(response.headers.get("content-length")) || Number(expectedSize) || 0
+  const reader = response.body.getReader()
+  const series = new Map()
+  let downloaded = 0
+  let lastYieldAt = 0
+  let activeFiles = 0
+  let archiveEnded = false
+  let unsupportedSyntax = null
+  let fatalError = null
+
+  let resolveFinished, rejectFinished
+  const finished = new Promise((resolve, reject) => {
+    resolveFinished = resolve
+    rejectFinished = reject
+  })
+  const maybeFinish = () => {
+    if (fatalError) return rejectFinished(fatalError)
+    if (archiveEnded && activeFiles === 0) resolveFinished()
+  }
+
+  const unzip = new Unzip((file) => {
+    if (file.name.endsWith("/") || /(^|\/)DICOMDIR$/i.test(file.name)) return
+    activeFiles += 1
+    const chunks = []
+    let length = 0
+    file.ondata = (error, chunk, final) => {
+      if (error) {
+        fatalError = error
+        activeFiles -= 1
+        maybeFinish()
+        return
+      }
+      if (chunk?.length) {
+        chunks.push(chunk)
+        length += chunk.length
+      }
+      if (!final) return
+      // Každý řez zpracujeme v samostatném úkolu, aby hlavní vlákno mezi
+      // řezy mohlo překreslit průběh a ovládání nepůsobilo zamrzle.
+      setTimeout(() => {
+        try {
+          const bytes = new Uint8Array(length)
+          let offset = 0
+          chunks.forEach((part) => { bytes.set(part, offset); offset += part.length })
+          const slice = decodeDicomSlice(bytes, quality)
+          if (slice?.unsupported) unsupportedSyntax = slice.transferSyntax || "neznámá"
+          else if (slice?.pixels) {
+            if (!series.has(slice.series)) series.set(slice.series, [])
+            series.get(slice.series).push(slice)
+          }
+        } catch (error) {
+          console.warn("DICOM soubor byl přeskočen:", error)
+        } finally {
+          activeFiles -= 1
+          maybeFinish()
+        }
+      }, 0)
+    }
+    file.start()
+  })
+  unzip.register(UnzipInflate)
+
+  while (true) {
+    if (signal?.aborted) throw new DOMException("Načítání zrušeno", "AbortError")
+    const { value, done } = await reader.read()
+    if (done) {
+      archiveEnded = true
+      unzip.push(new Uint8Array(0), true)
+      maybeFinish()
+      break
+    }
+    downloaded += value.byteLength
+    onProgress?.({
+      phase: "download",
+      percent: total ? Math.min(100, (downloaded / total) * 100) : 0,
+      downloaded,
+      total,
+    })
+    unzip.push(value, false)
+    if (downloaded - lastYieldAt >= 4 * 1024 * 1024) {
+      lastYieldAt = downloaded
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+  }
+
+  onProgress?.({ phase: "process", percent: 100, downloaded, total })
+  await finished
+
+  const candidates = [...series.values()].filter((items) => items.length > 1)
+  candidates.sort((a, b) => b.length - a.length)
+  const slices = candidates[0]
+  if (!slices?.length) {
+    if (unsupportedSyntax) {
+      throw new Error(`DICOM používá nepodporovanou kompresi (${unsupportedSyntax}).`)
+    }
+    throw new Error("V ZIP archivu nebyla nalezena použitelná DICOM CT série.")
+  }
+  slices.sort((a, b) => a.position - b.position)
+
+  const first = slices[0]
+  const depth = Math.min(slices.length, quality)
+  const voxels = new Uint8Array(first.width * first.height * depth)
+  for (let z = 0; z < depth; z++) {
+    const sourceIndex = Math.min(slices.length - 1, Math.round(z * (slices.length - 1) / Math.max(1, depth - 1)))
+    voxels.set(slices[sourceIndex].pixels, z * first.width * first.height)
+  }
+  const positionRange = Math.abs(slices[slices.length - 1].position - slices[0].position)
+  const physicalDepth = positionRange > 0 ? positionRange + first.thickness : slices.length * first.thickness
+
+  return {
+    data: voxels,
+    width: first.width,
+    height: first.height,
+    depth,
+    size: [
+      first.columns * first.spacingX,
+      first.rows * first.spacingY,
+      physicalDepth,
+    ],
+    sourceDimensions: [first.columns, first.rows, slices.length],
+  }
+}
+
+const DICOM_VERTEX_SHADER = `
+  out vec3 vOrigin;
+  out vec3 vDirection;
+  uniform vec3 uSize;
+  void main() {
+    vec3 cameraLocal = (inverse(modelMatrix) * vec4(cameraPosition, 1.0)).xyz;
+    vOrigin = cameraLocal / uSize + 0.5;
+    vec3 texturePosition = position / uSize + 0.5;
+    vDirection = texturePosition - vOrigin;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`
+
+const DICOM_FRAGMENT_SHADER = `
+  precision highp float;
+  precision highp sampler3D;
+  in vec3 vOrigin;
+  in vec3 vDirection;
+  out vec4 outColor;
+  uniform sampler3D uVolume;
+  uniform float uDensityLow;
+  uniform float uDensityHigh;
+  uniform float uOpacity;
+  uniform float uCropMin;
+  uniform float uCropMax;
+  uniform float uStep;
+  uniform vec3 uVoxel;
+
+  vec2 hitBox(vec3 origin, vec3 direction) {
+    vec3 invDirection = 1.0 / direction;
+    vec3 tMin = (vec3(0.0) - origin) * invDirection;
+    vec3 tMax = (vec3(1.0) - origin) * invDirection;
+    vec3 t1 = min(tMin, tMax);
+    vec3 t2 = max(tMin, tMax);
+    return vec2(max(max(t1.x, t1.y), t1.z), min(min(t2.x, t2.y), t2.z));
+  }
+
+  void main() {
+    vec3 direction = normalize(vDirection);
+    vec2 bounds = hitBox(vOrigin, direction);
+    if (bounds.x > bounds.y) discard;
+    bounds.x = max(bounds.x, 0.0);
+    vec3 point = vOrigin + bounds.x * direction;
+    float distanceTravelled = bounds.x;
+    vec4 accumulated = vec4(0.0);
+    float low = (uDensityLow - ${DICOM_HU_MIN.toFixed(1)}) / ${(DICOM_HU_MAX - DICOM_HU_MIN).toFixed(1)};
+    float high = (uDensityHigh - ${DICOM_HU_MIN.toFixed(1)}) / ${(DICOM_HU_MAX - DICOM_HU_MIN).toFixed(1)};
+
+    for (int i = 0; i < 768; i++) {
+      if (distanceTravelled > bounds.y || accumulated.a > 0.985) break;
+      if (point.z >= uCropMin && point.z <= uCropMax) {
+        float density = texture(uVolume, point).r;
+        float transfer = smoothstep(low, max(low + 0.002, high), density);
+        float alpha = pow(transfer, 1.35) * uOpacity * 0.075;
+        if (alpha > 0.002) {
+          vec3 gradient = vec3(
+            texture(uVolume, point + vec3(uVoxel.x, 0.0, 0.0)).r - texture(uVolume, point - vec3(uVoxel.x, 0.0, 0.0)).r,
+            texture(uVolume, point + vec3(0.0, uVoxel.y, 0.0)).r - texture(uVolume, point - vec3(0.0, uVoxel.y, 0.0)).r,
+            texture(uVolume, point + vec3(0.0, 0.0, uVoxel.z)).r - texture(uVolume, point - vec3(0.0, 0.0, uVoxel.z)).r
+          );
+          float shade = 0.48 + 0.52 * abs(dot(normalize(gradient + vec3(0.0001)), normalize(vec3(0.45, 0.65, 1.0))));
+          vec3 color = mix(vec3(0.78, 0.68, 0.52), vec3(1.0, 0.96, 0.84), transfer) * shade;
+          accumulated.rgb += (1.0 - accumulated.a) * alpha * color;
+          accumulated.a += (1.0 - accumulated.a) * alpha;
+        }
+      }
+      point += direction * uStep;
+      distanceTravelled += uStep;
+    }
+    if (accumulated.a < 0.01) discard;
+    outColor = accumulated;
+  }
+`
+
+function DicomVolume({ volume, settings }) {
+  const texture = useMemo(() => {
+    if (!volume) return null
+    const value = new THREE.Data3DTexture(volume.data, volume.width, volume.height, volume.depth)
+    value.format = THREE.RedFormat
+    value.type = THREE.UnsignedByteType
+    value.minFilter = THREE.LinearFilter
+    value.magFilter = THREE.LinearFilter
+    value.unpackAlignment = 1
+    value.needsUpdate = true
+    return value
+  }, [volume])
+
+  const material = useMemo(() => {
+    if (!texture || !volume) return null
+    return new THREE.ShaderMaterial({
+      glslVersion: THREE.GLSL3,
+      vertexShader: DICOM_VERTEX_SHADER,
+      fragmentShader: DICOM_FRAGMENT_SHADER,
+      side: THREE.BackSide,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      uniforms: {
+        uVolume: { value: texture },
+        uSize: { value: new THREE.Vector3(...volume.size) },
+        uDensityLow: { value: settings.densityMin },
+        uDensityHigh: { value: settings.densityMax },
+        uOpacity: { value: settings.opacity },
+        uCropMin: { value: settings.cropMin },
+        uCropMax: { value: settings.cropMax },
+        uStep: { value: 1.1 / Math.max(volume.width, volume.height, volume.depth) },
+        uVoxel: { value: new THREE.Vector3(1 / volume.width, 1 / volume.height, 1 / volume.depth) },
+      },
+    })
+  }, [texture, volume])
+
+  useEffect(() => () => {
+    material?.dispose()
+    texture?.dispose()
+  }, [material, texture])
+
+  useEffect(() => {
+    if (!material) return
+    material.uniforms.uDensityLow.value = settings.densityMin
+    material.uniforms.uDensityHigh.value = Math.max(settings.densityMin + 10, settings.densityMax)
+    material.uniforms.uOpacity.value = settings.opacity
+    material.uniforms.uCropMin.value = Math.min(settings.cropMin, settings.cropMax - 0.01)
+    material.uniforms.uCropMax.value = Math.max(settings.cropMax, settings.cropMin + 0.01)
+  }, [material, settings.densityMin, settings.densityMax, settings.opacity, settings.cropMin, settings.cropMax])
+
+  if (!volume || !material || settings.visible === false) return null
+  const rotation = (settings.rotation || [0, 0, 0]).map((value) => THREE.MathUtils.degToRad(value || 0))
+  return (
+    <mesh
+      position={settings.position || [0, 0, 0]}
+      rotation={rotation}
+      scale={settings.scale || 1}
+      material={material}
+      renderOrder={-1000}
+    >
+      <boxGeometry args={volume.size} />
+    </mesh>
+  )
 }
 
 function configureMaterialTransparency(material, opacity) {
@@ -1358,6 +1735,96 @@ export default function ClientPage() {
   const [wireframes, setWireframes] = useState([])
   const [fatal, setFatal] = useState(null)
 
+  const [dicomSource, setDicomSource] = useState(null)
+  const [dicomSettings, setDicomSettings] = useState(DEFAULT_DICOM_SETTINGS)
+  const [dicomVolume, setDicomVolume] = useState(null)
+  const [dicomStatus, setDicomStatus] = useState("idle")
+  const [dicomProgress, setDicomProgress] = useState(0)
+  const [dicomError, setDicomError] = useState("")
+  const dicomAbortRef = useRef(null)
+  const dicomLoadedQualityRef = useRef(null)
+
+  const applyDicomSource = useCallback((source) => {
+    if (!source?.u) {
+      dicomAbortRef.current?.abort()
+      dicomAbortRef.current = null
+      setDicomSource(null)
+      setDicomVolume(null)
+      setDicomStatus("idle")
+      setDicomError("")
+      return
+    }
+    setDicomSource((previous) => {
+      if (previous?.u && previous.u !== source.u) {
+        dicomAbortRef.current?.abort()
+        setDicomVolume(null)
+        setDicomStatus("idle")
+        setDicomError("")
+        dicomLoadedQualityRef.current = null
+      }
+      return source
+    })
+    setDicomSettings((previous) => ({
+      ...DEFAULT_DICOM_SETTINGS,
+      ...previous,
+      ...(source.settings || {}),
+      position: Array.isArray(source.settings?.position) ? source.settings.position : previous.position,
+      rotation: Array.isArray(source.settings?.rotation) ? source.settings.rotation : previous.rotation,
+    }))
+  }, [])
+
+  const startDicomLoad = useCallback(async (sourceOverride = null, force = false) => {
+    const source = sourceOverride?.u ? sourceOverride : dicomSource
+    if (!source?.u || (!force && (dicomStatus === "downloading" || dicomStatus === "processing"))) return
+    dicomAbortRef.current?.abort()
+    const controller = new AbortController()
+    dicomAbortRef.current = controller
+    const effectiveSettings = {
+      ...dicomSettings,
+      ...(source.settings || {}),
+    }
+    setDicomSettings((previous) => ({ ...previous, ...(source.settings || {}) }))
+    setDicomError("")
+    setDicomProgress(0)
+    setDicomStatus("downloading")
+    try {
+      const volume = await loadDicomZip(
+        source.u,
+        Number(effectiveSettings.quality) || 256,
+        source.size,
+        (progress) => {
+          setDicomProgress(progress.percent || 0)
+          setDicomStatus(progress.phase === "process" ? "processing" : "downloading")
+        },
+        controller.signal
+      )
+      if (controller.signal.aborted) return
+      setDicomVolume(volume)
+      dicomLoadedQualityRef.current = Number(effectiveSettings.quality) || 256
+      setDicomStatus("ready")
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        setDicomStatus("idle")
+        return
+      }
+      console.error("DICOM load error:", error)
+      setDicomError(error?.message || "DICOM data se nepodařilo načíst.")
+      setDicomStatus("error")
+    }
+  }, [dicomSource, dicomSettings, dicomStatus])
+
+  const releaseDicom = useCallback(() => {
+    dicomAbortRef.current?.abort()
+    dicomAbortRef.current = null
+    setDicomVolume(null)
+    setDicomStatus("idle")
+    setDicomProgress(0)
+    setDicomError("")
+    dicomLoadedQualityRef.current = null
+  }, [])
+
+  useEffect(() => () => dicomAbortRef.current?.abort(), [])
+
   const [autoSmooth, setAutoSmooth] = useState(true)
   const [smoothAngle] = useState(30)
 
@@ -1565,11 +2032,16 @@ export default function ClientPage() {
           snappedP2: measureState.snappedP2,
         } : null,
       },
+      dicom: dicomSource ? {
+        visible: dicomSettings.visible !== false,
+        settings: dicomSettings,
+      } : null,
     }
   }, [
     activeAnalysisMode, files, heatmapSelection, showHeatmap, hasComputedHeatmap,
     comparisonSelection, comparisonTolerance, showComparison, hasComputedComparison,
     pinnedNotes, clippingEnabled, planeGroup, measureState,
+    dicomSource, dicomSettings,
   ])
 
   const handleHeatmapHover = useCallback((dist, x, y) => {
@@ -1754,6 +2226,15 @@ export default function ClientPage() {
     setHasComputedHeatmap(false)
     setHasComputedComparison(false)
     setPinnedNotes(Array.isArray(pendingViewerState.pinnedNotes) ? pendingViewerState.pinnedNotes : [])
+
+    if (pendingViewerState.dicom?.settings) {
+      setDicomSettings((previous) => ({
+        ...previous,
+        ...pendingViewerState.dicom.settings,
+        // Uložená viditelnost se použije až po ručním potvrzení stažení.
+        visible: pendingViewerState.dicom.visible !== false,
+      }))
+    }
 
     if (pendingViewerState.clipping?.enabled) {
       pendingClipStateRef.current = pendingViewerState.clipping
@@ -1949,7 +2430,6 @@ export default function ClientPage() {
         if (smoothParam === "0") setAutoSmooth(false)
 
         const applyFiles = (Fs, titleStr, logoUrl, headlight, camState, viewerState = null) => {
-          if (!Fs.length) throw new Error("Manifest je prázdný.")
           setFiles(Fs)
           const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
           setColors(Fs.map((f, i) => f.c || palette[i % palette.length]))
@@ -1991,6 +2471,7 @@ export default function ClientPage() {
             vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera, m?.viewer_state)
+          applyDicomSource(m?.dicom || null)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -2007,6 +2488,7 @@ export default function ClientPage() {
             vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera, m?.viewer_state)
+          applyDicomSource(m?.dicom || null)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -2043,7 +2525,7 @@ export default function ClientPage() {
         setFatal("Tento náhled není dostupný (chyba při načtení dat).")
       }
     })()
-  }, [])
+  }, [applyDicomSource])
 
   useEffect(() => {
     const applyLivePayload = (p) => {
@@ -2061,6 +2543,7 @@ export default function ClientPage() {
       }
 
       if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
+      if (Object.prototype.hasOwnProperty.call(p, "dicom")) applyDicomSource(p.dicom)
       if (p.viewer_state) {
         restoredViewerStateRef.current = null
         setPendingViewerState(p.viewer_state)
@@ -2120,7 +2603,19 @@ export default function ClientPage() {
     const onMsg = (e) => { const d = e.data; if (d && LIVE_MSG_TYPES.has(d.type) && d.payload) applyLivePayload(d.payload) }
     window.addEventListener("message", onMsg)
     return () => window.removeEventListener("message", onMsg)
-  }, [files])
+  }, [files, applyDicomSource])
+
+  useEffect(() => {
+    const onDicomCommand = (event) => {
+      if (event.data?.type !== "SHADE3D_DICOM_LOAD") return
+      const source = event.data?.payload?.dicom
+      if (!source?.u) return
+      applyDicomSource(source)
+      startDicomLoad(source)
+    }
+    window.addEventListener("message", onDicomCommand)
+    return () => window.removeEventListener("message", onDicomCommand)
+  }, [applyDicomSource, startDicomLoad])
 
   const logoEl = logoCfg.url && (
     <img src={logoCfg.url} alt="" style={{
@@ -2132,6 +2627,116 @@ export default function ClientPage() {
       width: logoCfg.width, opacity: logoCfg.opacity, zIndex: 0,
       pointerEvents: "none", userSelect: "none", filter: "drop-shadow(0 0 1px rgba(0,0,0,.25))",
     }}/>
+  )
+
+  const setDicomPreset = (preset) => {
+    const presets = {
+      teeth: { densityMin: 350, densityMax: 2200, opacity: 0.82 },
+      bone: { densityMin: 180, densityMax: 1700, opacity: 0.72 },
+      soft: { densityMin: -150, densityMax: 450, opacity: 0.5 },
+    }
+    setDicomSettings((previous) => ({
+      ...previous,
+      preset,
+      ...(presets[preset] || presets.teeth),
+    }))
+  }
+
+  const dicomControls = dicomSource && (
+    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid rgba(255,255,255,.16)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 9 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontWeight: 800, fontSize: 12 }}>DICOM / CT</div>
+          <div title={dicomSource.n} style={{ fontSize: 10, color: "#9ca3af", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {dicomSource.n || "DICOM série"}
+          </div>
+        </div>
+        {dicomStatus === "ready" && (
+          <Switch
+            checked={dicomSettings.visible !== false}
+            onChange={(visible) => setDicomSettings((previous) => ({ ...previous, visible }))}
+          />
+        )}
+      </div>
+
+      {dicomStatus !== "ready" ? (
+        <div>
+          <button
+            onClick={() => startDicomLoad()}
+            disabled={dicomStatus === "downloading" || dicomStatus === "processing"}
+            style={{ width: "100%", border: 0, borderRadius: 7, padding: "9px 10px", background: "#2563eb", color: "white", fontWeight: 800, cursor: "pointer" }}
+          >
+            {dicomStatus === "downloading"
+              ? `Stahuji DICOM data - ${Math.round(dicomProgress)}%`
+              : dicomStatus === "processing"
+                ? "Zpracovávám DICOM data..."
+                : "Zobrazit DICOM data"}
+          </button>
+          {(dicomStatus === "downloading" || dicomStatus === "processing") && (
+            <div style={{ height: 4, marginTop: 7, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.12)" }}>
+              <div style={{ width: `${Math.max(2, dicomProgress)}%`, height: "100%", background: "#60a5fa", transition: "width .2s" }} />
+            </div>
+          )}
+          {dicomError && <div style={{ marginTop: 7, color: "#fca5a5", fontSize: 11, lineHeight: 1.35 }}>{dicomError}</div>}
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, marginBottom: 10 }}>
+            <select value={dicomSettings.preset} onChange={(e) => setDicomPreset(e.target.value)} style={{ background: "#151515", color: "white", border: "1px solid #444", borderRadius: 6, padding: 6, fontSize: 11 }}>
+              <option value="teeth">Zuby</option>
+              <option value="bone">Kost</option>
+              <option value="soft">Měkké tkáně</option>
+              <option value="custom">Vlastní</option>
+            </select>
+            <select value={dicomSettings.quality} onChange={(e) => setDicomSettings((previous) => ({ ...previous, quality: Number(e.target.value) }))} style={{ background: "#151515", color: "white", border: "1px solid #444", borderRadius: 6, padding: 6, fontSize: 11 }}>
+              <option value={192}>Rychlá</option>
+              <option value={256}>Vyvážená</option>
+              <option value={384}>Detailní</option>
+            </select>
+          </div>
+
+          {[
+            ["Krytí", "opacity", 0.05, 1, 0.01, `${Math.round(dicomSettings.opacity * 100)} %`],
+            ["Hustota od", "densityMin", -1000, 2500, 10, `${dicomSettings.densityMin} HU`],
+            ["Hustota do", "densityMax", 0, 3500, 10, `${dicomSettings.densityMax} HU`],
+            ["Ořez od", "cropMin", 0, 1, 0.01, `${Math.round(dicomSettings.cropMin * 100)} %`],
+            ["Ořez do", "cropMax", 0, 1, 0.01, `${Math.round(dicomSettings.cropMax * 100)} %`],
+          ].map(([label, key, min, max, step, value]) => (
+            <label key={key} style={{ display: "block", marginTop: 7, fontSize: 10, color: "#bbb" }}>
+              <span style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}><span>{label}</span><b style={{ color: "white" }}>{value}</b></span>
+              <input type="range" min={min} max={max} step={step} value={dicomSettings[key]} onChange={(e) => setDicomSettings((previous) => ({ ...previous, preset: "custom", [key]: Number(e.target.value) }))} style={{ width: "100%" }} />
+            </label>
+          ))}
+
+          <details style={{ marginTop: 9 }}>
+            <summary style={{ cursor: "pointer", color: "#ddd", fontSize: 11 }}>Umístění objemu</summary>
+            <div style={{ marginTop: 7 }}>
+              {["X", "Y", "Z"].map((axis, index) => (
+                <label key={`dicom-pos-${axis}`} style={{ display: "block", marginTop: 6, fontSize: 10, color: "#bbb" }}>
+                  <span style={{ display: "flex", justifyContent: "space-between" }}><span>Posun {axis}</span><b>{dicomSettings.position[index].toFixed(1)} mm</b></span>
+                  <input type="range" min={-150} max={150} step={0.5} value={dicomSettings.position[index]} onChange={(e) => setDicomSettings((previous) => { const position = [...previous.position]; position[index] = Number(e.target.value); return { ...previous, position } })} style={{ width: "100%" }} />
+                </label>
+              ))}
+              {["X", "Y", "Z"].map((axis, index) => (
+                <label key={`dicom-rot-${axis}`} style={{ display: "block", marginTop: 6, fontSize: 10, color: "#bbb" }}>
+                  <span style={{ display: "flex", justifyContent: "space-between" }}><span>Rotace {axis}</span><b>{dicomSettings.rotation[index].toFixed(0)}°</b></span>
+                  <input type="range" min={-180} max={180} step={1} value={dicomSettings.rotation[index]} onChange={(e) => setDicomSettings((previous) => { const rotation = [...previous.rotation]; rotation[index] = Number(e.target.value); return { ...previous, rotation } })} style={{ width: "100%" }} />
+                </label>
+              ))}
+              <label style={{ display: "block", marginTop: 6, fontSize: 10, color: "#bbb" }}>
+                <span style={{ display: "flex", justifyContent: "space-between" }}><span>Měřítko</span><b>{dicomSettings.scale.toFixed(2)}×</b></span>
+                <input type="range" min={0.25} max={2.5} step={0.01} value={dicomSettings.scale} onChange={(e) => setDicomSettings((previous) => ({ ...previous, scale: Number(e.target.value) }))} style={{ width: "100%" }} />
+              </label>
+            </div>
+          </details>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, marginTop: 10 }}>
+            <button onClick={() => startDicomLoad(null, true)} disabled={dicomLoadedQualityRef.current === Number(dicomSettings.quality)} style={{ padding: "7px 5px", borderRadius: 6, border: "1px solid rgba(255,255,255,.2)", background: "rgba(255,255,255,.08)", color: "white", fontSize: 10, cursor: "pointer", opacity: dicomLoadedQualityRef.current === Number(dicomSettings.quality) ? 0.45 : 1 }}>Načíst novou kvalitu</button>
+            <button onClick={releaseDicom} style={{ padding: "7px 5px", borderRadius: 6, border: "1px solid rgba(248,113,113,.35)", background: "rgba(127,29,29,.2)", color: "#fca5a5", fontSize: 10, cursor: "pointer" }}>Uvolnit z paměti</button>
+          </div>
+        </>
+      )}
+    </div>
   )
 
   const slidersContent = fatal ? (
@@ -2185,6 +2790,7 @@ export default function ClientPage() {
           </div>
         );
       })}
+      {dicomControls}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
         <Switch checked={autoSmooth} onChange={setAutoSmooth} label="Auto smooth" />
         <button 
@@ -2500,6 +3106,8 @@ export default function ClientPage() {
 
   const allLoaded = files.length > 0 && files.every(f => loadedUrls.has(f.url))
   const frameKey = allLoaded && !didInitialFrame ? `frame-${files.length}` : ""
+  const sceneReadyForDicom = (files.length === 0 || (allLoaded && didInitialFrame)) &&
+    !isCalculatingHeatmap && !isCalculatingComparison && !restoringAnalysisMode
 
   return (
     <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
@@ -2576,6 +3184,51 @@ export default function ClientPage() {
           }} />
           <div style={{ display: "flex", justifyContent: "space-between", width: 300, fontSize: 11, fontWeight: "bold", opacity: 0.8 }}>
             <span>-1.0−</span><span>-0.5</span><span>0</span><span>1.0</span><span>2.0+</span>
+          </div>
+        </div>
+      )}
+
+      {/* DICOM se nabízí teprve po zobrazení běžných modelů a uložených analýz. */}
+      {sceneReadyForDicom && dicomSource && (dicomStatus === "idle" || dicomStatus === "error") && (
+        <div style={{
+          position: "absolute", left: "50%", bottom: 24, transform: "translateX(-50%)",
+          zIndex: 9997, width: "min(440px, calc(100vw - 28px))", boxSizing: "border-box",
+          padding: 16, borderRadius: 12, background: "rgba(9,9,11,.92)", color: "white",
+          border: "1px solid rgba(96,165,250,.45)", boxShadow: "0 16px 45px rgba(0,0,0,.55)",
+          fontFamily: "sans-serif", backdropFilter: "blur(10px)"
+        }}>
+          <div style={{ fontSize: 14, fontWeight: 800, marginBottom: 5 }}>Zakázka obsahuje DICOM data</div>
+          <div style={{ color: "#cbd5e1", fontSize: 12, lineHeight: 1.45, marginBottom: 12 }}>
+            Běžné modely jsou připravené. DICOM ZIP má přibližně {dicomSource.size ? `${Math.round(dicomSource.size / 1024 / 1024)} MB` : "stovky MB"} a stáhne se pouze po vašem potvrzení.
+          </div>
+          {dicomError && <div style={{ color: "#fca5a5", fontSize: 11, marginBottom: 9 }}>{dicomError}</div>}
+          <button onClick={() => startDicomLoad()} style={{ width: "100%", padding: "10px 12px", border: 0, borderRadius: 8, background: "#2563eb", color: "white", fontWeight: 800, cursor: "pointer" }}>
+            Zobrazit DICOM data
+          </button>
+        </div>
+      )}
+
+      {(dicomStatus === "downloading" || dicomStatus === "processing") && (
+        <div style={{
+          position: "absolute", inset: 0, zIndex: 10000, background: "rgba(0,0,0,.76)",
+          display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontFamily: "sans-serif"
+        }}>
+          <div style={{ width: "min(430px, calc(100vw - 32px))", textAlign: "center" }}>
+            <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "shade3dSpin360 1s linear infinite", transformOrigin: "50% 50%", marginBottom: 14 }}>
+              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+            </svg>
+            <div style={{ fontSize: 18, fontWeight: 800 }}>
+              {dicomStatus === "downloading"
+                ? `Stahuji DICOM data - ${Math.round(dicomProgress)}%`
+                : "Zpracovávám DICOM data..."}
+            </div>
+            <div style={{ height: 6, marginTop: 14, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.15)" }}>
+              <div style={{ width: `${Math.max(2, dicomProgress)}%`, height: "100%", background: "#60a5fa", transition: "width .2s" }} />
+            </div>
+            <div style={{ marginTop: 9, fontSize: 11, color: "#cbd5e1" }}>
+              {dicomStatus === "downloading" ? "Modely zůstávají načtené; probíhá pouze přenos CT archivu." : "Sestavuji 3D objem z jednotlivých řezů."}
+            </div>
+            <button onClick={releaseDicom} style={{ marginTop: 14, padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(255,255,255,.3)", background: "rgba(255,255,255,.08)", color: "white", cursor: "pointer" }}>Zrušit</button>
           </div>
         </div>
       )}
@@ -2690,6 +3343,10 @@ export default function ClientPage() {
             </Html>
           ))}
         </group>
+
+        {dicomVolume && (
+          <DicomVolume volume={dicomVolume} settings={dicomSettings} />
+        )}
 
         {clippingEnabled && !isMobile && (
           <group ref={setPlaneGroup}>
