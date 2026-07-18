@@ -2143,6 +2143,14 @@ export default function ClientPage() {
   const [dicomSlice2D, setDicomSlice2D] = useState(null)
   const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
 
+  // Režim Only 2D používá existující průřez. Při obnovení uložené scény
+  // zajistíme, že se průřez zapne i tehdy, když ve starším viewer_state chyběl.
+  useEffect(() => {
+    if (dicomStatus === "ready" && dicomSettings.viewMode === "only2d" && !clippingEnabled) {
+      setClippingEnabled(true)
+    }
+  }, [dicomStatus, dicomSettings.viewMode, clippingEnabled])
+
   const [heatmapMenuOpen, setHeatmapMenuOpen] = useState(false)
   const [heatmapSelection, setHeatmapSelection] = useState([])
   const [isCalculatingHeatmap, setIsCalculatingHeatmap] = useState(false)
@@ -3046,14 +3054,18 @@ export default function ClientPage() {
 
           <div style={{ marginBottom: 10 }}>
             <div style={{ marginBottom: 5, color: "#9ca3af", fontSize: 9, fontWeight: 800, letterSpacing: ".08em" }}>VIEWING MODE</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 6 }}>
               {[
                 ["light", "Light"],
                 ["solid", "Solid"],
+                ["only2d", "Only 2D"],
               ].map(([mode, label]) => (
                 <button
                   key={mode}
-                  onClick={() => setDicomSettings((previous) => ({ ...previous, viewMode: mode }))}
+                  onClick={() => {
+                    setDicomSettings((previous) => ({ ...previous, viewMode: mode }))
+                    if (mode === "only2d") setClippingEnabled(true)
+                  }}
                   style={{
                     minHeight: 32,
                     padding: "6px 8px",
@@ -3427,7 +3439,16 @@ export default function ClientPage() {
 
       <div style={{ background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 12 }}>
         <div data-slice-window-anchor="true" style={{ display: "flex", alignItems: "center", justifyContent: "center", position: "relative", minHeight: 24 }}>
-          <Switch checked={clippingEnabled} onChange={setClippingEnabled} label="Průřez" />
+          <Switch
+            checked={clippingEnabled}
+            onChange={(checked) => {
+              if (!checked && dicomSettings.viewMode === "only2d") {
+                setDicomSettings((previous) => ({ ...previous, viewMode: "solid" }))
+              }
+              setClippingEnabled(checked)
+            }}
+            label="Průřez"
+          />
           {clippingEnabled && (
             <button 
               onClick={handleResetPlane}
@@ -3560,9 +3581,11 @@ export default function ClientPage() {
             <div style={{ height: 6, marginTop: 14, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.15)" }}>
               <div style={{ width: `${Math.max(2, dicomProgress)}%`, height: "100%", background: "#60a5fa", transition: "width .2s" }} />
             </div>
-            <div style={{ marginTop: 9, fontSize: 11, color: "#cbd5e1" }}>
-              {dicomStatus === "downloading" ? "Modely zůstávají načtené; probíhá pouze přenos CT archivu." : "Sestavuji 3D objem z jednotlivých řezů."}
-            </div>
+            {dicomStatus === "processing" && (
+              <div style={{ marginTop: 9, fontSize: 11, color: "#cbd5e1" }}>
+                Sestavuji 3D objem z jednotlivých řezů.
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -3584,7 +3607,7 @@ export default function ClientPage() {
         </div>
       )}
 
-      {clippingEnabled && !isMobile && <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />}
+      {clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />}
 
       <Canvas
         orthographic
@@ -3678,7 +3701,7 @@ export default function ClientPage() {
           ))}
         </group>
 
-        {dicomVolume && (
+        {dicomVolume && dicomSettings.viewMode !== "only2d" && (
           <DicomVolume
             volume={dicomVolume}
             settings={dicomSettings}
@@ -3686,7 +3709,7 @@ export default function ClientPage() {
           />
         )}
 
-        {clippingEnabled && !isMobile && (
+        {clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && (
           <group ref={setPlaneGroup}>
             <mesh>
               <circleGeometry args={[planeRadius, 64]} />
