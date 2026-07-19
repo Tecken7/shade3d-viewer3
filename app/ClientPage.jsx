@@ -3,7 +3,7 @@
 import React, { Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react"
 import { Canvas, useThree, useFrame } from "@react-three/fiber"
 import * as THREE from "three"
-import { Html } from "@react-three/drei"
+import { Html, TransformControls } from "@react-three/drei"
 import { TrackballControls } from "three/examples/jsm/controls/TrackballControls"
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader"
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader"
@@ -1951,7 +1951,7 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
         )}
       </div>
 
-      {controller && (
+      {controller && controller.inlineControls !== false && (
         <>
           <div style={{ position: 'absolute', top: 58, right: 9, bottom: 10, width: 34, zIndex: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, padding: '5px 0', borderRadius: 8, background: 'rgba(8,8,8,.7)', border: `1px solid ${controller.accent}66` }}>
             <button onClick={(event) => { event.stopPropagation(); controller.onStep?.(1) }} style={{ width: 24, height: 24, padding: 0, borderRadius: 5, border: 0, background: controller.accent, color: '#071018', fontWeight: 900, cursor: 'pointer' }}>+</button>
@@ -2309,6 +2309,8 @@ export default function ClientPage() {
   const [horizontalSliceOffset, setHorizontalSliceOffset] = useState(0)
   const [verticalPlaneVisible, setVerticalPlaneVisible] = useState(true)
   const [horizontalPlaneVisible, setHorizontalPlaneVisible] = useState(true)
+  const activeTransformRotateRef = useRef(null)
+  const activeTransformTranslateRef = useRef(null)
   
   const isPlaneInitialized = useRef(false)
   const isHorizontalPlaneInitialized = useRef(false)
@@ -2522,7 +2524,7 @@ export default function ClientPage() {
       clipping: {
         enabled: clippingEnabled,
         rigVersion: 1,
-        controlVersion: 2,
+        controlVersion: 3,
         rigMatrix: clippingEnabled && sliceRigGroup ? sliceRigGroup.matrix.toArray() : null,
         matrix: clippingEnabled && planeGroup ? planeGroup.matrix.toArray() : null,
         horizontalMatrix: clippingEnabled && horizontalPlaneGroup ? horizontalPlaneGroup.matrix.toArray() : null,
@@ -2885,7 +2887,7 @@ export default function ClientPage() {
     const savedClip = pendingClipStateRef.current
     if (!savedClip || !clippingEnabled || !sliceRigGroup || !planeGroup || (dicomSource && !isMobile && !horizontalPlaneGroup)) return
 
-    const compatibleRig = savedClip.rigVersion === 1 && savedClip.controlVersion === 2 && Array.isArray(savedClip.rigMatrix) && savedClip.rigMatrix.length === 16
+    const compatibleRig = savedClip.rigVersion === 1 && savedClip.controlVersion === 3 && Array.isArray(savedClip.rigMatrix) && savedClip.rigMatrix.length === 16
     if (compatibleRig) {
       sliceRigGroup.matrix.fromArray(savedClip.rigMatrix)
       sliceRigGroup.matrix.decompose(sliceRigGroup.position, sliceRigGroup.quaternion, sliceRigGroup.scale)
@@ -2962,12 +2964,46 @@ export default function ClientPage() {
 
   const stepSlice = useCallback((kind, direction) => {
     const group = kind === "horizontal" ? horizontalPlaneGroup : planeGroup
-    if (!group) return
-    const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(group.quaternion).normalize()
-    const current = group.position.dot(normal)
+    if (!clippingEnabled || !group) return
     const step = Math.max(0.25, Math.min(1, (planeRadius / 0.6) / 180))
-    setSliceOffset(kind, current + direction * step)
-  }, [planeGroup, horizontalPlaneGroup, planeRadius, setSliceOffset])
+    group.translateZ(direction * step)
+    group.updateMatrixWorld(true)
+    const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(group.quaternion).normalize()
+    const offset = group.position.dot(normal)
+
+    if (kind === "horizontal") {
+      horizontalPlaneMatrixRef.current.copy(group.matrix)
+      setHorizontalSliceOffset(offset)
+      setHorizontalMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
+      requestHorizontalClipUpdate()
+    } else {
+      planeMatrixRef.current.copy(group.matrix)
+      setVerticalSliceOffset(offset)
+      setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
+      requestClipUpdate()
+    }
+  }, [clippingEnabled, planeGroup, horizontalPlaneGroup, planeRadius, requestClipUpdate, requestHorizontalClipUpdate])
+
+  const syncActivePlaneFromGizmo = useCallback(() => {
+    const kind = activeSlice
+    const group = kind === "horizontal" ? horizontalPlaneGroup : planeGroup
+    if (!clippingEnabled || !group) return
+    group.updateMatrixWorld(true)
+    const normal = new THREE.Vector3(0, 0, 1).applyQuaternion(group.quaternion).normalize()
+    const offset = group.position.dot(normal)
+
+    if (kind === "horizontal") {
+      horizontalPlaneMatrixRef.current.copy(group.matrix)
+      setHorizontalSliceOffset(offset)
+      setHorizontalMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
+      requestHorizontalClipUpdate()
+    } else {
+      planeMatrixRef.current.copy(group.matrix)
+      setVerticalSliceOffset(offset)
+      setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
+      requestClipUpdate()
+    }
+  }, [activeSlice, clippingEnabled, planeGroup, horizontalPlaneGroup, requestClipUpdate, requestHorizontalClipUpdate])
 
   const rotateSlicePlane = useCallback((kind, movement) => {
     const group = kind === "horizontal" ? horizontalPlaneGroup : planeGroup
@@ -3557,6 +3593,8 @@ export default function ClientPage() {
   const dicomPanelWidth = "clamp(360px, 34vw, 560px)"
   const sliceTravel = Math.max(10, (planeRadius / 0.6) * 0.55)
   const sliceControlStep = Math.max(0.25, Math.min(1, (planeRadius / 0.6) / 180))
+  const activePlaneGroup = activeSlice === "horizontal" ? horizontalPlaneGroup : planeGroup
+  const activePlaneVisible = activeSlice === "horizontal" ? horizontalPlaneVisible : verticalPlaneVisible
 
   useEffect(() => {
     if (dicomLayoutActive) setDidInitialFrame(false)
@@ -3875,7 +3913,7 @@ export default function ClientPage() {
         {clippingEnabled && !dicomLayoutActive && (
           <div style={{ marginTop: 12, fontSize: 12, width: 220 }}>
             <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>
-              Polohu a natočení roviny nyní ovládáte přímo v okně 2D řezu.
+              Vybranou rovinu posouváte a natáčíte pomocí ovladače přímo ve 3D scéně.
             </p>
           </div>
         )}
@@ -3934,6 +3972,7 @@ export default function ClientPage() {
                   onActivate={() => setActiveSlice("vertical")}
                   controller={{
                     accent: "#f59e9e",
+                    inlineControls: false,
                     offset: verticalSliceOffset,
                     min: -sliceTravel,
                     max: sliceTravel,
@@ -3962,6 +4001,7 @@ export default function ClientPage() {
                   onActivate={() => setActiveSlice("horizontal")}
                   controller={{
                     accent: "#38bdf8",
+                    inlineControls: false,
                     offset: horizontalSliceOffset,
                     min: -sliceTravel,
                     max: sliceTravel,
@@ -4113,6 +4153,7 @@ export default function ClientPage() {
           onActivate={() => setActiveSlice("vertical")}
           controller={{
             accent: "#f59e9e",
+            inlineControls: false,
             offset: verticalSliceOffset,
             min: -sliceTravel,
             max: sliceTravel,
@@ -4251,6 +4292,46 @@ export default function ClientPage() {
               </group>
             )}
           </group>
+        )}
+
+        {clippingEnabled && !isMobile && activePlaneGroup && activePlaneVisible && (
+          <>
+            <TransformControls
+              key={`slice-rotate-${activeSlice}`}
+              ref={activeTransformRotateRef}
+              object={activePlaneGroup}
+              mode="rotate"
+              space="local"
+              size={0.72}
+              showX
+              showY
+              showZ
+              onObjectChange={syncActivePlaneFromGizmo}
+            />
+            <TransformControls
+              key={`slice-translate-${activeSlice}`}
+              ref={activeTransformTranslateRef}
+              object={activePlaneGroup}
+              mode="translate"
+              space="local"
+              size={1.18}
+              showX={false}
+              showY={false}
+              showZ
+              onObjectChange={syncActivePlaneFromGizmo}
+            />
+            <ThickRotationGizmo
+              key={`slice-thick-orbit-${activeSlice}`}
+              controlRef={activeTransformRotateRef}
+            />
+            <GizmoManager
+              key={`slice-gizmo-manager-${activeSlice}-${trackballNonce}`}
+              rotateRef={activeTransformRotateRef}
+              translateRef={activeTransformTranslateRef}
+              trackballRef={trackballRef}
+              interactionBlocked={sliceOverlayInteracting}
+            />
+          </>
         )}
 
         <ViewStateSync trackballRef={trackballRef} getViewerState={buildViewerState} />
