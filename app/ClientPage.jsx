@@ -1950,6 +1950,7 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
 /* ---------- Silnější vizuál rotačních oblouků ---------- */
 function ThickRotationGizmo({ controlRef }) {
   const helpersRef = useRef([])
+  const hiddenAxisLinesRef = useRef([])
 
   useEffect(() => {
     const control = controlRef.current
@@ -1957,8 +1958,14 @@ function ThickRotationGizmo({ controlRef }) {
     if (!root?.traverse) return
 
     const helpers = []
+    const hiddenAxisLines = []
     const orbitNames = new Set(["X", "Y", "Z", "E", "XYZE"])
     root.traverse((child) => {
+      if (child.isLine && child.name === "AXIS") {
+        hiddenAxisLines.push({ line: child, visible: child.visible })
+        child.visible = false
+        return
+      }
       if (!child.isLine || !orbitNames.has(child.name) || child.userData._thickOrbitSource) return
       const position = child.geometry?.attributes?.position
       if (!position || position.count < 8) return
@@ -1979,22 +1986,29 @@ function ThickRotationGizmo({ controlRef }) {
       helper.name = "_thickOrbit"
       helper.userData._thickOrbitSource = true
       helper.raycast = () => {}
+      const sourceMaterialVisible = child.material.visible
+      child.material.visible = false
       child.add(helper)
-      helpers.push({ source: child, helper })
+      helpers.push({ source: child, helper, sourceMaterialVisible })
     })
     helpersRef.current = helpers
+    hiddenAxisLinesRef.current = hiddenAxisLines
 
     return () => {
-      helpers.forEach(({ source, helper }) => {
+      helpers.forEach(({ source, helper, sourceMaterialVisible }) => {
         source.remove(helper)
+        source.material.visible = sourceMaterialVisible
         helper.geometry.dispose()
         helper.material.dispose()
       })
+      hiddenAxisLines.forEach(({ line, visible }) => { line.visible = visible })
       helpersRef.current = []
+      hiddenAxisLinesRef.current = []
     }
   }, [controlRef])
 
   useFrame(() => {
+    hiddenAxisLinesRef.current.forEach(({ line }) => { line.visible = false })
     helpersRef.current.forEach(({ source, helper }) => {
       if (source.material?.color) helper.material.color.copy(source.material.color)
       helper.material.opacity = source.material?.opacity ?? 1
@@ -3429,6 +3443,20 @@ export default function ClientPage() {
   const activePlaneGroup = activeSlice === "horizontal" ? horizontalPlaneGroup : planeGroup
 
   useEffect(() => {
+    if (!activePlaneGroup) return
+    const frame = requestAnimationFrame(() => {
+      ;[transformRotateRef.current, transformTranslateRef.current].forEach((control) => {
+        if (!control) return
+        control.attach(activePlaneGroup)
+        control.axis = null
+        control.enabled = true
+      })
+      if (trackballRef.current) trackballRef.current.enabled = !sliceOverlayInteracting
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [activePlaneGroup, sliceOverlayInteracting])
+
+  useEffect(() => {
     if (dicomLayoutActive) setDidInitialFrame(false)
   }, [dicomLayoutActive])
 
@@ -4076,7 +4104,6 @@ export default function ClientPage() {
         {clippingEnabled && !isMobile && activePlaneGroup && (
           <>
             <TransformControls
-              key={`active-slice-rotate-${activeSlice}`}
               ref={transformRotateRef}
               object={activePlaneGroup}
               mode="rotate"
@@ -4088,7 +4115,6 @@ export default function ClientPage() {
               onObjectChange={syncActiveSliceFromGizmo}
             />
             <TransformControls
-              key={`active-slice-translate-${activeSlice}`}
               ref={transformTranslateRef}
               object={activePlaneGroup}
               mode="translate"
@@ -4099,9 +4125,9 @@ export default function ClientPage() {
               showZ={true}
               onObjectChange={syncActiveSliceFromGizmo}
             />
-            <ThickRotationGizmo key={`active-slice-orbit-${activeSlice}`} controlRef={transformRotateRef} />
+            <ThickRotationGizmo controlRef={transformRotateRef} />
             <GizmoManager
-              key={`gizmo-manager-${activeSlice}-${trackballNonce}`}
+              key={`gizmo-manager-${trackballNonce}`}
               rotateRef={transformRotateRef}
               translateRef={transformTranslateRef}
               trackballRef={trackballRef}
