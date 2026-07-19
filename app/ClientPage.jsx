@@ -728,7 +728,7 @@ function DicomSlicePlane3D({ slice }) {
         side={THREE.DoubleSide}
         transparent
         opacity={0.9}
-        depthTest={false}
+        depthTest={true}
         depthWrite={false}
         toneMapped={false}
       />
