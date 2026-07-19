@@ -671,12 +671,30 @@ function buildDicomSliceImage(volume, settings, planeMatrixWorld, maxResolution 
       image.data[outputIndex] = gray
       image.data[outputIndex + 1] = gray
       image.data[outputIndex + 2] = gray
-      image.data[outputIndex + 3] = gray === 0 ? 0 : 255
+      image.data[outputIndex + 3] = 255
     }
   }
   context.putImageData(image, 0, 0)
+
+  // Pravá 2D okna používají původní neprůhledný snímek. Samostatná kopie
+  // pro roviny ve 3D scéně zprůhlední pouze pixely s přesnou hodnotou #000000.
+  const sceneCanvas = document.createElement("canvas")
+  sceneCanvas.width = width
+  sceneCanvas.height = height
+  const sceneContext = sceneCanvas.getContext("2d")
+  if (sceneContext) {
+    const sceneImage = sceneContext.createImageData(width, height)
+    sceneImage.data.set(image.data)
+    for (let i = 0; i < sceneImage.data.length; i += 4) {
+      if (sceneImage.data[i] === 0 && sceneImage.data[i + 1] === 0 && sceneImage.data[i + 2] === 0 && sceneImage.data[i + 3] > 0) {
+        sceneImage.data[i + 3] = 0
+      }
+    }
+    sceneContext.putImageData(sceneImage, 0, 0)
+  }
   return {
     canvas,
+    sceneCanvas: sceneContext ? sceneCanvas : canvas,
     url: canvas.toDataURL("image/png"),
     bounds: { minX, minY, width: physicalWidth, height: physicalHeight },
   }
@@ -684,8 +702,9 @@ function buildDicomSliceImage(volume, settings, planeMatrixWorld, maxResolution 
 
 function DicomSlicePlane3D({ slice }) {
   const texture = useMemo(() => {
-    if (!slice?.canvas) return null
-    const value = new THREE.CanvasTexture(slice.canvas)
+    const textureCanvas = slice?.sceneCanvas || slice?.canvas
+    if (!textureCanvas) return null
+    const value = new THREE.CanvasTexture(textureCanvas)
     value.colorSpace = THREE.SRGBColorSpace
     value.minFilter = THREE.LinearFilter
     value.magFilter = THREE.LinearFilter
@@ -2096,6 +2115,9 @@ export default function ClientPage() {
       setDicomVolume(null)
       setDicomStatus("idle")
       setDicomError("")
+      isPlaneInitialized.current = false
+      isHorizontalPlaneInitialized.current = false
+      isSliceRigInitialized.current = false
       return
     }
     setDicomSource((previous) => {
@@ -2106,6 +2128,7 @@ export default function ClientPage() {
         setDicomError("")
         isPlaneInitialized.current = false
         isHorizontalPlaneInitialized.current = false
+        isSliceRigInitialized.current = false
       }
       return source
     })
@@ -2163,6 +2186,7 @@ export default function ClientPage() {
 
   // -- STAVY PRO ŘEZÁNÍ A ANIMACI --
   const [clippingEnabled, setClippingEnabled] = useState(false)
+  const [sliceRigGroup, setSliceRigGroup] = useState(null)
   const [planeGroup, setPlaneGroup] = useState(null) 
   const [horizontalPlaneGroup, setHorizontalPlaneGroup] = useState(null)
   const [planeRadius, setPlaneRadius] = useState(100) 
@@ -2174,6 +2198,8 @@ export default function ClientPage() {
   
   const isPlaneInitialized = useRef(false)
   const isHorizontalPlaneInitialized = useRef(false)
+  const isSliceRigInitialized = useRef(false)
+  const sliceRigMatrixRef = useRef(new THREE.Matrix4())
   const planeMatrixRef = useRef(new THREE.Matrix4())
   const horizontalPlaneMatrixRef = useRef(new THREE.Matrix4())
 
@@ -2357,6 +2383,7 @@ export default function ClientPage() {
       const file = files.find((item) => item.url === url)
       return file?.rawName || file?.name || url
     })
+    if (sliceRigGroup) sliceRigGroup.updateMatrix()
     if (planeGroup) planeGroup.updateMatrix()
     if (horizontalPlaneGroup) horizontalPlaneGroup.updateMatrix()
 
@@ -2380,6 +2407,8 @@ export default function ClientPage() {
       })),
       clipping: {
         enabled: clippingEnabled,
+        rigVersion: 1,
+        rigMatrix: clippingEnabled && sliceRigGroup ? sliceRigGroup.matrix.toArray() : null,
         matrix: clippingEnabled && planeGroup ? planeGroup.matrix.toArray() : null,
         horizontalMatrix: clippingEnabled && horizontalPlaneGroup ? horizontalPlaneGroup.matrix.toArray() : null,
         horizontalOrientation: "axial-z",
@@ -2404,7 +2433,7 @@ export default function ClientPage() {
   }, [
     activeAnalysisMode, files, heatmapSelection, showHeatmap, hasComputedHeatmap,
     comparisonSelection, comparisonTolerance, showComparison, hasComputedComparison,
-    pinnedNotes, clippingEnabled, planeGroup, horizontalPlaneGroup, measureState, horizontalMeasureState,
+    pinnedNotes, clippingEnabled, sliceRigGroup, planeGroup, horizontalPlaneGroup, measureState, horizontalMeasureState,
     dicomSource, dicomSettings,
   ])
 
@@ -2737,23 +2766,31 @@ export default function ClientPage() {
 
   useEffect(() => {
     const savedClip = pendingClipStateRef.current
-    if (!savedClip || !clippingEnabled || !planeGroup || (dicomSource && !horizontalPlaneGroup)) return
+    if (!savedClip || !clippingEnabled || !sliceRigGroup || !planeGroup || (dicomSource && !isMobile && !horizontalPlaneGroup)) return
 
-    if (Array.isArray(savedClip.matrix) && savedClip.matrix.length === 16) {
+    const compatibleRig = savedClip.rigVersion === 1 && Array.isArray(savedClip.rigMatrix) && savedClip.rigMatrix.length === 16
+    if (compatibleRig) {
+      sliceRigGroup.matrix.fromArray(savedClip.rigMatrix)
+      sliceRigGroup.matrix.decompose(sliceRigGroup.position, sliceRigGroup.quaternion, sliceRigGroup.scale)
+      sliceRigGroup.updateMatrixWorld(true)
+      sliceRigMatrixRef.current.copy(sliceRigGroup.matrix)
+      isSliceRigInitialized.current = true
+    }
+    if (compatibleRig && Array.isArray(savedClip.matrix) && savedClip.matrix.length === 16) {
       planeGroup.matrix.fromArray(savedClip.matrix)
       planeGroup.matrix.decompose(planeGroup.position, planeGroup.quaternion, planeGroup.scale)
       planeGroup.updateMatrixWorld(true)
       planeMatrixRef.current.copy(planeGroup.matrix)
       isPlaneInitialized.current = true
     }
-    if (horizontalPlaneGroup && savedClip.horizontalOrientation === "axial-z" && Array.isArray(savedClip.horizontalMatrix) && savedClip.horizontalMatrix.length === 16) {
+    if (compatibleRig && horizontalPlaneGroup && savedClip.horizontalOrientation === "axial-z" && Array.isArray(savedClip.horizontalMatrix) && savedClip.horizontalMatrix.length === 16) {
       horizontalPlaneGroup.matrix.fromArray(savedClip.horizontalMatrix)
       horizontalPlaneGroup.matrix.decompose(horizontalPlaneGroup.position, horizontalPlaneGroup.quaternion, horizontalPlaneGroup.scale)
       horizontalPlaneGroup.updateMatrixWorld(true)
       horizontalPlaneMatrixRef.current.copy(horizontalPlaneGroup.matrix)
       isHorizontalPlaneInitialized.current = true
     }
-    if (savedClip.measurement?.p1) {
+    if (compatibleRig && savedClip.measurement?.p1) {
       setMeasureState({
         active: false,
         p1: savedClip.measurement.p1,
@@ -2761,7 +2798,7 @@ export default function ClientPage() {
         snappedP2: savedClip.measurement.snappedP2 || savedClip.measurement.p2,
       })
     }
-    if (savedClip.horizontalMeasurement?.p1) {
+    if (compatibleRig && savedClip.horizontalMeasurement?.p1) {
       setHorizontalMeasureState({
         active: false,
         p1: savedClip.horizontalMeasurement.p1,
@@ -2772,7 +2809,7 @@ export default function ClientPage() {
     pendingClipStateRef.current = null
     requestClipUpdate()
     if (horizontalPlaneGroup) requestHorizontalClipUpdate()
-  }, [clippingEnabled, planeGroup, horizontalPlaneGroup, dicomSource, requestClipUpdate, requestHorizontalClipUpdate])
+  }, [clippingEnabled, sliceRigGroup, planeGroup, horizontalPlaneGroup, dicomSource, isMobile, requestClipUpdate, requestHorizontalClipUpdate])
 
   const moveSliceBy = useCallback((step) => {
     if (!clippingEnabled || !planeGroup) return
@@ -2801,9 +2838,10 @@ export default function ClientPage() {
   }, [clippingEnabled, moveSliceBy, planeGroup])
 
   const handleResetPlane = useCallback(() => {
-    if (!rootGroupRef.current || (!planeGroup && !horizontalPlaneGroup)) {
+    if (!rootGroupRef.current || !sliceRigGroup || !planeGroup) {
        isPlaneInitialized.current = false;
        isHorizontalPlaneInitialized.current = false;
+       isSliceRigInitialized.current = false;
        return;
     }
     const box = getSliceSceneBounds()
@@ -2811,125 +2849,99 @@ export default function ClientPage() {
        const center = new THREE.Vector3()
        box.getCenter(center)
 
-       if (planeGroup) {
-         planeGroup.position.copy(center)
-         planeGroup.rotation.set(0, Math.PI / 2, 0)
-         planeGroup.scale.set(1, 1, 1)
-         planeGroup.updateMatrixWorld(true)
-         planeMatrixRef.current.copy(planeGroup.matrix)
-         isPlaneInitialized.current = true
-         updateClippingLogic()
-       }
+       sliceRigGroup.position.copy(center)
+       sliceRigGroup.rotation.set(0, 0, 0)
+       sliceRigGroup.scale.set(1, 1, 1)
+
+       planeGroup.position.set(0, 0, 0)
+       planeGroup.rotation.set(0, Math.PI / 2, 0)
+       planeGroup.scale.set(1, 1, 1)
 
        if (horizontalPlaneGroup) {
-         horizontalPlaneGroup.position.copy(center)
+         horizontalPlaneGroup.position.set(0, 0, 0)
          horizontalPlaneGroup.rotation.set(0, 0, 0)
          horizontalPlaneGroup.scale.set(1, 1, 1)
-         horizontalPlaneGroup.updateMatrixWorld(true)
-         horizontalPlaneMatrixRef.current.copy(horizontalPlaneGroup.matrix)
-         isHorizontalPlaneInitialized.current = true
-         updateHorizontalClippingLogic()
        }
+
+       sliceRigGroup.updateMatrixWorld(true)
+       sliceRigMatrixRef.current.copy(sliceRigGroup.matrix)
+       planeMatrixRef.current.copy(planeGroup.matrix)
+       if (horizontalPlaneGroup) horizontalPlaneMatrixRef.current.copy(horizontalPlaneGroup.matrix)
+       isSliceRigInitialized.current = true
+       isPlaneInitialized.current = true
+       isHorizontalPlaneInitialized.current = !!horizontalPlaneGroup
+       updateClippingLogic()
+       if (horizontalPlaneGroup) updateHorizontalClippingLogic()
 
        setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
        setHorizontalMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
     }
-  }, [planeGroup, horizontalPlaneGroup, getSliceSceneBounds, updateClippingLogic, updateHorizontalClippingLogic])
+  }, [sliceRigGroup, planeGroup, horizontalPlaneGroup, getSliceSceneBounds, updateClippingLogic, updateHorizontalClippingLogic])
 
   useEffect(() => {
-     if (clippingEnabled && rootGroupRef.current && planeGroup) {
-        if (!isPlaneInitialized.current) {
-            const box = getSliceSceneBounds()
-            if (!box.isEmpty()) {
-               const center = new THREE.Vector3()
-               box.getCenter(center)
-
-               const size = new THREE.Vector3()
-               box.getSize(size)
-               const maxDim = Math.max(size.x, size.y, size.z)
-               setPlaneRadius(maxDim * 0.6)
-               
-               planeGroup.position.copy(center)
-               planeGroup.rotation.set(0, Math.PI / 2, 0)
-               planeGroup.updateMatrixWorld(true)
-               
-               planeMatrixRef.current.copy(planeGroup.matrix)
-               isPlaneInitialized.current = true
-            }
-        } else {
-            planeGroup.matrix.copy(planeMatrixRef.current)
-            planeGroup.matrix.decompose(planeGroup.position, planeGroup.quaternion, planeGroup.scale)
-            planeGroup.updateMatrixWorld(true)
-        }
-
-        const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
-        const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
-        clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-        
-        updateClippingLogic()
-
-        setTimeout(() => {
-            const desaturateMaterials = (obj) => {
-                obj.traverse((child) => {
-                    if (child.isMesh || child.isLine) {
-                        const mat = child.material;
-                        if (!mat || !mat.color) return;
-                        
-                        const c = mat.color;
-                        if (c.r > 0.9 && c.g < 0.1 && c.b < 0.1) {
-                            c.set("#cc5555"); 
-                        }
-                        else if (c.g > 0.9 && c.r < 0.1 && c.b < 0.1) {
-                            c.set("#55cc55");
-                        }
-                        else if (c.b > 0.9 && c.r < 0.1 && c.g < 0.1) {
-                            c.set("#5555cc");
-                        }
-                        mat.needsUpdate = true;
-                    }
-                });
-            };
-
-            if (transformRotateRef.current) desaturateMaterials(planeGroup);
-            if (transformTranslateRef.current) desaturateMaterials(planeGroup);
-            
-        }, 50);
-
-     } else if (!clippingEnabled) {
-        setSliceSegments([])
-        setSliceBBox(null)
-        setDicomSlice2D(null)
-        setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
-        setHorizontalSliceSegments([])
-        setHorizontalSliceBBox(null)
-        setHorizontalDicomSlice2D(null)
-        setHorizontalMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
-     }
-  }, [clippingEnabled, planeGroup, getSliceSceneBounds, updateClippingLogic]) 
-
-  useEffect(() => {
-    if (!clippingEnabled || !dicomSource || !rootGroupRef.current || !horizontalPlaneGroup) return
-
-    if (!isHorizontalPlaneInitialized.current) {
+    const ready = clippingEnabled && rootGroupRef.current && sliceRigGroup && planeGroup && (!dicomSource || isMobile || horizontalPlaneGroup)
+    if (ready) {
       const box = getSliceSceneBounds()
-      if (!box.isEmpty()) {
-        const center = new THREE.Vector3()
-        box.getCenter(center)
-        horizontalPlaneGroup.position.copy(center)
-        horizontalPlaneGroup.rotation.set(0, 0, 0)
-        horizontalPlaneGroup.scale.set(1, 1, 1)
-        horizontalPlaneGroup.updateMatrixWorld(true)
-        horizontalPlaneMatrixRef.current.copy(horizontalPlaneGroup.matrix)
-        isHorizontalPlaneInitialized.current = true
-      }
-    } else {
-      horizontalPlaneGroup.matrix.copy(horizontalPlaneMatrixRef.current)
-      horizontalPlaneGroup.matrix.decompose(horizontalPlaneGroup.position, horizontalPlaneGroup.quaternion, horizontalPlaneGroup.scale)
-      horizontalPlaneGroup.updateMatrixWorld(true)
-    }
+      if (box.isEmpty()) return
 
-    updateHorizontalClippingLogic()
-  }, [clippingEnabled, dicomSource, horizontalPlaneGroup, getSliceSceneBounds, updateHorizontalClippingLogic])
+      const center = new THREE.Vector3()
+      const size = new THREE.Vector3()
+      box.getCenter(center)
+      box.getSize(size)
+      setPlaneRadius(Math.max(size.x, size.y, size.z) * 0.6)
+
+      if (!isSliceRigInitialized.current) {
+        sliceRigGroup.position.copy(center)
+        sliceRigGroup.rotation.set(0, 0, 0)
+        sliceRigGroup.scale.set(1, 1, 1)
+        sliceRigGroup.updateMatrix()
+        sliceRigMatrixRef.current.copy(sliceRigGroup.matrix)
+        isSliceRigInitialized.current = true
+      } else {
+        sliceRigGroup.matrix.copy(sliceRigMatrixRef.current)
+        sliceRigGroup.matrix.decompose(sliceRigGroup.position, sliceRigGroup.quaternion, sliceRigGroup.scale)
+      }
+
+      if (!isPlaneInitialized.current) {
+        planeGroup.position.set(0, 0, 0)
+        planeGroup.rotation.set(0, Math.PI / 2, 0)
+        planeGroup.scale.set(1, 1, 1)
+        planeGroup.updateMatrix()
+        planeMatrixRef.current.copy(planeGroup.matrix)
+        isPlaneInitialized.current = true
+      } else {
+        planeGroup.matrix.copy(planeMatrixRef.current)
+        planeGroup.matrix.decompose(planeGroup.position, planeGroup.quaternion, planeGroup.scale)
+      }
+
+      if (horizontalPlaneGroup) {
+        if (!isHorizontalPlaneInitialized.current) {
+          horizontalPlaneGroup.position.set(0, 0, 0)
+          horizontalPlaneGroup.rotation.set(0, 0, 0)
+          horizontalPlaneGroup.scale.set(1, 1, 1)
+          horizontalPlaneGroup.updateMatrix()
+          horizontalPlaneMatrixRef.current.copy(horizontalPlaneGroup.matrix)
+          isHorizontalPlaneInitialized.current = true
+        } else {
+          horizontalPlaneGroup.matrix.copy(horizontalPlaneMatrixRef.current)
+          horizontalPlaneGroup.matrix.decompose(horizontalPlaneGroup.position, horizontalPlaneGroup.quaternion, horizontalPlaneGroup.scale)
+        }
+      }
+
+      sliceRigGroup.updateMatrixWorld(true)
+      updateClippingLogic()
+      if (horizontalPlaneGroup) updateHorizontalClippingLogic()
+    } else if (!clippingEnabled) {
+      setSliceSegments([])
+      setSliceBBox(null)
+      setDicomSlice2D(null)
+      setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
+      setHorizontalSliceSegments([])
+      setHorizontalSliceBBox(null)
+      setHorizontalDicomSlice2D(null)
+      setHorizontalMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
+    }
+  }, [clippingEnabled, dicomSource, isMobile, sliceRigGroup, planeGroup, horizontalPlaneGroup, getSliceSceneBounds, updateClippingLogic, updateHorizontalClippingLogic])
 
   useEffect(() => {
     ;(async () => {
@@ -2968,6 +2980,7 @@ export default function ClientPage() {
           setDidInitialFrame(false)
           isPlaneInitialized.current = false 
           isHorizontalPlaneInitialized.current = false
+          isSliceRigInitialized.current = false
         }
 
         if (mId) {
@@ -3098,6 +3111,7 @@ export default function ClientPage() {
             setInitialCameraState(null); 
             isPlaneInitialized.current = false;
             isHorizontalPlaneInitialized.current = false;
+            isSliceRigInitialized.current = false;
         }
       }
 
@@ -3957,33 +3971,35 @@ export default function ClientPage() {
         )}
 
         {clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && (
-          <group ref={setPlaneGroup}>
-            <mesh>
-              <circleGeometry args={[planeRadius, 64]} />
-              <meshBasicMaterial color="#b88f8f" transparent opacity={0.25} side={THREE.DoubleSide} depthWrite={false} />
-            </mesh>
-            {dicomSlice2D && <DicomSlicePlane3D slice={dicomSlice2D} />}
-            <SliceOutline3D segments={sliceSegments} modelColors={colors} color="#eab308" />
-            <Measurement3D measureState={measureState} boundingBox={sliceBBox} />
+          <group ref={setSliceRigGroup}>
+            <group ref={setPlaneGroup}>
+              <mesh>
+                <circleGeometry args={[planeRadius, 64]} />
+                <meshBasicMaterial color="#b88f8f" transparent opacity={0.25} side={THREE.DoubleSide} depthWrite={false} />
+              </mesh>
+              {dicomSlice2D && <DicomSlicePlane3D slice={dicomSlice2D} />}
+              <SliceOutline3D segments={sliceSegments} modelColors={colors} color="#eab308" />
+              <Measurement3D measureState={measureState} boundingBox={sliceBBox} />
+            </group>
+
+            {dicomLayoutActive && (
+              <group ref={setHorizontalPlaneGroup}>
+                <mesh>
+                  <circleGeometry args={[planeRadius, 64]} />
+                  <meshBasicMaterial color="#5b9bb8" transparent opacity={0.23} side={THREE.DoubleSide} depthWrite={false} />
+                </mesh>
+                {horizontalDicomSlice2D && <DicomSlicePlane3D slice={horizontalDicomSlice2D} />}
+                <SliceOutline3D segments={horizontalSliceSegments} modelColors={colors} color="#38bdf8" />
+                <Measurement3D measureState={horizontalMeasureState} boundingBox={horizontalSliceBBox} />
+              </group>
+            )}
           </group>
         )}
 
-        {clippingEnabled && dicomLayoutActive && (
-          <group ref={setHorizontalPlaneGroup}>
-            <mesh>
-              <circleGeometry args={[planeRadius, 64]} />
-              <meshBasicMaterial color="#5b9bb8" transparent opacity={0.23} side={THREE.DoubleSide} depthWrite={false} />
-            </mesh>
-            {horizontalDicomSlice2D && <DicomSlicePlane3D slice={horizontalDicomSlice2D} />}
-            <SliceOutline3D segments={horizontalSliceSegments} modelColors={colors} color="#38bdf8" />
-            <Measurement3D measureState={horizontalMeasureState} boundingBox={horizontalSliceBBox} />
-          </group>
-        )}
-
-        {clippingEnabled && !isMobile && planeGroup && (
+        {clippingEnabled && !isMobile && sliceRigGroup && (
           <TransformControls 
             ref={transformRotateRef}
-            object={planeGroup}
+            object={sliceRigGroup}
             mode="rotate"
             space="local"
             size={0.72}
@@ -3991,16 +4007,15 @@ export default function ClientPage() {
             showY={true}
             showZ={false}
             onChange={() => {
-              if (planeGroup) {
+              if (sliceRigGroup) {
                 if (transformRotateRef.current?.dragging) {
-                    setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
+                  setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
+                  setHorizontalMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
                 }
-                planeGroup.updateMatrixWorld(true)
-                planeMatrixRef.current.copy(planeGroup.matrix)
-                const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
-                const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
-                clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-                requestClipUpdate() 
+                sliceRigGroup.updateMatrixWorld(true)
+                sliceRigMatrixRef.current.copy(sliceRigGroup.matrix)
+                requestClipUpdate()
+                if (horizontalPlaneGroup) requestHorizontalClipUpdate()
               }
             }}
           />
