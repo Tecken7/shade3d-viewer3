@@ -142,6 +142,9 @@ const DEFAULT_DICOM_SETTINGS = {
   rotation: [0, 0, 0],
   scale: 1,
 }
+const normalizeDicomViewMode = (value) => (
+  value === "light" || value === "solid" || value === "only2d" ? value : "only2d"
+)
 
 const parseDicomNumbers = (value, fallback = []) => {
   if (typeof value !== "string") return fallback
@@ -2178,7 +2181,7 @@ export default function ClientPage() {
       ...DEFAULT_DICOM_SETTINGS,
       ...previous,
       ...(source.settings || {}),
-      viewMode: "only2d",
+      viewMode: normalizeDicomViewMode(source.settings?.viewMode),
       quality: DICOM_DETAIL_QUALITY,
       position: Array.isArray(source.settings?.position) ? source.settings.position : previous.position,
       rotation: Array.isArray(source.settings?.rotation) ? source.settings.rotation : previous.rotation,
@@ -2193,8 +2196,12 @@ export default function ClientPage() {
     dicomAbortRef.current = controller
     setDicomSettings((previous) => {
       const sourceSettings = { ...(source.settings || {}) }
-      delete sourceSettings.viewMode
-      return { ...previous, ...sourceSettings, viewMode: previous.viewMode || "only2d", quality: DICOM_DETAIL_QUALITY }
+      return {
+        ...previous,
+        ...sourceSettings,
+        viewMode: normalizeDicomViewMode(sourceSettings.viewMode ?? previous.viewMode),
+        quality: DICOM_DETAIL_QUALITY,
+      }
     })
     setDicomError("")
     setDicomProgress(0)
@@ -2259,6 +2266,10 @@ export default function ClientPage() {
   useEffect(() => {
     if (dicomSource && dicomStatus === "ready") setClippingEnabled(true)
   }, [dicomSource, dicomStatus])
+
+  useEffect(() => {
+    if (dicomSource && dicomSettings.viewMode === "only2d") setClippingEnabled(true)
+  }, [dicomSource, dicomSettings.viewMode])
 
   const [heatmapMenuOpen, setHeatmapMenuOpen] = useState(false)
   const [heatmapSelection, setHeatmapSelection] = useState([])
