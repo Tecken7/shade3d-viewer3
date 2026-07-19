@@ -1585,7 +1585,7 @@ function Switch({ checked, onChange, label }) {
 }
 
 /* ---------- 2D OVERLAY ---------- */
-function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasureState, dicomSlice, onInteractionChange, embedded = false, title = "" }) {
+function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasureState, dicomSlice, onInteractionChange, embedded = false, title = "", active = false, onActivate, accent = "#f59e9e" }) {
   const svgRef = useRef(null)
   const containerRef = useRef(null)
 
@@ -1836,6 +1836,7 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
   return (
     <div 
       ref={containerRef}
+      onPointerDownCapture={() => onActivate?.()}
       onWheel={(e) => {
          e.stopPropagation()
          const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85
@@ -1850,13 +1851,16 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
         minWidth: 0,
         minHeight: 0,
         boxSizing: 'border-box',
-        background: '#1a1a1a', border: '1px solid #444', borderRadius: 8,
-        zIndex: 100, overflow: embedded ? 'hidden' : 'visible', boxShadow: embedded ? 'none' : '0 8px 32px rgba(0,0,0,0.5)',
+        background: '#1a1a1a', border: active ? `2px solid ${accent}` : '1px solid #444', borderRadius: 8,
+        zIndex: 100, overflow: embedded ? 'hidden' : 'visible', boxShadow: active ? `inset 0 0 0 1px ${accent}55, 0 0 18px ${accent}33` : embedded ? 'none' : '0 8px 32px rgba(0,0,0,0.5)',
         cursor: measureState.active ? 'crosshair' : 'grab'
       }}
     >
       <div style={{ position: 'absolute', top: 8, left: 16, fontSize: 11, color: '#aaa', pointerEvents: 'none', zIndex: 11 }}>
-        <b style={{ color: '#fff' }}>{title || (dicomSlice ? "DICOM řez + obrysy modelů" : "Obrysy modelů")}</b><br/>Levé tl. = posun, Kolečko = zoom, Dvojklik = měření
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+          <b style={{ color: active ? accent : '#fff' }}>{title || (dicomSlice ? "DICOM řez + obrysy modelů" : "Obrysy modelů")}</b>
+          {active && <span style={{ padding: '2px 5px', borderRadius: 4, background: `${accent}30`, border: `1px solid ${accent}88`, color: accent, fontSize: 9, fontWeight: 800 }}>AKTIVNÍ</span>}
+        </span><br/>Levé tl. = posun, Kolečko = zoom, Dvojklik = měření
       </div>
 
       {!embedded && (
@@ -2001,13 +2005,24 @@ function ThickRotationGizmo({ controlRef }) {
 }
 
 /* ---------- Manažer kolize gizma a ovládání kamery ---------- */
-function GizmoManager({ rotateRef, translateRef, secondaryTranslateRef, trackballRef, interactionBlocked = false }) {
+function GizmoManager({ rotateRef, translateRef, secondaryTranslateRef, trackballRef, cameraInteractingRef, interactionBlocked = false }) {
   const isCamDragging = useRef(false)
 
   useEffect(() => {
     const ctrl = trackballRef.current
     if (!ctrl) return
-    const onStart = () => { isCamDragging.current = true }
+    const disableGizmosForCamera = () => {
+      const controls = [rotateRef?.current, translateRef?.current, secondaryTranslateRef?.current]
+      controls.forEach((control) => {
+        if (!control || control.dragging) return
+        control.enabled = false
+        control.axis = null
+      })
+    }
+    const onStart = () => {
+      isCamDragging.current = true
+      disableGizmosForCamera()
+    }
     const onEnd = () => { isCamDragging.current = false }
     ctrl.addEventListener('start', onStart)
     ctrl.addEventListener('end', onEnd)
@@ -2015,7 +2030,7 @@ function GizmoManager({ rotateRef, translateRef, secondaryTranslateRef, trackbal
       ctrl.removeEventListener('start', onStart)
       ctrl.removeEventListener('end', onEnd)
     }
-  }, [trackballRef])
+  }, [rotateRef, translateRef, secondaryTranslateRef, trackballRef])
 
   useFrame(() => {
     const rotate = rotateRef?.current
@@ -2024,6 +2039,16 @@ function GizmoManager({ rotateRef, translateRef, secondaryTranslateRef, trackbal
     const translateActive = !!translate && (translate.axis !== null || translate.dragging)
     const secondaryTranslateActive = !!secondaryTranslate && (secondaryTranslate.axis !== null || secondaryTranslate.dragging)
     const rotateActive = !!rotate && (rotate.axis !== null || rotate.dragging)
+
+    // Jakmile uživatel začne otáčet kamerou mimo gizmo, gizmo po celý tah
+    // ignoruje hover i raycast. Přejetí přes jeho oblouky tak kameru nezastaví.
+    if (isCamDragging.current || cameraInteractingRef?.current) {
+      if (rotate && !rotate.dragging) { rotate.enabled = false; rotate.axis = null }
+      if (translate && !translate.dragging) { translate.enabled = false; translate.axis = null }
+      if (secondaryTranslate && !secondaryTranslate.dragging) { secondaryTranslate.enabled = false; secondaryTranslate.axis = null }
+      if (trackballRef.current) trackballRef.current.enabled = true
+      return
+    }
 
     // Při překryvu má modrá posuvná osa přednost před rotačním kruhem.
     if (rotate) rotate.enabled = (!translateActive && !secondaryTranslateActive) || !!rotate.dragging
@@ -2190,11 +2215,11 @@ export default function ClientPage() {
   const [planeGroup, setPlaneGroup] = useState(null) 
   const [horizontalPlaneGroup, setHorizontalPlaneGroup] = useState(null)
   const [planeRadius, setPlaneRadius] = useState(100) 
+  const [activeSlice, setActiveSlice] = useState("vertical")
   const clipPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(1, 0, 0), 0))
   
   const transformRotateRef = useRef(null) 
   const transformTranslateRef = useRef(null) 
-  const horizontalTransformTranslateRef = useRef(null)
   
   const isPlaneInitialized = useRef(false)
   const isHorizontalPlaneInitialized = useRef(false)
@@ -2250,6 +2275,7 @@ export default function ClientPage() {
   useEffect(() => { setSlidersOpen(!isMobile) }, [isMobile])
 
   const trackballRef = useRef(null)
+  const cameraInteractingRef = useRef(false)
   const rootGroupRef = useRef(null)
   const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
   const [sliceOverlayInteracting, setSliceOverlayInteracting] = useState(false)
@@ -2258,6 +2284,15 @@ export default function ClientPage() {
     setSliceOverlayInteracting(active)
     if (trackballRef.current) trackballRef.current.enabled = !active
     if (!active) setTrackballNonce((value) => value + 1)
+  }, [])
+  const handleCameraInteraction = useCallback((active) => {
+    cameraInteractingRef.current = active
+    if (!active) return
+    ;[transformRotateRef.current, transformTranslateRef.current].forEach((control) => {
+      if (!control || control.dragging) return
+      control.enabled = false
+      control.axis = null
+    })
   }, [])
   const [didInitialFrame, setDidInitialFrame] = useState(false)
   const [initialCameraState, setInitialCameraState] = useState(null)
@@ -2408,6 +2443,8 @@ export default function ClientPage() {
       clipping: {
         enabled: clippingEnabled,
         rigVersion: 1,
+        controlVersion: 2,
+        activeSlice,
         rigMatrix: clippingEnabled && sliceRigGroup ? sliceRigGroup.matrix.toArray() : null,
         matrix: clippingEnabled && planeGroup ? planeGroup.matrix.toArray() : null,
         horizontalMatrix: clippingEnabled && horizontalPlaneGroup ? horizontalPlaneGroup.matrix.toArray() : null,
@@ -2433,7 +2470,7 @@ export default function ClientPage() {
   }, [
     activeAnalysisMode, files, heatmapSelection, showHeatmap, hasComputedHeatmap,
     comparisonSelection, comparisonTolerance, showComparison, hasComputedComparison,
-    pinnedNotes, clippingEnabled, sliceRigGroup, planeGroup, horizontalPlaneGroup, measureState, horizontalMeasureState,
+    pinnedNotes, clippingEnabled, activeSlice, sliceRigGroup, planeGroup, horizontalPlaneGroup, measureState, horizontalMeasureState,
     dicomSource, dicomSettings,
   ])
 
@@ -2806,26 +2843,59 @@ export default function ClientPage() {
         snappedP2: savedClip.horizontalMeasurement.snappedP2 || savedClip.horizontalMeasurement.p2,
       })
     }
+    if (savedClip.activeSlice === "horizontal" || savedClip.activeSlice === "vertical") {
+      setActiveSlice(savedClip.activeSlice)
+    }
     pendingClipStateRef.current = null
     requestClipUpdate()
     if (horizontalPlaneGroup) requestHorizontalClipUpdate()
   }, [clippingEnabled, sliceRigGroup, planeGroup, horizontalPlaneGroup, dicomSource, isMobile, requestClipUpdate, requestHorizontalClipUpdate])
 
   const moveSliceBy = useCallback((step) => {
-    if (!clippingEnabled || !planeGroup) return
-    setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
-    planeGroup.translateZ(step)
-    planeGroup.updateMatrixWorld(true)
-    planeMatrixRef.current.copy(planeGroup.matrix)
-    const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
-    const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
-    clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-    requestClipUpdate()
-  }, [clippingEnabled, planeGroup, requestClipUpdate])
+    const kind = activeSlice === "horizontal" ? "horizontal" : "vertical"
+    const group = kind === "horizontal" ? horizontalPlaneGroup : planeGroup
+    if (!clippingEnabled || !group) return
+    group.translateZ(step)
+    group.updateMatrixWorld(true)
+
+    if (kind === "horizontal") {
+      setHorizontalMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
+      horizontalPlaneMatrixRef.current.copy(group.matrix)
+      requestHorizontalClipUpdate()
+    } else {
+      setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
+      planeMatrixRef.current.copy(group.matrix)
+      const normal = new THREE.Vector3(0, 0, 1).transformDirection(group.matrixWorld).normalize()
+      const pos = new THREE.Vector3().setFromMatrixPosition(group.matrixWorld)
+      clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
+      requestClipUpdate()
+    }
+  }, [activeSlice, clippingEnabled, planeGroup, horizontalPlaneGroup, requestClipUpdate, requestHorizontalClipUpdate])
+
+  const syncActiveSliceFromGizmo = useCallback(() => {
+    const kind = activeSlice === "horizontal" ? "horizontal" : "vertical"
+    const group = kind === "horizontal" ? horizontalPlaneGroup : planeGroup
+    if (!clippingEnabled || !group) return
+    group.updateMatrixWorld(true)
+
+    if (kind === "horizontal") {
+      horizontalPlaneMatrixRef.current.copy(group.matrix)
+      setHorizontalMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
+      requestHorizontalClipUpdate()
+    } else {
+      planeMatrixRef.current.copy(group.matrix)
+      const normal = new THREE.Vector3(0, 0, 1).transformDirection(group.matrixWorld).normalize()
+      const pos = new THREE.Vector3().setFromMatrixPosition(group.matrixWorld)
+      clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
+      setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
+      requestClipUpdate()
+    }
+  }, [activeSlice, clippingEnabled, planeGroup, horizontalPlaneGroup, requestClipUpdate, requestHorizontalClipUpdate])
 
   useEffect(() => {
     const handleKeyDown = (e) => {
-      if (!clippingEnabled || !planeGroup) return
+      const activeGroup = activeSlice === "horizontal" ? horizontalPlaneGroup : planeGroup
+      if (!clippingEnabled || !activeGroup) return
       const step = 0.5 
       if (e.key === "ArrowUp" || e.key === "ArrowRight") {
          moveSliceBy(step)
@@ -2835,7 +2905,7 @@ export default function ClientPage() {
     }
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [clippingEnabled, moveSliceBy, planeGroup])
+  }, [clippingEnabled, activeSlice, moveSliceBy, planeGroup, horizontalPlaneGroup])
 
   const handleResetPlane = useCallback(() => {
     if (!rootGroupRef.current || !sliceRigGroup || !planeGroup) {
@@ -3356,6 +3426,7 @@ export default function ClientPage() {
 
   const dicomLayoutActive = !!dicomSource && dicomStatus === "ready" && !isMobile
   const dicomPanelWidth = "clamp(360px, 34vw, 560px)"
+  const activePlaneGroup = activeSlice === "horizontal" ? horizontalPlaneGroup : planeGroup
 
   useEffect(() => {
     if (dicomLayoutActive) setDidInitialFrame(false)
@@ -3729,6 +3800,9 @@ export default function ClientPage() {
                   setMeasureState={setMeasureState}
                   dicomSlice={dicomSlice2D}
                   onInteractionChange={handleSliceOverlayInteraction}
+                  active={activeSlice === "vertical"}
+                  onActivate={() => setActiveSlice("vertical")}
+                  accent="#f59e9e"
                 />
               </div>
               <div style={{ minWidth: 0, minHeight: 0, position: "relative" }}>
@@ -3742,6 +3816,9 @@ export default function ClientPage() {
                   setMeasureState={setHorizontalMeasureState}
                   dicomSlice={horizontalDicomSlice2D}
                   onInteractionChange={handleSliceOverlayInteraction}
+                  active={activeSlice === "horizontal"}
+                  onActivate={() => setActiveSlice("horizontal")}
+                  accent="#38bdf8"
                 />
               </div>
             </>
@@ -3972,7 +4049,7 @@ export default function ClientPage() {
 
         {clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && (
           <group ref={setSliceRigGroup}>
-            <group ref={setPlaneGroup}>
+            <group ref={setPlaneGroup} visible={!dicomLayoutActive || activeSlice === "vertical"}>
               <mesh>
                 <circleGeometry args={[planeRadius, 64]} />
                 <meshBasicMaterial color="#b88f8f" transparent opacity={0.25} side={THREE.DoubleSide} depthWrite={false} />
@@ -3983,7 +4060,7 @@ export default function ClientPage() {
             </group>
 
             {dicomLayoutActive && (
-              <group ref={setHorizontalPlaneGroup}>
+              <group ref={setHorizontalPlaneGroup} visible={activeSlice === "horizontal"}>
                 <mesh>
                   <circleGeometry args={[planeRadius, 64]} />
                   <meshBasicMaterial color="#5b9bb8" transparent opacity={0.23} side={THREE.DoubleSide} depthWrite={false} />
@@ -3996,85 +4073,41 @@ export default function ClientPage() {
           </group>
         )}
 
-        {clippingEnabled && !isMobile && sliceRigGroup && (
-          <TransformControls 
-            ref={transformRotateRef}
-            object={sliceRigGroup}
-            mode="rotate"
-            space="local"
-            size={0.72}
-            showX={true}
-            showY={true}
-            showZ={false}
-            onChange={() => {
-              if (sliceRigGroup) {
-                if (transformRotateRef.current?.dragging) {
-                  setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
-                  setHorizontalMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
-                }
-                sliceRigGroup.updateMatrixWorld(true)
-                sliceRigMatrixRef.current.copy(sliceRigGroup.matrix)
-                requestClipUpdate()
-                if (horizontalPlaneGroup) requestHorizontalClipUpdate()
-              }
-            }}
-          />
-        )}
-
-        {clippingEnabled && dicomLayoutActive && horizontalPlaneGroup && (
-          <TransformControls
-            ref={horizontalTransformTranslateRef}
-            object={horizontalPlaneGroup}
-            mode="translate"
-            space="local"
-            size={1.08}
-            showX={false}
-            showY={false}
-            showZ={true}
-            onChange={() => {
-              if (!horizontalPlaneGroup) return
-              if (horizontalTransformTranslateRef.current?.dragging) {
-                setHorizontalMeasureState((previous) => (previous.active || previous.p1)
-                  ? { active: false, p1: null, p2: null, snappedP2: null }
-                  : previous)
-              }
-              horizontalPlaneGroup.updateMatrixWorld(true)
-              horizontalPlaneMatrixRef.current.copy(horizontalPlaneGroup.matrix)
-              requestHorizontalClipUpdate()
-            }}
-          />
-        )}
-
-        {clippingEnabled && !isMobile && planeGroup && (
-          <TransformControls 
-            ref={transformTranslateRef}
-            object={planeGroup}
-            mode="translate"
-            space="local"
-            size={1.18}
-            showX={false}
-            showY={false}
-            showZ={true}
-            onChange={() => {
-              if (planeGroup) {
-                if (transformTranslateRef.current?.dragging) {
-                    setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev);
-                }
-                planeGroup.updateMatrixWorld(true)
-                planeMatrixRef.current.copy(planeGroup.matrix)
-                const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
-                const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
-                clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-                requestClipUpdate() 
-              }
-            }}
-          />
-        )}
-
-        {clippingEnabled && !isMobile && (
+        {clippingEnabled && !isMobile && activePlaneGroup && (
           <>
-            <ThickRotationGizmo controlRef={transformRotateRef} />
-            <GizmoManager key={`gizmo-manager-${trackballNonce}`} rotateRef={transformRotateRef} translateRef={transformTranslateRef} secondaryTranslateRef={horizontalTransformTranslateRef} trackballRef={trackballRef} interactionBlocked={sliceOverlayInteracting} />
+            <TransformControls
+              key={`active-slice-rotate-${activeSlice}`}
+              ref={transformRotateRef}
+              object={activePlaneGroup}
+              mode="rotate"
+              space="local"
+              size={0.72}
+              showX={true}
+              showY={true}
+              showZ={false}
+              onObjectChange={syncActiveSliceFromGizmo}
+            />
+            <TransformControls
+              key={`active-slice-translate-${activeSlice}`}
+              ref={transformTranslateRef}
+              object={activePlaneGroup}
+              mode="translate"
+              space="local"
+              size={1.18}
+              showX={false}
+              showY={false}
+              showZ={true}
+              onObjectChange={syncActiveSliceFromGizmo}
+            />
+            <ThickRotationGizmo key={`active-slice-orbit-${activeSlice}`} controlRef={transformRotateRef} />
+            <GizmoManager
+              key={`gizmo-manager-${activeSlice}-${trackballNonce}`}
+              rotateRef={transformRotateRef}
+              translateRef={transformTranslateRef}
+              trackballRef={trackballRef}
+              cameraInteractingRef={cameraInteractingRef}
+              interactionBlocked={sliceOverlayInteracting}
+            />
           </>
         )}
 
@@ -4103,7 +4136,7 @@ export default function ClientPage() {
           />
         )}
 
-        <TouchTrackballControls key={`trackball-${trackballNonce}`} ref={trackballRef} target={cameraTarget} enabled={!sliceOverlayInteracting} />
+        <TouchTrackballControls key={`trackball-${trackballNonce}`} ref={trackballRef} target={cameraTarget} enabled={!sliceOverlayInteracting} onInteractionChange={handleCameraInteraction} />
         <RightButtonPan key={`pan-${trackballNonce}`} setTarget={setCameraTarget} trackballRef={trackballRef} />
       </Canvas>
 
