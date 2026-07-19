@@ -1566,8 +1566,9 @@ function Switch({ checked, onChange, label }) {
 }
 
 /* ---------- 2D OVERLAY ---------- */
-function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasureState, dicomSlice, onInteractionChange }) {
+function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasureState, dicomSlice, onInteractionChange, embedded = false, title = "" }) {
   const svgRef = useRef(null)
+  const containerRef = useRef(null)
 
   const [winSize, setWinSize] = useState({ w: 550, h: 400 })
   const [pan, setPan] = useState({ x: 0, y: 0 })
@@ -1575,7 +1576,7 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
   const userResizedRef = useRef(false)
 
   const setDefaultWindowSize = useCallback(() => {
-    if (userResizedRef.current || typeof window === "undefined") return
+    if (embedded || userResizedRef.current || typeof window === "undefined") return
     const anchor = document.querySelector('[data-slice-window-anchor="true"]')
     const anchorBottom = anchor?.getBoundingClientRect().bottom ?? 140
     const availableHeight = window.innerHeight - anchorBottom - 30
@@ -1583,16 +1584,30 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
       w: Math.min(550, Math.max(320, window.innerWidth - 40)),
       h: Math.max(220, availableHeight),
     })
-  }, [])
+  }, [embedded])
 
   useEffect(() => {
+    if (embedded) return
     const frame = requestAnimationFrame(setDefaultWindowSize)
     window.addEventListener("resize", setDefaultWindowSize)
     return () => {
       cancelAnimationFrame(frame)
       window.removeEventListener("resize", setDefaultWindowSize)
     }
-  }, [setDefaultWindowSize])
+  }, [embedded, setDefaultWindowSize])
+
+  useEffect(() => {
+    if (!embedded || !containerRef.current || typeof ResizeObserver === "undefined") return
+    const element = containerRef.current
+    const updateSize = () => {
+      const rect = element.getBoundingClientRect()
+      if (rect.width > 0 && rect.height > 0) setWinSize({ w: rect.width, h: rect.height })
+    }
+    const observer = new ResizeObserver(updateSize)
+    observer.observe(element)
+    updateSize()
+    return () => observer.disconnect()
+  }, [embedded])
 
   const pathDataByModel = useMemo(() => {
       const grouped = new Map()
@@ -1801,27 +1816,37 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
 
   return (
     <div 
+      ref={containerRef}
       onWheel={(e) => {
          e.stopPropagation()
          const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85
          setZoom(z => Math.max(0.1, Math.min(20, z * zoomFactor)))
       }}
       style={{
-        position: 'absolute', bottom: 20, right: 20, width: winSize.w, height: winSize.h,
+        position: embedded ? 'relative' : 'absolute',
+        bottom: embedded ? 'auto' : 20,
+        right: embedded ? 'auto' : 20,
+        width: embedded ? '100%' : winSize.w,
+        height: embedded ? '100%' : winSize.h,
+        minWidth: 0,
+        minHeight: 0,
+        boxSizing: 'border-box',
         background: '#1a1a1a', border: '1px solid #444', borderRadius: 8,
-        zIndex: 100, overflow: 'visible', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+        zIndex: 100, overflow: embedded ? 'hidden' : 'visible', boxShadow: embedded ? 'none' : '0 8px 32px rgba(0,0,0,0.5)',
         cursor: measureState.active ? 'crosshair' : 'grab'
       }}
     >
       <div style={{ position: 'absolute', top: 8, left: 16, fontSize: 11, color: '#aaa', pointerEvents: 'none', zIndex: 11 }}>
-        {dicomSlice ? "DICOM řez + obrysy modelů" : "Obrysy modelů"}<br/>Levé tl. = posun, Kolečko = zoom, Dvojklik = měření
+        <b style={{ color: '#fff' }}>{title || (dicomSlice ? "DICOM řez + obrysy modelů" : "Obrysy modelů")}</b><br/>Levé tl. = posun, Kolečko = zoom, Dvojklik = měření
       </div>
 
-      <div 
-        onPointerDown={(e) => startResize(e, 'top-left')}
-        style={{ position: 'absolute', top: -5, left: -5, width: 16, height: 16, cursor: 'nwse-resize', zIndex: 12, background: 'rgba(255,255,255,0.15)', borderRadius: '50%' }}
-        title="Zvětšit/Zmenšit"
-      />
+      {!embedded && (
+        <div 
+          onPointerDown={(e) => startResize(e, 'top-left')}
+          style={{ position: 'absolute', top: -5, left: -5, width: 16, height: 16, cursor: 'nwse-resize', zIndex: 12, background: 'rgba(255,255,255,0.15)', borderRadius: '50%' }}
+          title="Zvětšit/Zmenšit"
+        />
+      )}
 
       <svg 
         ref={svgRef} 
@@ -1957,7 +1982,7 @@ function ThickRotationGizmo({ controlRef }) {
 }
 
 /* ---------- Manažer kolize gizma a ovládání kamery ---------- */
-function GizmoManager({ rotateRef, translateRef, trackballRef, interactionBlocked = false }) {
+function GizmoManager({ rotateRef, translateRef, secondaryTranslateRef, trackballRef, interactionBlocked = false }) {
   const isCamDragging = useRef(false)
 
   useEffect(() => {
@@ -1976,14 +2001,17 @@ function GizmoManager({ rotateRef, translateRef, trackballRef, interactionBlocke
   useFrame(() => {
     const rotate = rotateRef?.current
     const translate = translateRef?.current
+    const secondaryTranslate = secondaryTranslateRef?.current
     const translateActive = !!translate && (translate.axis !== null || translate.dragging)
+    const secondaryTranslateActive = !!secondaryTranslate && (secondaryTranslate.axis !== null || secondaryTranslate.dragging)
     const rotateActive = !!rotate && (rotate.axis !== null || rotate.dragging)
 
     // Při překryvu má modrá posuvná osa přednost před rotačním kruhem.
-    if (rotate) rotate.enabled = !translateActive || !!rotate.dragging
-    if (translate) translate.enabled = !rotate?.dragging
-    const isHovered = translateActive || rotateActive
-    const isDragging = !!translate?.dragging || !!rotate?.dragging
+    if (rotate) rotate.enabled = (!translateActive && !secondaryTranslateActive) || !!rotate.dragging
+    if (translate) translate.enabled = !rotate?.dragging && !secondaryTranslate?.dragging
+    if (secondaryTranslate) secondaryTranslate.enabled = !rotate?.dragging && !translate?.dragging
+    const isHovered = translateActive || secondaryTranslateActive || rotateActive
+    const isDragging = !!translate?.dragging || !!secondaryTranslate?.dragging || !!rotate?.dragging
 
     if (trackballRef.current) {
       if (interactionBlocked) {
@@ -2076,6 +2104,8 @@ export default function ClientPage() {
         setDicomVolume(null)
         setDicomStatus("idle")
         setDicomError("")
+        isPlaneInitialized.current = false
+        isHorizontalPlaneInitialized.current = false
       }
       return source
     })
@@ -2129,27 +2159,33 @@ export default function ClientPage() {
   // -- STAVY PRO ŘEZÁNÍ A ANIMACI --
   const [clippingEnabled, setClippingEnabled] = useState(false)
   const [planeGroup, setPlaneGroup] = useState(null) 
+  const [horizontalPlaneGroup, setHorizontalPlaneGroup] = useState(null)
   const [planeRadius, setPlaneRadius] = useState(100) 
   const clipPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(1, 0, 0), 0))
   
   const transformRotateRef = useRef(null) 
   const transformTranslateRef = useRef(null) 
+  const horizontalTransformTranslateRef = useRef(null)
   
   const isPlaneInitialized = useRef(false)
+  const isHorizontalPlaneInitialized = useRef(false)
   const planeMatrixRef = useRef(new THREE.Matrix4())
+  const horizontalPlaneMatrixRef = useRef(new THREE.Matrix4())
 
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
   const [dicomSlice2D, setDicomSlice2D] = useState(null)
   const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
+  const [horizontalSliceSegments, setHorizontalSliceSegments] = useState([])
+  const [horizontalSliceBBox, setHorizontalSliceBBox] = useState(null)
+  const [horizontalDicomSlice2D, setHorizontalDicomSlice2D] = useState(null)
+  const [horizontalMeasureState, setHorizontalMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
 
-  // Režim Only 2D používá existující průřez. Při obnovení uložené scény
-  // zajistíme, že se průřez zapne i tehdy, když ve starším viewer_state chyběl.
+  // DICOM rozvržení používá oba řezy automaticky. Efekt se spustí při dokončení
+  // načtení CT, uživatel ale může průřezy následně ručně vypnout.
   useEffect(() => {
-    if (dicomStatus === "ready" && dicomSettings.viewMode === "only2d" && !clippingEnabled) {
-      setClippingEnabled(true)
-    }
-  }, [dicomStatus, dicomSettings.viewMode, clippingEnabled])
+    if (dicomSource && dicomStatus === "ready") setClippingEnabled(true)
+  }, [dicomSource, dicomStatus])
 
   const [heatmapMenuOpen, setHeatmapMenuOpen] = useState(false)
   const [heatmapSelection, setHeatmapSelection] = useState([])
@@ -2317,6 +2353,7 @@ export default function ClientPage() {
       return file?.rawName || file?.name || url
     })
     if (planeGroup) planeGroup.updateMatrix()
+    if (horizontalPlaneGroup) horizontalPlaneGroup.updateMatrix()
 
     return {
       version: 1,
@@ -2339,11 +2376,18 @@ export default function ClientPage() {
       clipping: {
         enabled: clippingEnabled,
         matrix: clippingEnabled && planeGroup ? planeGroup.matrix.toArray() : null,
+        horizontalMatrix: clippingEnabled && horizontalPlaneGroup ? horizontalPlaneGroup.matrix.toArray() : null,
         measurement: measureState?.p1 ? {
           active: false,
           p1: measureState.p1,
           p2: measureState.p2,
           snappedP2: measureState.snappedP2,
+        } : null,
+        horizontalMeasurement: horizontalMeasureState?.p1 ? {
+          active: false,
+          p1: horizontalMeasureState.p1,
+          p2: horizontalMeasureState.p2,
+          snappedP2: horizontalMeasureState.snappedP2,
         } : null,
       },
       dicom: dicomSource ? {
@@ -2354,7 +2398,7 @@ export default function ClientPage() {
   }, [
     activeAnalysisMode, files, heatmapSelection, showHeatmap, hasComputedHeatmap,
     comparisonSelection, comparisonTolerance, showComparison, hasComputedComparison,
-    pinnedNotes, clippingEnabled, planeGroup, measureState,
+    pinnedNotes, clippingEnabled, planeGroup, horizontalPlaneGroup, measureState, horizontalMeasureState,
     dicomSource, dicomSettings,
   ])
 
@@ -2390,17 +2434,45 @@ export default function ClientPage() {
   const centerParam = (getParam("center") || "combined").toLowerCase()
   const centerMode = ["per", "combined", "none"].includes(centerParam) ? centerParam : "combined"
 
-  const updateClippingLogic = useCallback((dicomResolution = DICOM_SLICE_DETAIL_RESOLUTION) => {
-    if (!planeGroup || !rootGroupRef.current) return
+  const getSliceSceneBounds = useCallback(() => {
+    const bounds = new THREE.Box3()
+    if (rootGroupRef.current) bounds.setFromObject(rootGroupRef.current)
 
-    planeGroup.updateMatrixWorld(true)
-    const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
-    const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
-    clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
+    if (dicomVolume) {
+      const position = new THREE.Vector3(...(dicomSettings.position || [0, 0, 0]))
+      const rotationValues = dicomSettings.rotation || [0, 0, 0]
+      const rotation = new THREE.Euler(
+        THREE.MathUtils.degToRad(rotationValues[0] || 0),
+        THREE.MathUtils.degToRad(rotationValues[1] || 0),
+        THREE.MathUtils.degToRad(rotationValues[2] || 0)
+      )
+      const scale = Number(dicomSettings.scale) || 1
+      const matrix = new THREE.Matrix4().compose(
+        position,
+        new THREE.Quaternion().setFromEuler(rotation),
+        new THREE.Vector3(scale, scale, scale)
+      )
+      const half = new THREE.Vector3(...dicomVolume.size).multiplyScalar(0.5)
+      for (let z = -1; z <= 1; z += 2) {
+        for (let y = -1; y <= 1; y += 2) {
+          for (let x = -1; x <= 1; x += 2) {
+            bounds.expandByPoint(new THREE.Vector3(x * half.x, y * half.y, z * half.z).applyMatrix4(matrix))
+          }
+        }
+      }
+    }
+    return bounds
+  }, [dicomVolume, dicomSettings.position, dicomSettings.rotation, dicomSettings.scale])
 
+  const calculateSliceData = useCallback((targetPlaneGroup, dicomResolution = DICOM_SLICE_DETAIL_RESOLUTION) => {
+    if (!targetPlaneGroup || !rootGroupRef.current) return null
+
+    targetPlaneGroup.updateMatrixWorld(true)
+    const normal = new THREE.Vector3(0, 0, 1).transformDirection(targetPlaneGroup.matrixWorld).normalize()
+    const planePosition = new THREE.Vector3().setFromMatrixPosition(targetPlaneGroup.matrixWorld)
+    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, planePosition)
     const segments2D = []
-    const invMat = planeGroup.matrixWorld.clone().invert()
-    const plane = clipPlaneRef.current
+    const invMat = targetPlaneGroup.matrixWorld.clone().invert()
 
     const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3()
     const edgePt = new THREE.Vector3(), locPt = new THREE.Vector3()
@@ -2480,8 +2552,6 @@ export default function ClientPage() {
       })
     })
 
-    setSliceSegments(segments2D)
-
     let combinedBounds = null
     if (segments2D.length > 0) {
        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -2497,9 +2567,8 @@ export default function ClientPage() {
     }
 
     const dicomSlice = dicomVolume && dicomSettings.visible !== false
-      ? buildDicomSliceImage(dicomVolume, dicomSettings, planeGroup.matrixWorld, dicomResolution)
+      ? buildDicomSliceImage(dicomVolume, dicomSettings, targetPlaneGroup.matrixWorld, dicomResolution)
       : null
-    setDicomSlice2D(dicomSlice)
 
     if (dicomSlice?.bounds) {
       const bounds = dicomSlice.bounds
@@ -2512,12 +2581,31 @@ export default function ClientPage() {
         combinedBounds = { minX, minY, width: maxX - minX, height: maxY - minY }
       }
     }
-    setSliceBBox(combinedBounds)
-  }, [planeGroup, visibles, dicomVolume, dicomSettings])
+    return { segments: segments2D, boundingBox: combinedBounds, dicomSlice }
+  }, [visibles, dicomVolume, dicomSettings])
+
+  const updateClippingLogic = useCallback((dicomResolution = DICOM_SLICE_DETAIL_RESOLUTION) => {
+    const result = calculateSliceData(planeGroup, dicomResolution)
+    if (!result) return
+    setSliceSegments(result.segments)
+    setSliceBBox(result.boundingBox)
+    setDicomSlice2D(result.dicomSlice)
+  }, [planeGroup, calculateSliceData])
+
+  const updateHorizontalClippingLogic = useCallback((dicomResolution = DICOM_SLICE_DETAIL_RESOLUTION) => {
+    const result = calculateSliceData(horizontalPlaneGroup, dicomResolution)
+    if (!result) return
+    setHorizontalSliceSegments(result.segments)
+    setHorizontalSliceBBox(result.boundingBox)
+    setHorizontalDicomSlice2D(result.dicomSlice)
+  }, [horizontalPlaneGroup, calculateSliceData])
 
   const lastClipTime = useRef(0)
   const clipTimeout = useRef(null)
   const clipDetailTimeout = useRef(null)
+  const lastHorizontalClipTime = useRef(0)
+  const horizontalClipTimeout = useRef(null)
+  const horizontalClipDetailTimeout = useRef(null)
 
   const requestClipUpdate = useCallback(() => {
     const now = performance.now()
@@ -2538,9 +2626,30 @@ export default function ClientPage() {
     }, 180)
   }, [updateClippingLogic])
 
+  const requestHorizontalClipUpdate = useCallback(() => {
+    const now = performance.now()
+    if (now - lastHorizontalClipTime.current > 60) {
+      updateHorizontalClippingLogic(DICOM_SLICE_INTERACTIVE_RESOLUTION)
+      lastHorizontalClipTime.current = now
+    } else {
+      clearTimeout(horizontalClipTimeout.current)
+      horizontalClipTimeout.current = setTimeout(() => {
+        updateHorizontalClippingLogic(DICOM_SLICE_INTERACTIVE_RESOLUTION)
+        lastHorizontalClipTime.current = performance.now()
+      }, 60)
+    }
+    clearTimeout(horizontalClipDetailTimeout.current)
+    horizontalClipDetailTimeout.current = setTimeout(() => {
+      updateHorizontalClippingLogic(DICOM_SLICE_DETAIL_RESOLUTION)
+      lastHorizontalClipTime.current = performance.now()
+    }, 180)
+  }, [updateHorizontalClippingLogic])
+
   useEffect(() => () => {
     clearTimeout(clipTimeout.current)
     clearTimeout(clipDetailTimeout.current)
+    clearTimeout(horizontalClipTimeout.current)
+    clearTimeout(horizontalClipDetailTimeout.current)
   }, [])
 
   useEffect(() => {
@@ -2578,8 +2687,8 @@ export default function ClientPage() {
       }))
     }
 
-    if (pendingViewerState.clipping?.enabled) {
-      pendingClipStateRef.current = pendingViewerState.clipping
+    if (pendingViewerState.clipping?.enabled || pendingViewerState.dicom || dicomSource) {
+      if (pendingViewerState.clipping) pendingClipStateRef.current = pendingViewerState.clipping
       setClippingEnabled(true)
     } else {
       setClippingEnabled(false)
@@ -2618,11 +2727,11 @@ export default function ClientPage() {
         setRestoringAnalysisMode(null)
       }
     }, 100)
-  }, [pendingViewerState, files, loadedUrls])
+  }, [pendingViewerState, files, loadedUrls, dicomSource])
 
   useEffect(() => {
     const savedClip = pendingClipStateRef.current
-    if (!savedClip || !clippingEnabled || !planeGroup) return
+    if (!savedClip || !clippingEnabled || !planeGroup || (dicomSource && !horizontalPlaneGroup)) return
 
     if (Array.isArray(savedClip.matrix) && savedClip.matrix.length === 16) {
       planeGroup.matrix.fromArray(savedClip.matrix)
@@ -2630,6 +2739,13 @@ export default function ClientPage() {
       planeGroup.updateMatrixWorld(true)
       planeMatrixRef.current.copy(planeGroup.matrix)
       isPlaneInitialized.current = true
+    }
+    if (horizontalPlaneGroup && Array.isArray(savedClip.horizontalMatrix) && savedClip.horizontalMatrix.length === 16) {
+      horizontalPlaneGroup.matrix.fromArray(savedClip.horizontalMatrix)
+      horizontalPlaneGroup.matrix.decompose(horizontalPlaneGroup.position, horizontalPlaneGroup.quaternion, horizontalPlaneGroup.scale)
+      horizontalPlaneGroup.updateMatrixWorld(true)
+      horizontalPlaneMatrixRef.current.copy(horizontalPlaneGroup.matrix)
+      isHorizontalPlaneInitialized.current = true
     }
     if (savedClip.measurement?.p1) {
       setMeasureState({
@@ -2639,9 +2755,18 @@ export default function ClientPage() {
         snappedP2: savedClip.measurement.snappedP2 || savedClip.measurement.p2,
       })
     }
+    if (savedClip.horizontalMeasurement?.p1) {
+      setHorizontalMeasureState({
+        active: false,
+        p1: savedClip.horizontalMeasurement.p1,
+        p2: savedClip.horizontalMeasurement.p2 || savedClip.horizontalMeasurement.snappedP2,
+        snappedP2: savedClip.horizontalMeasurement.snappedP2 || savedClip.horizontalMeasurement.p2,
+      })
+    }
     pendingClipStateRef.current = null
     requestClipUpdate()
-  }, [clippingEnabled, planeGroup, requestClipUpdate])
+    if (horizontalPlaneGroup) requestHorizontalClipUpdate()
+  }, [clippingEnabled, planeGroup, horizontalPlaneGroup, dicomSource, requestClipUpdate, requestHorizontalClipUpdate])
 
   const moveSliceBy = useCallback((step) => {
     if (!clippingEnabled || !planeGroup) return
@@ -2670,36 +2795,45 @@ export default function ClientPage() {
   }, [clippingEnabled, moveSliceBy, planeGroup])
 
   const handleResetPlane = useCallback(() => {
-    if (!rootGroupRef.current || !planeGroup) {
+    if (!rootGroupRef.current || (!planeGroup && !horizontalPlaneGroup)) {
        isPlaneInitialized.current = false;
+       isHorizontalPlaneInitialized.current = false;
        return;
     }
-    const box = new THREE.Box3().setFromObject(rootGroupRef.current)
+    const box = getSliceSceneBounds()
     if (!box.isEmpty()) {
        const center = new THREE.Vector3()
        box.getCenter(center)
-       
-       planeGroup.position.copy(center)
-       planeGroup.rotation.set(0, Math.PI / 2, 0)
-       planeGroup.scale.set(1, 1, 1)
-       planeGroup.updateMatrixWorld(true)
-       
-       planeMatrixRef.current.copy(planeGroup.matrix)
-       isPlaneInitialized.current = true
-       
-       const normal = new THREE.Vector3(0, 0, 1).transformDirection(planeGroup.matrixWorld).normalize()
-       const pos = new THREE.Vector3().setFromMatrixPosition(planeGroup.matrixWorld)
-       clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
-       
-       updateClippingLogic() 
+
+       if (planeGroup) {
+         planeGroup.position.copy(center)
+         planeGroup.rotation.set(0, Math.PI / 2, 0)
+         planeGroup.scale.set(1, 1, 1)
+         planeGroup.updateMatrixWorld(true)
+         planeMatrixRef.current.copy(planeGroup.matrix)
+         isPlaneInitialized.current = true
+         updateClippingLogic()
+       }
+
+       if (horizontalPlaneGroup) {
+         horizontalPlaneGroup.position.copy(center)
+         horizontalPlaneGroup.rotation.set(-Math.PI / 2, 0, 0)
+         horizontalPlaneGroup.scale.set(1, 1, 1)
+         horizontalPlaneGroup.updateMatrixWorld(true)
+         horizontalPlaneMatrixRef.current.copy(horizontalPlaneGroup.matrix)
+         isHorizontalPlaneInitialized.current = true
+         updateHorizontalClippingLogic()
+       }
+
        setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
+       setHorizontalMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
     }
-  }, [planeGroup, updateClippingLogic])
+  }, [planeGroup, horizontalPlaneGroup, getSliceSceneBounds, updateClippingLogic, updateHorizontalClippingLogic])
 
   useEffect(() => {
      if (clippingEnabled && rootGroupRef.current && planeGroup) {
         if (!isPlaneInitialized.current) {
-            const box = new THREE.Box3().setFromObject(rootGroupRef.current)
+            const box = getSliceSceneBounds()
             if (!box.isEmpty()) {
                const center = new THREE.Vector3()
                box.getCenter(center)
@@ -2760,8 +2894,36 @@ export default function ClientPage() {
         setSliceBBox(null)
         setDicomSlice2D(null)
         setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
+        setHorizontalSliceSegments([])
+        setHorizontalSliceBBox(null)
+        setHorizontalDicomSlice2D(null)
+        setHorizontalMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
      }
-  }, [clippingEnabled, planeGroup, updateClippingLogic]) 
+  }, [clippingEnabled, planeGroup, getSliceSceneBounds, updateClippingLogic]) 
+
+  useEffect(() => {
+    if (!clippingEnabled || !dicomSource || !rootGroupRef.current || !horizontalPlaneGroup) return
+
+    if (!isHorizontalPlaneInitialized.current) {
+      const box = getSliceSceneBounds()
+      if (!box.isEmpty()) {
+        const center = new THREE.Vector3()
+        box.getCenter(center)
+        horizontalPlaneGroup.position.copy(center)
+        horizontalPlaneGroup.rotation.set(-Math.PI / 2, 0, 0)
+        horizontalPlaneGroup.scale.set(1, 1, 1)
+        horizontalPlaneGroup.updateMatrixWorld(true)
+        horizontalPlaneMatrixRef.current.copy(horizontalPlaneGroup.matrix)
+        isHorizontalPlaneInitialized.current = true
+      }
+    } else {
+      horizontalPlaneGroup.matrix.copy(horizontalPlaneMatrixRef.current)
+      horizontalPlaneGroup.matrix.decompose(horizontalPlaneGroup.position, horizontalPlaneGroup.quaternion, horizontalPlaneGroup.scale)
+      horizontalPlaneGroup.updateMatrixWorld(true)
+    }
+
+    updateHorizontalClippingLogic()
+  }, [clippingEnabled, dicomSource, horizontalPlaneGroup, getSliceSceneBounds, updateHorizontalClippingLogic])
 
   useEffect(() => {
     ;(async () => {
@@ -2799,6 +2961,7 @@ export default function ClientPage() {
           setPendingViewerState(viewerState)
           setDidInitialFrame(false)
           isPlaneInitialized.current = false 
+          isHorizontalPlaneInitialized.current = false
         }
 
         if (mId) {
@@ -2928,6 +3091,7 @@ export default function ClientPage() {
             setDidInitialFrame(false); 
             setInitialCameraState(null); 
             isPlaneInitialized.current = false;
+            isHorizontalPlaneInitialized.current = false;
         }
       }
 
@@ -3170,6 +3334,13 @@ export default function ClientPage() {
     </>
   )
 
+  const dicomLayoutActive = !!dicomSource && dicomStatus === "ready" && !isMobile
+  const dicomPanelWidth = "clamp(360px, 34vw, 560px)"
+
+  useEffect(() => {
+    if (dicomLayoutActive) setDidInitialFrame(false)
+  }, [dicomLayoutActive])
+
   const sidebar = (
     <div className="sidebar" style={{ position: "absolute", top: 10, left: 10, zIndex: 2, width: "clamp(260px, 28vw, 420px)", maxWidth: "calc(100vw - 20px)", color: "white", fontFamily: "sans-serif", fontSize: 14, backdropFilter: "blur(3px)", background: "rgba(0,0,0,.25)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, boxSizing: "border-box", maxHeight: "calc(100vh - 20px)", overflowY: "auto" }}>
       {title && (<div title={title} style={{ marginBottom: 10, padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", background: "rgba(255,255,255,.08)", fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>)}
@@ -3195,9 +3366,22 @@ export default function ClientPage() {
   )
 
   const topBarRight = !isMobile && (
-    <div style={{ position: "absolute", top: 10, right: 10, zIndex: 10, display: "flex", flexDirection: "column", gap: 10, fontFamily: "sans-serif", color: "white" }}>
+    <div style={{
+      position: "absolute",
+      top: 10,
+      right: dicomLayoutActive ? "auto" : 10,
+      left: dicomLayoutActive ? `calc((100vw - ${dicomPanelWidth} + clamp(260px, 28vw, 420px) + 20px) / 2)` : "auto",
+      transform: dicomLayoutActive ? "translateX(-50%)" : "none",
+      zIndex: 10,
+      display: "flex",
+      flexDirection: dicomLayoutActive ? "row" : "column",
+      alignItems: "flex-start",
+      gap: dicomLayoutActive ? 8 : 10,
+      fontFamily: "sans-serif",
+      color: "white",
+    }}>
       
-      <div style={{ width: 270 }}>
+      <div style={{ width: dicomLayoutActive ? 120 : 270 }}>
         <button 
           onClick={() => { setHeatmapMenuOpen(prev => !prev); setComparisonMenuOpen(false) }}
           style={{
@@ -3213,6 +3397,7 @@ export default function ClientPage() {
         </button>
 
         <div style={{
+          width: dicomLayoutActive ? 266 : "auto",
           maxHeight: heatmapMenuOpen ? "500px" : "0px",
           opacity: heatmapMenuOpen ? 1 : 0,
           overflow: "hidden",
@@ -3286,7 +3471,7 @@ export default function ClientPage() {
         </div>
       </div>
 
-      <div style={{ width: 270 }}>
+      <div style={{ width: dicomLayoutActive ? 120 : 270 }}>
         <button
           onClick={() => { setComparisonMenuOpen(prev => !prev); setHeatmapMenuOpen(false) }}
           style={{
@@ -3302,6 +3487,7 @@ export default function ClientPage() {
         </button>
 
         <div style={{
+          width: dicomLayoutActive ? 270 : "auto",
           maxHeight: comparisonMenuOpen ? "720px" : "0px",
           opacity: comparisonMenuOpen ? 1 : 0,
           overflow: "hidden",
@@ -3378,7 +3564,7 @@ export default function ClientPage() {
         </div>
       </div>
 
-      <div>
+      <div style={{ width: dicomLayoutActive ? 120 : 270 }}>
         <button 
           onClick={() => setIsAutoRotating(p => !p)}
           style={{
@@ -3409,6 +3595,7 @@ export default function ClientPage() {
         </button>
 
         <div style={{
+          width: dicomLayoutActive ? 266 : "auto",
           maxHeight: isAutoRotating ? "100px" : "0px",
           opacity: isAutoRotating ? 1 : 0,
           overflow: "hidden",
@@ -3437,8 +3624,8 @@ export default function ClientPage() {
         </div>
       </div>
 
-      <div style={{ background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 12 }}>
-        <div data-slice-window-anchor="true" style={{ display: "flex", alignItems: "center", justifyContent: "center", position: "relative", minHeight: 24 }}>
+      <div style={{ width: dicomLayoutActive ? 150 : "auto", boxSizing: "border-box", background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: dicomLayoutActive ? 8 : 12 }}>
+        <div data-slice-window-anchor="true" style={{ display: "flex", alignItems: "center", justifyContent: dicomLayoutActive ? "space-between" : "center", gap: 6, position: "relative", minHeight: 24 }}>
           <Switch
             checked={clippingEnabled}
             onChange={(checked) => {
@@ -3453,7 +3640,7 @@ export default function ClientPage() {
             <button 
               onClick={handleResetPlane}
               style={{
-                position: "absolute", right: 0,
+                position: dicomLayoutActive ? "static" : "absolute", right: dicomLayoutActive ? "auto" : 0,
                 background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)",
                 borderRadius: 6, color: "white", padding: "4px 8px", fontSize: 11, cursor: "pointer",
                 transition: "background 0.2s"
@@ -3464,7 +3651,7 @@ export default function ClientPage() {
             </button>
           )}
         </div>
-        {clippingEnabled && (
+        {clippingEnabled && !dicomLayoutActive && (
           <div style={{ marginTop: 12, fontSize: 12, width: 220 }}>
             <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>
               Táhněte za <b>modrou osu</b> pro posun nebo za barevný kruh pro natočení roviny řezu.
@@ -3491,6 +3678,60 @@ export default function ClientPage() {
       {logoEl}
       {!hideSidebar && sidebar}
       {topBarRight}
+
+      {dicomLayoutActive && (
+        <div style={{
+          position: "absolute",
+          top: 0,
+          right: 0,
+          bottom: 0,
+          width: dicomPanelWidth,
+          zIndex: 6,
+          display: "grid",
+          gridTemplateRows: "minmax(0, 1fr) minmax(0, 1fr)",
+          gap: 6,
+          padding: 6,
+          boxSizing: "border-box",
+          background: "rgba(8,8,8,.96)",
+          borderLeft: "1px solid rgba(255,255,255,.2)",
+          boxShadow: "-12px 0 32px rgba(0,0,0,.42)",
+        }}>
+          {clippingEnabled ? (
+            <>
+              <div style={{ minWidth: 0, minHeight: 0, position: "relative" }}>
+                <Overlay2D
+                  embedded
+                  title="Vertikální řez"
+                  segments={sliceSegments}
+                  modelColors={colors}
+                  boundingBox={sliceBBox}
+                  measureState={measureState}
+                  setMeasureState={setMeasureState}
+                  dicomSlice={dicomSlice2D}
+                  onInteractionChange={handleSliceOverlayInteraction}
+                />
+              </div>
+              <div style={{ minWidth: 0, minHeight: 0, position: "relative" }}>
+                <Overlay2D
+                  embedded
+                  title="Horizontální řez"
+                  segments={horizontalSliceSegments}
+                  modelColors={colors}
+                  boundingBox={horizontalSliceBBox}
+                  measureState={horizontalMeasureState}
+                  setMeasureState={setHorizontalMeasureState}
+                  dicomSlice={horizontalDicomSlice2D}
+                  onInteractionChange={handleSliceOverlayInteraction}
+                />
+              </div>
+            </>
+          ) : (
+            <div style={{ gridRow: "1 / -1", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, color: "#9ca3af", fontFamily: "sans-serif", textAlign: "center", fontSize: 13 }}>
+              Zapněte funkci Průřez pro zobrazení vertikálního a horizontálního DICOM řezu.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* OVERLAY BĚHEM NAČÍTÁNÍ MODELŮ */}
       {!allLoaded && files.length > 0 && (
@@ -3607,7 +3848,7 @@ export default function ClientPage() {
         </div>
       )}
 
-      {clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />}
+      {!dicomLayoutActive && clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />}
 
       <Canvas
         orthographic
@@ -3617,7 +3858,7 @@ export default function ClientPage() {
             gl.setClearAlpha(0)
             gl.localClippingEnabled = false
         }}
-        style={{ position: "absolute", inset: 0, zIndex: 1, background: "transparent" }}
+        style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: dicomLayoutActive ? dicomPanelWidth : 0, zIndex: 1, background: "transparent" }}
       >
         <ambientLight intensity={0.35 * sceneIntensity} />
         <directionalLight position={[0, 5, 5]} intensity={1.2 * sceneIntensity} />
@@ -3721,6 +3962,18 @@ export default function ClientPage() {
           </group>
         )}
 
+        {clippingEnabled && dicomLayoutActive && (
+          <group ref={setHorizontalPlaneGroup}>
+            <mesh>
+              <circleGeometry args={[planeRadius, 64]} />
+              <meshBasicMaterial color="#5b9bb8" transparent opacity={0.23} side={THREE.DoubleSide} depthWrite={false} />
+            </mesh>
+            {horizontalDicomSlice2D && <DicomSlicePlane3D slice={horizontalDicomSlice2D} />}
+            <SliceOutline3D segments={horizontalSliceSegments} modelColors={colors} color="#38bdf8" />
+            <Measurement3D measureState={horizontalMeasureState} boundingBox={horizontalSliceBBox} />
+          </group>
+        )}
+
         {clippingEnabled && !isMobile && planeGroup && (
           <TransformControls 
             ref={transformRotateRef}
@@ -3743,6 +3996,30 @@ export default function ClientPage() {
                 clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
                 requestClipUpdate() 
               }
+            }}
+          />
+        )}
+
+        {clippingEnabled && dicomLayoutActive && horizontalPlaneGroup && (
+          <TransformControls
+            ref={horizontalTransformTranslateRef}
+            object={horizontalPlaneGroup}
+            mode="translate"
+            space="local"
+            size={1.08}
+            showX={false}
+            showY={false}
+            showZ={true}
+            onChange={() => {
+              if (!horizontalPlaneGroup) return
+              if (horizontalTransformTranslateRef.current?.dragging) {
+                setHorizontalMeasureState((previous) => (previous.active || previous.p1)
+                  ? { active: false, p1: null, p2: null, snappedP2: null }
+                  : previous)
+              }
+              horizontalPlaneGroup.updateMatrixWorld(true)
+              horizontalPlaneMatrixRef.current.copy(horizontalPlaneGroup.matrix)
+              requestHorizontalClipUpdate()
             }}
           />
         )}
@@ -3776,7 +4053,7 @@ export default function ClientPage() {
         {clippingEnabled && !isMobile && (
           <>
             <ThickRotationGizmo controlRef={transformRotateRef} />
-            <GizmoManager key={`gizmo-manager-${trackballNonce}`} rotateRef={transformRotateRef} translateRef={transformTranslateRef} trackballRef={trackballRef} interactionBlocked={sliceOverlayInteracting} />
+            <GizmoManager key={`gizmo-manager-${trackballNonce}`} rotateRef={transformRotateRef} translateRef={transformTranslateRef} secondaryTranslateRef={horizontalTransformTranslateRef} trackballRef={trackballRef} interactionBlocked={sliceOverlayInteracting} />
           </>
         )}
 
