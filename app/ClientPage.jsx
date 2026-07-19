@@ -130,7 +130,7 @@ const DICOM_SLICE_INTERACTIVE_RESOLUTION = 256
 const DICOM_SLICE_DETAIL_RESOLUTION = 640
 const DEFAULT_DICOM_SETTINGS = {
   preset: "teeth",
-  viewMode: "solid",
+  viewMode: "only2d",
   quality: DICOM_DETAIL_QUALITY,
   opacity: 0.82,
   densityMin: 350,
@@ -671,7 +671,7 @@ function buildDicomSliceImage(volume, settings, planeMatrixWorld, maxResolution 
       image.data[outputIndex] = gray
       image.data[outputIndex + 1] = gray
       image.data[outputIndex + 2] = gray
-      image.data[outputIndex + 3] = 255
+      image.data[outputIndex + 3] = gray === 0 ? 0 : 255
     }
   }
   context.putImageData(image, 0, 0)
@@ -2113,6 +2113,7 @@ export default function ClientPage() {
       ...DEFAULT_DICOM_SETTINGS,
       ...previous,
       ...(source.settings || {}),
+      viewMode: "only2d",
       quality: DICOM_DETAIL_QUALITY,
       position: Array.isArray(source.settings?.position) ? source.settings.position : previous.position,
       rotation: Array.isArray(source.settings?.rotation) ? source.settings.rotation : previous.rotation,
@@ -2125,7 +2126,11 @@ export default function ClientPage() {
     dicomAbortRef.current?.abort()
     const controller = new AbortController()
     dicomAbortRef.current = controller
-    setDicomSettings((previous) => ({ ...previous, ...(source.settings || {}), quality: DICOM_DETAIL_QUALITY }))
+    setDicomSettings((previous) => {
+      const sourceSettings = { ...(source.settings || {}) }
+      delete sourceSettings.viewMode
+      return { ...previous, ...sourceSettings, viewMode: previous.viewMode || "only2d", quality: DICOM_DETAIL_QUALITY }
+    })
     setDicomError("")
     setDicomProgress(0)
     setDicomStatus("downloading")
@@ -2377,6 +2382,7 @@ export default function ClientPage() {
         enabled: clippingEnabled,
         matrix: clippingEnabled && planeGroup ? planeGroup.matrix.toArray() : null,
         horizontalMatrix: clippingEnabled && horizontalPlaneGroup ? horizontalPlaneGroup.matrix.toArray() : null,
+        horizontalOrientation: "axial-z",
         measurement: measureState?.p1 ? {
           active: false,
           p1: measureState.p1,
@@ -2740,7 +2746,7 @@ export default function ClientPage() {
       planeMatrixRef.current.copy(planeGroup.matrix)
       isPlaneInitialized.current = true
     }
-    if (horizontalPlaneGroup && Array.isArray(savedClip.horizontalMatrix) && savedClip.horizontalMatrix.length === 16) {
+    if (horizontalPlaneGroup && savedClip.horizontalOrientation === "axial-z" && Array.isArray(savedClip.horizontalMatrix) && savedClip.horizontalMatrix.length === 16) {
       horizontalPlaneGroup.matrix.fromArray(savedClip.horizontalMatrix)
       horizontalPlaneGroup.matrix.decompose(horizontalPlaneGroup.position, horizontalPlaneGroup.quaternion, horizontalPlaneGroup.scale)
       horizontalPlaneGroup.updateMatrixWorld(true)
@@ -2817,7 +2823,7 @@ export default function ClientPage() {
 
        if (horizontalPlaneGroup) {
          horizontalPlaneGroup.position.copy(center)
-         horizontalPlaneGroup.rotation.set(-Math.PI / 2, 0, 0)
+         horizontalPlaneGroup.rotation.set(0, 0, 0)
          horizontalPlaneGroup.scale.set(1, 1, 1)
          horizontalPlaneGroup.updateMatrixWorld(true)
          horizontalPlaneMatrixRef.current.copy(horizontalPlaneGroup.matrix)
@@ -2910,7 +2916,7 @@ export default function ClientPage() {
         const center = new THREE.Vector3()
         box.getCenter(center)
         horizontalPlaneGroup.position.copy(center)
-        horizontalPlaneGroup.rotation.set(-Math.PI / 2, 0, 0)
+        horizontalPlaneGroup.rotation.set(0, 0, 0)
         horizontalPlaneGroup.scale.set(1, 1, 1)
         horizontalPlaneGroup.updateMatrixWorld(true)
         horizontalPlaneMatrixRef.current.copy(horizontalPlaneGroup.matrix)
@@ -3624,7 +3630,7 @@ export default function ClientPage() {
         </div>
       </div>
 
-      <div style={{ width: dicomLayoutActive ? 150 : "auto", boxSizing: "border-box", background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: dicomLayoutActive ? 8 : 12 }}>
+      <div style={{ width: dicomLayoutActive ? 190 : 270, boxSizing: "border-box", background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: dicomLayoutActive ? 8 : 12 }}>
         <div data-slice-window-anchor="true" style={{ display: "flex", alignItems: "center", justifyContent: dicomLayoutActive ? "space-between" : "center", gap: 6, position: "relative", minHeight: 24 }}>
           <Switch
             checked={clippingEnabled}
