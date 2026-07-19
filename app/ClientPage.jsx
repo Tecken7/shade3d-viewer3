@@ -1264,8 +1264,6 @@ function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
 const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], onInteractionChange, enabled = true }, ref) => {
   const { camera, gl, size } = useThree()
   const controlsRef = useRef(null)
-  
-  React.useImperativeHandle(ref, () => controlsRef.current)
 
   useEffect(() => {
     const c = new TrackballControls(camera, gl.domElement)
@@ -1281,12 +1279,17 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], onInterac
     c.addEventListener("start", handleStart)
     c.addEventListener("end", handleEnd)
     controlsRef.current = c
+    if (typeof ref === "function") ref(c)
+    else if (ref) ref.current = c
     return () => {
       c.removeEventListener("start", handleStart)
       c.removeEventListener("end", handleEnd)
       c.dispose()
+      controlsRef.current = null
+      if (typeof ref === "function") ref(null)
+      else if (ref?.current === c) ref.current = null
     }
-  }, [camera, gl, onInteractionChange])
+  }, [camera, gl, onInteractionChange, ref])
 
   useEffect(() => {
     if (controlsRef.current) controlsRef.current.enabled = enabled
@@ -2293,11 +2296,9 @@ export default function ClientPage() {
   const rootGroupRef = useRef(null)
   const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
   const [sliceOverlayInteracting, setSliceOverlayInteracting] = useState(false)
-  const [trackballNonce, setTrackballNonce] = useState(0)
   const handleSliceOverlayInteraction = useCallback((active) => {
     setSliceOverlayInteracting(active)
     if (trackballRef.current) trackballRef.current.enabled = !active
-    if (!active) setTrackballNonce((value) => value + 1)
   }, [])
   const handleCameraInteraction = useCallback((active) => {
     cameraInteractingRef.current = active
@@ -4127,7 +4128,6 @@ export default function ClientPage() {
             />
             <ThickRotationGizmo controlRef={transformRotateRef} />
             <GizmoManager
-              key={`gizmo-manager-${trackballNonce}`}
               rotateRef={transformRotateRef}
               translateRef={transformTranslateRef}
               trackballRef={trackballRef}
@@ -4162,8 +4162,8 @@ export default function ClientPage() {
           />
         )}
 
-        <TouchTrackballControls key={`trackball-${trackballNonce}`} ref={trackballRef} target={cameraTarget} enabled={!sliceOverlayInteracting} onInteractionChange={handleCameraInteraction} />
-        <RightButtonPan key={`pan-${trackballNonce}`} setTarget={setCameraTarget} trackballRef={trackballRef} />
+        <TouchTrackballControls ref={trackballRef} target={cameraTarget} enabled={!sliceOverlayInteracting} onInteractionChange={handleCameraInteraction} />
+        <RightButtonPan setTarget={setCameraTarget} trackballRef={trackballRef} />
       </Canvas>
 
       <Lightbox open={lightbox.open} onClose={() => setLightbox({ open: false, src: null, alt: "" })} src={lightbox.src} alt={lightbox.alt} />
