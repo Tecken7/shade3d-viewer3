@@ -2823,13 +2823,22 @@ function Lightbox({ open, onClose, src, alt }) {
 /* ---------- Switch ---------- */
 function Switch({ checked, onChange, label }) {
   const onKey = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onChange(!checked) } }
-  const TRACK_W = 38, TRACK_H = 22, KNOB = 18
+  const TRACK_W = 34, TRACK_H = 19, KNOB = 15
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      {label && <span style={{ opacity: .85, fontWeight: "bold" }}>{label}</span>}
+      {label && <span style={{ color: "inherit", fontSize: "inherit", fontWeight: 680, letterSpacing: "-.01em" }}>{label}</span>}
       <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)} onKeyDown={onKey}
-        style={{ position: "relative", width: TRACK_W, height: TRACK_H, borderRadius: 999, border: "1px solid rgba(255,255,255,.22)", background: checked ? "rgba(59,130,246,.45)" : "rgba(255,255,255,.10)", cursor: "pointer", transition: "background .15s ease, border-color .15s ease", outline: "none", padding: 0 }}>
-        <span aria-hidden style={{ position: "absolute", top: "50%", transform: "translateY(-50%)", left: checked ? TRACK_W - KNOB - 3 : 3, width: KNOB, height: KNOB, borderRadius: "50%", background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.35)", transition: "left .15s ease" }}/>
+        style={{
+          position: "relative", width: TRACK_W, height: TRACK_H, borderRadius: 999, outline: "none", padding: 0, cursor: "pointer",
+          border: checked ? "1px solid rgba(74,222,128,.26)" : "1px solid rgba(255,255,255,.14)",
+          background: checked ? "rgba(34,197,94,.13)" : "rgba(255,255,255,.055)",
+          transition: "background .15s ease, border-color .15s ease",
+        }}>
+        <span aria-hidden style={{
+          position: "absolute", top: "50%", transform: "translateY(-50%)", left: checked ? TRACK_W - KNOB - 2 : 2,
+          width: KNOB, height: KNOB, borderRadius: "50%", background: checked ? "#dffbea" : "#d7d7d7",
+          boxShadow: "0 1px 3px rgba(0,0,0,.35)", transition: "left .15s ease, background .15s ease"
+        }}/>
       </button>
     </div>
   )
@@ -5207,22 +5216,29 @@ export default function ClientPage() {
         const isTexAvailable = f.vc || hasTexMap[f.url];
 
         return (
-          <div key={`${f.url}-${i}`} className="control-row" style={{ display: "grid", gridTemplateColumns: "36px 1fr 32px 32px 36px", alignItems: "center", columnGap: 6, rowGap: 6, margin: "6px 0" }}>
-            <div className="row-label" style={{ gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={f.rawName || f.name}>{stripExt(f.name)}:</div>
+          <div key={`${f.url}-${i}`} className="control-row" style={{
+            display: "grid", gridTemplateColumns: "32px minmax(0,1fr) 30px 30px 32px", alignItems: "center", columnGap: 7, rowGap: 8,
+            margin: "7px 0", padding: "9px 10px", borderRadius: 11, boxSizing: "border-box",
+            background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.065)",
+          }}>
+            <div className="row-label" style={{
+              gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              color: "#d7d7d7", fontSize: 10.5, fontWeight: 680, letterSpacing: "-.01em",
+            }} title={f.rawName || f.name}>{stripExt(f.name)}</div>
             
-            <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} aria-label={`${f.name} color`} className="color-input" style={{ width: 36, height: 22, border: "1px solid #fff", borderRadius: 4, padding: 0, cursor: "pointer", background: "transparent" }}/>
+            <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} aria-label={`${f.name} color`} className="color-input" style={{ width: 32, height: 24, border: "1px solid rgba(255,255,255,.14)", borderRadius: 7, padding: 2, cursor: "pointer", background: "rgba(255,255,255,.035)" }}/>
             
-            <input className="slider" type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => { const v = parseFloat(e.target.value); setOpacities((prev) => prev.map((x, idx) => (idx === i ? v : x))) }} style={{ width: "calc(100% - 12px)", minWidth: 110 }} aria-label={`${f.name} opacity`} />
+            <input className="slider" type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => { const v = parseFloat(e.target.value); setOpacities((prev) => prev.map((x, idx) => (idx === i ? v : x))) }} style={{ width: "100%", minWidth: 0, accentColor: "#bdbdbd" }} aria-label={`${f.name} opacity`} />
             
             <button 
               onClick={() => { if (isTexAvailable) setVertexColors(prev => prev.map((v, idx) => idx === i ? !v : v)) }}
               disabled={!isTexAvailable}
               title={isTexAvailable ? "Přepnout texturu / barevná data" : "Sken neobsahuje barevná data"}
               style={{
-                  width: 32, height: 22, fontSize: 10, fontWeight: "bold",
-                  background: vertexColors[i] && isTexAvailable ? "rgba(59,130,246,.45)" : "transparent",
-                  border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, 
-                  color: isTexAvailable ? "#fff" : "rgba(255,255,255,0.25)", 
+                  width: 30, height: 24, fontSize: 8.5, fontWeight: 720,
+                  background: vertexColors[i] && isTexAvailable ? "rgba(34,197,94,.10)" : "rgba(255,255,255,.025)",
+                  border: vertexColors[i] && isTexAvailable ? "1px solid rgba(74,222,128,.22)" : "1px solid rgba(255,255,255,.09)", borderRadius: 7, 
+                  color: isTexAvailable ? (vertexColors[i] ? "#b7f7ca" : "#bdbdbd") : "rgba(255,255,255,0.22)", 
                   cursor: isTexAvailable ? "pointer" : "not-allowed", 
                   padding: 0,
                   textDecoration: isTexAvailable ? "none" : "line-through"
@@ -5235,16 +5251,16 @@ export default function ClientPage() {
               onClick={() => setWireframes(prev => prev.map((v, idx) => idx === i ? !v : v))}
               title="Přepnout drátěný model (Wireframe)"
               style={{
-                  width: 32, height: 22, fontSize: 10, fontWeight: "bold",
-                  background: wireframes[i] ? "rgba(59,130,246,.45)" : "transparent",
-                  border: "1px solid rgba(255,255,255,0.4)", borderRadius: 4, 
-                  color: "#fff", cursor: "pointer", padding: 0
+                  width: 30, height: 24, fontSize: 8.5, fontWeight: 720,
+                  background: wireframes[i] ? "rgba(34,197,94,.10)" : "rgba(255,255,255,.025)",
+                  border: wireframes[i] ? "1px solid rgba(74,222,128,.22)" : "1px solid rgba(255,255,255,.09)", borderRadius: 7, 
+                  color: wireframes[i] ? "#b7f7ca" : "#bdbdbd", cursor: "pointer", padding: 0
               }}
             >
               WF
             </button>
 
-            <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 36, height: 22, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: "transparent", border: "1px solid #fff", borderRadius: 4, cursor: "pointer" }}>
+            <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 32, height: 24, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: visibles[i] ? "rgba(255,255,255,.025)" : "rgba(255,255,255,.012)", border: "1px solid rgba(255,255,255,.09)", borderRadius: 7, cursor: "pointer", opacity: visibles[i] ? 1 : .56 }}>
               <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
             </button>
           </div>
@@ -5255,9 +5271,9 @@ export default function ClientPage() {
         <button 
           onClick={() => setDidInitialFrame(false)}
           style={{
-            background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)",
-            borderRadius: 6, color: "white", padding: "4px 10px", fontSize: 11, cursor: "pointer",
-            transition: "background 0.2s", fontWeight: "bold"
+            background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.085)",
+            borderRadius: 8, color: "#bdbdbd", padding: "6px 10px", fontSize: 9.5, cursor: "pointer",
+            transition: "background .16s ease, color .16s ease, border-color .16s ease", fontWeight: 680, fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
           }}
           title="Vrátí kameru do výchozí polohy"
         >
@@ -5290,24 +5306,30 @@ export default function ClientPage() {
   }, [dicomLayoutActive])
 
   const sidebar = (
-    <div className="sidebar" style={{ position: "absolute", top: 10, left: 10, zIndex: 2, width: "clamp(260px, 28vw, 420px)", maxWidth: "calc(100vw - 20px)", color: "white", fontFamily: "sans-serif", fontSize: 14, backdropFilter: "blur(3px)", background: "rgba(0,0,0,.25)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, boxSizing: "border-box", maxHeight: "calc(100vh - 20px)", overflowY: "auto" }}>
-      {title && (<div title={title} style={{ marginBottom: 10, padding: "10px 12px", borderRadius: 10, border: "1px solid rgba(255,255,255,.18)", background: "rgba(255,255,255,.08)", fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>)}
+    <div className="sidebar" style={{
+      position: "absolute", top: 10, left: 10, zIndex: 2, width: "clamp(270px, 27vw, 400px)", maxWidth: "calc(100vw - 20px)",
+      color: "#ededed", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: 12,
+      backdropFilter: "blur(18px)", WebkitBackdropFilter: "blur(18px)", background: "rgba(12,12,12,.78)",
+      border: "1px solid rgba(255,255,255,.09)", borderRadius: 14, padding: 8, boxSizing: "border-box",
+      boxShadow: "0 18px 50px rgba(0,0,0,.24)", maxHeight: "calc(100vh - 20px)", overflowY: "auto"
+    }}>
+      {title && (<div title={title} style={{ marginBottom: 8, padding: "9px 10px", borderRadius: 10, border: "1px solid rgba(255,255,255,.065)", background: "rgba(255,255,255,.025)", color: "#d7d7d7", fontSize: 10.5, fontWeight: 680, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>)}
       
       {isMobile ? (
         <>
-          <button onClick={() => setSlidersOpen((o) => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 12px", background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.18)", borderRadius: 10, color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>
+          <button onClick={() => setSlidersOpen((o) => !o)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 12px", background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.075)", borderRadius: 10, color: "#ededed", cursor: "pointer", fontWeight: 680, fontSize: 11 }}>
             <span>Nastavení modelů</span>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" style={{ transform: slidersOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform .15s ease" }} aria-hidden><path d="M8 5l8 7-8 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" style={{ transform: slidersOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform .15s ease" }} aria-hidden><path d="M8 5l8 7-8 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
           </button>
-          {slidersOpen && <div style={{ marginTop: 8, border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>{slidersContent}</div>}
+          {slidersOpen && <div style={{ marginTop: 8, border: "1px solid rgba(255,255,255,.055)", borderRadius: 11, padding: 6, background: "rgba(255,255,255,.012)" }}>{slidersContent}</div>}
         </>
       ) : (
-        <div style={{ border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: 10, background: "rgba(255,255,255,.06)" }}>{slidersContent}</div>
+        <div style={{ border: "1px solid rgba(255,255,255,.055)", borderRadius: 11, padding: 6, background: "rgba(255,255,255,.012)" }}>{slidersContent}</div>
       )}
 
       {photos && photos.length > 0 && (
         <div style={{ marginTop: 10 }}>
-          <button onClick={() => setLightbox({ open: true, src: photos[0].u, alt: photos[0].n || "" })} style={{ width: "100%", padding: "8px 10px", background: "rgba(255,255,255,.08)", border: "1px solid rgba(255,255,255,.18)", borderRadius: 10, color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13 }}>Fotky ({photos.length})</button>
+          <button onClick={() => setLightbox({ open: true, src: photos[0].u, alt: photos[0].n || "" })} style={{ width: "100%", padding: "8px 10px", background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.075)", borderRadius: 10, color: "#d7d7d7", cursor: "pointer", fontWeight: 680, fontSize: 10.5 }}>Fotky ({photos.length})</button>
         </div>
       )}
     </div>
@@ -5317,18 +5339,25 @@ export default function ClientPage() {
   const occlusionModelsReady = heatmapSelection.length === 2
   const comparisonModelsReady = comparisonSelection.length === 2
 
-  const analysisToolbarButtonStyle = (open = false, disabled = false) => ({
+  const viewerToolbarButtonStyle = (disabled = false, active = false) => ({
     display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
     height: 40, padding: "0 14px", width: "100%", boxSizing: "border-box",
-    background: open ? "rgba(255,255,255,.075)" : "rgba(12,12,12,.72)",
+    background: "rgba(12,12,12,.72)",
     backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
-    border: open ? "1px solid rgba(255,255,255,.18)" : "1px solid rgba(255,255,255,.10)",
-    borderRadius: 11, color: disabled ? "#666" : "#ededed",
+    border: active ? "1px solid rgba(74,222,128,.24)" : "1px solid rgba(255,255,255,.10)",
+    borderRadius: 11, color: disabled ? "#666" : active ? "#c8f8d5" : "#ededed",
     cursor: disabled ? "not-allowed" : "pointer", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
     fontWeight: 680, fontSize: 12, letterSpacing: "-.01em",
-    boxShadow: open ? "0 10px 28px rgba(0,0,0,.26)" : "none",
-    transition: "background .16s ease, border-color .16s ease, box-shadow .16s ease, color .16s ease",
+    boxShadow: active ? "inset 0 0 0 1px rgba(34,197,94,.035)" : "none",
+    transition: "background .16s ease, border-color .16s ease, box-shadow .16s ease, color .16s ease, transform .16s ease",
   })
+
+  const analysisCloseButtonStyle = {
+    position: "absolute", top: 10, right: 10, zIndex: 8, width: 30, height: 30, padding: 0,
+    display: "grid", placeItems: "center", borderRadius: 9,
+    border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)",
+    color: "#bdbdbd", cursor: "pointer", transition: "background .16s ease, color .16s ease, border-color .16s ease, transform .16s ease",
+  }
 
   const analysisStepChipStyle = (active, completed) => ({
     height: 27, padding: "0 9px", borderRadius: 8,
@@ -5361,15 +5390,12 @@ export default function ClientPage() {
           onClick={openAlignmentMode}
           disabled={files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url))).length < 2}
           style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-            background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)",
-            border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: "10px 14px",
-            color: "white", cursor: "pointer", fontWeight: "bold", fontSize: 14, width: "100%",
+            ...viewerToolbarButtonStyle(files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url))).length < 2),
             opacity: files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url))).length < 2 ? 0.45 : 1,
           }}
           title="Zarovnání dvou 3D modelů pomocí bodů a robustního Best Fit"
         >
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="8" cy="8" r="3"/><circle cx="16" cy="16" r="3"/><path d="M10.5 10.5l3 3"/><path d="M14 5h5v5"/><path d="M10 19H5v-5"/>
           </svg>
           Zarovnání
@@ -5392,6 +5418,9 @@ export default function ClientPage() {
         .artheticAnalysisReadyAction::after { content:""; position:absolute; inset:1px; border-radius:8px; z-index:1; pointer-events:none; background:rgba(18,42,27,.97); box-shadow:inset 0 0 0 1px rgba(34,197,94,.12); }
         .artheticAnalysisReadyAction > * { position:relative; z-index:3; }
         .artheticAnalysisRange { accent-color:#4ade80; cursor:pointer; }
+        .sidebar input[type="range"] { accent-color:#a3a3a3; }
+        .sidebar::-webkit-scrollbar { width:6px; }
+        .sidebar::-webkit-scrollbar-thumb { background:rgba(255,255,255,.10); border-radius:999px; }
       `}</style>
 
       <div style={{
@@ -5417,7 +5446,22 @@ export default function ClientPage() {
           fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
           overflow: "visible",
           transition: "width .36s cubic-bezier(.2,.75,.25,1), border-radius .32s ease, background .28s ease, border-color .28s ease, box-shadow .32s ease, backdrop-filter .32s ease",
+          position: "relative",
         }}>
+          {heatmapMenuOpen && (
+            <button
+              onClick={(event) => { event.stopPropagation(); setHeatmapMenuOpen(false) }}
+              style={analysisCloseButtonStyle}
+              title="Sbalit Okluzi"
+              aria-label="Sbalit Okluzi"
+              onMouseEnter={(event) => { event.currentTarget.style.background = "rgba(255,255,255,.075)"; event.currentTarget.style.color = "#fff"; event.currentTarget.style.borderColor = "rgba(255,255,255,.15)" }}
+              onMouseLeave={(event) => { event.currentTarget.style.background = "rgba(255,255,255,.035)"; event.currentTarget.style.color = "#bdbdbd"; event.currentTarget.style.borderColor = "rgba(255,255,255,.09)" }}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M15 18l-6-6 6-6" />
+              </svg>
+            </button>
+          )}
           <button
             onClick={() => { setHeatmapMenuOpen((prev) => !prev); setComparisonMenuOpen(false) }}
             disabled={analysisEligibleFiles.length < 2}
@@ -5442,7 +5486,7 @@ export default function ClientPage() {
             </span>
 
             <span style={{
-              position: "absolute", inset: 0, display: "flex", alignItems: "center", padding: "0 14px", boxSizing: "border-box",
+              position: "absolute", inset: 0, display: "flex", alignItems: "center", padding: "0 50px 0 14px", boxSizing: "border-box",
               opacity: heatmapMenuOpen ? 1 : 0, transform: heatmapMenuOpen ? "translateY(0) scale(1)" : "translateY(7px) scale(.985)",
               transition: "opacity .2s .08s ease, transform .32s cubic-bezier(.2,.75,.25,1)", pointerEvents: "none", textAlign: "left",
             }}>
@@ -5546,7 +5590,22 @@ export default function ClientPage() {
           fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
           overflow: "visible",
           transition: "width .36s cubic-bezier(.2,.75,.25,1), border-radius .32s ease, background .28s ease, border-color .28s ease, box-shadow .32s ease, backdrop-filter .32s ease",
+          position: "relative",
         }}>
+          {comparisonMenuOpen && (
+            <button
+              onClick={(event) => { event.stopPropagation(); setComparisonMenuOpen(false) }}
+              style={analysisCloseButtonStyle}
+              title="Sbalit Porovnání"
+              aria-label="Sbalit Porovnání"
+              onMouseEnter={(event) => { event.currentTarget.style.background = "rgba(255,255,255,.075)"; event.currentTarget.style.color = "#fff"; event.currentTarget.style.borderColor = "rgba(255,255,255,.15)" }}
+              onMouseLeave={(event) => { event.currentTarget.style.background = "rgba(255,255,255,.035)"; event.currentTarget.style.color = "#bdbdbd"; event.currentTarget.style.borderColor = "rgba(255,255,255,.09)" }}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M15 18l-6-6 6-6" />
+              </svg>
+            </button>
+          )}
           <button
             onClick={() => { setComparisonMenuOpen((prev) => !prev); setHeatmapMenuOpen(false) }}
             disabled={analysisEligibleFiles.length < 2}
@@ -5571,7 +5630,7 @@ export default function ClientPage() {
             </span>
 
             <span style={{
-              position: "absolute", inset: 0, display: "flex", alignItems: "center", padding: "0 14px", boxSizing: "border-box",
+              position: "absolute", inset: 0, display: "flex", alignItems: "center", padding: "0 50px 0 14px", boxSizing: "border-box",
               opacity: comparisonMenuOpen ? 1 : 0, transform: comparisonMenuOpen ? "translateY(0) scale(1)" : "translateY(7px) scale(.985)",
               transition: "opacity .2s .08s ease, transform .32s cubic-bezier(.2,.75,.25,1)", pointerEvents: "none", textAlign: "left",
             }}>
@@ -5664,13 +5723,7 @@ export default function ClientPage() {
       <div style={{ width: dicomLayoutActive ? 120 : 270 }}>
         <button 
           onClick={() => setIsAutoRotating(p => !p)}
-          style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-            background: isAutoRotating ? "rgba(59,130,246,.8)" : "rgba(0,0,0,.25)",
-            backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)",
-            borderRadius: 10, padding: "10px 14px", color: "white", cursor: "pointer",
-            fontWeight: "bold", fontSize: 14, transition: "background 0.2s", width: "100%"
-          }}
+          style={viewerToolbarButtonStyle(false, isAutoRotating)}
         >
           <svg 
             key={`spin-icon-${isAutoRotating}-${spinIconNonce}`}
@@ -5721,8 +5774,16 @@ export default function ClientPage() {
         </div>
       </div>
 
-      <div style={{ width: dicomLayoutActive ? 190 : 270, boxSizing: "border-box", background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: dicomLayoutActive ? 8 : 12 }}>
-        <div data-slice-window-anchor="true" style={{ display: "flex", alignItems: "center", justifyContent: dicomLayoutActive ? "space-between" : "center", gap: 6, position: "relative", minHeight: 24 }}>
+      <div style={{
+        width: dicomLayoutActive ? 190 : 270, boxSizing: "border-box",
+        background: "rgba(12,12,12,.72)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
+        border: clippingEnabled ? "1px solid rgba(74,222,128,.20)" : "1px solid rgba(255,255,255,.10)",
+        borderRadius: 11, padding: clippingEnabled ? (dicomLayoutActive ? 8 : "8px 12px") : (dicomLayoutActive ? 8 : "8px 12px"),
+        color: clippingEnabled ? "#c8f8d5" : "#ededed",
+        fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+        transition: "background .16s ease, border-color .16s ease, color .16s ease",
+      }}>
+        <div data-slice-window-anchor="true" style={{ display: "flex", alignItems: "center", justifyContent: dicomLayoutActive ? "space-between" : "center", gap: 7, position: "relative", minHeight: 22, fontSize: 12, fontWeight: 680, letterSpacing: "-.01em" }}>
           <Switch
             checked={clippingEnabled}
             onChange={(checked) => {
@@ -5738,9 +5799,9 @@ export default function ClientPage() {
               onClick={handleResetPlane}
               style={{
                 position: dicomLayoutActive ? "static" : "absolute", right: dicomLayoutActive ? "auto" : 0,
-                background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)",
-                borderRadius: 6, color: "white", padding: "4px 8px", fontSize: 11, cursor: "pointer",
-                transition: "background 0.2s"
+                background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.09)",
+                borderRadius: 8, color: "#bdbdbd", padding: "4px 8px", fontSize: 9.5, fontWeight: 650, cursor: "pointer",
+                transition: "background .16s ease, color .16s ease, border-color .16s ease"
               }}
               title="Vrátí průřez do výchozí pozice uprostřed modelu"
             >
