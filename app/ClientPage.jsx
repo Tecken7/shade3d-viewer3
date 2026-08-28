@@ -1098,16 +1098,6 @@ function makeClosestSurfaceQuery(targetMesh) {
   }
 }
 
-function isInsideAlignmentRoi(point, centers, radiusSq) {
-  if (!Array.isArray(centers) || centers.length === 0) return true
-  for (let i = 0; i < centers.length; i++) {
-    const c = centers[i]
-    const dx = point.x - c[0], dy = point.y - c[1], dz = point.z - c[2]
-    if (dx * dx + dy * dy + dz * dz <= radiusSq) return true
-  }
-  return false
-}
-
 function sampledVertexIndices(positionCount, desiredCount) {
   if (!positionCount) return []
   const count = Math.min(positionCount, Math.max(100, desiredCount || positionCount))
@@ -1135,9 +1125,6 @@ async function robustPointToPlaneICP({
   targetMesh,
   targetRoot,
   initialMatrix,
-  sourceRoi = [],
-  targetRoi = [],
-  roiRadius = 3,
   landmarkSeeded = false,
   onProgress,
 }) {
@@ -1159,12 +1146,10 @@ async function robustPointToPlaneICP({
   const parentWorldInverse = new THREE.Matrix4().copy(parentWorld).invert()
   const worldNormalToParent = new THREE.Matrix3().setFromMatrix4(parentWorldInverse)
 
-  const targetRootInverse = new THREE.Matrix4().copy(targetRoot.matrixWorld).invert()
   const query = makeClosestSurfaceQuery(targetMesh)
   const targetBox = new THREE.Box3().setFromObject(targetRoot)
   const targetSize = targetBox.getSize(new THREE.Vector3())
   const diagonal = Math.max(1, targetSize.length())
-  const radiusSq = Math.max(0.01, roiRadius * roiRadius)
 
   // Skutečná aktuální matice objektu — chrání před závodem React state.
   const current = new THREE.Matrix4()
@@ -1189,7 +1174,6 @@ async function robustPointToPlaneICP({
 
   const pParent = new THREE.Vector3()
   const pWorld = new THREE.Vector3()
-  const qTargetRoot = new THREE.Vector3()
   const qParent = new THREE.Vector3()
   const nParent = new THREE.Vector3()
   const delta = new THREE.Vector3()
@@ -1203,7 +1187,6 @@ async function robustPointToPlaneICP({
     const point = new THREE.Vector3()
     for (let i = 0; i < indices.length; i++) {
       point.fromBufferAttribute(sourcePosition, indices[i]).applyMatrix4(meshToRoot)
-      if (!isInsideAlignmentRoi(point, sourceRoi, radiusSq)) continue
       samples.push(point.clone())
     }
     return samples
@@ -1237,16 +1220,14 @@ async function robustPointToPlaneICP({
       const hit = query(pWorld)
       if (Number.isFinite(hit.distance) && hit.distance <= maxDistance) {
         qTargetRoot.copy(hit.pointWorld).applyMatrix4(targetRootInverse)
-        if (isInsideAlignmentRoi(qTargetRoot, targetRoi, radiusSq)) {
-          qParent.copy(hit.pointWorld).applyMatrix4(parentWorldInverse)
-          nParent.copy(hit.normalWorld).applyMatrix3(worldNormalToParent).normalize()
-          result.push({
-            p: pParent.clone(),
-            q: qParent.clone(),
-            n: nParent.clone(),
-            distance: pParent.distanceTo(qParent),
-          })
-        }
+        qParent.copy(hit.pointWorld).applyMatrix4(parentWorldInverse)
+        nParent.copy(hit.normalWorld).applyMatrix3(worldNormalToParent).normalize()
+        result.push({
+          p: pParent.clone(),
+          q: qParent.clone(),
+          n: nParent.clone(),
+          distance: pParent.distanceTo(qParent),
+        })
       }
 
       if (yieldEvery > 0 && k > 0 && k % yieldEvery === 0) await alignmentYield()
@@ -1542,28 +1523,9 @@ function AlignmentMarker({ point, index, radius = 0.8 }) {
   )
 }
 
-function AlignmentRoiCloud({ points, color = "#22c55e", size = 5 }) {
-  const geometry = useMemo(() => {
-    const g = new THREE.BufferGeometry()
-    const data = new Float32Array((points?.length || 0) * 3)
-    ;(points || []).forEach((p, i) => { data[i * 3] = p[0]; data[i * 3 + 1] = p[1]; data[i * 3 + 2] = p[2] })
-    g.setAttribute("position", new THREE.BufferAttribute(data, 3))
-    return g
-  }, [points])
-  useEffect(() => () => geometry.dispose(), [geometry])
-  if (!points?.length) return null
-  return (
-    <points geometry={geometry} renderOrder={999}>
-      <pointsMaterial color={color} size={size} sizeAttenuation={false} transparent opacity={0.82} depthTest={false} depthWrite={false} />
-    </points>
-  )
-}
-
-function AlignmentPreviewModel({ file, sourceObject, color, points, roiPoints, mode, active, brushRadius, onPickPoint, onPaintPoint, onLoaded }) {
+function AlignmentPreviewModel({ file, sourceObject, color, points, active, onPickPoint, onLoaded }) {
   const [object3D, setObject3D] = useState(null)
   const rootRef = useRef(null)
-  const paintingRef = useRef(false)
-  const lastPaintRef = useRef(null)
   const ext = useMemo(() => inferExt(file?.rawName || file?.name || file?.url), [file])
 
   useEffect(() => {
@@ -1626,73 +1588,59 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, roiPoints, m
     return rootRef.current.worldToLocal(event.point.clone())
   }
 
-  const addPaintPoint = (event) => {
-    const local = localPointFromEvent(event)
-    if (!local) return
-    const previous = lastPaintRef.current
-    const minStep = Math.max(0.15, brushRadius * 0.22)
-    if (previous && previous.distanceTo(local) < minStep) return
-    lastPaintRef.current = local.clone()
-    onPaintPoint?.([local.x, local.y, local.z])
-  }
-
   if (!object3D) return null
-  const markerRadius = Math.max(0.35, brushRadius * 0.18)
   return (
     <group ref={rootRef}>
       <primitive
         object={object3D}
-        onClick={mode === "points" && active ? (event) => {
+        onClick={active ? (event) => {
           event.stopPropagation()
           const local = localPointFromEvent(event)
           if (local) onPickPoint?.([local.x, local.y, local.z])
         } : undefined}
-        onPointerDown={mode === "roi" && active ? (event) => {
-          event.stopPropagation()
-          paintingRef.current = true
-          lastPaintRef.current = null
-          addPaintPoint(event)
-        } : undefined}
-        onPointerMove={mode === "roi" && active ? (event) => {
-          if (!paintingRef.current) return
-          event.stopPropagation()
-          addPaintPoint(event)
-        } : undefined}
-        onPointerUp={mode === "roi" && active ? (event) => {
-          event.stopPropagation()
-          paintingRef.current = false
-          lastPaintRef.current = null
-        } : undefined}
-        onPointerOut={mode === "roi" && active ? () => {
-          paintingRef.current = false
-          lastPaintRef.current = null
-        } : undefined}
       />
-      {(points || []).map((p, index) => <AlignmentMarker key={`${index}-${p.join("-")}`} point={p} index={index} radius={markerRadius} />)}
-      <AlignmentRoiCloud points={roiPoints} />
+      {(points || []).map((p, index) => <AlignmentMarker key={`${index}-${p.join("-")}`} point={p} index={index} radius={0.55} />)}
     </group>
   )
 }
 
-function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, points, roiPoints, mode, active, brushRadius, onPickPoint, onPaintPoint, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 } }) {
+function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, points, active, nextPointNumber, onPickPoint, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 } }) {
   const rootRef = useRef(null)
   const controlsRef = useRef(null)
   const [target, setTarget] = useState([0, 0, 0])
   const [loadedNonce, setLoadedNonce] = useState(0)
   return (
-    <div style={{ position: "relative", minWidth: 0, minHeight: 0, background: "#080808", overflow: "hidden" }}>
+    <div style={{ position: "relative", minWidth: 0, minHeight: 0, background: "#0C0C0C", overflow: "hidden" }}>
       <div style={{
-        position: "absolute", top: 8, left: 10, right: 10, zIndex: 5, display: "flex", alignItems: "center", justifyContent: "space-between",
-        pointerEvents: "none", fontFamily: "sans-serif",
+        position: "absolute", top: 12, left: 14, right: 14, zIndex: 5,
+        display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+        pointerEvents: "none", fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <span style={{ width: 22, height: 22, borderRadius: 6, display: "grid", placeItems: "center", background: active ? "#fbbf24" : "rgba(255,255,255,.14)", color: active ? "#050505" : "#fff", fontSize: 11, fontWeight: 900 }}>{badge}</span>
-          <span style={{ color: "white", fontSize: 12, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+          <span style={{
+            width: 26, height: 26, borderRadius: 8, display: "grid", placeItems: "center",
+            background: active ? "#ffffff" : "rgba(255,255,255,.08)", color: active ? "#0C0C0C" : "#b3b3b3",
+            border: "1px solid rgba(255,255,255,.10)", fontSize: 11, fontWeight: 850,
+            boxShadow: active ? "0 5px 18px rgba(255,255,255,.10)" : "none",
+          }}>{badge}</span>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ color: "#f5f5f5", fontSize: 12, fontWeight: 760, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
+            <div style={{ color: "#6f6f6f", fontSize: 9, fontWeight: 650, marginTop: 2 }}>{badge === "A" ? "Reference" : "Moving"}</div>
+          </div>
         </div>
-        <span style={{ color: active ? "#fbbf24" : "#777", fontSize: 10, fontWeight: 800 }}>{active ? (mode === "points" ? "KLIKNĚTE NA BOD" : "MALUJTE OBLAST") : ""}</span>
+        {active && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: 7, padding: "6px 9px", borderRadius: 9,
+            background: "rgba(255,255,255,.07)", border: "1px solid rgba(255,255,255,.10)",
+            color: "#ffffff", fontSize: 9, fontWeight: 780, letterSpacing: ".01em",
+          }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#ffffff", boxShadow: "0 0 0 4px rgba(255,255,255,.08)" }} />
+            Umístěte bod {nextPointNumber}
+          </div>
+        )}
       </div>
       <Canvas orthographic camera={{ position: [0, 0, 250], near: 0.01, far: 100000, zoom: 1 }} gl={{ antialias: true }} style={{ position: "absolute", inset: 0 }}>
-        <color attach="background" args={["#080808"]} />
+        <color attach="background" args={["#0C0C0C"]} />
         <ambientLight intensity={0.35 * sceneIntensity} />
         <directionalLight position={[0, 5, 5]} intensity={1.2 * sceneIntensity} />
         <directionalLight position={[-10, 0, 0]} intensity={0.9 * sceneIntensity} />
@@ -1706,12 +1654,8 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
               sourceObject={sourceObject}
               color={color}
               points={points}
-              roiPoints={roiPoints}
-              mode={mode}
               active={active}
-              brushRadius={brushRadius}
               onPickPoint={onPickPoint}
-              onPaintPoint={onPaintPoint}
               onLoaded={() => setLoadedNonce((n) => n + 1)}
             />
           )}
@@ -1727,10 +1671,15 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
             setTarget={setTarget}
           />
         )}
-        <TouchTrackballControls ref={controlsRef} target={target} enabled={mode !== "roi"} />
+        <TouchTrackballControls ref={controlsRef} target={target} enabled={true} />
         <RightButtonPan setTarget={setTarget} trackballRef={controlsRef} />
       </Canvas>
-      <div style={{ position: "absolute", inset: 0, pointerEvents: "none", border: active ? "2px solid rgba(251,191,36,.72)" : "1px solid rgba(255,255,255,.12)", boxSizing: "border-box" }} />
+      <div style={{
+        position: "absolute", inset: 0, pointerEvents: "none", boxSizing: "border-box",
+        border: active ? "1px solid rgba(255,255,255,.30)" : "1px solid rgba(255,255,255,.08)",
+        boxShadow: active ? "inset 0 0 0 1px rgba(255,255,255,.04), inset 0 18px 50px rgba(255,255,255,.015)" : "none",
+        transition: "border-color .2s ease, box-shadow .2s ease",
+      }} />
     </div>
   )
 }
@@ -3141,17 +3090,26 @@ export default function ClientPage() {
   // -- ZAROVNÁNÍ / REGISTRACE MODELŮ --
   const [alignmentMode, setAlignmentMode] = useState(false)
   const [alignmentSelection, setAlignmentSelection] = useState([])
-  const [alignmentTool, setAlignmentTool] = useState("points") // points | roi
   const [alignmentPointsA, setAlignmentPointsA] = useState([])
   const [alignmentPointsB, setAlignmentPointsB] = useState([])
-  const [alignmentRoiA, setAlignmentRoiA] = useState([])
-  const [alignmentRoiB, setAlignmentRoiB] = useState([])
-  const [alignmentBrushRadius, setAlignmentBrushRadius] = useState(3)
   const [alignmentBusy, setAlignmentBusy] = useState(false)
   const [alignmentProgress, setAlignmentProgress] = useState(null)
   const [alignmentStats, setAlignmentStats] = useState(null)
   const [alignmentMessage, setAlignmentMessage] = useState("")
+  const [alignmentStartedAt, setAlignmentStartedAt] = useState(null)
+  const [alignmentElapsed, setAlignmentElapsed] = useState(0)
   const [modelTransforms, setModelTransforms] = useState({})
+
+  useEffect(() => {
+    if (!alignmentBusy || !alignmentStartedAt) {
+      if (!alignmentBusy) setAlignmentElapsed(0)
+      return
+    }
+    const update = () => setAlignmentElapsed(Math.max(0, (performance.now() - alignmentStartedAt) / 1000))
+    update()
+    const timer = setInterval(update, 100)
+    return () => clearInterval(timer)
+  }, [alignmentBusy, alignmentStartedAt])
 
   const [pinnedNotes, setPinnedNotes] = useState([])
   const [pendingViewerState, setPendingViewerState] = useState(null)
@@ -3228,8 +3186,6 @@ export default function ClientPage() {
     setAlignmentSelection([])
     setAlignmentPointsA([])
     setAlignmentPointsB([])
-    setAlignmentRoiA([])
-    setAlignmentRoiB([])
     setAlignmentStats(null)
     setAlignmentProgress(null)
     setAlignmentMessage("")
@@ -3289,7 +3245,6 @@ export default function ClientPage() {
       return [eligible[0].url, eligible[1].url]
     })
     setAlignmentMode(true)
-    setAlignmentTool("points")
     setAlignmentMessage("Označte stejný bod nejprve na Reference A a potom na Moving B.")
     setAlignmentProgress(null)
     setAlignmentStats(null)
@@ -3311,8 +3266,6 @@ export default function ClientPage() {
     })
     setAlignmentPointsA([])
     setAlignmentPointsB([])
-    setAlignmentRoiA([])
-    setAlignmentRoiB([])
     setAlignmentStats(null)
     setAlignmentProgress(null)
     setAlignmentMessage("Výběr modelů byl změněn. Označte nové korespondenční body.")
@@ -3340,19 +3293,6 @@ export default function ClientPage() {
       ? `${pairNumber} párů označeno. Můžete přidat další body nebo spustit Předzarovnání.`
       : `Pár ${pairNumber} hotový. Označte bod ${pairNumber + 1} na Reference A.`)
   }, [alignmentPointsA.length, alignmentPointsB.length])
-
-  const appendAlignmentRoi = useCallback((side, point) => {
-    const setter = side === "A" ? setAlignmentRoiA : setAlignmentRoiB
-    setter((previous) => {
-      if (previous.length >= 1600) return previous
-      const last = previous[previous.length - 1]
-      if (last) {
-        const dx = point[0] - last[0], dy = point[1] - last[1], dz = point[2] - last[2]
-        if (dx * dx + dy * dy + dz * dz < Math.pow(Math.max(0.12, alignmentBrushRadius * 0.12), 2)) return previous
-      }
-      return [...previous, point]
-    })
-  }, [alignmentBrushRadius])
 
   const undoAlignmentPoint = useCallback(() => {
     if (alignmentPointsA.length > alignmentPointsB.length) {
@@ -3423,8 +3363,11 @@ export default function ClientPage() {
       return
     }
     setAlignmentBusy(true)
+    setAlignmentStartedAt(performance.now())
+    setAlignmentElapsed(0)
+    setAlignmentProgress({ stage: 0, stages: 3, iteration: 0, iterations: 1, rms: null, correspondences: 0, mode: "prepare" })
     setAlignmentStats(null)
-    setAlignmentMessage("Probíhá robustní multi-scale Best Fit…")
+    setAlignmentMessage("Připravuji povrchy pro Best Fit…")
     setShowComparison(false)
     setShowHeatmap(false)
     try {
@@ -3434,13 +3377,18 @@ export default function ClientPage() {
         targetMesh,
         targetRoot,
         initialMatrix: sourceRoot.matrix?.toArray?.() || modelTransforms[bUrl],
-        sourceRoi: alignmentRoiB,
-        targetRoi: alignmentRoiA,
-        roiRadius: alignmentBrushRadius,
         landmarkSeeded: Math.min(alignmentPointsA.length, alignmentPointsB.length) >= 3,
-        onProgress: (progress) => setAlignmentProgress(progress),
+        onProgress: (progress) => {
+          setAlignmentProgress(progress)
+          if (progress?.mode === "prepare") setAlignmentMessage("Připravuji povrchy a kontroluji překryv…")
+          else if (progress?.stage === 1) setAlignmentMessage("Hrubé zarovnání povrchů…")
+          else if (progress?.stage === 2) setAlignmentMessage("Střední zpřesnění zarovnání…")
+          else if (progress?.stage === 3) setAlignmentMessage("Jemné point-to-plane zpřesnění…")
+        },
       })
       applyModelTransform(bUrl, result.matrix)
+      setAlignmentProgress({ mode: "metrics", stage: 4, stages: 4, iteration: 1, iterations: 1, rms: result.rms, correspondences: result.correspondences })
+      setAlignmentMessage("Kontroluji výsledek a počítám metrologii…")
       const stats = await refreshAlignmentMetrics(aUrl, bUrl)
       setAlignmentMessage(result.improved
         ? (stats
@@ -3452,8 +3400,10 @@ export default function ClientPage() {
       setAlignmentMessage(error?.message || "Best Fit se nepodařilo dokončit.")
     } finally {
       setAlignmentBusy(false)
+      setAlignmentStartedAt(null)
+      setAlignmentProgress(null)
     }
-  }, [getAlignmentPair, modelTransforms, alignmentRoiA, alignmentRoiB, alignmentBrushRadius, alignmentPointsA.length, alignmentPointsB.length, applyModelTransform, refreshAlignmentMetrics])
+  }, [getAlignmentPair, modelTransforms, alignmentPointsA.length, alignmentPointsB.length, applyModelTransform, refreshAlignmentMetrics])
 
   const resetAlignmentTransform = useCallback(async () => {
     const { aUrl, bUrl } = getAlignmentPair()
@@ -4982,127 +4932,204 @@ export default function ClientPage() {
   const alignmentPair = getAlignmentPair()
   const alignmentPairCount = Math.min(alignmentPointsA.length, alignmentPointsB.length)
   const alignmentNextSide = alignmentPointsA.length === alignmentPointsB.length ? "A" : "B"
-  const alignmentButtonStyle = (active = false, disabled = false, accent = "#fbbf24") => ({
-    height: 34, padding: "0 12px", borderRadius: 8,
-    border: `1px solid ${active ? accent : "rgba(255,255,255,.18)"}`,
-    background: active ? `${accent}22` : "rgba(255,255,255,.07)",
-    color: disabled ? "#666" : active ? accent : "#fff",
-    fontSize: 11, fontWeight: 800, cursor: disabled ? "not-allowed" : "pointer",
-    whiteSpace: "nowrap", opacity: disabled ? 0.55 : 1,
-  })
+  const alignmentNextPointNumber = alignmentNextSide === "A" ? alignmentPointsA.length + 1 : alignmentPointsB.length + 1
+  const hasLandmarkSeed = alignmentPairCount >= 3
+
+  const alignmentProgressUi = (() => {
+    if (!alignmentBusy) return null
+    const progress = alignmentProgress || {}
+    if (progress.mode === "metrics") return { label: "Kontrola výsledku", detail: "Počítám odchylky a metrologické hodnoty", percent: 94 }
+    if (progress.mode === "prepare" || !progress.stage) return { label: "Příprava povrchů", detail: "Vzorkuji geometrii a kontroluji překryv", percent: 7 }
+    const stage = Math.max(1, Math.min(3, Number(progress.stage) || 1))
+    const iterations = Math.max(1, Number(progress.iterations) || 1)
+    const iteration = Math.max(0, Number(progress.iteration) || 0)
+    const withinStage = Math.min(1, iteration / iterations)
+    const percent = 10 + (((stage - 1) + withinStage) / 3) * 78
+    const labels = {
+      1: ["Hrubý Best Fit", "Stabilizuji překryv obou povrchů"],
+      2: ["Střední Best Fit", "Zpřesňuji rigidní polohu modelu"],
+      3: ["Jemný Best Fit", "Point-to-plane finální zpřesnění"],
+    }
+    return { label: labels[stage][0], detail: labels[stage][1], percent }
+  })()
+
+  const alignmentButtonStyle = (variant = "secondary", disabled = false) => {
+    const variants = {
+      secondary: { background: "rgba(255,255,255,.055)", border: "rgba(255,255,255,.10)", color: "#f4f4f4", shadow: "none" },
+      primary: { background: "#f2f2f2", border: "#f2f2f2", color: "#0C0C0C", shadow: "0 8px 24px rgba(255,255,255,.08)" },
+      success: { background: "rgba(34,197,94,.12)", border: "rgba(34,197,94,.28)", color: "#86efac", shadow: "0 8px 24px rgba(34,197,94,.06)" },
+      danger: { background: "rgba(255,255,255,.045)", border: "rgba(255,255,255,.08)", color: "#a3a3a3", shadow: "none" },
+    }
+    const v = variants[variant] || variants.secondary
+    return {
+      height: 36, padding: "0 13px", borderRadius: 10,
+      border: `1px solid ${v.border}`, background: disabled ? "rgba(255,255,255,.035)" : v.background,
+      color: disabled ? "#5f5f5f" : v.color, boxShadow: disabled ? "none" : v.shadow,
+      fontSize: 11, fontWeight: 760, cursor: disabled ? "not-allowed" : "pointer",
+      whiteSpace: "nowrap", opacity: disabled ? 0.72 : 1,
+      transition: "transform .16s ease, background .16s ease, border-color .16s ease, opacity .16s ease",
+    }
+  }
+
+  const alignmentSelectStyle = {
+    height: 36, minWidth: 150, maxWidth: 210, borderRadius: 10,
+    border: "1px solid rgba(255,255,255,.10)", background: "#151515", color: "#f3f3f3",
+    padding: "0 30px 0 10px", fontSize: 11, fontWeight: 650, outline: "none",
+  }
 
   const alignmentWorkspace = alignmentMode && alignmentPair.aUrl && alignmentPair.bUrl && (
     <>
+      <style>{`
+        @keyframes artheticAlignSpin { to { transform: rotate(360deg); } }
+        @keyframes artheticAlignPulse { 0%,100% { opacity:.45; transform:scale(.92); } 50% { opacity:1; transform:scale(1); } }
+        @keyframes artheticAlignCardIn { from { opacity:0; transform:translate(-50%,-46%) scale(.97); } to { opacity:1; transform:translate(-50%,-50%) scale(1); } }
+      `}</style>
+
       <div style={{
-        position: "absolute", top: 0, left: 0, right: 0, zIndex: 30,
-        minHeight: 68, padding: "8px 10px", boxSizing: "border-box",
-        background: "linear-gradient(to bottom, rgba(5,5,5,.97), rgba(5,5,5,.82))",
-        borderBottom: "1px solid rgba(255,255,255,.16)", backdropFilter: "blur(10px)",
-        display: "flex", alignItems: "center", gap: 8, color: "white", fontFamily: "sans-serif",
+        position: "absolute", top: 10, left: 10, right: 10, zIndex: 32,
+        minHeight: 58, padding: "10px 12px", boxSizing: "border-box",
+        background: "rgba(12,12,12,.92)", border: "1px solid rgba(255,255,255,.08)", borderRadius: 14,
+        boxShadow: "0 14px 42px rgba(0,0,0,.32)", backdropFilter: "blur(18px)",
+        display: "flex", alignItems: "center", gap: 10, color: "white",
+        fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       }}>
-        <div style={{ minWidth: 118, paddingRight: 8 }}>
-          <div style={{ fontSize: 14, fontWeight: 900, letterSpacing: ".02em" }}>ARTHETIC Align</div>
-          <div style={{ fontSize: 9, color: "#888", marginTop: 2 }}>Rigid registration · mm</div>
+        <div style={{ minWidth: 132, padding: "0 6px 0 2px" }}>
+          <div style={{ fontSize: 14, fontWeight: 820, letterSpacing: "-.015em" }}>ARTHETIC Align</div>
+          <div style={{ fontSize: 9, color: "#737373", marginTop: 3, fontWeight: 620 }}>Rigid registration · mm</div>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "auto minmax(110px,170px) auto minmax(110px,170px)", gap: 5, alignItems: "center" }}>
-          <span style={{ fontSize: 10, fontWeight: 900, color: "#60a5fa" }}>A</span>
-          <select
-            value={alignmentPair.aUrl}
-            onChange={(e) => changeAlignmentSelection("A", e.target.value)}
-            disabled={alignmentBusy}
-            style={{ height: 32, borderRadius: 7, border: "1px solid rgba(255,255,255,.18)", background: "#151515", color: "white", padding: "0 7px", fontSize: 10, minWidth: 0 }}
-          >
+        <div style={{ width: 1, height: 34, background: "rgba(255,255,255,.07)" }} />
+
+        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+          <span style={{ width: 22, height: 22, borderRadius: 7, display: "grid", placeItems: "center", background: "rgba(96,165,250,.12)", color: "#93c5fd", fontSize: 10, fontWeight: 850 }}>A</span>
+          <select value={alignmentPair.aUrl} onChange={(e) => changeAlignmentSelection("A", e.target.value)} disabled={alignmentBusy} style={alignmentSelectStyle}>
             {alignmentEligibleFiles.map((file) => <option key={`a-${file.url}`} value={file.url}>{stripExt(file.name || file.rawName || "Model")}</option>)}
           </select>
-          <span style={{ fontSize: 10, fontWeight: 900, color: "#f472b6" }}>B</span>
-          <select
-            value={alignmentPair.bUrl}
-            onChange={(e) => changeAlignmentSelection("B", e.target.value)}
-            disabled={alignmentBusy}
-            style={{ height: 32, borderRadius: 7, border: "1px solid rgba(255,255,255,.18)", background: "#151515", color: "white", padding: "0 7px", fontSize: 10, minWidth: 0 }}
-          >
+          <span style={{ width: 22, height: 22, borderRadius: 7, display: "grid", placeItems: "center", background: "rgba(244,114,182,.12)", color: "#f9a8d4", fontSize: 10, fontWeight: 850, marginLeft: 2 }}>B</span>
+          <select value={alignmentPair.bUrl} onChange={(e) => changeAlignmentSelection("B", e.target.value)} disabled={alignmentBusy} style={alignmentSelectStyle}>
             {alignmentEligibleFiles.map((file) => <option key={`b-${file.url}`} value={file.url}>{stripExt(file.name || file.rawName || "Model")}</option>)}
           </select>
         </div>
 
-        <div style={{ width: 1, alignSelf: "stretch", background: "rgba(255,255,255,.12)", margin: "0 3px" }} />
+        <div style={{ width: 1, height: 34, background: "rgba(255,255,255,.07)", marginLeft: 2 }} />
 
-        <button onClick={() => setAlignmentTool("points")} disabled={alignmentBusy} style={alignmentButtonStyle(alignmentTool === "points", alignmentBusy, "#fbbf24")}>● Body</button>
-        <button onClick={() => setAlignmentTool("roi")} disabled={alignmentBusy} style={alignmentButtonStyle(alignmentTool === "roi", alignmentBusy, "#34d399")}>◌ Oblast</button>
-
-        {alignmentTool === "roi" && (
-          <div style={{ width: 112, padding: "0 4px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#aaa", marginBottom: 2 }}><span>Štětec</span><b>{alignmentBrushRadius.toFixed(1)} mm</b></div>
-            <input type="range" min={0.8} max={8} step={0.2} value={alignmentBrushRadius} onChange={(e) => setAlignmentBrushRadius(Number(e.target.value))} style={{ width: "100%" }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+          <div style={{
+            height: 34, padding: "0 11px", borderRadius: 10, display: "flex", alignItems: "center", gap: 8,
+            background: "rgba(255,255,255,.055)", border: "1px solid rgba(255,255,255,.09)",
+          }}>
+            <span style={{ width: 7, height: 7, borderRadius: "50%", background: hasLandmarkSeed ? "#86efac" : "#f5f5f5" }} />
+            <span style={{ color: "#d4d4d4", fontSize: 10, fontWeight: 700 }}>{alignmentPairCount} {alignmentPairCount === 1 ? "pár" : alignmentPairCount >= 2 && alignmentPairCount <= 4 ? "páry" : "párů"}</span>
           </div>
-        )}
-
-        <div style={{ width: 1, alignSelf: "stretch", background: "rgba(255,255,255,.12)", margin: "0 3px" }} />
-
-        <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
-          <button onClick={undoAlignmentPoint} disabled={alignmentBusy || (!alignmentPointsA.length && !alignmentPointsB.length)} style={alignmentButtonStyle(false, alignmentBusy || (!alignmentPointsA.length && !alignmentPointsB.length))}>Zpět</button>
-          <button onClick={() => { setAlignmentPointsA([]); setAlignmentPointsB([]); setAlignmentStats(null); setAlignmentMessage("Body byly vymazány.") }} disabled={alignmentBusy} style={alignmentButtonStyle(false, alignmentBusy)}>Smazat body</button>
-          {alignmentTool === "roi" && <button onClick={() => { setAlignmentRoiA([]); setAlignmentRoiB([]); setAlignmentMessage("Referenční oblasti byly vymazány.") }} disabled={alignmentBusy} style={alignmentButtonStyle(false, alignmentBusy)}>Smazat oblast</button>}
+          <button onClick={undoAlignmentPoint} disabled={alignmentBusy || (!alignmentPointsA.length && !alignmentPointsB.length)} style={alignmentButtonStyle("secondary", alignmentBusy || (!alignmentPointsA.length && !alignmentPointsB.length))}>Zpět</button>
+          <button onClick={() => { setAlignmentPointsA([]); setAlignmentPointsB([]); setAlignmentStats(null); setAlignmentMessage("Body byly vymazány. Začněte bodem na Reference A.") }} disabled={alignmentBusy} style={alignmentButtonStyle("danger", alignmentBusy)}>Smazat body</button>
         </div>
 
-        <div style={{ marginLeft: "auto", display: "flex", gap: 5, alignItems: "center" }}>
-          <button onClick={handleAlignmentLandmarkFit} disabled={alignmentBusy || alignmentPairCount < 3} style={alignmentButtonStyle(alignmentPairCount >= 3, alignmentBusy || alignmentPairCount < 3, "#60a5fa")}>Předzarovnat</button>
-          <button onClick={handleAlignmentBestFit} disabled={alignmentBusy} style={{ ...alignmentButtonStyle(true, alignmentBusy, "#34d399"), background: alignmentBusy ? "rgba(255,255,255,.06)" : "rgba(52,211,153,.18)" }}>Best Fit</button>
-          <button onClick={showAlignmentDeviation} disabled={alignmentBusy || !alignmentStats} style={alignmentButtonStyle(false, alignmentBusy || !alignmentStats, "#c084fc")}>Odchylky</button>
-          <button onClick={resetAlignmentTransform} disabled={alignmentBusy} style={alignmentButtonStyle(false, alignmentBusy)}>Reset B</button>
-          <button onClick={() => { setAlignmentMode(false); setAlignmentMessage("") }} disabled={alignmentBusy} style={{ ...alignmentButtonStyle(true, alignmentBusy, "#fbbf24"), padding: "0 16px" }}>Hotovo</button>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 7, alignItems: "center" }}>
+          <button onClick={handleAlignmentLandmarkFit} disabled={alignmentBusy || alignmentPairCount < 3} style={alignmentButtonStyle("secondary", alignmentBusy || alignmentPairCount < 3)}>Předzarovnat</button>
+          <button onClick={handleAlignmentBestFit} disabled={alignmentBusy || alignmentPairCount < 3} style={alignmentButtonStyle("success", alignmentBusy || alignmentPairCount < 3)}>{alignmentBusy ? "Best Fit běží…" : "Best Fit"}</button>
+          <button onClick={showAlignmentDeviation} disabled={alignmentBusy || !alignmentStats} style={alignmentButtonStyle("secondary", alignmentBusy || !alignmentStats)}>Odchylky</button>
+          <button onClick={resetAlignmentTransform} disabled={alignmentBusy} style={alignmentButtonStyle("danger", alignmentBusy)}>Reset B</button>
+          <button onClick={() => { setAlignmentMode(false); setAlignmentMessage("") }} disabled={alignmentBusy} style={alignmentButtonStyle("primary", alignmentBusy)}>Hotovo</button>
         </div>
       </div>
 
-      <div style={{
-        position: "absolute", top: 72, left: "50%", transform: "translateX(-50%)", zIndex: 29,
-        maxWidth: "min(760px, calc(100vw - 40px))", padding: "7px 12px", borderRadius: 9,
-        background: "rgba(0,0,0,.68)", border: "1px solid rgba(255,255,255,.13)", backdropFilter: "blur(6px)",
-        color: alignmentBusy ? "#34d399" : "#d1d5db", fontFamily: "sans-serif", fontSize: 10, fontWeight: 700,
-        display: "flex", alignItems: "center", gap: 12, pointerEvents: "none",
-      }}>
-        <span>{alignmentBusy ? "⏳" : alignmentTool === "points" ? `Body ${alignmentPairCount} párů · další ${alignmentNextSide}` : `ROI A ${alignmentRoiA.length} · B ${alignmentRoiB.length}`}</span>
-        <span style={{ opacity: .75 }}>{alignmentMessage}</span>
-        {alignmentProgress?.rms != null && <b style={{ color: "#34d399", marginLeft: "auto" }}>Pass {alignmentProgress.stage}/{alignmentProgress.stages} · RMS {alignmentProgress.rms.toFixed(4)} mm</b>}
-        {alignmentStats && !alignmentBusy && <b style={{ color: "#fbbf24", marginLeft: "auto" }}>RMS {alignmentStats.rms.toFixed(3)} · P95 {alignmentStats.percentile95.toFixed(3)} mm</b>}
-      </div>
+      {!alignmentBusy && (
+        <div style={{
+          position: "absolute", top: 80, left: "50%", transform: "translateX(-50%)", zIndex: 29,
+          maxWidth: "min(760px, calc(100vw - 40px))", minHeight: 34, padding: "7px 11px", borderRadius: 11,
+          background: "rgba(12,12,12,.82)", border: "1px solid rgba(255,255,255,.075)", backdropFilter: "blur(12px)",
+          color: "#bdbdbd", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: 10, fontWeight: 650,
+          display: "flex", alignItems: "center", gap: 10, pointerEvents: "none", boxShadow: "0 10px 30px rgba(0,0,0,.20)",
+        }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 7, color: "#f1f1f1", whiteSpace: "nowrap" }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: alignmentNextSide === "A" ? "#93c5fd" : "#f9a8d4" }} />
+            Další bod: {alignmentNextSide} · {alignmentNextPointNumber}
+          </span>
+          <span style={{ width: 1, height: 14, background: "rgba(255,255,255,.08)" }} />
+          <span style={{ opacity: .82, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{alignmentMessage}</span>
+          {alignmentStats && (
+            <span style={{ marginLeft: "auto", display: "flex", gap: 10, whiteSpace: "nowrap" }}>
+              <b style={{ color: "#f5f5f5" }}>RMS {alignmentStats.rms.toFixed(3)} mm</b>
+              <span style={{ color: "#8a8a8a" }}>P95 {alignmentStats.percentile95.toFixed(3)} mm</span>
+            </span>
+          )}
+        </div>
+      )}
+
+      {alignmentBusy && alignmentProgressUi && (
+        <div style={{
+          position: "absolute", top: 0, left: 0, right: 0, bottom: alignmentBottomHeight, zIndex: 31,
+          background: "rgba(0,0,0,.18)", backdropFilter: "blur(1.5px)", pointerEvents: "all",
+        }}>
+          <div style={{
+            position: "absolute", left: "50%", top: "50%", transform: "translate(-50%,-50%)",
+            width: 328, maxWidth: "calc(100vw - 40px)", padding: "20px 20px 18px", borderRadius: 16,
+            background: "rgba(12,12,12,.94)", border: "1px solid rgba(255,255,255,.09)",
+            boxShadow: "0 24px 70px rgba(0,0,0,.48)", backdropFilter: "blur(20px)",
+            color: "#f5f5f5", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+            animation: "artheticAlignCardIn .22s ease-out both",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{
+                width: 34, height: 34, borderRadius: "50%", boxSizing: "border-box",
+                border: "2px solid rgba(255,255,255,.10)", borderTopColor: "#f3f3f3",
+                animation: "artheticAlignSpin .85s linear infinite", flex: "0 0 auto",
+              }} />
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 790, letterSpacing: "-.01em" }}>{alignmentProgressUi.label}</div>
+                <div style={{ marginTop: 3, color: "#7f7f7f", fontSize: 10, fontWeight: 620 }}>{alignmentProgressUi.detail}</div>
+              </div>
+              <div style={{ marginLeft: "auto", color: "#8a8a8a", fontSize: 10, fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>{alignmentElapsed.toFixed(1)} s</div>
+            </div>
+
+            <div style={{ marginTop: 18, height: 5, borderRadius: 999, background: "rgba(255,255,255,.065)", overflow: "hidden" }}>
+              <div style={{
+                height: "100%", width: `${Math.max(3, Math.min(98, alignmentProgressUi.percent))}%`, borderRadius: 999,
+                background: "linear-gradient(90deg, rgba(255,255,255,.58), #ffffff)",
+                transition: "width .28s cubic-bezier(.22,.61,.36,1)",
+              }} />
+            </div>
+
+            <div style={{ marginTop: 11, display: "flex", alignItems: "center", gap: 8, color: "#686868", fontSize: 9, fontWeight: 650 }}>
+              <span>{Math.round(alignmentProgressUi.percent)} %</span>
+              {alignmentProgress?.rms != null && Number.isFinite(alignmentProgress.rms) && <><span>·</span><span>RMS {alignmentProgress.rms.toFixed(4)} mm</span></>}
+              {alignmentProgress?.stage > 0 && alignmentProgress?.stage <= 3 && <><span>·</span><span>Pass {alignmentProgress.stage} / 3</span></>}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div style={{
-        position: "absolute", left: 0, right: 0, bottom: 0, height: alignmentBottomHeight, zIndex: 25,
-        display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1,
-        background: "rgba(255,255,255,.18)", borderTop: "1px solid rgba(255,255,255,.24)", boxShadow: "0 -12px 35px rgba(0,0,0,.55)",
+        position: "absolute", left: 10, right: 10, bottom: 10, height: `calc(${alignmentBottomHeight} - 20px)`, zIndex: 25,
+        display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8,
+        background: "transparent", borderRadius: 14, overflow: "hidden",
+        boxShadow: "0 -10px 36px rgba(0,0,0,.26)",
       }}>
         <AlignmentPreviewViewport
-          title={`Reference A · ${stripExt(alignmentPair.fileA?.name || alignmentPair.fileA?.rawName || "")}`}
+          title={stripExt(alignmentPair.fileA?.name || alignmentPair.fileA?.rawName || "Reference A")}
           badge="A"
           file={alignmentPair.fileA}
           sourceObject={modelObjectsRef.current[alignmentPair.aUrl]}
           color="#60a5fa"
           points={alignmentPointsA}
-          roiPoints={alignmentRoiA}
-          mode={alignmentTool}
-          active={!alignmentBusy && (alignmentTool === "roi" || alignmentNextSide === "A")}
-          brushRadius={alignmentBrushRadius}
+          active={!alignmentBusy && alignmentNextSide === "A"}
+          nextPointNumber={alignmentPointsA.length + 1}
           onPickPoint={handleAlignmentPickA}
-          onPaintPoint={(point) => appendAlignmentRoi("A", point)}
           sceneIntensity={sceneIntensity}
           highlightIntensity={highlightIntensity}
           headlightCfg={headlightCfg}
         />
         <AlignmentPreviewViewport
-          title={`Moving B · ${stripExt(alignmentPair.fileB?.name || alignmentPair.fileB?.rawName || "")}`}
+          title={stripExt(alignmentPair.fileB?.name || alignmentPair.fileB?.rawName || "Moving B")}
           badge="B"
           file={alignmentPair.fileB}
           sourceObject={modelObjectsRef.current[alignmentPair.bUrl]}
           color="#f472b6"
           points={alignmentPointsB}
-          roiPoints={alignmentRoiB}
-          mode={alignmentTool}
-          active={!alignmentBusy && (alignmentTool === "roi" || alignmentNextSide === "B")}
-          brushRadius={alignmentBrushRadius}
+          active={!alignmentBusy && alignmentNextSide === "B"}
+          nextPointNumber={alignmentPointsB.length + 1}
           onPickPoint={handleAlignmentPickB}
-          onPaintPoint={(point) => appendAlignmentRoi("B", point)}
           sceneIntensity={sceneIntensity}
           highlightIntensity={highlightIntensity}
           headlightCfg={headlightCfg}
