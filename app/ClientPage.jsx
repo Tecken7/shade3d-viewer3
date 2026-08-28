@@ -1042,86 +1042,6 @@ function landmarkFitRms(sourcePoints, targetPoints, matrix) {
   return Math.sqrt(sumSq / count)
 }
 
-function rigidTransformFromBestTriangle(sourcePoints, targetPoints) {
-  const count = Math.min(sourcePoints?.length || 0, targetPoints?.length || 0)
-  if (count < 3) return null
-
-  // Pro ruční landmark registration je nejstabilnější postavit orientovaný rámec
-  // přímo z největšího dostupného trojúhelníku. Tím se vyhneme zbytečné
-  // numerické nejistotě u přesně tří bodů a zároveň použijeme co největší baseline.
-  let best = null
-  let bestAreaSq = -1
-  const ab = new THREE.Vector3(), ac = new THREE.Vector3(), cross = new THREE.Vector3()
-  for (let i = 0; i < count - 2; i++) {
-    for (let j = i + 1; j < count - 1; j++) {
-      for (let k = j + 1; k < count; k++) {
-        ab.subVectors(sourcePoints[j], sourcePoints[i])
-        ac.subVectors(sourcePoints[k], sourcePoints[i])
-        const sourceAreaSq = cross.crossVectors(ab, ac).lengthSq()
-        ab.subVectors(targetPoints[j], targetPoints[i])
-        ac.subVectors(targetPoints[k], targetPoints[i])
-        const targetAreaSq = cross.crossVectors(ab, ac).lengthSq()
-        const score = Math.min(sourceAreaSq, targetAreaSq)
-        if (score > bestAreaSq) { bestAreaSq = score; best = [i, j, k] }
-      }
-    }
-  }
-  if (!best || bestAreaSq < 1e-10) return null
-
-  const makeBasis = (points, indices) => {
-    const [i, j, k] = indices
-    const origin = points[i].clone()
-    const x = points[j].clone().sub(origin)
-    if (x.lengthSq() < 1e-12) return null
-    x.normalize()
-    const towardThird = points[k].clone().sub(origin)
-    const z = new THREE.Vector3().crossVectors(x, towardThird)
-    if (z.lengthSq() < 1e-12) return null
-    z.normalize()
-    const y = new THREE.Vector3().crossVectors(z, x).normalize()
-    return { origin, matrix: new THREE.Matrix4().makeBasis(x, y, z) }
-  }
-
-  const sourceBasis = makeBasis(sourcePoints, best)
-  const targetBasis = makeBasis(targetPoints, best)
-  if (!sourceBasis || !targetBasis) return null
-
-  const rotation = targetBasis.matrix.clone().multiply(sourceBasis.matrix.clone().invert())
-  const rotatedOrigin = sourceBasis.origin.clone().applyMatrix4(rotation)
-  const translation = targetBasis.origin.clone().sub(rotatedOrigin)
-  rotation.setPosition(translation)
-
-  // Pokud máme více než tři body, Hornův least-squares fit může být přesnější.
-  // Použijeme ho ale pouze tehdy, když skutečně sníží landmark RMS.
-  if (count > 3) {
-    const horn = rigidTransformHorn(sourcePoints, targetPoints)
-    if (horn) {
-      const triangleRms = landmarkFitRms(sourcePoints, targetPoints, rotation)
-      const hornRms = landmarkFitRms(sourcePoints, targetPoints, horn)
-      if (hornRms <= triangleRms + 1e-9) return horn
-    }
-  }
-  return rotation
-}
-
-function sceneLandmarkRms(sourceRoot, targetRoot, sourceLocalPoints, targetLocalPoints) {
-  const count = Math.min(sourceLocalPoints?.length || 0, targetLocalPoints?.length || 0)
-  if (!sourceRoot || !targetRoot || count < 1) return Infinity
-  sourceRoot.parent?.updateMatrixWorld?.(true)
-  targetRoot.parent?.updateMatrixWorld?.(true)
-  sourceRoot.updateMatrixWorld(true)
-  targetRoot.updateMatrixWorld(true)
-  const sourceWorld = new THREE.Vector3()
-  const targetWorld = new THREE.Vector3()
-  let sumSq = 0
-  for (let i = 0; i < count; i++) {
-    sourceWorld.fromArray(sourceLocalPoints[i]).applyMatrix4(sourceRoot.matrixWorld)
-    targetWorld.fromArray(targetLocalPoints[i]).applyMatrix4(targetRoot.matrixWorld)
-    sumSq += sourceWorld.distanceToSquared(targetWorld)
-  }
-  return Math.sqrt(sumSq / count)
-}
-
 function solveLinearSystem6(matrix, rhs) {
   const n = 6
   const a = Array.from({ length: n }, (_, r) => {
@@ -3403,70 +3323,34 @@ export default function ClientPage() {
       return
     }
 
+    // Body ve spodních A/B oknech jsou uložené v lokálním prostoru rootu modelu.
+    // B chceme převést přímo do společného parent-space. A proto převedeme jeho
+    // landmarky aktuální skutečnou maticí reference (ne pouze případně opožděným state).
     const referenceRoot = modelObjectsRef.current[aUrl]
-    const movingRoot = modelObjectsRef.current[bUrl]
-    if (!referenceRoot || !movingRoot) {
-      setAlignmentMessage("Vybrané modely ještě nejsou připravené pro předzarovnání.")
+    referenceRoot?.updateMatrixWorld(true)
+    const matrixA = referenceRoot?.matrix?.elements?.length === 16
+      ? referenceRoot.matrix.clone()
+      : new THREE.Matrix4().fromArray(matrixArrayOrIdentity(modelTransforms[aUrl]))
+
+    const source = alignmentPointsB.slice(0, pairCount).map((point) => new THREE.Vector3(...point))
+    const target = alignmentPointsA.slice(0, pairCount).map((point) => new THREE.Vector3(...point).applyMatrix4(matrixA))
+    const matrix = rigidTransformHorn(source, target)
+    if (!matrix) {
+      setAlignmentMessage("Předzarovnání nelze jednoznačně spočítat. Rozmístěte 3 body více do trojúhelníku, ne téměř do jedné přímky.")
       return
     }
 
-    // Registration teď řešíme výhradně v reálném WORLD prostoru hlavní scény.
-    // Tím odpadá jakýkoli předpoklad o AutoCenter parentu nebo o lokálních maticích.
-    referenceRoot.parent?.updateMatrixWorld?.(true)
-    movingRoot.parent?.updateMatrixWorld?.(true)
-    referenceRoot.updateMatrixWorld(true)
-    movingRoot.updateMatrixWorld(true)
-
-    const sourceWorld = alignmentPointsB.slice(0, pairCount).map((point) =>
-      new THREE.Vector3(...point).applyMatrix4(movingRoot.matrixWorld)
-    )
-    const targetWorld = alignmentPointsA.slice(0, pairCount).map((point) =>
-      new THREE.Vector3(...point).applyMatrix4(referenceRoot.matrixWorld)
-    )
-
-    // U tří bodů použijeme explicitní orientovaný trojúhelníkový frame.
-    // U 4+ bodů se případně použije least-squares Horn fit, jen když je lepší.
-    const deltaWorld = rigidTransformFromBestTriangle(sourceWorld, targetWorld)
-    if (!deltaWorld) {
-      setAlignmentMessage("Předzarovnání nelze jednoznačně spočítat. Rozmístěte body více do trojúhelníku, ne téměř do jedné přímky.")
-      return
-    }
-
-    const predictedRms = landmarkFitRms(sourceWorld, targetWorld, deltaWorld)
-    if (!Number.isFinite(predictedRms)) {
+    const landmarkRms = landmarkFitRms(source, target, matrix)
+    if (!Number.isFinite(landmarkRms)) {
       setAlignmentMessage("Předzarovnání se nepodařilo numericky ověřit.")
       return
     }
 
-    // deltaWorld převádí AKTUÁLNÍ world pose B do world pose A. Výslednou world
-    // matici převedeme zpět do lokálního prostoru skutečného parentu Moving B.
-    const desiredWorld = deltaWorld.clone().multiply(movingRoot.matrixWorld)
-    const parentWorld = movingRoot.parent?.matrixWorld?.clone?.() || new THREE.Matrix4().identity()
-    const desiredLocal = parentWorld.clone().invert().multiply(desiredWorld)
-    applyModelTransform(bUrl, desiredLocal.toArray())
-
-    // Nevěříme jen solveru: po skutečném vykreslení znovu změříme landmarky
-    // přímo z matrixWorld objektů v hlavní scéně. Tohle je rozhodující kontrola.
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
-    referenceRoot.parent?.updateMatrixWorld?.(true)
-    movingRoot.parent?.updateMatrixWorld?.(true)
-    referenceRoot.updateMatrixWorld(true)
-    movingRoot.updateMatrixWorld(true)
-    const actualRms = sceneLandmarkRms(
-      movingRoot, referenceRoot,
-      alignmentPointsB.slice(0, pairCount),
-      alignmentPointsA.slice(0, pairCount)
-    )
-
-    if (!Number.isFinite(actualRms)) {
-      setAlignmentMessage("Transformace byla vypočtena, ale hlavní scénu se nepodařilo ověřit.")
-      return
-    }
-
-    setAlignmentMessage(`Předzarovnání z ${pairCount} párů dokončeno · Scene Landmark RMS ${actualRms.toFixed(3)} mm. Teď spusťte Best Fit.`)
-    setAlignmentProgress({ label: "Landmark fit", rms: actualRms })
+    applyModelTransform(bUrl, matrix.toArray())
+    setAlignmentMessage(`Předzarovnání z ${pairCount} párů dokončeno · Landmark RMS ${landmarkRms.toFixed(3)} mm. Teď spusťte Best Fit.`)
+    setAlignmentProgress({ label: "Landmark fit", rms: landmarkRms })
     await refreshAlignmentMetrics(aUrl, bUrl)
-  }, [getAlignmentPair, alignmentPointsA, alignmentPointsB, applyModelTransform, refreshAlignmentMetrics])
+  }, [getAlignmentPair, alignmentPointsA, alignmentPointsB, modelTransforms, applyModelTransform, refreshAlignmentMetrics])
 
   const handleAlignmentBestFit = useCallback(async () => {
     const { aUrl, bUrl } = getAlignmentPair()
