@@ -1673,7 +1673,7 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, active, onPi
   )
 }
 
-function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, active, dimmed = false, onPickPoint, forceLoading = false, locked = false, onPreviewLoaded, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 }, eligibleFiles = [], selectedUrl = "", otherSelectedUrl = "", onSelectModel, selectStyle = {} }) {
+function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, active, dimmed = false, selectionDisabled = false, onPickPoint, forceLoading = false, locked = false, onPreviewLoaded, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 }, eligibleFiles = [], selectedUrl = "", otherSelectedUrl = "", onSelectModel, selectStyle = {} }) {
   const rootRef = useRef(null)
   const controlsRef = useRef(null)
   const [target, setTarget] = useState([0, 0, 0])
@@ -1701,9 +1701,11 @@ function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, ac
         border: selectorDocked ? "1px solid transparent" : "1px solid rgba(255,255,255,.09)",
         boxShadow: selectorDocked ? "none" : "0 18px 48px rgba(0,0,0,.38)",
         backdropFilter: selectorDocked ? "none" : "blur(16px)",
-        pointerEvents: "auto",
+        pointerEvents: selectionDisabled ? "none" : "auto",
+        filter: selectionDisabled ? "grayscale(1) blur(.7px)" : "none",
+        opacity: selectionDisabled ? .54 : 1,
         fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-        transition: "top .42s cubic-bezier(.22,.61,.36,1), left .42s cubic-bezier(.22,.61,.36,1), transform .42s cubic-bezier(.22,.61,.36,1), width .34s ease, padding .34s ease, background .25s ease, border-color .25s ease, box-shadow .25s ease",
+        transition: "top .42s cubic-bezier(.22,.61,.36,1), left .42s cubic-bezier(.22,.61,.36,1), transform .42s cubic-bezier(.22,.61,.36,1), width .34s ease, padding .34s ease, background .25s ease, border-color .25s ease, box-shadow .25s ease, filter .24s ease, opacity .24s ease",
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: selectorDocked ? 10 : 12, minWidth: 0 }}>
           <span style={{
@@ -1715,14 +1717,16 @@ function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, ac
             boxShadow: active ? "0 5px 18px rgba(255,255,255,.10)" : "none",
             transition: "width .34s ease, height .34s ease, border-radius .34s ease, background .2s ease, color .2s ease",
           }}>{badge}</span>
-          <div style={{ minWidth: 0, flex: "1 1 auto", display: "flex", flexDirection: "column", gap: selectorDocked ? 3 : 6 }}>
+          <div style={{ minWidth: 0, flex: "1 1 auto", display: "flex", flexDirection: "column", gap: selectorDocked ? 3 : 7 }}>
             {!selectorDocked && (
-              <div style={{ color: "#f1f1f1", fontSize: 11, fontWeight: 760, letterSpacing: "-.01em" }}>Vyberte {roleLabel}</div>
+              <div style={{ color: "#f1f1f1", fontSize: 11, fontWeight: 760, letterSpacing: "-.01em" }}>
+                {selectionDisabled ? "Nejdřív vyberte Reference A" : `Vyberte ${roleLabel}`}
+              </div>
             )}
             <select
               value={selectedUrl || ""}
               onChange={(event) => onSelectModel?.(event.target.value)}
-              disabled={locked || forceLoading || previewLoading}
+              disabled={selectionDisabled || locked || forceLoading || previewLoading}
               aria-label={`Vybrat model ${roleLabel}`}
               style={{
                 ...selectStyle,
@@ -1741,10 +1745,24 @@ function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, ac
                 </option>
               ))}
             </select>
-            <div style={{ color: active ? "#bdbdbd" : "#666", fontSize: 9, fontWeight: 620, paddingLeft: 1 }}>{roleLabel}</div>
+            {!selectorDocked && !selectionDisabled && (
+              <div style={{ color: "#777", fontSize: 9, lineHeight: 1.35, fontWeight: 570, paddingLeft: 1 }}>
+                Vyberte ze seznamu nebo kliknutím na model v hlavní scéně.
+              </div>
+            )}
           </div>
         </div>
       </div>
+
+      {selectorDocked && (
+        <div style={{
+          position: "absolute", top: 17, right: 17, zIndex: 12, pointerEvents: "none",
+          color: "rgba(255,255,255,.82)", fontSize: 10, fontWeight: 700, letterSpacing: "-.01em",
+          textShadow: "0 2px 12px rgba(0,0,0,.55)",
+          fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+          opacity: selectionDisabled ? .45 : 1, transition: "opacity .24s ease",
+        }}>{roleLabel}</div>
+      )}
 
       <Canvas
         orthographic
@@ -1752,8 +1770,10 @@ function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, ac
         gl={{ antialias: true }}
         style={{
           position: "absolute", inset: 0,
-          filter: dimmed && !locked ? "grayscale(1) saturate(.08) brightness(.58)" : "none",
-          opacity: dimmed && !locked ? .72 : 1,
+          filter: selectionDisabled && !locked
+            ? "grayscale(1) saturate(.08) brightness(.56) blur(.8px)"
+            : dimmed && !locked ? "grayscale(1) saturate(.08) brightness(.58)" : "none",
+          opacity: selectionDisabled && !locked ? .60 : dimmed && !locked ? .72 : 1,
           transition: "filter .26s ease, opacity .26s ease",
         }}
       >
@@ -1792,7 +1812,7 @@ function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, ac
             setTarget={setTarget}
           />
         )}
-        <TouchTrackballControls ref={controlsRef} target={target} enabled={!locked && !!file} />
+        <TouchTrackballControls ref={controlsRef} target={target} enabled={!selectionDisabled && !locked && !!file} />
         <RightButtonPan setTarget={setTarget} trackballRef={controlsRef} />
       </Canvas>
 
@@ -2004,6 +2024,7 @@ function AnyModel({
   onHoverDist,
   onPinNote,
   onAlignmentSelect,
+  onAlignmentHover,
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
@@ -2166,6 +2187,43 @@ function AnyModel({
     })
   }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, analysisMode, renderOrder])
 
+  const setAlignmentHoverVisual = (enabled) => {
+    if (!object3D) return
+    if (enabled && !onAlignmentSelect) return
+    object3D.traverse((child) => {
+      if (!child.isMesh || !child.material) return
+      const materials = Array.isArray(child.material) ? child.material : [child.material]
+      materials.filter(Boolean).forEach((material) => {
+        material.userData = material.userData || {}
+        if (enabled) {
+          if (!material.userData._alignmentHoverBackup) {
+            material.userData._alignmentHoverBackup = {
+              emissive: material.emissive?.clone?.() || null,
+              emissiveIntensity: typeof material.emissiveIntensity === "number" ? material.emissiveIntensity : null,
+            }
+          }
+          if (material.emissive?.set) {
+            material.emissive.set("#22c55e")
+            material.emissiveIntensity = Math.max(0.32, Number(material.emissiveIntensity) || 0)
+          }
+        } else {
+          const backup = material.userData._alignmentHoverBackup
+          if (backup) {
+            if (backup.emissive && material.emissive?.copy) material.emissive.copy(backup.emissive)
+            if (backup.emissiveIntensity !== null && typeof backup.emissiveIntensity === "number") material.emissiveIntensity = backup.emissiveIntensity
+            delete material.userData._alignmentHoverBackup
+          }
+        }
+        material.needsUpdate = true
+      })
+    })
+  }
+
+  useEffect(() => {
+    if (!onAlignmentSelect) setAlignmentHoverVisual(false)
+    return () => setAlignmentHoverVisual(false)
+  }, [object3D, onAlignmentSelect])
+
   if (!object3D) return null
 
   return visible ? (
@@ -2176,22 +2234,37 @@ function AnyModel({
         e.stopPropagation()
         onAlignmentSelect(url)
       } : undefined}
-      onPointerMove={analysisMode && onHoverDist ? (e) => {
-        e.stopPropagation(); 
-        const distAttr = e.object.geometry.getAttribute('_analysisDist');
-        
-        if (distAttr && e.face) {
-          const dA = distAttr.getX(e.face.a);
-          const dB = distAttr.getX(e.face.b);
-          const dC = distAttr.getX(e.face.c);
-          const avgDist = (dA + dB + dC) / 3;
-          onHoverDist(avgDist, e.clientX, e.clientY);
-        } else if (distAttr && e.index !== undefined) {
-          onHoverDist(distAttr.getX(e.index), e.clientX, e.clientY);
+      onPointerOver={onAlignmentSelect ? (e) => {
+        e.stopPropagation()
+        setAlignmentHoverVisual(true)
+        onAlignmentHover?.(url, true)
+      } : undefined}
+      onPointerMove={(analysisMode && onHoverDist) || onAlignmentSelect ? (e) => {
+        if (onAlignmentSelect) {
+          e.stopPropagation()
+          onAlignmentHover?.(url, true)
+        }
+        if (analysisMode && onHoverDist) {
+          e.stopPropagation(); 
+          const distAttr = e.object.geometry.getAttribute('_analysisDist');
+          
+          if (distAttr && e.face) {
+            const dA = distAttr.getX(e.face.a);
+            const dB = distAttr.getX(e.face.b);
+            const dC = distAttr.getX(e.face.c);
+            const avgDist = (dA + dB + dC) / 3;
+            onHoverDist(avgDist, e.clientX, e.clientY);
+          } else if (distAttr && e.index !== undefined) {
+            onHoverDist(distAttr.getX(e.index), e.clientX, e.clientY);
+          }
         }
       } : undefined}
-      onPointerOut={analysisMode && onHoverDist ? () => {
-        onHoverDist(null);
+      onPointerOut={(analysisMode && onHoverDist) || onAlignmentSelect ? () => {
+        if (onAlignmentSelect) {
+          setAlignmentHoverVisual(false)
+          onAlignmentHover?.(url, false)
+        }
+        if (analysisMode && onHoverDist) onHoverDist(null)
       } : undefined}
       onDoubleClick={analysisMode && onPinNote ? (e) => {
         e.stopPropagation();
@@ -3261,6 +3334,8 @@ export default function ClientPage() {
   const [alignmentStep, setAlignmentStep] = useState("models") // models | points | prealign | bestfit
   const [alignmentPrealignMatrix, setAlignmentPrealignMatrix] = useState(null)
   const [modelTransforms, setModelTransforms] = useState({})
+  const alignmentPointerHintRef = useRef(null)
+  const alignmentSceneHoveredUrlRef = useRef("")
 
   useEffect(() => {
     if (!alignmentBusy || !alignmentStartedAt) {
@@ -3447,6 +3522,16 @@ export default function ClientPage() {
       return
     }
 
+    // Po kliknutí model okamžitě přestane být hover kandidátem pro další krok.
+    alignmentSceneHoveredUrlRef.current = ""
+    if (alignmentPointerHintRef.current) {
+      alignmentPointerHintRef.current.style.borderColor = "rgba(255,255,255,.12)"
+      alignmentPointerHintRef.current.style.background = "rgba(12,12,12,.92)"
+      alignmentPointerHintRef.current.style.color = "#eeeeee"
+      const dot = alignmentPointerHintRef.current.querySelector?.("[data-align-pointer-dot]")
+      if (dot) dot.style.background = "#9a9a9a"
+    }
+
     // Loader zapneme ještě PŘED změnou modelu a necháme ho jeden frame vykreslit.
     setAlignmentPreviewBusy((previous) => ({ ...previous, [side]: true }))
     await alignmentPaintYield()
@@ -3490,6 +3575,49 @@ export default function ClientPage() {
       changeAlignmentSelection("B", url)
     }
   }, [alignmentMode, alignmentBusy, alignmentStep, alignmentSelection, changeAlignmentSelection])
+
+  const handleAlignmentSceneHover = useCallback((url, hovering) => {
+    const hint = alignmentPointerHintRef.current
+    if (hovering) alignmentSceneHoveredUrlRef.current = url || ""
+    else if (!url || alignmentSceneHoveredUrlRef.current === url) alignmentSceneHoveredUrlRef.current = ""
+    if (!hint) return
+    const hasHover = !!alignmentSceneHoveredUrlRef.current
+    hint.style.borderColor = hasHover ? "rgba(34,197,94,.34)" : "rgba(255,255,255,.12)"
+    hint.style.background = hasHover ? "rgba(15,34,22,.94)" : "rgba(12,12,12,.92)"
+    hint.style.color = hasHover ? "#bbf7d0" : "#eeeeee"
+    const dot = hint.querySelector?.("[data-align-pointer-dot]")
+    if (dot) dot.style.background = hasHover ? "#4ade80" : "#9a9a9a"
+  }, [])
+
+  useEffect(() => {
+    if (!alignmentMode || alignmentStep !== "models" || alignmentBusy) {
+      if (alignmentPointerHintRef.current) alignmentPointerHintRef.current.style.opacity = "0"
+      alignmentSceneHoveredUrlRef.current = ""
+      return
+    }
+    const onMove = (event) => {
+      const hint = alignmentPointerHintRef.current
+      if (!hint) return
+      const isMainCanvas = event.target?.dataset?.artheticMainScene === "1"
+      if (!isMainCanvas) {
+        hint.style.opacity = "0"
+        return
+      }
+      hint.style.left = `${event.clientX + 15}px`
+      hint.style.top = `${event.clientY + 15}px`
+      hint.style.opacity = "1"
+    }
+    const onLeave = () => {
+      if (alignmentPointerHintRef.current) alignmentPointerHintRef.current.style.opacity = "0"
+      alignmentSceneHoveredUrlRef.current = ""
+    }
+    window.addEventListener("pointermove", onMove, true)
+    window.addEventListener("blur", onLeave)
+    return () => {
+      window.removeEventListener("pointermove", onMove, true)
+      window.removeEventListener("blur", onLeave)
+    }
+  }, [alignmentMode, alignmentStep, alignmentBusy])
 
 
   const handleAlignmentPickA = useCallback((point) => {
@@ -5406,6 +5534,23 @@ export default function ClientPage() {
         </div>
       </div>
 
+      {alignmentStep === "models" && !alignmentModelsSelected && (
+        <div
+          ref={alignmentPointerHintRef}
+          style={{
+            position: "fixed", left: 0, top: 0, zIndex: 80, opacity: 0, pointerEvents: "none",
+            display: "flex", alignItems: "center", gap: 7, height: 28, padding: "0 10px", borderRadius: 9,
+            background: "rgba(12,12,12,.92)", border: "1px solid rgba(255,255,255,.12)",
+            color: "#eeeeee", boxShadow: "0 8px 28px rgba(0,0,0,.34)", backdropFilter: "blur(12px)",
+            fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: 9.5, fontWeight: 700, whiteSpace: "nowrap",
+            transition: "opacity .12s ease, background .12s ease, border-color .12s ease, color .12s ease",
+          }}
+        >
+          <span data-align-pointer-dot style={{ width: 6, height: 6, borderRadius: "50%", background: "#9a9a9a", transition: "background .12s ease" }} />
+          {!alignmentHasA ? "Vyberte model Reference A" : "Vyberte model Moving B"}
+        </div>
+      )}
+
       {alignmentBusy && alignmentProgressUi && (
         <div style={{
           position: "absolute", top: 0, left: 0, right: 0, bottom: alignmentBottomHeight, zIndex: 31,
@@ -5461,8 +5606,9 @@ export default function ClientPage() {
           sourceObject={alignmentPair.aUrl ? modelObjectsRef.current[alignmentPair.aUrl] : null}
           color="#60a5fa"
           points={alignmentPointsA}
-          active={alignmentStep === "points" && !!alignmentPair.aUrl && alignmentModelsSelected && !alignmentBusy && !alignmentPreviewBusy.A && !alignmentPreviewBusy.B && alignmentNextSide === "A"}
+          active={(alignmentStep === "models" && !alignmentHasA && !alignmentBusy) || (alignmentStep === "points" && !!alignmentPair.aUrl && alignmentModelsSelected && !alignmentBusy && !alignmentPreviewBusy.A && !alignmentPreviewBusy.B && alignmentNextSide === "A")}
           dimmed={alignmentStep === "points" && alignmentModelsSelected && alignmentNextSide !== "A" && !alignmentBusy}
+          selectionDisabled={false}
           onPickPoint={handleAlignmentPickA}
           forceLoading={alignmentPreviewBusy.A}
           locked={alignmentBusy && !!alignmentProgress}
@@ -5486,8 +5632,9 @@ export default function ClientPage() {
           sourceObject={alignmentPair.bUrl ? modelObjectsRef.current[alignmentPair.bUrl] : null}
           color="#f472b6"
           points={alignmentPointsB}
-          active={alignmentStep === "points" && !!alignmentPair.bUrl && alignmentModelsSelected && !alignmentBusy && !alignmentPreviewBusy.A && !alignmentPreviewBusy.B && alignmentNextSide === "B"}
+          active={(alignmentStep === "models" && alignmentHasA && !alignmentHasB && !alignmentBusy) || (alignmentStep === "points" && !!alignmentPair.bUrl && alignmentModelsSelected && !alignmentBusy && !alignmentPreviewBusy.A && !alignmentPreviewBusy.B && alignmentNextSide === "B")}
           dimmed={alignmentStep === "points" && alignmentModelsSelected && alignmentNextSide !== "B" && !alignmentBusy}
+          selectionDisabled={alignmentStep === "models" && !alignmentHasA}
           onPickPoint={handleAlignmentPickB}
           forceLoading={alignmentPreviewBusy.B}
           locked={alignmentBusy && !!alignmentProgress}
@@ -5701,6 +5848,7 @@ export default function ClientPage() {
         onCreated={({ gl }) => {
             gl.setClearAlpha(0)
             gl.localClippingEnabled = false
+            gl.domElement.dataset.artheticMainScene = "1"
         }}
         style={{ position: "absolute", top: 0, bottom: alignmentMode ? alignmentBottomHeight : 0, left: 0, right: dicomLayoutActive ? dicomPanelWidth : 0, zIndex: 1, background: "transparent" }}
       >
@@ -5747,8 +5895,11 @@ export default function ClientPage() {
                 }
                 onHoverDist={handleHeatmapHover} 
                 onPinNote={handlePinNote}
-                onAlignmentSelect={alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy
+                onAlignmentSelect={alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy && (!alignmentHasA || f.url !== alignmentPair.aUrl)
                   ? selectAlignmentModelFromScene
+                  : null}
+                onAlignmentHover={alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy
+                  ? handleAlignmentSceneHover
                   : null}
               />
             ))}
