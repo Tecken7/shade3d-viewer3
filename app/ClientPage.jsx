@@ -3268,7 +3268,7 @@ export default function ClientPage() {
         sourceRoi: alignmentRoiB,
         targetRoi: alignmentRoiA,
         roiRadius: alignmentBrushRadius,
-        landmarkSeeded: alignmentPairCount >= 3,
+        landmarkSeeded: Math.min(alignmentPointsA.length, alignmentPointsB.length) >= 3,
         onProgress: (progress) => setAlignmentProgress(progress),
       })
       applyModelTransform(bUrl, result.matrix)
@@ -3284,7 +3284,7 @@ export default function ClientPage() {
     } finally {
       setAlignmentBusy(false)
     }
-  }, [getAlignmentPair, modelTransforms, alignmentRoiA, alignmentRoiB, alignmentBrushRadius, alignmentPairCount, applyModelTransform, refreshAlignmentMetrics])
+  }, [getAlignmentPair, modelTransforms, alignmentRoiA, alignmentRoiB, alignmentBrushRadius, alignmentPointsA.length, alignmentPointsB.length, applyModelTransform, refreshAlignmentMetrics])
 
   const resetAlignmentTransform = useCallback(async () => {
     const { aUrl, bUrl } = getAlignmentPair()
