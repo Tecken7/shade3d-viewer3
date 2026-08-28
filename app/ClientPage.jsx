@@ -1673,7 +1673,7 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, active, onPi
   )
 }
 
-function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, points, active, nextPointNumber, onPickPoint, forceLoading = false, onPreviewLoaded, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 } }) {
+function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, points, active, nextPointNumber, onPickPoint, forceLoading = false, locked = false, onPreviewLoaded, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 } }) {
   const rootRef = useRef(null)
   const controlsRef = useRef(null)
   const [target, setTarget] = useState([0, 0, 0])
@@ -1752,7 +1752,7 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
             setTarget={setTarget}
           />
         )}
-        <TouchTrackballControls ref={controlsRef} target={target} enabled={true} />
+        <TouchTrackballControls ref={controlsRef} target={target} enabled={!locked} />
         <RightButtonPan setTarget={setTarget} trackballRef={controlsRef} />
       </Canvas>
       {(previewLoading || forceLoading) && (
@@ -1769,6 +1769,29 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
             }} />
             <div style={{ color: "#d4d4d4", fontSize: 10, fontWeight: 700 }}>Načítám model…</div>
           </div>
+        </div>
+      )}
+      {locked && !previewLoading && !forceLoading && (
+        <div style={{
+          position: "absolute", inset: 0, zIndex: 8, pointerEvents: "all",
+          background: "rgba(12,12,12,.16)",
+          backdropFilter: "blur(2.4px) grayscale(1) saturate(0)",
+          WebkitBackdropFilter: "blur(2.4px) grayscale(1) saturate(0)",
+          overflow: "hidden",
+        }}>
+          <svg
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
+            aria-hidden="true"
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", display: "block" }}
+          >
+            <line
+              x1="0" y1="0" x2="100" y2="100"
+              stroke="rgba(255,255,255,.24)"
+              strokeWidth="1"
+              vectorEffect="non-scaling-stroke"
+            />
+          </svg>
         </div>
       )}
       <div style={{
@@ -3196,6 +3219,7 @@ export default function ClientPage() {
   const [alignmentStartedAt, setAlignmentStartedAt] = useState(null)
   const [alignmentElapsed, setAlignmentElapsed] = useState(0)
   const [alignmentPreviewBusy, setAlignmentPreviewBusy] = useState({ A: false, B: false })
+  const [alignmentWorkflowStage, setAlignmentWorkflowStage] = useState("points") // points | prealigned | bestfit
   const [modelTransforms, setModelTransforms] = useState({})
 
   useEffect(() => {
@@ -3287,6 +3311,7 @@ export default function ClientPage() {
     setAlignmentStats(null)
     setAlignmentProgress(null)
     setAlignmentMessage("")
+    setAlignmentWorkflowStage("points")
     setModelTransforms({})
     meshesRef.current = {}
     modelObjectsRef.current = {}
@@ -3346,6 +3371,7 @@ export default function ClientPage() {
     setAlignmentMessage("Označte stejný bod nejprve na Reference A a potom na Moving B.")
     setAlignmentProgress(null)
     setAlignmentStats(null)
+    setAlignmentWorkflowStage("points")
     setIsAutoRotating(false)
     setHeatmapMenuOpen(false)
     setComparisonMenuOpen(false)
@@ -3372,6 +3398,7 @@ export default function ClientPage() {
     setAlignmentPointsB([])
     setAlignmentStats(null)
     setAlignmentProgress(null)
+    setAlignmentWorkflowStage("points")
     setAlignmentMessage("Výběr modelů byl změněn. Načítám pracovní náhled…")
   }, [files])
 
@@ -3382,6 +3409,7 @@ export default function ClientPage() {
     }
     if (alignmentPointsA.length >= 3) return
     setAlignmentPointsA((previous) => [...previous, point])
+    setAlignmentWorkflowStage("points")
     setAlignmentMessage(`Bod ${alignmentPointsA.length + 1}: teď označte stejné místo na Moving B.`)
   }, [alignmentPointsA.length, alignmentPointsB.length])
 
@@ -3393,6 +3421,7 @@ export default function ClientPage() {
     if (alignmentPointsB.length >= 3) return
     const pairNumber = alignmentPointsB.length + 1
     setAlignmentPointsB((previous) => [...previous, point])
+    setAlignmentWorkflowStage("points")
     setAlignmentMessage(pairNumber >= 3
       ? "Tři korespondenční body jsou připravené. Spusťte Předzarovnat."
       : `Pár ${pairNumber} hotový. Označte bod ${pairNumber + 1} na Reference A.`)
@@ -3407,6 +3436,7 @@ export default function ClientPage() {
       setAlignmentPointsA((previous) => previous.slice(0, -1))
     }
     setAlignmentStats(null)
+    setAlignmentWorkflowStage("points")
   }, [alignmentPointsA.length, alignmentPointsB.length])
 
   const refreshAlignmentMetrics = useCallback(async (aUrl, bUrl, onProgress = null) => {
@@ -3451,6 +3481,7 @@ export default function ClientPage() {
     }
 
     applyModelTransform(bUrl, matrix.toArray())
+    setAlignmentWorkflowStage("prealigned")
     setAlignmentMessage(`Předzarovnání z ${pairCount} párů dokončeno · Landmark RMS ${landmarkRms.toFixed(3)} mm. Teď spusťte Best Fit.`)
     setAlignmentProgress({ label: "Landmark fit", rms: landmarkRms })
     await refreshAlignmentMetrics(aUrl, bUrl)
@@ -3500,6 +3531,7 @@ export default function ClientPage() {
         setAlignmentProgress({ mode: "metrics", stage: 4, stages: 4, iteration: fraction, iterations: 1, rms: result.rms, correspondences: result.correspondences, percent: 94 + Math.min(1, fraction) * 5.5 })
       })
       setAlignmentProgress({ mode: "metrics", stage: 4, stages: 4, iteration: 1, iterations: 1, rms: stats?.rms ?? result.rms, correspondences: result.correspondences, percent: 100 })
+      setAlignmentWorkflowStage("bestfit")
       setAlignmentMessage(result.improved
         ? (stats
           ? `Best Fit dokončen · RMS ${stats.rms.toFixed(3)} mm · 95 % ${stats.percentile95.toFixed(3)} mm`
@@ -3521,8 +3553,9 @@ export default function ClientPage() {
     applyModelTransform(bUrl, IDENTITY_MATRIX_ARRAY)
     setAlignmentStats(null)
     setAlignmentProgress(null)
+    setAlignmentWorkflowStage("points")
     setShowComparison(false)
-    setAlignmentMessage("Transformace Moving B byla vrácena do původní polohy.")
+    setAlignmentMessage("Poloha Moving B byla vrácena do původního stavu.")
     if (aUrl) await refreshAlignmentMetrics(aUrl, bUrl)
   }, [getAlignmentPair, applyModelTransform, refreshAlignmentMetrics])
 
@@ -5126,15 +5159,24 @@ export default function ClientPage() {
         <div style={{ width: 1, height: 34, background: "rgba(255,255,255,.07)", marginLeft: 2 }} />
 
         <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-          <button onClick={undoAlignmentPoint} disabled={alignmentBusy || (!alignmentPointsA.length && !alignmentPointsB.length)} style={alignmentButtonStyle("secondary", alignmentBusy || (!alignmentPointsA.length && !alignmentPointsB.length))}>Zpět</button>
-          <button onClick={() => { setAlignmentPointsA([]); setAlignmentPointsB([]); setAlignmentStats(null); setAlignmentMessage("Body byly vymazány. Začněte bodem na Reference A.") }} disabled={alignmentBusy} style={alignmentButtonStyle("danger", alignmentBusy)}>Smazat body</button>
+          <button
+            onClick={undoAlignmentPoint}
+            title="Zpět o jeden bod"
+            aria-label="Zpět o jeden bod"
+            disabled={alignmentBusy || (!alignmentPointsA.length && !alignmentPointsB.length)}
+            style={{ ...alignmentButtonStyle("secondary", alignmentBusy || (!alignmentPointsA.length && !alignmentPointsB.length)), width: 36, padding: 0, display: "grid", placeItems: "center" }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M10 7L5 12L10 17" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M5.5 12H14.5C17.5 12 19 13.6 19 16.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </button>
+          <button onClick={() => { setAlignmentPointsA([]); setAlignmentPointsB([]); setAlignmentStats(null); setAlignmentWorkflowStage("points"); setAlignmentMessage("Body byly vymazány. Začněte bodem na Reference A.") }} disabled={alignmentBusy} style={alignmentButtonStyle("danger", alignmentBusy)}>Smazat body</button>
         </div>
 
         <div style={{ marginLeft: "auto", display: "flex", gap: 7, alignItems: "center" }}>
-          <button onClick={handleAlignmentLandmarkFit} disabled={alignmentBusy || alignmentPairCount < 3} style={alignmentButtonStyle("secondary", alignmentBusy || alignmentPairCount < 3)}>Předzarovnat</button>
-          <button onClick={handleAlignmentBestFit} disabled={alignmentBusy || alignmentPairCount < 3} style={alignmentButtonStyle("success", alignmentBusy || alignmentPairCount < 3)}>{alignmentBusy ? "Best Fit běží…" : "Best Fit"}</button>
           <button onClick={showAlignmentDeviation} disabled={alignmentBusy || !alignmentStats} style={alignmentButtonStyle("secondary", alignmentBusy || !alignmentStats)}>Odchylky</button>
-          <button onClick={resetAlignmentTransform} disabled={alignmentBusy} style={alignmentButtonStyle("danger", alignmentBusy)}>Reset B</button>
+          <button onClick={resetAlignmentTransform} disabled={alignmentBusy} style={alignmentButtonStyle("danger", alignmentBusy)}>Reset polohy</button>
           <button onClick={() => { setAlignmentMode(false); setAlignmentMessage("") }} disabled={alignmentBusy} style={alignmentButtonStyle("primary", alignmentBusy)}>Hotovo</button>
         </div>
       </div>
@@ -5142,22 +5184,36 @@ export default function ClientPage() {
       {!alignmentBusy && (
         <div style={{
           position: "absolute", top: 80, left: "50%", transform: "translateX(-50%)", zIndex: 29,
-          maxWidth: "min(760px, calc(100vw - 40px))", minHeight: 34, padding: "7px 11px", borderRadius: 11,
+          maxWidth: "min(860px, calc(100vw - 40px))", minHeight: 34, padding: "7px 8px 7px 11px", borderRadius: 11,
           background: "rgba(12,12,12,.82)", border: "1px solid rgba(255,255,255,.075)", backdropFilter: "blur(12px)",
           color: "#bdbdbd", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: 10, fontWeight: 650,
-          display: "flex", alignItems: "center", gap: 10, pointerEvents: "none", boxShadow: "0 10px 30px rgba(0,0,0,.20)",
+          display: "flex", alignItems: "center", gap: 10, pointerEvents: "auto", boxShadow: "0 10px 30px rgba(0,0,0,.20)",
         }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 7, color: "#f1f1f1", whiteSpace: "nowrap" }}>
             <span style={{ width: 6, height: 6, borderRadius: "50%", background: alignmentPointsComplete ? "#86efac" : (alignmentNextSide === "A" ? "#93c5fd" : "#f9a8d4") }} />
             {alignmentPointsComplete ? "3 body připraveny" : `Další bod: ${alignmentNextSide} · ${alignmentNextPointNumber}`}
           </span>
-          <span style={{ width: 1, height: 14, background: "rgba(255,255,255,.08)" }} />
+          <span style={{ width: 1, height: 14, background: "rgba(255,255,255,.08)", flex: "0 0 auto" }} />
           <span style={{ opacity: .82, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{alignmentMessage}</span>
-          {alignmentStats && (
-            <span style={{ marginLeft: "auto", display: "flex", gap: 10, whiteSpace: "nowrap" }}>
-              <b style={{ color: "#f5f5f5" }}>RMS {alignmentStats.rms.toFixed(3)} mm</b>
-              <span style={{ color: "#8a8a8a" }}>P95 {alignmentStats.percentile95.toFixed(3)} mm</span>
-            </span>
+
+          {alignmentPointsComplete && alignmentWorkflowStage === "points" && (
+            <button
+              onClick={handleAlignmentLandmarkFit}
+              disabled={alignmentBusy}
+              style={{ ...alignmentButtonStyle("secondary", alignmentBusy), height: 30, marginLeft: "auto", padding: "0 11px", borderRadius: 8, flex: "0 0 auto" }}
+            >
+              Předzarovnat
+            </button>
+          )}
+
+          {alignmentPointsComplete && alignmentWorkflowStage === "prealigned" && (
+            <button
+              onClick={handleAlignmentBestFit}
+              disabled={alignmentBusy}
+              style={{ ...alignmentButtonStyle("success", alignmentBusy), height: 30, marginLeft: "auto", padding: "0 11px", borderRadius: 8, flex: "0 0 auto" }}
+            >
+              Best Fit
+            </button>
           )}
         </div>
       )}
@@ -5222,8 +5278,10 @@ export default function ClientPage() {
           nextPointNumber={Math.min(3, alignmentPointsA.length + 1)}
           onPickPoint={handleAlignmentPickA}
           forceLoading={alignmentPreviewBusy.A}
+          locked={alignmentBusy && !!alignmentProgress}
           onPreviewLoaded={() => {
             setAlignmentPreviewBusy((previous) => ({ ...previous, A: false }))
+            setAlignmentWorkflowStage("points")
             setAlignmentMessage("Model A je připraven. Označte nové korespondenční body.")
           }}
           sceneIntensity={sceneIntensity}
@@ -5241,8 +5299,10 @@ export default function ClientPage() {
           nextPointNumber={Math.min(3, alignmentPointsB.length + 1)}
           onPickPoint={handleAlignmentPickB}
           forceLoading={alignmentPreviewBusy.B}
+          locked={alignmentBusy && !!alignmentProgress}
           onPreviewLoaded={() => {
             setAlignmentPreviewBusy((previous) => ({ ...previous, B: false }))
+            setAlignmentWorkflowStage("points")
             setAlignmentMessage("Model B je připraven. Označte nové korespondenční body.")
           }}
           sceneIntensity={sceneIntensity}
