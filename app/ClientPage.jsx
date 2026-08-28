@@ -897,7 +897,7 @@ export function applySurfaceComparison(meshA, meshB, tolerance = 0.25) {
 
 
 /* ---------- Zarovnání modelů / metrologie ---------- */
-const ALIGNMENT_POINT_COLORS = ["#fbbf24", "#60a5fa", "#34d399", "#f472b6", "#c084fc", "#fb7185", "#22d3ee", "#a3e635"]
+const ALIGNMENT_POINT_COLORS = ["#fbbf24", "#ef4444", "#22c55e"]
 const IDENTITY_MATRIX_ARRAY = new THREE.Matrix4().identity().toArray()
 
 function matrixArrayOrIdentity(value) {
@@ -1211,7 +1211,7 @@ async function robustPointToPlaneICP({
 
   // Nejdražší část Best Fitu. Je async a po několika stovkách BVH dotazů vrací
   // řízení prohlížeči, takže Chrome nezamrzne ani na velkém intraorálním scanu.
-  const makeCorrespondences = async (matrix, sourceSamples, maxDistance, trim, yieldEvery = 420) => {
+  const makeCorrespondences = async (matrix, sourceSamples, maxDistance, trim, yieldEvery = 420, progressTick = null) => {
     const result = []
     for (let k = 0; k < sourceSamples.length; k++) {
       const pRoot = sourceSamples[k]
@@ -1229,8 +1229,12 @@ async function robustPointToPlaneICP({
         })
       }
 
-      if (yieldEvery > 0 && k > 0 && k % yieldEvery === 0) await alignmentYield()
+      if (yieldEvery > 0 && k > 0 && k % yieldEvery === 0) {
+        progressTick?.(Math.min(1, k / Math.max(1, sourceSamples.length)))
+        await alignmentYield()
+      }
     }
+    progressTick?.(1)
 
     result.sort((a, b) => a.distance - b.distance)
     const keepCount = Math.min(result.length, Math.max(30, Math.floor(result.length * trim)))
@@ -1238,8 +1242,8 @@ async function robustPointToPlaneICP({
     return result
   }
 
-  const evaluateMatrix = async (matrix, sourceSamples, maxDistance, trim) => {
-    return metricsFromCorrespondences(await makeCorrespondences(matrix, sourceSamples, maxDistance, trim))
+  const evaluateMatrix = async (matrix, sourceSamples, maxDistance, trim, progressTick = null) => {
+    return metricsFromCorrespondences(await makeCorrespondences(matrix, sourceSamples, maxDistance, trim, 420, progressTick))
   }
 
   const scaleRigidIncrement = (matrix, factor, maxTranslation, maxRotation) => {
@@ -1341,21 +1345,43 @@ async function robustPointToPlaneICP({
   onProgress?.({ stage: 0, stages: stages.length, iteration: 0, iterations: 1, rms: null, correspondences: 0, mode: "prepare" })
   await alignmentYield()
 
-  const initialValidation = await evaluateMatrix(current, validationSamples, validationMaxDistance, validationTrim)
+  const initialValidation = await evaluateMatrix(
+    current, validationSamples, validationMaxDistance, validationTrim,
+    (fraction) => onProgress?.({ stage: 0, stages: stages.length, iteration: 0, iterations: 1, rms: null, correspondences: 0, mode: "prepare", percent: 3 + fraction * 7 })
+  )
   let bestMatrix = current.clone()
   let bestValidationRms = initialValidation.rms
   let finalRms = initialValidation.rms
   let finalCount = initialValidation.count
 
+  const stageRanges = [[10, 34], [34, 62], [62, 88]]
+
   for (let stageIndex = 0; stageIndex < stages.length; stageIndex++) {
     const stage = stages[stageIndex]
     const samples = stageSamples[stageIndex]
     if (samples.length < 30) continue
+    const [stageStartPercent, stageEndPercent] = stageRanges[stageIndex]
+    const iterationPercentSpan = (stageEndPercent - stageStartPercent) / Math.max(1, stage.iterations)
 
     for (let iteration = 0; iteration < stage.iterations; iteration++) {
+      const iterationStartPercent = stageStartPercent + iteration * iterationPercentSpan
+      const emitStageProgress = (localFraction, extra = {}) => onProgress?.({
+        stage: stageIndex + 1,
+        stages: stages.length,
+        iteration: iteration + Math.min(0.99, Math.max(0, localFraction)),
+        iterations: stage.iterations,
+        rms: finalRms,
+        correspondences: finalCount,
+        mode: stage.mode,
+        percent: iterationStartPercent + iterationPercentSpan * Math.min(0.98, Math.max(0, localFraction)),
+        ...extra,
+      })
       // Correspondence hledáme pro current pouze jednou. Jeho RMS spočítáme rovnou
       // ze stejného výsledku — v2.2 zde dělala druhý kompletní BVH průchod.
-      const correspondences = await makeCorrespondences(current, samples, stage.maxDistance, stage.trim)
+      const correspondences = await makeCorrespondences(
+        current, samples, stage.maxDistance, stage.trim, 420,
+        (fraction) => emitStageProgress(fraction * 0.55, { phase: "correspondences" })
+      )
       if (correspondences.length < 30) {
         if (stageIndex === 0 && iteration === 0) throw new Error("Příliš málo překrývající se geometrie pro Best Fit.")
         break
@@ -1399,7 +1425,10 @@ async function robustPointToPlaneICP({
           if (centroidDrift > maxSeedDrift || rotationDrift > maxSeedRotation) continue
         }
 
-        const candidateCorrespondences = await makeCorrespondences(candidate, samples, stage.maxDistance, stage.trim)
+        const candidateCorrespondences = await makeCorrespondences(
+          candidate, samples, stage.maxDistance, stage.trim, 420,
+          (fraction) => emitStageProgress(0.58 + ((f + fraction) / Math.max(1, factorCandidates.length)) * 0.32, { phase: "verify" })
+        )
         const candidateEval = metricsFromCorrespondences(candidateCorrespondences)
         const enoughPairs = candidateEval.count >= Math.max(30, Math.floor(currentEval.count * 0.65))
         if (enoughPairs && candidateEval.rms + 1e-6 < currentEval.rms) {
@@ -1427,6 +1456,7 @@ async function robustPointToPlaneICP({
         rms: finalRms,
         correspondences: finalCount,
         mode: stage.mode,
+        percent: Math.min(stageEndPercent - 0.5, iterationStartPercent + iterationPercentSpan * 0.96),
       })
       await alignmentYield()
 
@@ -1435,7 +1465,14 @@ async function robustPointToPlaneICP({
 
     // Drahá 5k validační sada se v2.2 počítala po KAŽDÉ iteraci.
     // Pro safety rollback ji stačí provést jednou na konci každého scale passu.
-    const validation = await evaluateMatrix(current, validationSamples, validationMaxDistance, validationTrim)
+    const validation = await evaluateMatrix(
+      current, validationSamples, validationMaxDistance, validationTrim,
+      (fraction) => onProgress?.({
+        stage: stageIndex + 1, stages: stages.length, iteration: stage.iterations, iterations: stage.iterations,
+        rms: finalRms, correspondences: finalCount, mode: stage.mode, phase: "validation",
+        percent: (stageEndPercent - 1.6) + fraction * 1.6,
+      })
+    )
     if (validation.count >= 30 && validation.rms < bestValidationRms) {
       bestValidationRms = validation.rms
       bestMatrix.copy(current)
@@ -1444,7 +1481,10 @@ async function robustPointToPlaneICP({
   }
 
   // Finální safety check. Best Fit nikdy nesmí být horší než landmark seed.
-  const finalValidation = await evaluateMatrix(bestMatrix, validationSamples, validationMaxDistance, validationTrim)
+  const finalValidation = await evaluateMatrix(
+    bestMatrix, validationSamples, validationMaxDistance, validationTrim,
+    (fraction) => onProgress?.({ stage: 4, stages: 4, iteration: 1, iterations: 1, rms: finalRms, correspondences: finalCount, mode: "validation", percent: 88 + fraction * 6 })
+  )
   if (finalValidation.count >= 30 && finalValidation.rms < bestValidationRms) bestValidationRms = finalValidation.rms
 
   const improved = Number.isFinite(bestValidationRms) && (
@@ -1458,7 +1498,7 @@ async function robustPointToPlaneICP({
   }
 }
 
-async function computeAlignmentMetrics(meshA, meshB, tolerance = 0.25, maxSamples = 8000) {
+async function computeAlignmentMetrics(meshA, meshB, tolerance = 0.25, maxSamples = 8000, onProgress = null) {
   if (!meshA || !meshB) return null
   meshA.updateMatrixWorld(true)
   meshB.updateMatrixWorld(true)
@@ -1471,7 +1511,7 @@ async function computeAlignmentMetrics(meshA, meshB, tolerance = 0.25, maxSample
   const point = new THREE.Vector3()
   let sum = 0, sumSq = 0, max = 0, within = 0
 
-  const collect = async (position, mesh, sampler) => {
+  const collect = async (position, mesh, sampler, progressStart, progressSpan) => {
     const indices = sampledVertexIndices(position.count, Math.floor(maxSamples / 2))
     for (let i = 0; i < indices.length; i++) {
       point.fromBufferAttribute(position, indices[i]).applyMatrix4(mesh.matrixWorld)
@@ -1483,12 +1523,17 @@ async function computeAlignmentMetrics(meshA, meshB, tolerance = 0.25, maxSample
         max = Math.max(max, distance)
         if (distance <= tolerance) within++
       }
-      if (i > 0 && i % 500 === 0) await alignmentYield()
+      if (i > 0 && i % 500 === 0) {
+        onProgress?.(progressStart + (i / Math.max(1, indices.length)) * progressSpan)
+        await alignmentYield()
+      }
     }
+    onProgress?.(progressStart + progressSpan)
   }
 
-  await collect(posA, meshA, sampleA)
-  await collect(posB, meshB, sampleB)
+  await collect(posA, meshA, sampleA, 0, 0.5)
+  await collect(posB, meshB, sampleB, 0.5, 0.5)
+  onProgress?.(1)
   values.sort((a, b) => a - b)
   const count = values.length || 1
   const at = (fraction) => values.length ? values[Math.min(values.length - 1, Math.floor((values.length - 1) * fraction))] : 0
@@ -1530,8 +1575,12 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, active, onPi
   useEffect(() => {
     if (!file?.url) { setObject3D(null); return }
     let cancelled = false
+    setObject3D(null)
     ;(async () => {
       try {
+        // Necháme React nejdřív vykreslit loading overlay, teprve potom klonujeme / načítáme geometrii.
+        await alignmentYield()
+        if (cancelled) return
         let obj
         if (sourceObject) {
           obj = sourceObject.clone(true)
@@ -1608,6 +1657,13 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
   const controlsRef = useRef(null)
   const [target, setTarget] = useState([0, 0, 0])
   const [loadedNonce, setLoadedNonce] = useState(0)
+  const [previewLoading, setPreviewLoading] = useState(!!file)
+
+  useEffect(() => {
+    setPreviewLoading(!!file)
+    setLoadedNonce(0)
+  }, [file?.url])
+
   return (
     <div style={{ position: "relative", minWidth: 0, minHeight: 0, background: "#0C0C0C", overflow: "hidden" }}>
       <div style={{
@@ -1632,8 +1688,9 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
             display: "flex", alignItems: "center", gap: 7, padding: "6px 9px", borderRadius: 9,
             background: "rgba(255,255,255,.07)", border: "1px solid rgba(255,255,255,.10)",
             color: "#ffffff", fontSize: 9, fontWeight: 780, letterSpacing: ".01em",
+            animation: "artheticAlignAttention 1.35s ease-in-out infinite", transformOrigin: "center",
           }}>
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#ffffff", boxShadow: "0 0 0 4px rgba(255,255,255,.08)" }} />
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#ffffff", boxShadow: "0 0 0 4px rgba(255,255,255,.08)", animation: "artheticAlignPulse 1.05s ease-in-out infinite" }} />
             Umístěte bod {nextPointNumber}
           </div>
         )}
@@ -1655,7 +1712,7 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
               points={points}
               active={active}
               onPickPoint={onPickPoint}
-              onLoaded={() => setLoadedNonce((n) => n + 1)}
+              onLoaded={() => { setPreviewLoading(false); setLoadedNonce((n) => n + 1) }}
             />
           )}
         </group>
@@ -1673,6 +1730,22 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
         <TouchTrackballControls ref={controlsRef} target={target} enabled={true} />
         <RightButtonPan setTarget={setTarget} trackballRef={controlsRef} />
       </Canvas>
+      {previewLoading && (
+        <div style={{
+          position: "absolute", inset: 0, zIndex: 7, display: "flex", alignItems: "center", justifyContent: "center",
+          background: "rgba(12,12,12,.72)", backdropFilter: "blur(2px)", pointerEvents: "all",
+          fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+        }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
+            <div style={{
+              width: 28, height: 28, borderRadius: "50%", boxSizing: "border-box",
+              border: "2px solid rgba(255,255,255,.10)", borderTopColor: "#f5f5f5",
+              animation: "artheticAlignSpin .8s linear infinite",
+            }} />
+            <div style={{ color: "#d4d4d4", fontSize: 10, fontWeight: 700 }}>Načítám model…</div>
+          </div>
+        </div>
+      )}
       <div style={{
         position: "absolute", inset: 0, pointerEvents: "none", boxSizing: "border-box",
         border: active ? "1px solid rgba(255,255,255,.30)" : "1px solid rgba(255,255,255,.08)",
@@ -3275,7 +3348,7 @@ export default function ClientPage() {
       setAlignmentMessage("Nejdřív označte odpovídající bod na Moving B.")
       return
     }
-    if (alignmentPointsA.length >= 8) return
+    if (alignmentPointsA.length >= 3) return
     setAlignmentPointsA((previous) => [...previous, point])
     setAlignmentMessage(`Bod ${alignmentPointsA.length + 1}: teď označte stejné místo na Moving B.`)
   }, [alignmentPointsA.length, alignmentPointsB.length])
@@ -3285,11 +3358,11 @@ export default function ClientPage() {
       setAlignmentMessage("Nejdřív označte nový bod na Reference A.")
       return
     }
-    if (alignmentPointsB.length >= 8) return
+    if (alignmentPointsB.length >= 3) return
     const pairNumber = alignmentPointsB.length + 1
     setAlignmentPointsB((previous) => [...previous, point])
     setAlignmentMessage(pairNumber >= 3
-      ? `${pairNumber} párů označeno. Můžete přidat další body nebo spustit Předzarovnání.`
+      ? "Tři korespondenční body jsou připravené. Spusťte Předzarovnat."
       : `Pár ${pairNumber} hotový. Označte bod ${pairNumber + 1} na Reference A.`)
   }, [alignmentPointsA.length, alignmentPointsB.length])
 
@@ -3304,12 +3377,12 @@ export default function ClientPage() {
     setAlignmentStats(null)
   }, [alignmentPointsA.length, alignmentPointsB.length])
 
-  const refreshAlignmentMetrics = useCallback(async (aUrl, bUrl) => {
+  const refreshAlignmentMetrics = useCallback(async (aUrl, bUrl, onProgress = null) => {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
     rootGroupRef.current?.updateMatrixWorld(true)
     meshesRef.current[aUrl]?.updateMatrixWorld(true)
     meshesRef.current[bUrl]?.updateMatrixWorld(true)
-    const stats = await computeAlignmentMetrics(meshesRef.current[aUrl], meshesRef.current[bUrl], 0.25)
+    const stats = await computeAlignmentMetrics(meshesRef.current[aUrl], meshesRef.current[bUrl], 0.25, 8000, onProgress)
     setAlignmentStats(stats)
     return stats
   }, [])
@@ -3386,9 +3459,12 @@ export default function ClientPage() {
         },
       })
       applyModelTransform(bUrl, result.matrix)
-      setAlignmentProgress({ mode: "metrics", stage: 4, stages: 4, iteration: 1, iterations: 1, rms: result.rms, correspondences: result.correspondences })
+      setAlignmentProgress({ mode: "metrics", stage: 4, stages: 4, iteration: 0, iterations: 1, rms: result.rms, correspondences: result.correspondences, percent: 94 })
       setAlignmentMessage("Kontroluji výsledek a počítám metrologii…")
-      const stats = await refreshAlignmentMetrics(aUrl, bUrl)
+      const stats = await refreshAlignmentMetrics(aUrl, bUrl, (fraction) => {
+        setAlignmentProgress({ mode: "metrics", stage: 4, stages: 4, iteration: fraction, iterations: 1, rms: result.rms, correspondences: result.correspondences, percent: 94 + Math.min(1, fraction) * 5.5 })
+      })
+      setAlignmentProgress({ mode: "metrics", stage: 4, stages: 4, iteration: 1, iterations: 1, rms: stats?.rms ?? result.rms, correspondences: result.correspondences, percent: 100 })
       setAlignmentMessage(result.improved
         ? (stats
           ? `Best Fit dokončen · RMS ${stats.rms.toFixed(3)} mm · 95 % ${stats.percentile95.toFixed(3)} mm`
@@ -4930,20 +5006,21 @@ export default function ClientPage() {
   const alignmentEligibleFiles = files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url)))
   const alignmentPair = getAlignmentPair()
   const alignmentPairCount = Math.min(alignmentPointsA.length, alignmentPointsB.length)
-  const alignmentNextSide = alignmentPointsA.length === alignmentPointsB.length ? "A" : "B"
-  const alignmentNextPointNumber = alignmentNextSide === "A" ? alignmentPointsA.length + 1 : alignmentPointsB.length + 1
-  const hasLandmarkSeed = alignmentPairCount >= 3
+  const alignmentPointsComplete = alignmentPairCount >= 3 && alignmentPointsA.length === alignmentPointsB.length
+  const alignmentNextSide = alignmentPointsComplete ? null : (alignmentPointsA.length === alignmentPointsB.length ? "A" : "B")
+  const alignmentNextPointNumber = alignmentPointsComplete ? 3 : (alignmentNextSide === "A" ? alignmentPointsA.length + 1 : alignmentPointsB.length + 1)
 
   const alignmentProgressUi = (() => {
     if (!alignmentBusy) return null
     const progress = alignmentProgress || {}
-    if (progress.mode === "metrics") return { label: "Kontrola výsledku", detail: "Počítám odchylky a metrologické hodnoty", percent: 94 }
-    if (progress.mode === "prepare" || !progress.stage) return { label: "Příprava povrchů", detail: "Vzorkuji geometrii a kontroluji překryv", percent: 7 }
+    if (progress.mode === "metrics") return { label: "Kontrola výsledku", detail: "Počítám odchylky a metrologické hodnoty", percent: Number.isFinite(progress.percent) ? progress.percent : 94 }
+    if (progress.mode === "validation") return { label: "Kontrola výsledku", detail: "Ověřuji, že Best Fit skutečně zlepšil překryv", percent: Number.isFinite(progress.percent) ? progress.percent : 90 }
+    if (progress.mode === "prepare" || !progress.stage) return { label: "Příprava povrchů", detail: "Vzorkuji geometrii a kontroluji překryv", percent: Number.isFinite(progress.percent) ? progress.percent : 3 }
     const stage = Math.max(1, Math.min(3, Number(progress.stage) || 1))
     const iterations = Math.max(1, Number(progress.iterations) || 1)
     const iteration = Math.max(0, Number(progress.iteration) || 0)
     const withinStage = Math.min(1, iteration / iterations)
-    const percent = 10 + (((stage - 1) + withinStage) / 3) * 78
+    const percent = Number.isFinite(progress.percent) ? progress.percent : 10 + (((stage - 1) + withinStage) / 3) * 78
     const labels = {
       1: ["Hrubý Best Fit", "Stabilizuji překryv obou povrchů"],
       2: ["Střední Best Fit", "Zpřesňuji rigidní polohu modelu"],
@@ -4980,7 +5057,8 @@ export default function ClientPage() {
     <>
       <style>{`
         @keyframes artheticAlignSpin { to { transform: rotate(360deg); } }
-        @keyframes artheticAlignPulse { 0%,100% { opacity:.45; transform:scale(.92); } 50% { opacity:1; transform:scale(1); } }
+        @keyframes artheticAlignPulse { 0%,100% { opacity:.55; transform:scale(.9); } 50% { opacity:1; transform:scale(1.12); } }
+        @keyframes artheticAlignAttention { 0%,100% { box-shadow:0 0 0 0 rgba(255,255,255,.04); border-color:rgba(255,255,255,.10); } 50% { box-shadow:0 0 0 5px rgba(255,255,255,.055), 0 0 22px rgba(255,255,255,.08); border-color:rgba(255,255,255,.24); } }
         @keyframes artheticAlignCardIn { from { opacity:0; transform:translate(-50%,-46%) scale(.97); } to { opacity:1; transform:translate(-50%,-50%) scale(1); } }
       `}</style>
 
@@ -5013,13 +5091,6 @@ export default function ClientPage() {
         <div style={{ width: 1, height: 34, background: "rgba(255,255,255,.07)", marginLeft: 2 }} />
 
         <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-          <div style={{
-            height: 34, padding: "0 11px", borderRadius: 10, display: "flex", alignItems: "center", gap: 8,
-            background: "rgba(255,255,255,.055)", border: "1px solid rgba(255,255,255,.09)",
-          }}>
-            <span style={{ width: 7, height: 7, borderRadius: "50%", background: hasLandmarkSeed ? "#86efac" : "#f5f5f5" }} />
-            <span style={{ color: "#d4d4d4", fontSize: 10, fontWeight: 700 }}>{alignmentPairCount} {alignmentPairCount === 1 ? "pár" : alignmentPairCount >= 2 && alignmentPairCount <= 4 ? "páry" : "párů"}</span>
-          </div>
           <button onClick={undoAlignmentPoint} disabled={alignmentBusy || (!alignmentPointsA.length && !alignmentPointsB.length)} style={alignmentButtonStyle("secondary", alignmentBusy || (!alignmentPointsA.length && !alignmentPointsB.length))}>Zpět</button>
           <button onClick={() => { setAlignmentPointsA([]); setAlignmentPointsB([]); setAlignmentStats(null); setAlignmentMessage("Body byly vymazány. Začněte bodem na Reference A.") }} disabled={alignmentBusy} style={alignmentButtonStyle("danger", alignmentBusy)}>Smazat body</button>
         </div>
@@ -5042,8 +5113,8 @@ export default function ClientPage() {
           display: "flex", alignItems: "center", gap: 10, pointerEvents: "none", boxShadow: "0 10px 30px rgba(0,0,0,.20)",
         }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 7, color: "#f1f1f1", whiteSpace: "nowrap" }}>
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: alignmentNextSide === "A" ? "#93c5fd" : "#f9a8d4" }} />
-            Další bod: {alignmentNextSide} · {alignmentNextPointNumber}
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: alignmentPointsComplete ? "#86efac" : (alignmentNextSide === "A" ? "#93c5fd" : "#f9a8d4") }} />
+            {alignmentPointsComplete ? "3 body připraveny" : `Další bod: ${alignmentNextSide} · ${alignmentNextPointNumber}`}
           </span>
           <span style={{ width: 1, height: 14, background: "rgba(255,255,255,.08)" }} />
           <span style={{ opacity: .82, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{alignmentMessage}</span>
@@ -5084,7 +5155,7 @@ export default function ClientPage() {
 
             <div style={{ marginTop: 18, height: 5, borderRadius: 999, background: "rgba(255,255,255,.065)", overflow: "hidden" }}>
               <div style={{
-                height: "100%", width: `${Math.max(3, Math.min(98, alignmentProgressUi.percent))}%`, borderRadius: 999,
+                height: "100%", width: `${Math.max(2, Math.min(100, alignmentProgressUi.percent))}%`, borderRadius: 999,
                 background: "linear-gradient(90deg, rgba(255,255,255,.58), #ffffff)",
                 transition: "width .28s cubic-bezier(.22,.61,.36,1)",
               }} />
@@ -5113,7 +5184,7 @@ export default function ClientPage() {
           color="#60a5fa"
           points={alignmentPointsA}
           active={!alignmentBusy && alignmentNextSide === "A"}
-          nextPointNumber={alignmentPointsA.length + 1}
+          nextPointNumber={Math.min(3, alignmentPointsA.length + 1)}
           onPickPoint={handleAlignmentPickA}
           sceneIntensity={sceneIntensity}
           highlightIntensity={highlightIntensity}
@@ -5127,7 +5198,7 @@ export default function ClientPage() {
           color="#f472b6"
           points={alignmentPointsB}
           active={!alignmentBusy && alignmentNextSide === "B"}
-          nextPointNumber={alignmentPointsB.length + 1}
+          nextPointNumber={Math.min(3, alignmentPointsB.length + 1)}
           onPickPoint={handleAlignmentPickB}
           sceneIntensity={sceneIntensity}
           highlightIntensity={highlightIntensity}
