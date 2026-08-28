@@ -4382,6 +4382,18 @@ export default function ClientPage() {
   const handleComparisonDirectionChange = (direction) => {
     if (direction !== "A_TO_B" && direction !== "B_TO_A") return
     setComparisonDirection(direction)
+
+    // Pokud už je porovnání spočítané, nový referenční model opravdu nastavíme
+    // na 50 % v hlavním opacity state. Posuvník tak přesně odpovídá scéně
+    // a uživatel může hodnotu okamžitě dál ručně měnit.
+    if (hasComputedComparison && comparisonSelection.length === 2) {
+      const referenceUrl = direction === "B_TO_A" ? comparisonSelection[0] : comparisonSelection[1]
+      const referenceIndex = files.findIndex((file) => file.url === referenceUrl)
+      if (referenceIndex >= 0) {
+        setOpacities((previous) => previous.map((value, index) => index === referenceIndex ? 0.5 : value))
+      }
+    }
+
     setPinnedNotes([])
     if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
   }
@@ -4423,6 +4435,15 @@ export default function ClientPage() {
         if (meshA && meshB) {
           const stats = applySurfaceComparison(meshA, meshB, comparisonTolerance)
           setComparisonStats(stats)
+
+          // Reference není jen vizuálně přepsaná na 50 %. Hodnotu zapíšeme
+          // přímo do stejného state, který řídí opacity slider v levém panelu.
+          const referenceUrl = comparisonDirection === "B_TO_A" ? comparisonSelection[0] : comparisonSelection[1]
+          const referenceIndex = files.findIndex((file) => file.url === referenceUrl)
+          if (referenceIndex >= 0) {
+            setOpacities((previous) => previous.map((value, index) => index === referenceIndex ? 0.5 : value))
+          }
+
           setHasComputedComparison(true)
           setShowComparison(true)
           setShowHeatmap(false)
@@ -4846,6 +4867,13 @@ export default function ClientPage() {
           const meshB = meshesRef.current[savedComparisonSelection[1]]
           if (meshA && meshB) {
             setComparisonStats(applySurfaceComparison(meshA, meshB, savedTolerance))
+
+            const referenceUrl = savedComparisonDirection === "B_TO_A" ? savedComparisonSelection[0] : savedComparisonSelection[1]
+            const referenceIndex = files.findIndex((file) => file.url === referenceUrl)
+            if (referenceIndex >= 0) {
+              setOpacities((previous) => previous.map((value, index) => index === referenceIndex ? 0.5 : value))
+            }
+
             setHasComputedComparison(true)
             setShowComparison(pendingViewerState.comparison?.visible !== false)
           }
@@ -6669,18 +6697,52 @@ export default function ClientPage() {
       )}
 
       {/* OVERLAY BĚHEM NAČÍTÁNÍ MODELŮ */}
-      {!allLoaded && files.length > 0 && (
-        <div style={{
-          position: "absolute", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.85)", 
-          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", 
-          color: "white", fontFamily: "sans-serif"
-        }}>
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "shade3dSpin360 1s linear infinite", transformOrigin: "50% 50%", marginBottom: 16 }}>
-            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-          </svg>
-          <div style={{ fontSize: 18, fontWeight: "bold" }}>Načítám modely...</div>
-        </div>
-      )}
+      {!allLoaded && files.length > 0 && (() => {
+        const loadedCount = files.filter((file) => loadedUrls.has(file.url)).length
+        const totalCount = files.length
+        const loadPercent = Math.max(4, Math.min(100, Math.round((loadedCount / Math.max(1, totalCount)) * 100)))
+        return (
+          <div style={{
+            position: "absolute", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.42)",
+            backdropFilter: "blur(2px)", WebkitBackdropFilter: "blur(2px)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color: "white", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
+          }}>
+            <div style={{
+              width: 350, maxWidth: "calc(100vw - 40px)", padding: "20px 20px 18px", borderRadius: 16,
+              background: "rgba(12,12,12,.96)", border: "1px solid rgba(255,255,255,.09)",
+              boxShadow: "0 24px 70px rgba(0,0,0,.52)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)"
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{
+                  width: 34, height: 34, borderRadius: "50%", boxSizing: "border-box",
+                  border: "2px solid rgba(255,255,255,.10)", borderTopColor: "#f3f3f3",
+                  animation: "artheticAnalysisSpin .85s linear infinite", flex: "0 0 auto"
+                }} />
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 790, letterSpacing: "-.01em" }}>Načítám 3D scénu</div>
+                  <div style={{ marginTop: 3, color: "#777", fontSize: 9.5, fontWeight: 610 }}>
+                    Připravuji modely a jejich geometrii · {loadedCount} / {totalCount}
+                  </div>
+                </div>
+                <div style={{ color: "#a3a3a3", fontSize: 10, fontWeight: 760, fontVariantNumeric: "tabular-nums" }}>
+                  {Math.round((loadedCount / Math.max(1, totalCount)) * 100)} %
+                </div>
+              </div>
+              <div style={{ marginTop: 17, height: 4, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.06)" }}>
+                <div style={{
+                  width: `${loadPercent}%`, height: "100%", borderRadius: 999,
+                  background: "linear-gradient(90deg, rgba(255,255,255,.42), rgba(255,255,255,.96))",
+                  boxShadow: "0 0 14px rgba(255,255,255,.12)", transition: "width .28s cubic-bezier(.22,.8,.22,1)"
+                }} />
+              </div>
+              <div style={{ marginTop: 10, color: "#595959", fontSize: 8.5, fontWeight: 620 }}>
+                Viewer se otevře automaticky, jakmile budou všechny modely připravené.
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* OVERLAY BĚHEM VÝPOČTU ANALÝZY */}
       {(isCalculatingHeatmap || isCalculatingComparison) && (
@@ -6830,7 +6892,7 @@ export default function ClientPage() {
                 name={f.rawName || f.name}
                 url={f.url}
                 color={colors[i] ?? "#ffffff"}
-                opacity={showComparison && hasComputedComparison && f.url === comparisonReferenceUrl ? 0.5 : (opacities[i] ?? 1)}
+                opacity={opacities[i] ?? 1}
                 visible={alignmentMode && alignmentModelsSelected
                   ? (f.url === alignmentPair.aUrl || f.url === alignmentPair.bUrl)
                   : (visibles[i] ?? true)}
