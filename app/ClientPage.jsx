@@ -4136,6 +4136,45 @@ export default function ClientPage() {
     if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
   }
 
+  const setHeatmapSelectionSlot = (slot, url) => {
+    setHeatmapSelection((prev) => {
+      const a = prev[0] || ""
+      const b = prev[1] || ""
+      if (slot === 0) {
+        if (!url) return []
+        return b && b !== url ? [url, b] : [url]
+      }
+      if (!a) return prev
+      if (!url) return [a]
+      if (url === a) return prev
+      return [a, url]
+    })
+    setHasComputedHeatmap(false)
+    setShowHeatmap(false)
+    setPinnedNotes([])
+    if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
+  }
+
+  const setComparisonSelectionSlot = (slot, url) => {
+    setComparisonSelection((prev) => {
+      const a = prev[0] || ""
+      const b = prev[1] || ""
+      if (slot === 0) {
+        if (!url) return []
+        return b && b !== url ? [url, b] : [url]
+      }
+      if (!a) return prev
+      if (!url) return [a]
+      if (url === a) return prev
+      return [a, url]
+    })
+    setHasComputedComparison(false)
+    setShowComparison(false)
+    setComparisonStats(null)
+    setPinnedNotes([])
+    if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
+  }
+
   const handleApplyHeatmap = () => {
     if (heatmapSelection.length !== 2) return
     setIsCalculatingHeatmap(true);
@@ -5274,6 +5313,32 @@ export default function ClientPage() {
     </div>
   )
 
+  const analysisEligibleFiles = files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url)))
+  const occlusionModelsReady = heatmapSelection.length === 2
+  const comparisonModelsReady = comparisonSelection.length === 2
+
+  const analysisToolbarButtonStyle = (open = false, disabled = false) => ({
+    display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+    height: 40, padding: "0 14px", width: "100%", boxSizing: "border-box",
+    background: open ? "rgba(255,255,255,.075)" : "rgba(12,12,12,.72)",
+    backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
+    border: open ? "1px solid rgba(255,255,255,.18)" : "1px solid rgba(255,255,255,.10)",
+    borderRadius: 11, color: disabled ? "#666" : "#ededed",
+    cursor: disabled ? "not-allowed" : "pointer", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+    fontWeight: 680, fontSize: 12, letterSpacing: "-.01em",
+    boxShadow: open ? "0 10px 28px rgba(0,0,0,.26)" : "none",
+    transition: "background .16s ease, border-color .16s ease, box-shadow .16s ease, color .16s ease",
+  })
+
+  const analysisStepChipStyle = (active, completed) => ({
+    height: 27, padding: "0 9px", borderRadius: 8,
+    display: "inline-flex", alignItems: "center", gap: 5, boxSizing: "border-box",
+    background: active ? "rgba(34,197,94,.09)" : "rgba(255,255,255,.035)",
+    border: active ? "1px solid rgba(74,222,128,.25)" : "1px solid rgba(255,255,255,.07)",
+    color: active ? "#b7f7ca" : completed ? "#a8d9b5" : "#777",
+    fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: 9, fontWeight: 680, whiteSpace: "nowrap",
+  })
+
   const topBarRight = !isMobile && (
     <div style={{
       position: "absolute",
@@ -5310,187 +5375,199 @@ export default function ClientPage() {
         </button>
       </div>
 
+      <style>{`
+        @keyframes artheticAnalysisMenuIn { from { opacity:0; transform:translateY(-5px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
+        @keyframes artheticAlignMenuIn { from { opacity:0; transform:translateY(-4px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
+        @keyframes artheticAnalysisSpin { to { transform:rotate(360deg); } }
+        @property --artheticAnalysisBeamAngle { syntax:"<angle>"; inherits:false; initial-value:0deg; }
+        @keyframes artheticAnalysisReadyBeam { to { --artheticAnalysisBeamAngle:360deg; } }
+        .artheticAnalysisReadyAction { position:relative; isolation:isolate; overflow:visible; border:1px solid transparent !important; background:transparent !important; }
+        .artheticAnalysisReadyAction::before {
+          content:""; position:absolute; inset:-2px; padding:2px; border-radius:12px; pointer-events:none; z-index:0;
+          background:conic-gradient(from var(--artheticAnalysisBeamAngle), rgba(74,222,128,0) 0deg 287deg, rgba(74,222,128,.06) 302deg, rgba(74,222,128,.46) 318deg, rgba(240,253,244,1) 332deg, rgba(134,239,172,.7) 343deg, rgba(74,222,128,.08) 354deg, rgba(74,222,128,0) 360deg);
+          -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite:xor; mask-composite:exclude;
+          filter:drop-shadow(0 0 2px rgba(134,239,172,.68)) drop-shadow(0 0 6px rgba(34,197,94,.26)); animation:artheticAnalysisReadyBeam 1.9s linear infinite;
+        }
+        .artheticAnalysisReadyAction::after { content:""; position:absolute; inset:1px; border-radius:8px; z-index:1; pointer-events:none; background:rgba(18,42,27,.97); box-shadow:inset 0 0 0 1px rgba(34,197,94,.12); }
+        .artheticAnalysisReadyAction > * { position:relative; z-index:3; }
+        .artheticAnalysisRange { accent-color:#4ade80; cursor:pointer; }
+      `}</style>
+
       <div style={{ width: dicomLayoutActive ? 120 : 270 }}>
-        <button 
-          onClick={() => { setHeatmapMenuOpen(prev => !prev); setComparisonMenuOpen(false) }}
-          style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-            background: heatmapMenuOpen ? "rgba(239,68,68,.8)" : "rgba(0,0,0,.25)",
-            backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)",
-            borderRadius: 10, padding: "10px 14px", color: "white", cursor: "pointer",
-            fontWeight: "bold", fontSize: 14, transition: "background 0.2s", width: "100%"
-          }}
-          title="Změřit mezeru a průnik mezi horním a dolním modelem"
+        <button
+          onClick={() => { setHeatmapMenuOpen((prev) => !prev); setComparisonMenuOpen(false) }}
+          style={analysisToolbarButtonStyle(heatmapMenuOpen, analysisEligibleFiles.length < 2)}
+          disabled={analysisEligibleFiles.length < 2}
+          title="Změřit mezeru a průnik mezi dvěma modely"
         >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M4 8.5c3.2-2.5 6.4-3.7 9.5-3.2 2.2.3 4.3 1.5 6.5 3.2"/><path d="M4 15.5c3.2 2.5 6.4 3.7 9.5 3.2 2.2-.3 4.3-1.5 6.5-3.2"/><path d="M7 11.7h10"/><path d="M9.2 9.8L7 12l2.2 2.2"/><path d="M14.8 9.8L17 12l-2.2 2.2"/>
+          </svg>
           Okluze
         </button>
 
-        <div style={{
-          width: dicomLayoutActive ? 266 : "auto",
-          maxHeight: heatmapMenuOpen ? "500px" : "0px",
-          opacity: heatmapMenuOpen ? 1 : 0,
-          overflow: "hidden",
-          transition: "max-height 0.4s ease-in-out, opacity 0.3s ease",
-          pointerEvents: heatmapMenuOpen ? "auto" : "none"
-        }}>
+        {heatmapMenuOpen && (
           <div style={{
-            marginTop: 8,
-            background: "rgba(0,0,0,.85)", backdropFilter: "blur(8px)",
-            border: "1px solid rgba(255,255,255,.2)", borderRadius: 10,
-            padding: 12, width: 240, color: "white", boxShadow: "0 10px 30px rgba(0,0,0,0.5)"
+            marginTop: 8, width: dicomLayoutActive ? 320 : 310, padding: 14, boxSizing: "border-box",
+            borderRadius: 15, border: "1px solid rgba(255,255,255,.095)", background: "rgba(12,12,12,.96)",
+            boxShadow: "0 24px 64px rgba(0,0,0,.42)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
+            color: "#f2f2f2", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+            animation: "artheticAnalysisMenuIn .18s cubic-bezier(.22,.61,.36,1) both",
           }}>
-            <div style={{ marginBottom: 10, fontSize: 13, fontWeight: "bold", color: "#ccc" }}>
-              Směr měření okluze
+            <div style={{ display: "flex", alignItems: "baseline", gap: 0 }}>
+              <span style={{ fontSize: 14, fontWeight: 850 }}>ART</span><span style={{ fontSize: 14, fontWeight: 300 }}>HETIC</span>
+              <span style={{ marginLeft: 6, fontSize: 14, fontWeight: 300, color: "#d7d7d7" }}>Okluze</span>
             </div>
-            <div style={{ display: "grid", gap: 5, marginBottom: 12, fontSize: 11 }}>
-              <div style={{ padding: "6px 8px", borderRadius: 6, background: "rgba(251,191,36,.12)", border: "1px solid rgba(251,191,36,.28)" }}>
-                <b style={{ color: "#fbbf24" }}>1 · Barevná mapa na:</b>{" "}
-                {heatmapSelection[0] ? stripExt(files.find((f) => f.url === heatmapSelection[0])?.name || "") : "— vyberte model"}
+            <div style={{ marginTop: 4, color: "#666", fontSize: 9.5, fontWeight: 590 }}>Průnik a mezera mezi dvěma povrchy · mm</div>
+
+            <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={analysisStepChipStyle(!occlusionModelsReady, occlusionModelsReady)}>
+                {occlusionModelsReady && <span style={{ color: "#86efac" }}>✓</span>}<span>Vybrat modely</span>
               </div>
-              <div style={{ padding: "6px 8px", borderRadius: 6, background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.14)" }}>
-                <b>2 · Vzdálenost vůči:</b>{" "}
-                {heatmapSelection[1] ? stripExt(files.find((f) => f.url === heatmapSelection[1])?.name || "") : "— vyberte model"}
+              <div style={{ width: 13, height: 1, background: "rgba(255,255,255,.07)" }} />
+              <div style={analysisStepChipStyle(occlusionModelsReady && !hasComputedHeatmap, hasComputedHeatmap)}>
+                {hasComputedHeatmap && <span style={{ color: "#86efac" }}>✓</span>}<span>Vypočítat</span>
               </div>
-            </div>
-            
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 180, overflowY: "auto", marginBottom: 16 }}>
-              {files.map((f) => {
-                const selectionOrder = heatmapSelection.indexOf(f.url)
-                return (
-                <label key={f.url} style={{ display: "flex", alignItems: "center", gap: 8, cursor: heatmapSelection.length >= 2 && !heatmapSelection.includes(f.url) ? "not-allowed" : "pointer", fontSize: 13, opacity: heatmapSelection.length >= 2 && !heatmapSelection.includes(f.url) ? 0.5 : 1 }}>
-                  <input 
-                    type="checkbox" 
-                    checked={heatmapSelection.includes(f.url)}
-                    onChange={() => toggleHeatmapModel(f.url)}
-                    disabled={heatmapSelection.length >= 2 && !heatmapSelection.includes(f.url)}
-                    style={{ width: 16, height: 16, cursor: "inherit" }}
-                  />
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {stripExt(f.name)}
-                  </span>
-                  {selectionOrder >= 0 && <b style={{ marginLeft: "auto", color: "#fbbf24" }}>{selectionOrder + 1}</b>}
-                </label>
-                )
-              })}
             </div>
 
-            <button 
+            <div style={{ height: 1, background: "rgba(255,255,255,.07)", margin: "13px 0" }} />
+
+            <div style={{ display: "grid", gap: 11 }}>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                  <span style={{ color: "#bdbdbd", fontSize: 9.5, fontWeight: 700 }}>A · Barevná mapa</span>
+                  <span style={{ color: "#5d5d5d", fontSize: 8.5 }}>zobrazí průnik / mezeru</span>
+                </div>
+                <AlignmentModelDropdown badge="A" value={heatmapSelection[0] || ""} files={analysisEligibleFiles} otherValue={heatmapSelection[1] || ""} onChange={(url) => setHeatmapSelectionSlot(0, url)} />
+              </div>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                  <span style={{ color: "#bdbdbd", fontSize: 9.5, fontWeight: 700 }}>B · Referenční model</span>
+                  <span style={{ color: "#5d5d5d", fontSize: 8.5 }}>vzdálenost vůči B</span>
+                </div>
+                <AlignmentModelDropdown badge="B" value={heatmapSelection[1] || ""} files={analysisEligibleFiles} otherValue={heatmapSelection[0] || ""} disabled={!heatmapSelection[0]} onChange={(url) => setHeatmapSelectionSlot(1, url)} />
+              </div>
+            </div>
+
+            <button
               onClick={handleApplyHeatmap}
-              disabled={heatmapSelection.length !== 2 || isCalculatingHeatmap}
+              disabled={!occlusionModelsReady || isCalculatingHeatmap}
+              className={occlusionModelsReady && !hasComputedHeatmap && !isCalculatingHeatmap ? "artheticAnalysisReadyAction" : undefined}
               style={{
-                width: "100%", padding: "10px 0", borderRadius: 6,
-                background: heatmapSelection.length === 2 && !isCalculatingHeatmap ? "#fbbf24" : "rgba(255,255,255,0.1)",
-                color: heatmapSelection.length === 2 && !isCalculatingHeatmap ? "black" : "#888",
-                fontWeight: "bold", border: "none", cursor: heatmapSelection.length === 2 && !isCalculatingHeatmap ? "pointer" : "not-allowed",
-                transition: "background 0.2s"
+                marginTop: 14, width: "100%", height: 36, borderRadius: 10, boxSizing: "border-box",
+                border: "1px solid rgba(255,255,255,.09)",
+                background: hasComputedHeatmap ? "rgba(255,255,255,.055)" : occlusionModelsReady ? "rgba(18,42,27,.97)" : "rgba(255,255,255,.03)",
+                color: !occlusionModelsReady ? "#555" : hasComputedHeatmap ? "#c9c9c9" : "#dffbea",
+                cursor: !occlusionModelsReady || isCalculatingHeatmap ? "not-allowed" : "pointer",
+                fontFamily: "inherit", fontSize: 10, fontWeight: 720,
               }}
-            >
-              Vypočítat
-            </button>
+            ><span>{hasComputedHeatmap ? "Přepočítat okluzi" : "Vypočítat okluzi"}</span></button>
 
             {hasComputedHeatmap && (
-              <div style={{ marginTop: 12, borderTop: "1px solid rgba(255,255,255,.2)", paddingTop: 12 }}>
-                <Switch checked={showHeatmap} onChange={(checked) => { setShowHeatmap(checked); if (checked) setShowComparison(false) }} label="Zobrazit mapu okluze" />
-                <div style={{ fontSize: 10, color: "#888", marginTop: 8 }}>
-                  Záporná hodnota = průnik. Dvojklikem připnete hodnotu.
+              <div style={{ marginTop: 13, padding: 11, borderRadius: 11, background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.065)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 10 }}>
+                  <span style={{ width: 16, height: 16, borderRadius: "50%", display: "grid", placeItems: "center", color: "#86efac", background: "rgba(34,197,94,.1)", border: "1px solid rgba(74,222,128,.2)", fontSize: 10 }}>✓</span>
+                  <span style={{ fontSize: 10, fontWeight: 720, color: "#d8d8d8" }}>Výpočet dokončen</span>
                 </div>
+                <Switch checked={showHeatmap} onChange={(checked) => { setShowHeatmap(checked); if (checked) setShowComparison(false) }} label="Zobrazit mapu okluze" />
+                <div style={{ marginTop: 8, color: "#666", fontSize: 8.8, lineHeight: 1.45 }}>Záporná hodnota = průnik. Dvojklikem připnete hodnotu do scény.</div>
               </div>
             )}
           </div>
-        </div>
+        )}
       </div>
 
       <div style={{ width: dicomLayoutActive ? 120 : 270 }}>
         <button
-          onClick={() => { setComparisonMenuOpen(prev => !prev); setHeatmapMenuOpen(false) }}
-          style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-            background: comparisonMenuOpen ? "rgba(37,99,235,.85)" : "rgba(0,0,0,.25)",
-            backdropFilter: "blur(3px)", border: "1px solid rgba(255,255,255,.15)",
-            borderRadius: 10, padding: "10px 14px", color: "white", cursor: "pointer",
-            fontWeight: "bold", fontSize: 14, transition: "background 0.2s", width: "100%"
-          }}
+          onClick={() => { setComparisonMenuOpen((prev) => !prev); setHeatmapMenuOpen(false) }}
+          style={analysisToolbarButtonStyle(comparisonMenuOpen, analysisEligibleFiles.length < 2)}
+          disabled={analysisEligibleFiles.length < 2}
           title="Oboustranně porovnat podobnost povrchů dvou modelů"
         >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M5 7h9"/><path d="M10.5 3.5L14 7l-3.5 3.5"/><path d="M19 17h-9"/><path d="M13.5 13.5L10 17l3.5 3.5"/>
+          </svg>
           Porovnání
         </button>
 
-        <div style={{
-          width: dicomLayoutActive ? 270 : "auto",
-          maxHeight: comparisonMenuOpen ? "720px" : "0px",
-          opacity: comparisonMenuOpen ? 1 : 0,
-          overflow: "hidden",
-          transition: "max-height 0.4s ease-in-out, opacity 0.3s ease",
-          pointerEvents: comparisonMenuOpen ? "auto" : "none"
-        }}>
+        {comparisonMenuOpen && (
           <div style={{
-            marginTop: 8, background: "rgba(0,0,0,.88)", backdropFilter: "blur(8px)",
-            border: "1px solid rgba(255,255,255,.2)", borderRadius: 10,
-            padding: 12, width: 270, boxSizing: "border-box", color: "white", boxShadow: "0 10px 30px rgba(0,0,0,0.5)"
+            marginTop: 8, width: dicomLayoutActive ? 330 : 320, padding: 14, boxSizing: "border-box",
+            borderRadius: 15, border: "1px solid rgba(255,255,255,.095)", background: "rgba(12,12,12,.96)",
+            boxShadow: "0 24px 64px rgba(0,0,0,.42)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
+            color: "#f2f2f2", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+            animation: "artheticAnalysisMenuIn .18s cubic-bezier(.22,.61,.36,1) both",
           }}>
-            <div style={{ marginBottom: 9, fontSize: 13, fontWeight: "bold", color: "#ccc" }}>
-              Porovnávaná dvojice
+            <div style={{ display: "flex", alignItems: "baseline", gap: 0 }}>
+              <span style={{ fontSize: 14, fontWeight: 850 }}>ART</span><span style={{ fontSize: 14, fontWeight: 300 }}>HETIC</span>
+              <span style={{ marginLeft: 6, fontSize: 14, fontWeight: 300, color: "#d7d7d7" }}>Porovnání</span>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5, marginBottom: 11, fontSize: 11 }}>
-              <div style={{ padding: "6px 8px", borderRadius: 6, background: "rgba(37,99,235,.14)", border: "1px solid rgba(96,165,250,.3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                <b style={{ color: "#60a5fa" }}>A:</b>{" "}{comparisonSelection[0] ? stripExt(files.find((f) => f.url === comparisonSelection[0])?.name || "") : "—"}
+            <div style={{ marginTop: 4, color: "#666", fontSize: 9.5, fontWeight: 590 }}>Oboustranná povrchová odchylka · mm</div>
+
+            <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 6 }}>
+              <div style={analysisStepChipStyle(!comparisonModelsReady, comparisonModelsReady)}>
+                {comparisonModelsReady && <span style={{ color: "#86efac" }}>✓</span>}<span>Vybrat modely</span>
               </div>
-              <div style={{ padding: "6px 8px", borderRadius: 6, background: "rgba(37,99,235,.14)", border: "1px solid rgba(96,165,250,.3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                <b style={{ color: "#60a5fa" }}>B:</b>{" "}{comparisonSelection[1] ? stripExt(files.find((f) => f.url === comparisonSelection[1])?.name || "") : "—"}
+              <div style={{ width: 13, height: 1, background: "rgba(255,255,255,.07)" }} />
+              <div style={analysisStepChipStyle(comparisonModelsReady && !hasComputedComparison, hasComputedComparison)}>
+                {hasComputedComparison && <span style={{ color: "#86efac" }}>✓</span>}<span>Vypočítat</span>
               </div>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 160, overflowY: "auto", marginBottom: 14 }}>
-              {files.map((f) => {
-                const selectionOrder = comparisonSelection.indexOf(f.url)
-                return (
-                <label key={f.url} style={{ display: "flex", alignItems: "center", gap: 8, cursor: comparisonSelection.length >= 2 && !comparisonSelection.includes(f.url) ? "not-allowed" : "pointer", fontSize: 13, opacity: comparisonSelection.length >= 2 && !comparisonSelection.includes(f.url) ? 0.5 : 1 }}>
-                  <input
-                    type="checkbox"
-                    checked={comparisonSelection.includes(f.url)}
-                    onChange={() => toggleComparisonModel(f.url)}
-                    disabled={comparisonSelection.length >= 2 && !comparisonSelection.includes(f.url)}
-                    style={{ width: 16, height: 16, cursor: "inherit" }}
-                  />
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stripExt(f.name)}</span>
-                  {selectionOrder >= 0 && <b style={{ marginLeft: "auto", color: "#60a5fa" }}>{selectionOrder === 0 ? "A" : "B"}</b>}
-                </label>
-                )
-              })}
             </div>
 
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, fontSize: 11, color: "#bbb" }}>
-              <span>Tolerance shody</span><b>{comparisonTolerance.toFixed(2)} mm</b>
+            <div style={{ height: 1, background: "rgba(255,255,255,.07)", margin: "13px 0" }} />
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <div>
+                <div style={{ marginBottom: 6, color: "#bdbdbd", fontSize: 9.5, fontWeight: 700 }}>A · Model</div>
+                <AlignmentModelDropdown badge="A" value={comparisonSelection[0] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[1] || ""} onChange={(url) => setComparisonSelectionSlot(0, url)} />
+              </div>
+              <div>
+                <div style={{ marginBottom: 6, color: "#bdbdbd", fontSize: 9.5, fontWeight: 700 }}>B · Model</div>
+                <AlignmentModelDropdown badge="B" value={comparisonSelection[1] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0]} onChange={(url) => setComparisonSelectionSlot(1, url)} />
+              </div>
             </div>
-            <input type="range" min={0.05} max={1} step={0.05} value={comparisonTolerance} onChange={(e) => { setComparisonTolerance(Number(e.target.value)); setHasComputedComparison(false); setShowComparison(false) }} style={{ width: "100%", marginBottom: 12 }} />
+
+            <div style={{ marginTop: 13, padding: "10px 11px", borderRadius: 11, background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.065)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
+                <span style={{ color: "#8a8a8a", fontSize: 9.3, fontWeight: 650 }}>Tolerance shody</span>
+                <span style={{ color: "#d7d7d7", fontSize: 9.5, fontWeight: 730, fontVariantNumeric: "tabular-nums" }}>{comparisonTolerance.toFixed(2)} mm</span>
+              </div>
+              <input className="artheticAnalysisRange" type="range" min={0.05} max={1} step={0.05} value={comparisonTolerance} onChange={(e) => { setComparisonTolerance(Number(e.target.value)); setHasComputedComparison(false); setShowComparison(false) }} style={{ width: "100%", margin: 0 }} />
+            </div>
 
             <button
               onClick={handleApplyComparison}
-              disabled={comparisonSelection.length !== 2 || isCalculatingComparison}
+              disabled={!comparisonModelsReady || isCalculatingComparison}
+              className={comparisonModelsReady && !hasComputedComparison && !isCalculatingComparison ? "artheticAnalysisReadyAction" : undefined}
               style={{
-                width: "100%", padding: "10px 0", borderRadius: 6,
-                background: comparisonSelection.length === 2 && !isCalculatingComparison ? "#60a5fa" : "rgba(255,255,255,0.1)",
-                color: comparisonSelection.length === 2 && !isCalculatingComparison ? "#07111f" : "#888",
-                fontWeight: "bold", border: "none", cursor: comparisonSelection.length === 2 && !isCalculatingComparison ? "pointer" : "not-allowed"
+                marginTop: 14, width: "100%", height: 36, borderRadius: 10, boxSizing: "border-box",
+                border: "1px solid rgba(255,255,255,.09)",
+                background: hasComputedComparison ? "rgba(255,255,255,.055)" : comparisonModelsReady ? "rgba(18,42,27,.97)" : "rgba(255,255,255,.03)",
+                color: !comparisonModelsReady ? "#555" : hasComputedComparison ? "#c9c9c9" : "#dffbea",
+                cursor: !comparisonModelsReady || isCalculatingComparison ? "not-allowed" : "pointer",
+                fontFamily: "inherit", fontSize: 10, fontWeight: 720,
               }}
-            >Vypočítat podobnost</button>
+            ><span>{hasComputedComparison ? "Přepočítat porovnání" : "Vypočítat porovnání"}</span></button>
 
             {hasComputedComparison && comparisonStats && (
-              <div style={{ marginTop: 12, borderTop: "1px solid rgba(255,255,255,.2)", paddingTop: 12 }}>
+              <div style={{ marginTop: 13, padding: 11, borderRadius: 11, background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.065)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 10 }}>
+                  <span style={{ width: 16, height: 16, borderRadius: "50%", display: "grid", placeItems: "center", color: "#86efac", background: "rgba(34,197,94,.1)", border: "1px solid rgba(74,222,128,.2)", fontSize: 10 }}>✓</span>
+                  <span style={{ fontSize: 10, fontWeight: 720, color: "#d8d8d8" }}>Výpočet dokončen</span>
+                </div>
                 <Switch checked={showComparison} onChange={(checked) => { setShowComparison(checked); if (checked) setShowHeatmap(false) }} label="Zobrazit mapu odchylek" />
-                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "5px 12px", marginTop: 12, fontSize: 11 }}>
-                  <span>Průměrná odchylka</span><b>{comparisonStats.mean.toFixed(3)} mm</b>
-                  <span>RMS</span><b>{comparisonStats.rms.toFixed(3)} mm</b>
-                  <span>95. percentil</span><b>{comparisonStats.percentile95.toFixed(3)} mm</b>
-                  <span>Maximum</span><b>{comparisonStats.max.toFixed(3)} mm</b>
-                  <span>V toleranci</span><b>{comparisonStats.withinTolerance.toFixed(1)} %</b>
+                <div style={{ marginTop: 11, display: "grid", gridTemplateColumns: "1fr auto", gap: "5px 12px", color: "#8b8b8b", fontSize: 9 }}>
+                  <span>Průměrná odchylka</span><b style={{ color: "#d4d4d4" }}>{comparisonStats.mean.toFixed(3)} mm</b>
+                  <span>RMS</span><b style={{ color: "#d4d4d4" }}>{comparisonStats.rms.toFixed(3)} mm</b>
+                  <span>95. percentil</span><b style={{ color: "#d4d4d4" }}>{comparisonStats.percentile95.toFixed(3)} mm</b>
+                  <span>Maximum</span><b style={{ color: "#d4d4d4" }}>{comparisonStats.max.toFixed(3)} mm</b>
+                  <span>V toleranci</span><b style={{ color: "#a7e6b8" }}>{comparisonStats.withinTolerance.toFixed(1)} %</b>
                 </div>
-                <div style={{ fontSize: 10, color: "#888", marginTop: 9, lineHeight: 1.35 }}>
-                  Oboustranná povrchová odchylka v aktuální poloze modelů.
-                </div>
+                <div style={{ marginTop: 9, color: "#626262", fontSize: 8.7, lineHeight: 1.45 }}>Oboustranná povrchová odchylka v aktuální poloze modelů.</div>
               </div>
             )}
           </div>
-        </div>
+        )}
       </div>
 
       <div style={{ width: dicomLayoutActive ? 120 : 270 }}>
@@ -6177,22 +6254,37 @@ export default function ClientPage() {
       {/* OVERLAY BĚHEM VÝPOČTU ANALÝZY */}
       {(isCalculatingHeatmap || isCalculatingComparison) && (
         <div style={{
-          position: "absolute", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.7)", 
-          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", 
-          color: "white", fontFamily: "sans-serif"
+          position: "absolute", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.26)", backdropFilter: "blur(1.5px)", WebkitBackdropFilter: "blur(1.5px)",
+          display: "flex", alignItems: "center", justifyContent: "center", color: "white",
+          fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
         }}>
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "shade3dSpin360 1s linear infinite", transformOrigin: "50% 50%", marginBottom: 16 }}>
-            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-          </svg>
-          <div style={{ fontSize: 18, fontWeight: "bold" }}>
-            {restoringAnalysisMode === "comparison"
-              ? "Načítám uložené porovnání..."
-              : restoringAnalysisMode === "occlusion"
-                ? "Načítám uloženou okluzi..."
-                : isCalculatingComparison
-                  ? "Porovnávám povrchy..."
-                  : "Vypočítávám mapu okluze..."}
+          <div style={{
+            width: 330, maxWidth: "calc(100vw - 40px)", padding: "20px 20px 18px", borderRadius: 16,
+            background: "rgba(12,12,12,.95)", border: "1px solid rgba(255,255,255,.09)",
+            boxShadow: "0 24px 70px rgba(0,0,0,.48)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 34, height: 34, borderRadius: "50%", boxSizing: "border-box", border: "2px solid rgba(255,255,255,.10)", borderTopColor: "#f3f3f3", animation: "artheticAnalysisSpin .85s linear infinite", flex: "0 0 auto" }} />
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 790, letterSpacing: "-.01em" }}>
+                  {restoringAnalysisMode === "comparison"
+                    ? "Načítám porovnání"
+                    : restoringAnalysisMode === "occlusion"
+                      ? "Načítám okluzi"
+                      : isCalculatingComparison
+                        ? "Porovnávám povrchy"
+                        : "Vypočítávám okluzi"}
+                </div>
+                <div style={{ marginTop: 3, color: "#777", fontSize: 9.5, fontWeight: 610 }}>
+                  {isCalculatingComparison ? "Počítám oboustranné vzdálenosti mezi povrchy." : "Počítám průnik a mezeru vůči referenčnímu modelu."}
+                </div>
+              </div>
+            </div>
+            <div style={{ marginTop: 17, height: 4, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.06)" }}>
+              <div style={{ width: "38%", height: "100%", borderRadius: 999, background: "linear-gradient(90deg, rgba(255,255,255,.22), rgba(255,255,255,.92), rgba(255,255,255,.22))", animation: "artheticAnalysisLoadBar 1.25s ease-in-out infinite alternate" }} />
+            </div>
           </div>
+          <style>{`@keyframes artheticAnalysisLoadBar { from { transform:translateX(-10%); } to { transform:translateX(175%); } }`}</style>
         </div>
       )}
 
@@ -6213,20 +6305,18 @@ export default function ClientPage() {
 
       {showHeatmap && hasComputedHeatmap && (
         <div style={{
-          position: "absolute", top: alignmentMode ? 106 : 20, left: "50%", transform: "translateX(-50%)",
-          zIndex: 100, background: "rgba(0,0,0,0.65)", padding: "12px 24px",
-          borderRadius: 12, border: "1px solid rgba(255,255,255,0.2)",
-          color: "white", fontFamily: "sans-serif", fontSize: 12,
-          display: "flex", flexDirection: "column", alignItems: "center", gap: 8,
-          backdropFilter: "blur(6px)", boxShadow: "0 4px 12px rgba(0,0,0,0.5)"
+          position: "absolute", top: alignmentMode ? 106 : 20, left: "50%", transform: "translateX(-50%)", zIndex: 100,
+          minWidth: 330, padding: "11px 14px 10px", borderRadius: 13,
+          background: "rgba(12,12,12,.88)", border: "1px solid rgba(255,255,255,.09)",
+          color: "#ededed", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+          backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)", boxShadow: "0 16px 42px rgba(0,0,0,.3)"
         }}>
-          <span style={{ fontWeight: "bold", fontSize: 14 }}>Okluze – průnik a mezera (mm)</span>
-          <div style={{
-            width: 300, height: 12, borderRadius: 6,
-            background: "linear-gradient(to right, #7e22ce 0%, #ef4444 25%, #facc15 37.5%, #22c55e 62.5%, #ffffff 100%)",
-            boxShadow: "inset 0 1px 3px rgba(0,0,0,0.4)"
-          }} />
-          <div style={{ display: "flex", justifyContent: "space-between", width: 300, fontSize: 11, fontWeight: "bold", opacity: 0.8 }}>
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16, marginBottom: 8 }}>
+            <span style={{ fontWeight: 720, fontSize: 10.5 }}>Okluze</span>
+            <span style={{ color: "#696969", fontWeight: 600, fontSize: 8.5 }}>průnik · mezera · mm</span>
+          </div>
+          <div style={{ height: 7, borderRadius: 999, background: "linear-gradient(to right, #7e22ce 0%, #ef4444 25%, #facc15 37.5%, #22c55e 62.5%, #ffffff 100%)", boxShadow: "inset 0 1px 2px rgba(0,0,0,.35)" }} />
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5, color: "#777", fontSize: 8, fontWeight: 650, fontVariantNumeric: "tabular-nums" }}>
             <span>-1.0−</span><span>-0.5</span><span>0</span><span>1.0</span><span>2.0+</span>
           </div>
         </div>
@@ -6260,16 +6350,18 @@ export default function ClientPage() {
 
       {showComparison && hasComputedComparison && (
         <div style={{
-          position: "absolute", top: alignmentMode ? 106 : 20, left: "50%", transform: "translateX(-50%)",
-          zIndex: 100, background: "rgba(0,0,0,0.65)", padding: "12px 24px",
-          borderRadius: 12, border: "1px solid rgba(255,255,255,0.2)",
-          color: "white", fontFamily: "sans-serif", fontSize: 12,
-          display: "flex", flexDirection: "column", alignItems: "center", gap: 8,
-          backdropFilter: "blur(6px)", boxShadow: "0 4px 12px rgba(0,0,0,0.5)"
+          position: "absolute", top: alignmentMode ? 106 : 20, left: "50%", transform: "translateX(-50%)", zIndex: 100,
+          minWidth: 330, padding: "11px 14px 10px", borderRadius: 13,
+          background: "rgba(12,12,12,.88)", border: "1px solid rgba(255,255,255,.09)",
+          color: "#ededed", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+          backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)", boxShadow: "0 16px 42px rgba(0,0,0,.3)"
         }}>
-          <span style={{ fontWeight: "bold", fontSize: 14 }}>Porovnání povrchů – absolutní odchylka (mm)</span>
-          <div style={{ width: 300, height: 12, borderRadius: 6, background: "linear-gradient(to right, #2563eb 0%, #22c55e 25%, #facc15 50%, #ef4444 75%, #a21caf 100%)" }} />
-          <div style={{ display: "flex", justifyContent: "space-between", width: 300, fontSize: 11, fontWeight: "bold", opacity: 0.8 }}>
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16, marginBottom: 8 }}>
+            <span style={{ fontWeight: 720, fontSize: 10.5 }}>Porovnání povrchů</span>
+            <span style={{ color: "#696969", fontWeight: 600, fontSize: 8.5 }}>absolutní odchylka · mm</span>
+          </div>
+          <div style={{ height: 7, borderRadius: 999, background: "linear-gradient(to right, #2563eb 0%, #22c55e 25%, #facc15 50%, #ef4444 75%, #a21caf 100%)" }} />
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5, color: "#777", fontSize: 8, fontWeight: 650, fontVariantNumeric: "tabular-nums" }}>
             <span>0</span><span>{comparisonTolerance.toFixed(2)}</span><span>{(comparisonTolerance * 2).toFixed(2)}</span><span>{(comparisonTolerance * 4).toFixed(2)}</span><span>více</span>
           </div>
         </div>
