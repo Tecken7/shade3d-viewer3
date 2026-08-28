@@ -3898,19 +3898,20 @@ export default function ClientPage() {
 
   const clearAlignmentPointsForSide = useCallback((side) => {
     if (alignmentBusy) return
-    const { bUrl } = getAlignmentPair()
-    if (bUrl) applyModelTransform(bUrl, IDENTITY_MATRIX_ARRAY)
+    const pair = getAlignmentPair()
+    const modelsSelected = !!pair.aUrl && !!pair.bUrl
+    if (pair.bUrl) applyModelTransform(pair.bUrl, IDENTITY_MATRIX_ARRAY)
     if (side === "A") setAlignmentPointsA([])
     else setAlignmentPointsB([])
     setAlignmentStats(null)
     setAlignmentProgress(null)
     setAlignmentPrealignMatrix(null)
     setAlignmentWorkflowStage("points")
-    setAlignmentStep(alignmentModelsSelected ? "points" : "models")
+    setAlignmentStep(modelsSelected ? "points" : "models")
     setShowComparison(false)
     setShowHeatmap(false)
     setAlignmentMessage(`Body v okně ${side} byly vymazány. Doplňte je znovu.`)
-  }, [alignmentBusy, getAlignmentPair, applyModelTransform, alignmentModelsSelected])
+  }, [alignmentBusy, getAlignmentPair, applyModelTransform])
 
   const refreshAlignmentMetrics = useCallback(async (aUrl, bUrl, onProgress = null) => {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
