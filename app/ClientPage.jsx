@@ -1174,7 +1174,6 @@ async function robustPointToPlaneICP({
 
   const pParent = new THREE.Vector3()
   const pWorld = new THREE.Vector3()
-  const qTargetRoot = new THREE.Vector3()
   const qParent = new THREE.Vector3()
   const nParent = new THREE.Vector3()
   const delta = new THREE.Vector3()
@@ -1220,7 +1219,6 @@ async function robustPointToPlaneICP({
       pWorld.copy(pParent).applyMatrix4(parentWorld)
       const hit = query(pWorld)
       if (Number.isFinite(hit.distance) && hit.distance <= maxDistance) {
-        qTargetRoot.copy(hit.pointWorld).applyMatrix4(targetRootInverse)
         qParent.copy(hit.pointWorld).applyMatrix4(parentWorldInverse)
         nParent.copy(hit.normalWorld).applyMatrix3(worldNormalToParent).normalize()
         result.push({
