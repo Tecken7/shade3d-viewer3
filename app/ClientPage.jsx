@@ -5758,6 +5758,22 @@ export default function ClientPage() {
           72%  { opacity:.16; transform:scale(.55) translateY(-4px); }
           100% { offset-distance:100%; opacity:0; transform:scale(.35) translateY(-6px); }
         }
+        @keyframes artheticAlignPostFitReveal {
+          0% { opacity:0; transform:translateY(8px) scale(.94); filter:blur(5px); }
+          58% { opacity:1; transform:translateY(-1px) scale(1.018); filter:blur(0); }
+          78% { transform:translateY(.5px) scale(.995); }
+          100% { opacity:1; transform:translateY(0) scale(1); filter:blur(0); }
+        }
+        .artheticAlignPostFitAction {
+          opacity:0;
+          animation:artheticAlignPostFitReveal .52s cubic-bezier(.2,.85,.25,1) forwards;
+          will-change:transform, opacity, filter;
+        }
+        .artheticAlignPostFitAction:hover:not(:disabled) {
+          transform:translateY(-1px) !important;
+          background:rgba(255,255,255,.08) !important;
+          border-color:rgba(255,255,255,.15) !important;
+        }
         .artheticAlignReadyAction {
           position:relative;
           isolation:isolate;
@@ -5896,9 +5912,29 @@ export default function ClientPage() {
             {alignmentWorkflowStage === "bestfit" && !alignmentBusy && (
               <>
                 <div style={{ width: 18, height: 1, background: "rgba(255,255,255,.08)", flex: "0 0 auto" }} />
-                <button onClick={showAlignmentDeviation} disabled={!alignmentStats} style={{ ...alignmentButtonStyle("secondary", !alignmentStats), height: 32, fontSize: 10, padding: "0 11px" }}>Odchylka</button>
-                <button onClick={resetAlignmentTransform} style={{ ...alignmentButtonStyle("danger", false), height: 32, fontSize: 10, padding: "0 11px" }}>Reset polohy</button>
-                <button onClick={() => { setAlignmentMode(false); setAlignmentMessage("") }} style={{ ...alignmentButtonStyle("primary", false), height: 32, fontSize: 10, padding: "0 12px" }}>Hotovo</button>
+                {[
+                  { label: "Odchylka", onClick: showAlignmentDeviation, disabled: !alignmentStats, delay: ".08s" },
+                  { label: "Reset polohy", onClick: resetAlignmentTransform, disabled: false, delay: ".23s" },
+                  { label: "Hotovo", onClick: () => { setAlignmentMode(false); setAlignmentMessage("") }, disabled: false, delay: ".38s" },
+                ].map((action) => (
+                  <button
+                    key={action.label}
+                    className="artheticAlignPostFitAction"
+                    onClick={action.onClick}
+                    disabled={action.disabled}
+                    style={{
+                      ...alignmentButtonStyle("secondary", action.disabled),
+                      height: 32,
+                      fontSize: 10,
+                      fontWeight: 670,
+                      color: action.disabled ? "#5f5f5f" : "#eeeeee",
+                      padding: "0 12px",
+                      animationDelay: action.delay,
+                    }}
+                  >
+                    {action.label}
+                  </button>
+                ))}
               </>
             )}
           </div>
