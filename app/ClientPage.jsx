@@ -1673,12 +1673,13 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, active, onPi
   )
 }
 
-function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, points, active, nextPointNumber, onPickPoint, forceLoading = false, locked = false, onPreviewLoaded, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 } }) {
+function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, active, onPickPoint, forceLoading = false, locked = false, onPreviewLoaded, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 }, eligibleFiles = [], selectedUrl = "", otherSelectedUrl = "", onSelectModel, selectStyle = {} }) {
   const rootRef = useRef(null)
   const controlsRef = useRef(null)
   const [target, setTarget] = useState([0, 0, 0])
   const [loadedNonce, setLoadedNonce] = useState(0)
   const [previewLoading, setPreviewLoading] = useState(!!file)
+  const roleLabel = badge === "A" ? "Reference A" : "Moving B"
 
   useEffect(() => {
     setPreviewLoading(!!file)
@@ -1686,36 +1687,49 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
   }, [file?.url])
 
   return (
-    <div style={{ position: "relative", minWidth: 0, minHeight: 0, background: "#0C0C0C", overflow: "hidden" }}>
+    <div style={{ position: "relative", minWidth: 0, minHeight: 0, background: "#0C0C0C", overflow: "hidden", borderRadius: 13 }}>
       <div style={{
-        position: "absolute", top: 12, left: 14, right: 14, zIndex: 5,
+        position: "absolute", top: 12, left: 14, right: 14, zIndex: 10,
         display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
         pointerEvents: "none", fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, pointerEvents: "auto" }}>
           <span style={{
-            width: 26, height: 26, borderRadius: 8, display: "grid", placeItems: "center",
+            width: 28, height: 28, borderRadius: 9, display: "grid", placeItems: "center", flex: "0 0 auto",
             background: active ? "#ffffff" : "rgba(255,255,255,.08)", color: active ? "#0C0C0C" : "#b3b3b3",
             border: "1px solid rgba(255,255,255,.10)", fontSize: 11, fontWeight: 850,
             boxShadow: active ? "0 5px 18px rgba(255,255,255,.10)" : "none",
+            transition: "background .2s ease, color .2s ease, box-shadow .2s ease",
           }}>{badge}</span>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ color: "#f5f5f5", fontSize: 12, fontWeight: 760, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
-            <div style={{ color: "#6f6f6f", fontSize: 9, fontWeight: 650, marginTop: 2 }}>{badge === "A" ? "Reference" : "Moving"}</div>
+          <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+            <select
+              value={selectedUrl || ""}
+              onChange={(event) => onSelectModel?.(event.target.value)}
+              disabled={locked || forceLoading || previewLoading}
+              aria-label={`Vybrat model ${roleLabel}`}
+              style={{
+                ...selectStyle,
+                height: 31, minWidth: 180, maxWidth: 280, padding: "0 30px 0 10px", borderRadius: 9,
+                fontSize: 10, fontWeight: 680, pointerEvents: "auto",
+                opacity: locked ? .55 : 1,
+              }}
+            >
+              <option value="">Vyberte model…</option>
+              {eligibleFiles.map((candidate) => (
+                <option
+                  key={`${badge}-${candidate.url}`}
+                  value={candidate.url}
+                  disabled={candidate.url === otherSelectedUrl}
+                >
+                  {stripExt(candidate.name || candidate.rawName || "Model")}
+                </option>
+              ))}
+            </select>
+            <div style={{ color: active ? "#bdbdbd" : "#666", fontSize: 9, fontWeight: 620, paddingLeft: 1 }}>{roleLabel}</div>
           </div>
         </div>
-        {active && (
-          <div style={{
-            display: "flex", alignItems: "center", gap: 7, padding: "6px 9px", borderRadius: 9,
-            background: "rgba(255,255,255,.07)", border: "1px solid rgba(255,255,255,.10)",
-            color: "#ffffff", fontSize: 9, fontWeight: 780, letterSpacing: ".01em",
-            animation: "artheticAlignAttention 1.35s ease-in-out infinite", transformOrigin: "center",
-          }}>
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#ffffff", boxShadow: "0 0 0 4px rgba(255,255,255,.08)", animation: "artheticAlignPulse 1.05s ease-in-out infinite" }} />
-            Umístěte bod {nextPointNumber}
-          </div>
-        )}
       </div>
+
       <Canvas orthographic camera={{ position: [0, 0, 250], near: 0.01, far: 100000, zoom: 1 }} gl={{ antialias: true }} style={{ position: "absolute", inset: 0 }}>
         <color attach="background" args={["#0C0C0C"]} />
         <ambientLight intensity={0.35 * sceneIntensity} />
@@ -1752,14 +1766,31 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
             setTarget={setTarget}
           />
         )}
-        <TouchTrackballControls ref={controlsRef} target={target} enabled={!locked} />
+        <TouchTrackballControls ref={controlsRef} target={target} enabled={!locked && !!file} />
         <RightButtonPan setTarget={setTarget} trackballRef={controlsRef} />
       </Canvas>
+
+      {!file && !forceLoading && (
+        <div style={{
+          position: "absolute", inset: 0, zIndex: 3, display: "flex", alignItems: "center", justifyContent: "center",
+          pointerEvents: "none", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+        }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, opacity: .72 }}>
+            <div style={{
+              width: 34, height: 34, borderRadius: 11, border: "1px solid rgba(255,255,255,.09)",
+              background: "rgba(255,255,255,.025)", display: "grid", placeItems: "center", color: "#777",
+              fontSize: 12, fontWeight: 820,
+            }}>{badge}</div>
+            <div style={{ color: "#747474", fontSize: 10, fontWeight: 630 }}>Vyberte 3D model</div>
+          </div>
+        </div>
+      )}
+
       {(previewLoading || forceLoading) && (
         <div style={{
           position: "absolute", inset: 0, zIndex: 7, display: "flex", alignItems: "center", justifyContent: "center",
           background: "rgba(12,12,12,.72)", backdropFilter: "blur(2px)", pointerEvents: "all",
-          fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+          fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", borderRadius: "inherit",
         }}>
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
             <div style={{
@@ -1771,13 +1802,14 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
           </div>
         </div>
       )}
+
       {locked && !previewLoading && !forceLoading && (
         <div style={{
           position: "absolute", inset: 0, zIndex: 8, pointerEvents: "all",
           background: "rgba(12,12,12,.16)",
           backdropFilter: "blur(2.4px) grayscale(1) saturate(0)",
           WebkitBackdropFilter: "blur(2.4px) grayscale(1) saturate(0)",
-          overflow: "hidden",
+          overflow: "hidden", borderRadius: "inherit",
         }}>
           <svg
             viewBox="0 0 100 100"
@@ -1794,10 +1826,11 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
           </svg>
         </div>
       )}
+
       <div style={{
-        position: "absolute", inset: 0, pointerEvents: "none", boxSizing: "border-box",
-        border: active ? "1px solid rgba(255,255,255,.30)" : "1px solid rgba(255,255,255,.08)",
-        boxShadow: active ? "inset 0 0 0 1px rgba(255,255,255,.04), inset 0 18px 50px rgba(255,255,255,.015)" : "none",
+        position: "absolute", inset: 0, pointerEvents: "none", boxSizing: "border-box", borderRadius: "inherit",
+        border: active ? "1px solid rgba(255,255,255,.34)" : "1px solid rgba(255,255,255,.08)",
+        boxShadow: active ? "inset 0 0 0 1px rgba(255,255,255,.04), inset 0 18px 50px rgba(255,255,255,.015), 0 0 0 1px rgba(255,255,255,.025)" : "none",
         transition: "border-color .2s ease, box-shadow .2s ease",
       }} />
     </div>
@@ -3363,15 +3396,17 @@ export default function ClientPage() {
       setAlignmentMessage("Pro zarovnání jsou potřeba alespoň dva 3D modely.")
       return
     }
-    setAlignmentSelection((previous) => {
-      if (previous.length === 2 && eligible.some((f) => f.url === previous[0]) && eligible.some((f) => f.url === previous[1]) && previous[0] !== previous[1]) return previous
-      return [eligible[0].url, eligible[1].url]
-    })
+    // Pracovní viewporty A/B se při vstupu záměrně otevřou prázdné.
+    // Hlavní scéna zůstává beze změny a uživatel si oba modely vybere přímo dole.
+    setAlignmentSelection(["", ""])
+    setAlignmentPointsA([])
+    setAlignmentPointsB([])
     setAlignmentMode(true)
-    setAlignmentMessage("Označte stejný bod nejprve na Reference A a potom na Moving B.")
+    setAlignmentMessage("Vyberte model Reference A a model Moving B v pracovních oknech dole.")
     setAlignmentProgress(null)
     setAlignmentStats(null)
     setAlignmentWorkflowStage("points")
+    setAlignmentPreviewBusy({ A: false, B: false })
     setIsAutoRotating(false)
     setHeatmapMenuOpen(false)
     setComparisonMenuOpen(false)
@@ -3380,17 +3415,33 @@ export default function ClientPage() {
   }, [files])
 
   const changeAlignmentSelection = useCallback(async (side, url) => {
+    const index = side === "A" ? 0 : 1
+    const otherIndex = index === 0 ? 1 : 0
+
+    if (!url) {
+      setAlignmentSelection((previous) => {
+        const next = previous.length === 2 ? [...previous] : ["", ""]
+        next[index] = ""
+        return next
+      })
+      setAlignmentPreviewBusy((previous) => ({ ...previous, [side]: false }))
+      setAlignmentPointsA([])
+      setAlignmentPointsB([])
+      setAlignmentStats(null)
+      setAlignmentProgress(null)
+      setAlignmentWorkflowStage("points")
+      setAlignmentMessage(side === "A" ? "Vyberte model Reference A." : "Vyberte model Moving B.")
+      return
+    }
+
     // Loader zapneme ještě PŘED změnou modelu a necháme ho jeden frame vykreslit.
-    // Teprve potom spustíme klonování geometrie / přípravu BVH, která může být
-    // na hustém intraorálním scanu synchronně náročná.
     setAlignmentPreviewBusy((previous) => ({ ...previous, [side]: true }))
     await alignmentPaintYield()
 
     setAlignmentSelection((previous) => {
-      const next = previous.length === 2 ? [...previous] : [files[0]?.url || "", files[1]?.url || ""]
-      const index = side === "A" ? 0 : 1
-      const otherIndex = index === 0 ? 1 : 0
-      if (next[otherIndex] === url) next[otherIndex] = next[index]
+      const next = previous.length === 2 ? [...previous] : ["", ""]
+      // Jeden model nesmí být současně Reference i Moving.
+      if (next[otherIndex] === url) next[otherIndex] = ""
       next[index] = url
       return next
     })
@@ -3399,8 +3450,8 @@ export default function ClientPage() {
     setAlignmentStats(null)
     setAlignmentProgress(null)
     setAlignmentWorkflowStage("points")
-    setAlignmentMessage("Výběr modelů byl změněn. Načítám pracovní náhled…")
-  }, [files])
+    setAlignmentMessage(side === "A" ? "Načítám model Reference A…" : "Načítám model Moving B…")
+  }, [])
 
   const handleAlignmentPickA = useCallback((point) => {
     if (alignmentPointsA.length !== alignmentPointsB.length) {
@@ -5077,6 +5128,22 @@ export default function ClientPage() {
   const alignmentPointsComplete = alignmentPairCount >= 3 && alignmentPointsA.length === alignmentPointsB.length
   const alignmentNextSide = alignmentPointsComplete ? null : (alignmentPointsA.length === alignmentPointsB.length ? "A" : "B")
   const alignmentNextPointNumber = alignmentPointsComplete ? 3 : (alignmentNextSide === "A" ? alignmentPointsA.length + 1 : alignmentPointsB.length + 1)
+  const alignmentHasA = !!alignmentPair.aUrl
+  const alignmentHasB = !!alignmentPair.bUrl
+  const alignmentModelsSelected = alignmentHasA && alignmentHasB
+  const alignmentTopInstruction = alignmentPreviewBusy.A
+    ? "Načítám Reference A…"
+    : alignmentPreviewBusy.B
+      ? "Načítám Moving B…"
+      : !alignmentHasA && !alignmentHasB
+        ? "Vyberte model A a B"
+        : !alignmentHasA
+          ? "Vyberte Reference A"
+          : !alignmentHasB
+            ? "Vyberte Moving B"
+            : alignmentPointsComplete
+              ? (alignmentWorkflowStage === "points" ? "3 body připraveny" : alignmentWorkflowStage === "prealigned" ? "Předzarovnání dokončeno" : "Best Fit dokončen")
+              : `Další bod ${alignmentNextSide}${alignmentNextPointNumber}`
 
   const alignmentProgressUi = (() => {
     if (!alignmentBusy) return null
@@ -5121,7 +5188,7 @@ export default function ClientPage() {
     padding: "0 30px 0 10px", fontSize: 11, fontWeight: 650, outline: "none",
   }
 
-  const alignmentWorkspace = alignmentMode && alignmentPair.aUrl && alignmentPair.bUrl && (
+  const alignmentWorkspace = alignmentMode && (
     <>
       <style>{`
         @keyframes artheticAlignSpin { to { transform: rotate(360deg); } }
@@ -5138,25 +5205,48 @@ export default function ClientPage() {
         display: "flex", alignItems: "center", gap: 10, color: "white",
         fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
       }}>
-        <div style={{ minWidth: 132, padding: "0 6px 0 2px" }}>
-          <div style={{ fontSize: 14, fontWeight: 820, letterSpacing: "-.015em" }}>ARTHETIC Align</div>
-          <div style={{ fontSize: 9, color: "#737373", marginTop: 3, fontWeight: 620 }}>Rigid registration · mm</div>
+        <div style={{ minWidth: 148, padding: "0 7px 0 2px" }}>
+          <div style={{ fontSize: 15, letterSpacing: "-.02em", whiteSpace: "nowrap", lineHeight: 1 }}>
+            <span style={{ fontWeight: 850 }}>ART</span><span style={{ fontWeight: 300 }}>HETIC</span><span style={{ fontWeight: 300, marginLeft: 6, color: "#dddddd" }}>Align</span>
+          </div>
+          <div style={{ fontSize: 9, color: "#737373", marginTop: 5, fontWeight: 560 }}>Rigid registration · mm</div>
         </div>
 
-        <div style={{ width: 1, height: 34, background: "rgba(255,255,255,.07)" }} />
+        <div style={{ width: 1, height: 34, background: "rgba(255,255,255,.07)", flex: "0 0 auto" }} />
 
-        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-          <span style={{ width: 22, height: 22, borderRadius: 7, display: "grid", placeItems: "center", background: "rgba(96,165,250,.12)", color: "#93c5fd", fontSize: 10, fontWeight: 850 }}>A</span>
-          <select value={alignmentPair.aUrl} onChange={(e) => changeAlignmentSelection("A", e.target.value)} disabled={alignmentBusy || alignmentPreviewBusy.A || alignmentPreviewBusy.B} style={alignmentSelectStyle}>
-            {alignmentEligibleFiles.map((file) => <option key={`a-${file.url}`} value={file.url}>{stripExt(file.name || file.rawName || "Model")}</option>)}
-          </select>
-          <span style={{ width: 22, height: 22, borderRadius: 7, display: "grid", placeItems: "center", background: "rgba(244,114,182,.12)", color: "#f9a8d4", fontSize: 10, fontWeight: 850, marginLeft: 2 }}>B</span>
-          <select value={alignmentPair.bUrl} onChange={(e) => changeAlignmentSelection("B", e.target.value)} disabled={alignmentBusy || alignmentPreviewBusy.A || alignmentPreviewBusy.B} style={alignmentSelectStyle}>
-            {alignmentEligibleFiles.map((file) => <option key={`b-${file.url}`} value={file.url}>{stripExt(file.name || file.rawName || "Model")}</option>)}
-          </select>
+        <div style={{ flex: "1 1 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 10, padding: "0 2px" }}>
+          <span style={{
+            width: 7, height: 7, borderRadius: "50%", flex: "0 0 auto",
+            background: alignmentPointsComplete ? "#86efac" : alignmentNextSide === "A" && alignmentModelsSelected ? "#93c5fd" : alignmentNextSide === "B" && alignmentModelsSelected ? "#f9a8d4" : "#777",
+            boxShadow: alignmentModelsSelected && !alignmentPointsComplete ? "0 0 0 4px rgba(255,255,255,.035)" : "none",
+          }} />
+          <div style={{ minWidth: 0, flex: "1 1 auto" }}>
+            <div style={{ color: "#f3f3f3", fontSize: 10.5, fontWeight: 730, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{alignmentTopInstruction}</div>
+            <div style={{ color: "#737373", fontSize: 9, fontWeight: 590, marginTop: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{alignmentMessage}</div>
+          </div>
+
+          {alignmentModelsSelected && alignmentPointsComplete && alignmentWorkflowStage === "points" && (
+            <button
+              onClick={handleAlignmentLandmarkFit}
+              disabled={alignmentBusy}
+              style={{ ...alignmentButtonStyle("secondary", alignmentBusy), height: 32, padding: "0 12px", borderRadius: 9, flex: "0 0 auto" }}
+            >
+              Předzarovnat
+            </button>
+          )}
+
+          {alignmentModelsSelected && alignmentPointsComplete && alignmentWorkflowStage === "prealigned" && (
+            <button
+              onClick={handleAlignmentBestFit}
+              disabled={alignmentBusy}
+              style={{ ...alignmentButtonStyle("success", alignmentBusy), height: 32, padding: "0 12px", borderRadius: 9, flex: "0 0 auto" }}
+            >
+              Best Fit
+            </button>
+          )}
         </div>
 
-        <div style={{ width: 1, height: 34, background: "rgba(255,255,255,.07)", marginLeft: 2 }} />
+        <div style={{ width: 1, height: 34, background: "rgba(255,255,255,.07)", flex: "0 0 auto" }} />
 
         <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
           <button
@@ -5171,52 +5261,15 @@ export default function ClientPage() {
               <path d="M5.5 12H14.5C17.5 12 19 13.6 19 16.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
             </svg>
           </button>
-          <button onClick={() => { setAlignmentPointsA([]); setAlignmentPointsB([]); setAlignmentStats(null); setAlignmentWorkflowStage("points"); setAlignmentMessage("Body byly vymazány. Začněte bodem na Reference A.") }} disabled={alignmentBusy} style={alignmentButtonStyle("danger", alignmentBusy)}>Smazat body</button>
+          <button onClick={() => { setAlignmentPointsA([]); setAlignmentPointsB([]); setAlignmentStats(null); setAlignmentWorkflowStage("points"); setAlignmentMessage(alignmentModelsSelected ? "Body byly vymazány. Začněte bodem na Reference A." : "Vyberte oba modely a potom umístěte tři páry bodů.") }} disabled={alignmentBusy || !alignmentModelsSelected} style={alignmentButtonStyle("danger", alignmentBusy || !alignmentModelsSelected)}>Smazat body</button>
         </div>
 
-        <div style={{ marginLeft: "auto", display: "flex", gap: 7, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
           <button onClick={showAlignmentDeviation} disabled={alignmentBusy || !alignmentStats} style={alignmentButtonStyle("secondary", alignmentBusy || !alignmentStats)}>Odchylky</button>
-          <button onClick={resetAlignmentTransform} disabled={alignmentBusy} style={alignmentButtonStyle("danger", alignmentBusy)}>Reset polohy</button>
+          <button onClick={resetAlignmentTransform} disabled={alignmentBusy || !alignmentPair.bUrl} style={alignmentButtonStyle("danger", alignmentBusy || !alignmentPair.bUrl)}>Reset polohy</button>
           <button onClick={() => { setAlignmentMode(false); setAlignmentMessage("") }} disabled={alignmentBusy} style={alignmentButtonStyle("primary", alignmentBusy)}>Hotovo</button>
         </div>
       </div>
-
-      {!alignmentBusy && (
-        <div style={{
-          position: "absolute", top: 80, left: "50%", transform: "translateX(-50%)", zIndex: 29,
-          maxWidth: "min(860px, calc(100vw - 40px))", minHeight: 34, padding: "7px 8px 7px 11px", borderRadius: 11,
-          background: "rgba(12,12,12,.82)", border: "1px solid rgba(255,255,255,.075)", backdropFilter: "blur(12px)",
-          color: "#bdbdbd", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: 10, fontWeight: 650,
-          display: "flex", alignItems: "center", gap: 10, pointerEvents: "auto", boxShadow: "0 10px 30px rgba(0,0,0,.20)",
-        }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 7, color: "#f1f1f1", whiteSpace: "nowrap" }}>
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: alignmentPointsComplete ? "#86efac" : (alignmentNextSide === "A" ? "#93c5fd" : "#f9a8d4") }} />
-            {alignmentPointsComplete ? "3 body připraveny" : `Další bod: ${alignmentNextSide} · ${alignmentNextPointNumber}`}
-          </span>
-          <span style={{ width: 1, height: 14, background: "rgba(255,255,255,.08)", flex: "0 0 auto" }} />
-          <span style={{ opacity: .82, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{alignmentMessage}</span>
-
-          {alignmentPointsComplete && alignmentWorkflowStage === "points" && (
-            <button
-              onClick={handleAlignmentLandmarkFit}
-              disabled={alignmentBusy}
-              style={{ ...alignmentButtonStyle("secondary", alignmentBusy), height: 30, marginLeft: "auto", padding: "0 11px", borderRadius: 8, flex: "0 0 auto" }}
-            >
-              Předzarovnat
-            </button>
-          )}
-
-          {alignmentPointsComplete && alignmentWorkflowStage === "prealigned" && (
-            <button
-              onClick={handleAlignmentBestFit}
-              disabled={alignmentBusy}
-              style={{ ...alignmentButtonStyle("success", alignmentBusy), height: 30, marginLeft: "auto", padding: "0 11px", borderRadius: 8, flex: "0 0 auto" }}
-            >
-              Best Fit
-            </button>
-          )}
-        </div>
-      )}
 
       {alignmentBusy && alignmentProgressUi && (
         <div style={{
@@ -5268,42 +5321,48 @@ export default function ClientPage() {
         boxShadow: "0 -10px 36px rgba(0,0,0,.26)",
       }}>
         <AlignmentPreviewViewport
-          title={stripExt(alignmentPair.fileA?.name || alignmentPair.fileA?.rawName || "Reference A")}
           badge="A"
           file={alignmentPair.fileA}
-          sourceObject={modelObjectsRef.current[alignmentPair.aUrl]}
+          sourceObject={alignmentPair.aUrl ? modelObjectsRef.current[alignmentPair.aUrl] : null}
           color="#60a5fa"
           points={alignmentPointsA}
-          active={!alignmentBusy && !alignmentPreviewBusy.A && !alignmentPreviewBusy.B && alignmentNextSide === "A"}
-          nextPointNumber={Math.min(3, alignmentPointsA.length + 1)}
+          active={!!alignmentPair.aUrl && alignmentModelsSelected && !alignmentBusy && !alignmentPreviewBusy.A && !alignmentPreviewBusy.B && alignmentNextSide === "A"}
           onPickPoint={handleAlignmentPickA}
           forceLoading={alignmentPreviewBusy.A}
           locked={alignmentBusy && !!alignmentProgress}
+          eligibleFiles={alignmentEligibleFiles}
+          selectedUrl={alignmentPair.aUrl || ""}
+          otherSelectedUrl={alignmentPair.bUrl || ""}
+          onSelectModel={(url) => changeAlignmentSelection("A", url)}
+          selectStyle={alignmentSelectStyle}
           onPreviewLoaded={() => {
             setAlignmentPreviewBusy((previous) => ({ ...previous, A: false }))
             setAlignmentWorkflowStage("points")
-            setAlignmentMessage("Model A je připraven. Označte nové korespondenční body.")
+            setAlignmentMessage("Reference A je připravena.")
           }}
           sceneIntensity={sceneIntensity}
           highlightIntensity={highlightIntensity}
           headlightCfg={headlightCfg}
         />
         <AlignmentPreviewViewport
-          title={stripExt(alignmentPair.fileB?.name || alignmentPair.fileB?.rawName || "Moving B")}
           badge="B"
           file={alignmentPair.fileB}
-          sourceObject={modelObjectsRef.current[alignmentPair.bUrl]}
+          sourceObject={alignmentPair.bUrl ? modelObjectsRef.current[alignmentPair.bUrl] : null}
           color="#f472b6"
           points={alignmentPointsB}
-          active={!alignmentBusy && !alignmentPreviewBusy.A && !alignmentPreviewBusy.B && alignmentNextSide === "B"}
-          nextPointNumber={Math.min(3, alignmentPointsB.length + 1)}
+          active={!!alignmentPair.bUrl && alignmentModelsSelected && !alignmentBusy && !alignmentPreviewBusy.A && !alignmentPreviewBusy.B && alignmentNextSide === "B"}
           onPickPoint={handleAlignmentPickB}
           forceLoading={alignmentPreviewBusy.B}
           locked={alignmentBusy && !!alignmentProgress}
+          eligibleFiles={alignmentEligibleFiles}
+          selectedUrl={alignmentPair.bUrl || ""}
+          otherSelectedUrl={alignmentPair.aUrl || ""}
+          onSelectModel={(url) => changeAlignmentSelection("B", url)}
+          selectStyle={alignmentSelectStyle}
           onPreviewLoaded={() => {
             setAlignmentPreviewBusy((previous) => ({ ...previous, B: false }))
             setAlignmentWorkflowStage("points")
-            setAlignmentMessage("Model B je připraven. Označte nové korespondenční body.")
+            setAlignmentMessage("Moving B je připraven.")
           }}
           sceneIntensity={sceneIntensity}
           highlightIntensity={highlightIntensity}
