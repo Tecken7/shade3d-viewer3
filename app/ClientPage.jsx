@@ -3733,6 +3733,7 @@ export default function ClientPage() {
   const [showComparison, setShowComparison] = useState(false)
   const [comparisonTolerance, setComparisonTolerance] = useState(0.25)
   const [comparisonStats, setComparisonStats] = useState(null)
+  const [comparisonDirection, setComparisonDirection] = useState("A_TO_B") // A_TO_B | B_TO_A
   const [restoringAnalysisMode, setRestoringAnalysisMode] = useState(null)
 
   // -- ZAROVNÁNÍ / REGISTRACE MODELŮ --
@@ -4378,6 +4379,13 @@ export default function ClientPage() {
     if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
   }
 
+  const handleComparisonDirectionChange = (direction) => {
+    if (direction !== "A_TO_B" && direction !== "B_TO_A") return
+    setComparisonDirection(direction)
+    setPinnedNotes([])
+    if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
+  }
+
   const handleApplyHeatmap = () => {
     if (heatmapSelection.length !== 2) return
     setIsCalculatingHeatmap(true);
@@ -4448,6 +4456,7 @@ export default function ClientPage() {
       comparison: {
         files: selectionNames(comparisonSelection),
         tolerance: comparisonTolerance,
+        direction: comparisonDirection,
         visible: showComparison && hasComputedComparison,
       },
       alignment: {
@@ -4493,7 +4502,7 @@ export default function ClientPage() {
     }
   }, [
     activeAnalysisMode, files, heatmapSelection, showHeatmap, hasComputedHeatmap,
-    comparisonSelection, comparisonTolerance, showComparison, hasComputedComparison, modelTransforms, alignmentSelection,
+    comparisonSelection, comparisonTolerance, comparisonDirection, showComparison, hasComputedComparison, modelTransforms, alignmentSelection,
     pinnedNotes, clippingEnabled, activeSlice, sliceRigGroup, planeGroup, horizontalPlaneGroup, measureState, horizontalMeasureState,
     dicomSource, dicomSettings,
   ])
@@ -4764,6 +4773,7 @@ export default function ClientPage() {
     const savedComparisonSelection = resolveSelection(pendingViewerState.comparison?.files)
     const savedAlignmentSelection = resolveSelection([pendingViewerState.alignment?.reference, pendingViewerState.alignment?.moving].filter(Boolean))
     const savedTolerance = Math.max(0.05, Math.min(1, Number(pendingViewerState.comparison?.tolerance) || 0.25))
+    const savedComparisonDirection = pendingViewerState.comparison?.direction === "B_TO_A" ? "B_TO_A" : "A_TO_B"
     const mode = pendingViewerState.activeAnalysisMode
 
     const restoredTransforms = {}
@@ -4790,6 +4800,7 @@ export default function ClientPage() {
     setComparisonSelection(savedComparisonSelection)
     if (savedAlignmentSelection.length === 2) setAlignmentSelection(savedAlignmentSelection)
     setComparisonTolerance(savedTolerance)
+    setComparisonDirection(savedComparisonDirection)
     setShowHeatmap(false)
     setShowComparison(false)
     setHasComputedHeatmap(false)
@@ -5566,6 +5577,8 @@ export default function ClientPage() {
   const analysisEligibleFiles = files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url)))
   const occlusionModelsReady = heatmapSelection.length === 2
   const comparisonModelsReady = comparisonSelection.length === 2
+  const comparisonAnalyzedUrl = comparisonDirection === "B_TO_A" ? comparisonSelection[1] : comparisonSelection[0]
+  const comparisonReferenceUrl = comparisonDirection === "B_TO_A" ? comparisonSelection[0] : comparisonSelection[1]
 
   const viewerToolbarButtonStyle = (disabled = false, active = false) => ({
     display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
@@ -5895,12 +5908,46 @@ export default function ClientPage() {
 
                 <div style={{ display: "grid", gap: 11 }}>
                   <div>
-                    <div style={{ marginBottom: 6, color: "#bdbdbd", fontSize: 9.5, fontWeight: 700 }}>A · Model</div>
+                    <div style={{ marginBottom: 6, color: "#bdbdbd", fontSize: 9.5, fontWeight: 700 }}>
+                      A · {comparisonDirection === "A_TO_B" ? "Analyzovaný model" : "Referenční model"}
+                    </div>
                     <AlignmentModelDropdown badge="A" value={comparisonSelection[0] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[1] || ""} onChange={(url) => setComparisonSelectionSlot(0, url)} />
                   </div>
                   <div>
-                    <div style={{ marginBottom: 6, color: "#bdbdbd", fontSize: 9.5, fontWeight: 700 }}>B · Model</div>
+                    <div style={{ marginBottom: 6, color: "#bdbdbd", fontSize: 9.5, fontWeight: 700 }}>
+                      B · {comparisonDirection === "A_TO_B" ? "Referenční model" : "Analyzovaný model"}
+                    </div>
                     <AlignmentModelDropdown badge="B" value={comparisonSelection[1] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0]} onChange={(url) => setComparisonSelectionSlot(1, url)} />
+                  </div>
+                </div>
+
+                <div style={{ marginTop: 13, padding: "9px 10px", borderRadius: 11, background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.065)" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
+                    <span style={{ color: "#8a8a8a", fontSize: 9.3, fontWeight: 650 }}>Mapa odchylek</span>
+                    <span style={{ color: "#707070", fontSize: 8.7 }}>Reference automaticky 50 %</span>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, padding: 3, borderRadius: 9, background: "rgba(0,0,0,.28)", border: "1px solid rgba(255,255,255,.055)" }}>
+                    {[
+                      ["A_TO_B", "A → B"],
+                      ["B_TO_A", "B → A"],
+                    ].map(([direction, label]) => {
+                      const active = comparisonDirection === direction
+                      return (
+                        <button
+                          key={direction}
+                          type="button"
+                          onClick={() => handleComparisonDirectionChange(direction)}
+                          disabled={!comparisonModelsReady}
+                          style={{
+                            height: 28, borderRadius: 7, border: active ? "1px solid rgba(74,222,128,.20)" : "1px solid transparent",
+                            background: active ? "rgba(22,54,34,.78)" : "transparent",
+                            color: !comparisonModelsReady ? "#555" : active ? "#c8f8d5" : "#858585",
+                            cursor: comparisonModelsReady ? "pointer" : "not-allowed", fontFamily: "inherit", fontSize: 9.5, fontWeight: 720,
+                            transition: "background .18s ease, border-color .18s ease, color .18s ease, transform .18s ease",
+                          }}
+                        >{label}</button>
+                      )
+                    })}
                   </div>
                 </div>
 
@@ -5933,6 +5980,9 @@ export default function ClientPage() {
                       <span style={{ fontSize: 10, fontWeight: 720, color: "#d8d8d8" }}>Výpočet dokončen</span>
                     </div>
                     <Switch checked={showComparison} onChange={(checked) => { setShowComparison(checked); if (checked) setShowHeatmap(false) }} label="Zobrazit mapu odchylek" />
+                    <div style={{ marginTop: 8, padding: "7px 8px", borderRadius: 8, background: "rgba(0,0,0,.18)", color: "#777", fontSize: 8.7, lineHeight: 1.45 }}>
+                      {comparisonDirection === "A_TO_B" ? "A" : "B"} zobrazuje heatmapu · {comparisonDirection === "A_TO_B" ? "B" : "A"} zůstává jako reference s 50% opacitou.
+                    </div>
                     <div style={{ marginTop: 11, display: "grid", gridTemplateColumns: "1fr auto", gap: "5px 12px", color: "#8b8b8b", fontSize: 9 }}>
                       <span>Průměrná odchylka</span><b style={{ color: "#d4d4d4" }}>{comparisonStats.mean.toFixed(3)} mm</b>
                       <span>RMS</span><b style={{ color: "#d4d4d4" }}>{comparisonStats.rms.toFixed(3)} mm</b>
@@ -6738,7 +6788,7 @@ export default function ClientPage() {
           backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)", boxShadow: "0 16px 42px rgba(0,0,0,.3)"
         }}>
           <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16, marginBottom: 8 }}>
-            <span style={{ fontWeight: 720, fontSize: 10.5 }}>Porovnání povrchů</span>
+            <span style={{ fontWeight: 720, fontSize: 10.5 }}>Porovnání povrchů · {comparisonDirection === "A_TO_B" ? "A → B" : "B → A"}</span>
             <span style={{ color: "#696969", fontWeight: 600, fontSize: 8.5 }}>absolutní odchylka · mm</span>
           </div>
           <div style={{ height: 7, borderRadius: 999, background: "linear-gradient(to right, #2563eb 0%, #22c55e 25%, #facc15 50%, #ef4444 75%, #a21caf 100%)" }} />
@@ -6780,7 +6830,7 @@ export default function ClientPage() {
                 name={f.rawName || f.name}
                 url={f.url}
                 color={colors[i] ?? "#ffffff"}
-                opacity={opacities[i] ?? 1}
+                opacity={showComparison && hasComputedComparison && f.url === comparisonReferenceUrl ? 0.5 : (opacities[i] ?? 1)}
                 visible={alignmentMode && alignmentModelsSelected
                   ? (f.url === alignmentPair.aUrl || f.url === alignmentPair.bUrl)
                   : (visibles[i] ?? true)}
@@ -6799,7 +6849,7 @@ export default function ClientPage() {
                 analysisMode={
                   showHeatmap && heatmapSelection[0] === f.url
                     ? "occlusion"
-                    : showComparison && comparisonSelection.includes(f.url)
+                    : showComparison && hasComputedComparison && f.url === comparisonAnalyzedUrl
                       ? "comparison"
                       : null
                 }
