@@ -1174,6 +1174,7 @@ async function robustPointToPlaneICP({
 
   const pParent = new THREE.Vector3()
   const pWorld = new THREE.Vector3()
+  const qTargetRoot = new THREE.Vector3()
   const qParent = new THREE.Vector3()
   const nParent = new THREE.Vector3()
   const delta = new THREE.Vector3()
