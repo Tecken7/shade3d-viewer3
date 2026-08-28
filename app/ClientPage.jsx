@@ -1588,7 +1588,7 @@ function AlignmentMarker({ point, index, radius = 0.8 }) {
   )
 }
 
-function AlignmentPreviewModel({ file, sourceObject, color, points, active, onPickPoint, onLoaded }) {
+function AlignmentPreviewModel({ file, sourceObject, color, points, active, muted = false, onPickPoint, onLoaded }) {
   const [object3D, setObject3D] = useState(null)
   const rootRef = useRef(null)
   const ext = useMemo(() => inferExt(file?.rawName || file?.name || file?.url), [file])
@@ -1644,12 +1644,18 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, active, onPi
 
   useEffect(() => {
     if (!object3D) return
+    const baseColor = new THREE.Color(color || "#ffffff")
+    const mutedColor = baseColor.clone().lerp(new THREE.Color("#62666a"), 0.86)
     object3D.traverse((child) => {
-      if (!child.isMesh || !child.material?.color) return
-      child.material.color.set(color)
-      child.material.needsUpdate = true
+      if (!child.isMesh || !child.material) return
+      const materials = Array.isArray(child.material) ? child.material : [child.material]
+      materials.filter(Boolean).forEach((material) => {
+        if (material.color?.copy) material.color.copy(muted ? mutedColor : baseColor)
+        if ("roughness" in material) material.roughness = muted ? 0.72 : 0.55
+        if ("metalness" in material) material.metalness = muted ? 0 : 0.05
+      })
     })
-  }, [object3D, color])
+  }, [object3D, color, muted])
 
   const localPointFromEvent = (event) => {
     if (!rootRef.current) return null
@@ -1670,6 +1676,114 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, active, onPi
       />
       {(points || []).map((p, index) => <AlignmentMarker key={`${index}-${p.join("-")}`} point={p} index={index} radius={0.55} />)}
     </group>
+  )
+}
+
+function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", disabled = false, docked = false, onChange, style = {} }) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef(null)
+  const selected = files.find((item) => item.url === value)
+  const selectedLabel = selected ? stripExt(selected.name || selected.rawName || "Model") : "Vyberte model…"
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event) => {
+      if (!rootRef.current?.contains(event.target)) setOpen(false)
+    }
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") setOpen(false)
+    }
+    window.addEventListener("pointerdown", onPointerDown, true)
+    window.addEventListener("keydown", onKeyDown)
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true)
+      window.removeEventListener("keydown", onKeyDown)
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (disabled) setOpen(false)
+  }, [disabled])
+
+  const choose = (url) => {
+    setOpen(false)
+    requestAnimationFrame(() => onChange?.(url))
+  }
+
+  return (
+    <div ref={rootRef} style={{ position: "relative", width: docked ? 205 : "100%", minWidth: docked ? 180 : 0, maxWidth: docked ? 280 : "none", ...style }}>
+      <button
+        type="button"
+        disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`Vybrat model ${badge}`}
+        onClick={() => !disabled && setOpen((value) => !value)}
+        style={{
+          width: "100%", height: docked ? 31 : 36, boxSizing: "border-box",
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+          padding: "0 9px 0 10px", borderRadius: docked ? 9 : 10,
+          border: open ? "1px solid rgba(255,255,255,.20)" : "1px solid rgba(255,255,255,.10)",
+          background: open ? "#1b1b1b" : "#151515", color: disabled ? "#616161" : "#f0f0f0",
+          boxShadow: open ? "0 0 0 3px rgba(255,255,255,.035)" : "none",
+          cursor: disabled ? "not-allowed" : "pointer", outline: "none",
+          fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: docked ? 10 : 11, fontWeight: 680,
+          transition: "background .16s ease, border-color .16s ease, box-shadow .16s ease, color .16s ease",
+        }}
+      >
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "left" }}>{selectedLabel}</span>
+        <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true" style={{ flex: "0 0 auto", opacity: .66, transform: open ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .18s ease" }}>
+          <path d="M5.5 7.5L10 12L14.5 7.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+
+      {open && !disabled && (
+        <div role="listbox" style={{
+          position: "absolute", left: 0, right: 0, top: "calc(100% + 6px)", zIndex: 80,
+          padding: 5, maxHeight: 238, overflowY: "auto", overscrollBehavior: "contain",
+          borderRadius: 12, border: "1px solid rgba(255,255,255,.10)",
+          background: "rgba(17,17,17,.97)", boxShadow: "0 18px 46px rgba(0,0,0,.52)",
+          backdropFilter: "blur(18px)", WebkitBackdropFilter: "blur(18px)",
+          animation: "artheticAlignMenuIn .15s cubic-bezier(.22,.61,.36,1) both",
+        }}>
+          <button type="button" role="option" aria-selected={!value} onClick={() => choose("")} style={{
+            width: "100%", minHeight: 32, padding: "7px 9px", border: 0, borderRadius: 8,
+            background: !value ? "rgba(255,255,255,.075)" : "transparent", color: !value ? "#f2f2f2" : "#929292",
+            display: "flex", alignItems: "center", textAlign: "left", cursor: "pointer",
+            fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: 10, fontWeight: 650,
+          }}>Vyberte model…</button>
+          {files.map((candidate) => {
+            const blocked = candidate.url === otherValue
+            const current = candidate.url === value
+            const label = stripExt(candidate.name || candidate.rawName || "Model")
+            return (
+              <button
+                key={`${badge}-custom-${candidate.url}`}
+                type="button"
+                role="option"
+                aria-selected={current}
+                disabled={blocked}
+                onClick={() => !blocked && choose(candidate.url)}
+                style={{
+                  width: "100%", minHeight: 32, padding: "7px 9px", border: 0, borderRadius: 8,
+                  background: current ? "rgba(255,255,255,.075)" : "transparent",
+                  color: blocked ? "#454545" : current ? "#f4f4f4" : "#bdbdbd",
+                  display: "flex", alignItems: "center", gap: 8, textAlign: "left",
+                  cursor: blocked ? "not-allowed" : "pointer",
+                  fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: 10, fontWeight: current ? 720 : 620,
+                  transition: "background .13s ease, color .13s ease",
+                }}
+                onPointerEnter={(event) => { if (!blocked && !current) event.currentTarget.style.background = "rgba(255,255,255,.045)" }}
+                onPointerLeave={(event) => { if (!current) event.currentTarget.style.background = "transparent" }}
+              >
+                <span style={{ width: 5, height: 5, borderRadius: "50%", flex: "0 0 auto", background: current ? "#4ade80" : blocked ? "#3a3a3a" : "#737373" }} />
+                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -1723,28 +1837,16 @@ function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, ac
                 {selectionDisabled ? "Nejdřív vyberte Reference A" : `Vyberte ${roleLabel}`}
               </div>
             )}
-            <select
+            <AlignmentModelDropdown
+              badge={badge}
               value={selectedUrl || ""}
-              onChange={(event) => onSelectModel?.(event.target.value)}
+              files={eligibleFiles}
+              otherValue={otherSelectedUrl}
               disabled={selectionDisabled || locked || forceLoading || previewLoading}
-              aria-label={`Vybrat model ${roleLabel}`}
-              style={{
-                ...selectStyle,
-                width: selectorDocked ? 205 : "100%", height: selectorDocked ? 31 : 36,
-                minWidth: selectorDocked ? 180 : 0, maxWidth: selectorDocked ? 280 : "none",
-                padding: "0 30px 0 10px", borderRadius: selectorDocked ? 9 : 10,
-                fontSize: selectorDocked ? 10 : 11, fontWeight: 680,
-                opacity: locked ? .55 : 1,
-                transition: "width .34s ease, height .34s ease, border-radius .34s ease",
-              }}
-            >
-              <option value="">Vyberte model…</option>
-              {eligibleFiles.map((candidate) => (
-                <option key={`${badge}-${candidate.url}`} value={candidate.url} disabled={candidate.url === otherSelectedUrl}>
-                  {stripExt(candidate.name || candidate.rawName || "Model")}
-                </option>
-              ))}
-            </select>
+              docked={selectorDocked}
+              onChange={onSelectModel}
+              style={{ opacity: locked ? .55 : 1, transition: "width .34s ease, opacity .2s ease" }}
+            />
             {!selectorDocked && !selectionDisabled && (
               <div style={{ color: "#777", fontSize: 9, lineHeight: 1.35, fontWeight: 570, paddingLeft: 1 }}>
                 Vyberte ze seznamu nebo kliknutím na model v hlavní scéně.
@@ -1770,10 +1872,8 @@ function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, ac
         gl={{ antialias: true }}
         style={{
           position: "absolute", inset: 0,
-          filter: selectionDisabled && !locked
-            ? "grayscale(1) saturate(.08) brightness(.56) blur(.8px)"
-            : dimmed && !locked ? "grayscale(1) saturate(.08) brightness(.58)" : "none",
-          opacity: selectionDisabled && !locked ? .60 : dimmed && !locked ? .72 : 1,
+          filter: selectionDisabled && !locked ? "brightness(.62) blur(.65px)" : "none",
+          opacity: selectionDisabled && !locked ? .68 : 1,
           transition: "filter .26s ease, opacity .26s ease",
         }}
       >
@@ -1792,6 +1892,7 @@ function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, ac
               color={color}
               points={points}
               active={active}
+              muted={(selectionDisabled || dimmed) && !locked}
               onPickPoint={onPickPoint}
               onLoaded={() => {
                 setPreviewLoading(false)
@@ -2009,6 +2110,16 @@ function Measurement3D({ measureState, boundingBox }) {
   )
 }
 
+function AlignmentFastRaycast({ enabled = false }) {
+  const { raycaster } = useThree()
+  useEffect(() => {
+    const previous = raycaster.firstHitOnly
+    raycaster.firstHitOnly = !!enabled
+    return () => { raycaster.firstHitOnly = previous }
+  }, [raycaster, enabled])
+  return null
+}
+
 /* ---------- AnyModel ---------- */
 function AnyModel({
   name, url,
@@ -2187,6 +2298,24 @@ function AnyModel({
     })
   }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, analysisMode, renderOrder])
 
+  useEffect(() => {
+    if (!object3D || !onAlignmentSelect) return
+    let cancelled = false
+    const meshes = []
+    object3D.traverse((child) => {
+      if (child.isMesh && child.geometry && !child.geometry.boundsTree && typeof child.geometry.computeBoundsTree === "function") meshes.push(child)
+    })
+    ;(async () => {
+      for (let i = 0; i < meshes.length; i++) {
+        if (cancelled) return
+        await alignmentYield()
+        if (cancelled) return
+        try { if (!meshes[i].geometry.boundsTree) meshes[i].geometry.computeBoundsTree() } catch {}
+      }
+    })()
+    return () => { cancelled = true }
+  }, [object3D, !!onAlignmentSelect])
+
   const setAlignmentHoverVisual = (enabled) => {
     if (!object3D) return
     if (enabled && !onAlignmentSelect) return
@@ -2204,7 +2333,7 @@ function AnyModel({
           }
           if (material.emissive?.set) {
             material.emissive.set("#22c55e")
-            material.emissiveIntensity = Math.max(0.32, Number(material.emissiveIntensity) || 0)
+            material.emissiveIntensity = Math.max(0.18, Number(material.emissiveIntensity) || 0)
           }
         } else {
           const backup = material.userData._alignmentHoverBackup
@@ -2214,7 +2343,6 @@ function AnyModel({
             delete material.userData._alignmentHoverBackup
           }
         }
-        material.needsUpdate = true
       })
     })
   }
@@ -2239,11 +2367,7 @@ function AnyModel({
         setAlignmentHoverVisual(true)
         onAlignmentHover?.(url, true)
       } : undefined}
-      onPointerMove={(analysisMode && onHoverDist) || onAlignmentSelect ? (e) => {
-        if (onAlignmentSelect) {
-          e.stopPropagation()
-          onAlignmentHover?.(url, true)
-        }
+      onPointerMove={analysisMode && onHoverDist ? (e) => {
         if (analysisMode && onHoverDist) {
           e.stopPropagation(); 
           const distAttr = e.object.geometry.getAttribute('_analysisDist');
@@ -3582,12 +3706,19 @@ export default function ClientPage() {
     else if (!url || alignmentSceneHoveredUrlRef.current === url) alignmentSceneHoveredUrlRef.current = ""
     if (!hint) return
     const hasHover = !!alignmentSceneHoveredUrlRef.current
+    const hoveredFile = hasHover ? files.find((item) => item.url === alignmentSceneHoveredUrlRef.current) : null
+    const hoveredName = hoveredFile ? stripExt(hoveredFile.name || hoveredFile.rawName || "Model") : ""
     hint.style.borderColor = hasHover ? "rgba(34,197,94,.34)" : "rgba(255,255,255,.12)"
     hint.style.background = hasHover ? "rgba(15,34,22,.94)" : "rgba(12,12,12,.92)"
     hint.style.color = hasHover ? "#bbf7d0" : "#eeeeee"
     const dot = hint.querySelector?.("[data-align-pointer-dot]")
     if (dot) dot.style.background = hasHover ? "#4ade80" : "#9a9a9a"
-  }, [])
+    const modelLabel = hint.querySelector?.("[data-align-pointer-model]")
+    if (modelLabel) {
+      modelLabel.textContent = hoveredName
+      modelLabel.style.display = hasHover ? "block" : "none"
+    }
+  }, [files])
 
   useEffect(() => {
     if (!alignmentMode || alignmentStep !== "models" || alignmentBusy) {
@@ -3595,25 +3726,36 @@ export default function ClientPage() {
       alignmentSceneHoveredUrlRef.current = ""
       return
     }
-    const onMove = (event) => {
+    let frame = 0
+    let pointerX = -9999
+    let pointerY = -9999
+    let pointerVisible = false
+    const paint = () => {
+      frame = 0
       const hint = alignmentPointerHintRef.current
       if (!hint) return
-      const isMainCanvas = event.target?.dataset?.artheticMainScene === "1"
-      if (!isMainCanvas) {
+      if (!pointerVisible) {
         hint.style.opacity = "0"
         return
       }
-      hint.style.left = `${event.clientX + 15}px`
-      hint.style.top = `${event.clientY + 15}px`
+      hint.style.transform = `translate3d(${pointerX + 15}px, ${pointerY + 15}px, 0)`
       hint.style.opacity = "1"
     }
+    const onMove = (event) => {
+      pointerVisible = event.target?.dataset?.artheticMainScene === "1"
+      pointerX = event.clientX
+      pointerY = event.clientY
+      if (!frame) frame = requestAnimationFrame(paint)
+    }
     const onLeave = () => {
+      pointerVisible = false
       if (alignmentPointerHintRef.current) alignmentPointerHintRef.current.style.opacity = "0"
       alignmentSceneHoveredUrlRef.current = ""
     }
     window.addEventListener("pointermove", onMove, true)
     window.addEventListener("blur", onLeave)
     return () => {
+      if (frame) cancelAnimationFrame(frame)
       window.removeEventListener("pointermove", onMove, true)
       window.removeEventListener("blur", onLeave)
     }
@@ -5474,6 +5616,7 @@ export default function ClientPage() {
         @keyframes artheticAlignPulse { 0%,100% { opacity:.55; transform:scale(.9); } 50% { opacity:1; transform:scale(1.12); } }
         @keyframes artheticAlignAttention { 0%,100% { box-shadow:0 0 0 0 rgba(255,255,255,.04); border-color:rgba(255,255,255,.10); } 50% { box-shadow:0 0 0 5px rgba(255,255,255,.055), 0 0 22px rgba(255,255,255,.08); border-color:rgba(255,255,255,.24); } }
         @keyframes artheticAlignCardIn { from { opacity:0; transform:translate(-50%,-46%) scale(.97); } to { opacity:1; transform:translate(-50%,-50%) scale(1); } }
+        @keyframes artheticAlignMenuIn { from { opacity:0; transform:translateY(-4px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
       `}</style>
 
       <div style={{
@@ -5539,15 +5682,19 @@ export default function ClientPage() {
           ref={alignmentPointerHintRef}
           style={{
             position: "fixed", left: 0, top: 0, zIndex: 80, opacity: 0, pointerEvents: "none",
-            display: "flex", alignItems: "center", gap: 7, height: 28, padding: "0 10px", borderRadius: 9,
+            display: "flex", alignItems: "flex-start", gap: 8, minHeight: 30, padding: "7px 10px", borderRadius: 10,
             background: "rgba(12,12,12,.92)", border: "1px solid rgba(255,255,255,.12)",
             color: "#eeeeee", boxShadow: "0 8px 28px rgba(0,0,0,.34)", backdropFilter: "blur(12px)",
-            fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: 9.5, fontWeight: 700, whiteSpace: "nowrap",
-            transition: "opacity .12s ease, background .12s ease, border-color .12s ease, color .12s ease",
+            fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", whiteSpace: "nowrap",
+            transform: "translate3d(-9999px,-9999px,0)", willChange: "transform, opacity",
+            transition: "opacity .10s ease, background .12s ease, border-color .12s ease, color .12s ease",
           }}
         >
-          <span data-align-pointer-dot style={{ width: 6, height: 6, borderRadius: "50%", background: "#9a9a9a", transition: "background .12s ease" }} />
-          {!alignmentHasA ? "Vyberte model Reference A" : "Vyberte model Moving B"}
+          <span data-align-pointer-dot style={{ width: 6, height: 6, marginTop: 4, borderRadius: "50%", background: "#9a9a9a", transition: "background .12s ease", flex: "0 0 auto" }} />
+          <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <span style={{ fontSize: 9.5, fontWeight: 720 }}>{!alignmentHasA ? "Vyberte model Reference A" : "Vyberte model Moving B"}</span>
+            <span data-align-pointer-model style={{ display: "none", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", color: "rgba(255,255,255,.58)", fontSize: 8.5, fontWeight: 580 }} />
+          </span>
         </div>
       )}
 
@@ -5859,6 +6006,7 @@ export default function ClientPage() {
         <directionalLight position={[0, -5, -5]} intensity={0.7 * sceneIntensity} />
 
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
+        <AlignmentFastRaycast enabled={alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy} />
 
         <AutoRotateScene enabled={!alignmentMode && isAutoRotating} target={cameraTarget} speedFactor={spinSpeed} />
 
