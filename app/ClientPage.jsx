@@ -895,6 +895,525 @@ export function applySurfaceComparison(meshA, meshB, tolerance = 0.25) {
   }
 }
 
+
+/* ---------- Zarovnání modelů / metrologie ---------- */
+const ALIGNMENT_POINT_COLORS = ["#fbbf24", "#60a5fa", "#34d399", "#f472b6", "#c084fc", "#fb7185", "#22d3ee", "#a3e635"]
+const IDENTITY_MATRIX_ARRAY = new THREE.Matrix4().identity().toArray()
+
+function matrixArrayOrIdentity(value) {
+  return Array.isArray(value) && value.length === 16 ? value : IDENTITY_MATRIX_ARRAY
+}
+
+function rigidTransformHorn(sourcePoints, targetPoints) {
+  const count = Math.min(sourcePoints?.length || 0, targetPoints?.length || 0)
+  if (count < 3) return null
+
+  const sourceCenter = new THREE.Vector3()
+  const targetCenter = new THREE.Vector3()
+  for (let i = 0; i < count; i++) {
+    sourceCenter.add(sourcePoints[i])
+    targetCenter.add(targetPoints[i])
+  }
+  sourceCenter.multiplyScalar(1 / count)
+  targetCenter.multiplyScalar(1 / count)
+
+  let sxx = 0, sxy = 0, sxz = 0
+  let syx = 0, syy = 0, syz = 0
+  let szx = 0, szy = 0, szz = 0
+  for (let i = 0; i < count; i++) {
+    const a = sourcePoints[i].clone().sub(sourceCenter)
+    const b = targetPoints[i].clone().sub(targetCenter)
+    sxx += a.x * b.x; sxy += a.x * b.y; sxz += a.x * b.z
+    syx += a.y * b.x; syy += a.y * b.y; syz += a.y * b.z
+    szx += a.z * b.x; szy += a.z * b.y; szz += a.z * b.z
+  }
+
+  const trace = sxx + syy + szz
+  const N = [
+    trace,       syz - szy,  szx - sxz,  sxy - syx,
+    syz - szy,  sxx-syy-szz, sxy+syx,    szx+sxz,
+    szx - sxz,  sxy+syx,    -sxx+syy-szz, syz+szy,
+    sxy - syx,  szx+sxz,     syz+szy,    -sxx-syy+szz,
+  ]
+
+  let q = [1, 0, 0, 0]
+  for (let iter = 0; iter < 40; iter++) {
+    const next = [0, 0, 0, 0]
+    for (let r = 0; r < 4; r++) {
+      for (let c = 0; c < 4; c++) next[r] += N[r * 4 + c] * q[c]
+    }
+    const length = Math.hypot(next[0], next[1], next[2], next[3]) || 1
+    q = next.map((v) => v / length)
+  }
+
+  const rotation = new THREE.Quaternion(q[1], q[2], q[3], q[0]).normalize()
+  const rotatedSourceCenter = sourceCenter.clone().applyQuaternion(rotation)
+  const translation = targetCenter.clone().sub(rotatedSourceCenter)
+  return new THREE.Matrix4().compose(translation, rotation, new THREE.Vector3(1, 1, 1))
+}
+
+function solveLinearSystem6(matrix, rhs) {
+  const n = 6
+  const a = Array.from({ length: n }, (_, r) => {
+    const row = new Array(n + 1)
+    for (let c = 0; c < n; c++) row[c] = matrix[r * n + c]
+    row[n] = rhs[r]
+    return row
+  })
+
+  for (let col = 0; col < n; col++) {
+    let pivot = col
+    for (let r = col + 1; r < n; r++) if (Math.abs(a[r][col]) > Math.abs(a[pivot][col])) pivot = r
+    if (Math.abs(a[pivot][col]) < 1e-12) return null
+    if (pivot !== col) [a[pivot], a[col]] = [a[col], a[pivot]]
+    const div = a[col][col]
+    for (let c = col; c <= n; c++) a[col][c] /= div
+    for (let r = 0; r < n; r++) {
+      if (r === col) continue
+      const factor = a[r][col]
+      if (Math.abs(factor) < 1e-18) continue
+      for (let c = col; c <= n; c++) a[r][c] -= factor * a[col][c]
+    }
+  }
+  return a.map((row) => row[n])
+}
+
+function makeClosestSurfaceQuery(targetMesh) {
+  targetMesh.updateMatrixWorld(true)
+  if (!targetMesh.geometry.boundsTree) targetMesh.geometry.computeBoundsTree()
+  const inverseTarget = new THREE.Matrix4().copy(targetMesh.matrixWorld).invert()
+  const normalMatrix = new THREE.Matrix3().getNormalMatrix(targetMesh.matrixWorld)
+  const localPoint = new THREE.Vector3()
+  const closestWorld = new THREE.Vector3()
+  const deltaWorld = new THREE.Vector3()
+  const normalWorld = new THREE.Vector3()
+  const triangleA = new THREE.Vector3(), triangleB = new THREE.Vector3(), triangleC = new THREE.Vector3()
+  const result = { point: new THREE.Vector3(), distance: Infinity, faceIndex: -1 }
+  const output = { pointWorld: new THREE.Vector3(), normalWorld: new THREE.Vector3(), distance: Infinity, faceIndex: -1 }
+
+  return (worldPoint) => {
+    localPoint.copy(worldPoint).applyMatrix4(inverseTarget)
+    result.distance = Infinity
+    result.faceIndex = -1
+    targetMesh.geometry.boundsTree.closestPointToPoint(localPoint, result)
+    closestWorld.copy(result.point).applyMatrix4(targetMesh.matrixWorld)
+    faceNormalLocal(targetMesh.geometry, result.faceIndex, normalWorld, triangleA, triangleB, triangleC)
+      .applyMatrix3(normalMatrix)
+      .normalize()
+    output.pointWorld.copy(closestWorld)
+    output.normalWorld.copy(normalWorld)
+    output.distance = deltaWorld.subVectors(worldPoint, closestWorld).length()
+    output.faceIndex = result.faceIndex
+    return output
+  }
+}
+
+function isInsideAlignmentRoi(point, centers, radiusSq) {
+  if (!Array.isArray(centers) || centers.length === 0) return true
+  for (let i = 0; i < centers.length; i++) {
+    const c = centers[i]
+    const dx = point.x - c[0], dy = point.y - c[1], dz = point.z - c[2]
+    if (dx * dx + dy * dy + dz * dz <= radiusSq) return true
+  }
+  return false
+}
+
+function sampledVertexIndices(positionCount, desiredCount) {
+  if (!positionCount) return []
+  const count = Math.min(positionCount, Math.max(100, desiredCount || positionCount))
+  const step = positionCount / count
+  const result = new Array(count)
+  for (let i = 0; i < count; i++) result[i] = Math.min(positionCount - 1, Math.floor((i + 0.37) * step))
+  return result
+}
+
+async function robustPointToPlaneICP({
+  sourceMesh,
+  sourceRoot,
+  targetMesh,
+  targetRoot,
+  initialMatrix,
+  sourceRoi = [],
+  targetRoi = [],
+  roiRadius = 3,
+  onProgress,
+}) {
+  if (!sourceMesh || !sourceRoot || !targetMesh || !targetRoot) throw new Error("Chybí model pro Best Fit.")
+  sourceRoot.updateMatrixWorld(true)
+  targetRoot.updateMatrixWorld(true)
+  sourceMesh.updateMatrixWorld(true)
+  targetMesh.updateMatrixWorld(true)
+
+  const sourcePosition = sourceMesh.geometry.getAttribute("position")
+  if (!sourcePosition?.count) throw new Error("Moving model nemá použitelnou geometrii.")
+
+  const sourceRootInverse = new THREE.Matrix4().copy(sourceRoot.matrixWorld).invert()
+  const meshToRoot = new THREE.Matrix4().multiplyMatrices(sourceRootInverse, sourceMesh.matrixWorld)
+  const targetRootInverse = new THREE.Matrix4().copy(targetRoot.matrixWorld).invert()
+  const query = makeClosestSurfaceQuery(targetMesh)
+  const targetBox = new THREE.Box3().setFromObject(targetRoot)
+  const targetSize = targetBox.getSize(new THREE.Vector3())
+  const diagonal = Math.max(1, targetSize.length())
+  const radiusSq = Math.max(0.01, roiRadius * roiRadius)
+  const current = new THREE.Matrix4().fromArray(matrixArrayOrIdentity(initialMatrix))
+
+  const stages = [
+    { samples: 2400, iterations: 10, maxDistance: Math.max(3.5, diagonal * 0.075), trim: 0.72 },
+    { samples: 6000, iterations: 12, maxDistance: Math.max(1.8, diagonal * 0.038), trim: 0.80 },
+    { samples: 12000, iterations: 14, maxDistance: Math.max(0.75, diagonal * 0.018), trim: 0.86 },
+  ]
+
+  const pMesh = new THREE.Vector3()
+  const pRoot = new THREE.Vector3()
+  const pWorld = new THREE.Vector3()
+  const qTargetRoot = new THREE.Vector3()
+  const delta = new THREE.Vector3()
+  const cross = new THREE.Vector3()
+  let finalRms = Infinity
+  let finalCount = 0
+
+  for (let stageIndex = 0; stageIndex < stages.length; stageIndex++) {
+    const stage = stages[stageIndex]
+    const indices = sampledVertexIndices(sourcePosition.count, stage.samples)
+
+    for (let iteration = 0; iteration < stage.iterations; iteration++) {
+      const correspondences = []
+      for (let k = 0; k < indices.length; k++) {
+        pMesh.fromBufferAttribute(sourcePosition, indices[k])
+        pRoot.copy(pMesh).applyMatrix4(meshToRoot)
+        if (!isInsideAlignmentRoi(pRoot, sourceRoi, radiusSq)) continue
+        pWorld.copy(pRoot).applyMatrix4(current)
+        const hit = query(pWorld)
+        if (!Number.isFinite(hit.distance) || hit.distance > stage.maxDistance) continue
+        qTargetRoot.copy(hit.pointWorld).applyMatrix4(targetRootInverse)
+        if (!isInsideAlignmentRoi(qTargetRoot, targetRoi, radiusSq)) continue
+        correspondences.push({
+          p: pWorld.clone(),
+          q: hit.pointWorld.clone(),
+          n: hit.normalWorld.clone(),
+          distance: hit.distance,
+        })
+      }
+
+      if (correspondences.length < 30) throw new Error("Příliš málo překrývající se geometrie pro Best Fit.")
+      correspondences.sort((a, b) => a.distance - b.distance)
+      const keepCount = Math.max(30, Math.floor(correspondences.length * stage.trim))
+      correspondences.length = keepCount
+
+      const residualAbs = correspondences.map((c) => Math.abs(c.n.dot(delta.subVectors(c.p, c.q)))).sort((a, b) => a - b)
+      const medianResidual = residualAbs[Math.floor(residualAbs.length / 2)] || 0.01
+      const robustScale = Math.max(0.025, medianResidual * 1.4826 * 4.685)
+
+      const normalMatrix = new Float64Array(36)
+      const rhs = new Float64Array(6)
+      let sumSq = 0, used = 0
+
+      for (let i = 0; i < correspondences.length; i++) {
+        const c = correspondences[i]
+        delta.subVectors(c.p, c.q)
+        const residual = c.n.dot(delta)
+        const u = Math.abs(residual) / robustScale
+        if (u >= 1) continue
+        const robustWeight = Math.pow(1 - u * u, 2)
+        cross.crossVectors(c.p, c.n)
+        const J = [cross.x, cross.y, cross.z, c.n.x, c.n.y, c.n.z]
+        for (let r = 0; r < 6; r++) {
+          rhs[r] += -robustWeight * J[r] * residual
+          for (let col = 0; col < 6; col++) normalMatrix[r * 6 + col] += robustWeight * J[r] * J[col]
+        }
+        sumSq += residual * residual
+        used++
+      }
+
+      if (used < 20) throw new Error("Best Fit nemá dostatek spolehlivých korespondencí.")
+      for (let d = 0; d < 6; d++) normalMatrix[d * 6 + d] += 1e-8
+      const solution = solveLinearSystem6(normalMatrix, rhs)
+      if (!solution) break
+
+      const rotationVector = new THREE.Vector3(solution[0], solution[1], solution[2])
+      let rotationAngle = rotationVector.length()
+      if (rotationAngle > 0.18) {
+        rotationVector.multiplyScalar(0.18 / rotationAngle)
+        rotationAngle = 0.18
+      }
+      const translation = new THREE.Vector3(solution[3], solution[4], solution[5])
+      if (translation.length() > 2.5) translation.setLength(2.5)
+      const quaternion = rotationAngle > 1e-10
+        ? new THREE.Quaternion().setFromAxisAngle(rotationVector.clone().normalize(), rotationAngle)
+        : new THREE.Quaternion()
+      const increment = new THREE.Matrix4().compose(translation, quaternion, new THREE.Vector3(1, 1, 1))
+      current.premultiply(increment)
+
+      finalRms = Math.sqrt(sumSq / Math.max(1, used))
+      finalCount = used
+      onProgress?.({
+        stage: stageIndex + 1,
+        stages: stages.length,
+        iteration: iteration + 1,
+        iterations: stage.iterations,
+        rms: finalRms,
+        correspondences: used,
+      })
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+
+      if (translation.length() < 0.001 && rotationAngle < 0.00008) break
+    }
+  }
+
+  return { matrix: current.toArray(), rms: finalRms, correspondences: finalCount }
+}
+
+function computeAlignmentMetrics(meshA, meshB, tolerance = 0.25, maxSamples = 12000) {
+  if (!meshA || !meshB) return null
+  meshA.updateMatrixWorld(true)
+  meshB.updateMatrixWorld(true)
+  const posA = meshA.geometry.getAttribute("position")
+  const posB = meshB.geometry.getAttribute("position")
+  if (!posA?.count || !posB?.count) return null
+  const sampleA = makeClosestSurfaceSampler(meshB)
+  const sampleB = makeClosestSurfaceSampler(meshA)
+  const values = []
+  const point = new THREE.Vector3()
+  let sum = 0, sumSq = 0, max = 0, within = 0
+
+  const collect = (position, mesh, sampler) => {
+    const indices = sampledVertexIndices(position.count, Math.floor(maxSamples / 2))
+    for (let i = 0; i < indices.length; i++) {
+      point.fromBufferAttribute(position, indices[i]).applyMatrix4(mesh.matrixWorld)
+      const distance = sampler(point).distance
+      if (!Number.isFinite(distance)) continue
+      values.push(distance)
+      sum += distance
+      sumSq += distance * distance
+      max = Math.max(max, distance)
+      if (distance <= tolerance) within++
+    }
+  }
+  collect(posA, meshA, sampleA)
+  collect(posB, meshB, sampleB)
+  values.sort((a, b) => a - b)
+  const count = values.length || 1
+  const at = (fraction) => values.length ? values[Math.min(values.length - 1, Math.floor((values.length - 1) * fraction))] : 0
+  return {
+    mean: sum / count,
+    median: at(0.5),
+    rms: Math.sqrt(sumSq / count),
+    percentile95: at(0.95),
+    max,
+    withinTolerance: (within / count) * 100,
+    samples: values.length,
+  }
+}
+
+function AlignmentMarker({ point, index, radius = 0.8 }) {
+  const color = ALIGNMENT_POINT_COLORS[index % ALIGNMENT_POINT_COLORS.length]
+  return (
+    <group position={point}>
+      <mesh renderOrder={1000}>
+        <sphereGeometry args={[radius, 20, 14]} />
+        <meshBasicMaterial color={color} depthTest={false} depthWrite={false} />
+      </mesh>
+      <Html center style={{ pointerEvents: "none" }} zIndexRange={[1000, 0]}>
+        <div style={{
+          width: 22, height: 22, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
+          background: color, color: "#050505", fontFamily: "sans-serif", fontSize: 11, fontWeight: 900,
+          border: "2px solid rgba(0,0,0,.7)", boxShadow: "0 2px 6px rgba(0,0,0,.55)", transform: "translate(12px,-12px)",
+        }}>{index + 1}</div>
+      </Html>
+    </group>
+  )
+}
+
+function AlignmentRoiCloud({ points, color = "#22c55e", size = 5 }) {
+  const geometry = useMemo(() => {
+    const g = new THREE.BufferGeometry()
+    const data = new Float32Array((points?.length || 0) * 3)
+    ;(points || []).forEach((p, i) => { data[i * 3] = p[0]; data[i * 3 + 1] = p[1]; data[i * 3 + 2] = p[2] })
+    g.setAttribute("position", new THREE.BufferAttribute(data, 3))
+    return g
+  }, [points])
+  useEffect(() => () => geometry.dispose(), [geometry])
+  if (!points?.length) return null
+  return (
+    <points geometry={geometry} renderOrder={999}>
+      <pointsMaterial color={color} size={size} sizeAttenuation={false} transparent opacity={0.82} depthTest={false} depthWrite={false} />
+    </points>
+  )
+}
+
+function AlignmentPreviewModel({ file, sourceObject, color, points, roiPoints, mode, active, brushRadius, onPickPoint, onPaintPoint, onLoaded }) {
+  const [object3D, setObject3D] = useState(null)
+  const rootRef = useRef(null)
+  const paintingRef = useRef(false)
+  const lastPaintRef = useRef(null)
+  const ext = useMemo(() => inferExt(file?.rawName || file?.name || file?.url), [file])
+
+  useEffect(() => {
+    if (!file?.url) { setObject3D(null); return }
+    let cancelled = false
+    ;(async () => {
+      try {
+        let obj
+        if (sourceObject) {
+          obj = sourceObject.clone(true)
+          obj.matrixAutoUpdate = true
+          obj.position.set(0, 0, 0)
+          obj.quaternion.identity()
+          obj.scale.set(1, 1, 1)
+          obj.updateMatrix()
+          obj.traverse((child) => {
+            if (!child.isMesh) return
+            child.material = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, side: THREE.DoubleSide })
+          })
+        } else if (ext === "stl") {
+          const geometry = await new STLLoader().loadAsync(file.url)
+          if (!geometry.attributes.normal) geometry.computeVertexNormals()
+          obj = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, side: THREE.DoubleSide }))
+        } else if (ext === "ply") {
+          const geometry = await new PLYLoader().loadAsync(file.url)
+          if (!geometry.attributes.normal) geometry.computeVertexNormals()
+          obj = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, side: THREE.DoubleSide }))
+        } else {
+          obj = await new OBJLoader().loadAsync(file.url)
+          obj.traverse((child) => {
+            if (!child.isMesh) return
+            if (!child.geometry.attributes.normal) child.geometry.computeVertexNormals()
+            child.material = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, side: THREE.DoubleSide })
+          })
+        }
+        if (!cancelled) {
+          obj.traverse((child) => { if (child.isMesh && !child.geometry.boundsTree) child.geometry.computeBoundsTree() })
+          setObject3D(obj)
+          onLoaded?.()
+        }
+      } catch (error) {
+        console.error("Alignment preview load error:", error)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [file?.url, ext, sourceObject])
+
+  useEffect(() => {
+    if (!object3D) return
+    object3D.traverse((child) => {
+      if (!child.isMesh || !child.material?.color) return
+      child.material.color.set(color)
+      child.material.needsUpdate = true
+    })
+  }, [object3D, color])
+
+  const localPointFromEvent = (event) => {
+    if (!rootRef.current) return null
+    rootRef.current.updateMatrixWorld(true)
+    return rootRef.current.worldToLocal(event.point.clone())
+  }
+
+  const addPaintPoint = (event) => {
+    const local = localPointFromEvent(event)
+    if (!local) return
+    const previous = lastPaintRef.current
+    const minStep = Math.max(0.15, brushRadius * 0.22)
+    if (previous && previous.distanceTo(local) < minStep) return
+    lastPaintRef.current = local.clone()
+    onPaintPoint?.([local.x, local.y, local.z])
+  }
+
+  if (!object3D) return null
+  const markerRadius = Math.max(0.35, brushRadius * 0.18)
+  return (
+    <group ref={rootRef}>
+      <primitive
+        object={object3D}
+        onClick={mode === "points" && active ? (event) => {
+          event.stopPropagation()
+          const local = localPointFromEvent(event)
+          if (local) onPickPoint?.([local.x, local.y, local.z])
+        } : undefined}
+        onPointerDown={mode === "roi" && active ? (event) => {
+          event.stopPropagation()
+          paintingRef.current = true
+          lastPaintRef.current = null
+          addPaintPoint(event)
+        } : undefined}
+        onPointerMove={mode === "roi" && active ? (event) => {
+          if (!paintingRef.current) return
+          event.stopPropagation()
+          addPaintPoint(event)
+        } : undefined}
+        onPointerUp={mode === "roi" && active ? (event) => {
+          event.stopPropagation()
+          paintingRef.current = false
+          lastPaintRef.current = null
+        } : undefined}
+        onPointerOut={mode === "roi" && active ? () => {
+          paintingRef.current = false
+          lastPaintRef.current = null
+        } : undefined}
+      />
+      {(points || []).map((p, index) => <AlignmentMarker key={`${index}-${p.join("-")}`} point={p} index={index} radius={markerRadius} />)}
+      <AlignmentRoiCloud points={roiPoints} />
+    </group>
+  )
+}
+
+function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, points, roiPoints, mode, active, brushRadius, onPickPoint, onPaintPoint }) {
+  const rootRef = useRef(null)
+  const controlsRef = useRef(null)
+  const [target, setTarget] = useState([0, 0, 0])
+  const [loadedNonce, setLoadedNonce] = useState(0)
+  return (
+    <div style={{ position: "relative", minWidth: 0, minHeight: 0, background: "#080808", overflow: "hidden" }}>
+      <div style={{
+        position: "absolute", top: 8, left: 10, right: 10, zIndex: 5, display: "flex", alignItems: "center", justifyContent: "space-between",
+        pointerEvents: "none", fontFamily: "sans-serif",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          <span style={{ width: 22, height: 22, borderRadius: 6, display: "grid", placeItems: "center", background: active ? "#fbbf24" : "rgba(255,255,255,.14)", color: active ? "#050505" : "#fff", fontSize: 11, fontWeight: 900 }}>{badge}</span>
+          <span style={{ color: "white", fontSize: 12, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</span>
+        </div>
+        <span style={{ color: active ? "#fbbf24" : "#777", fontSize: 10, fontWeight: 800 }}>{active ? (mode === "points" ? "KLIKNĚTE NA BOD" : "MALUJTE OBLAST") : ""}</span>
+      </div>
+      <Canvas orthographic camera={{ position: [0, 0, 250], near: 0.01, far: 100000, zoom: 1 }} gl={{ antialias: true }} style={{ position: "absolute", inset: 0 }}>
+        <color attach="background" args={["#080808"]} />
+        <ambientLight intensity={0.6} />
+        <directionalLight position={[0, 5, 8]} intensity={1.4} />
+        <directionalLight position={[-8, -2, 3]} intensity={0.55} />
+        <group ref={rootRef}>
+          {file && (
+            <AlignmentPreviewModel
+              file={file}
+              sourceObject={sourceObject}
+              color={color}
+              points={points}
+              roiPoints={roiPoints}
+              mode={mode}
+              active={active}
+              brushRadius={brushRadius}
+              onPickPoint={onPickPoint}
+              onPaintPoint={onPaintPoint}
+              onLoaded={() => setLoadedNonce((n) => n + 1)}
+            />
+          )}
+        </group>
+        {file && loadedNonce > 0 && (
+          <AutoCenterAndFrame
+            rootRef={rootRef}
+            triggerKey={`${file.url}-${loadedNonce}`}
+            margin={1.18}
+            desktopScale={1}
+            mobileScale={1}
+            centerMode="combined"
+            setTarget={setTarget}
+          />
+        )}
+        <TouchTrackballControls ref={controlsRef} target={target} enabled={mode !== "roi"} />
+        <RightButtonPan setTarget={setTarget} trackballRef={controlsRef} />
+      </Canvas>
+      <div style={{ position: "absolute", inset: 0, pointerEvents: "none", border: active ? "2px solid rgba(251,191,36,.72)" : "1px solid rgba(255,255,255,.12)", boxSizing: "border-box" }} />
+    </div>
+  )
+}
+
 /* ---------- Loader ---------- */
 function InlineLoader({ text }) {
   return (
@@ -1051,13 +1570,14 @@ function Measurement3D({ measureState, boundingBox }) {
 function AnyModel({
   name, url,
   color, opacity, visible,
-  onLoaded, onMeshReady, autoSmooth, smoothAngle = DEFAULT_SMOOTH_ANGLE,
+  onLoaded, onMeshReady, onObjectReady, autoSmooth, smoothAngle = DEFAULT_SMOOTH_ANGLE,
   roughness = 0.5, metalness = 0.5,
   useVertexColors = false,
   keepMaterials = false,
   wireframe = false,
   analysisMode = null,
   renderOrder = 0,
+  modelMatrix = null,
   onHoverDist,
   onPinNote,
 }) {
@@ -1133,6 +1653,7 @@ function AnyModel({
           })
           setObject3D(obj)
           onLoaded && onLoaded(url)
+          onObjectReady && onObjectReady(obj, url)
           
           let foundMesh = null;
           obj.traverse((child) => { if (child.isMesh && !foundMesh) foundMesh = child });
@@ -1144,6 +1665,15 @@ function AnyModel({
     })()
     return () => { cancelled = true }
   }, [url, ext])
+
+  useEffect(() => {
+    if (!object3D) return
+    object3D.matrixAutoUpdate = false
+    if (Array.isArray(modelMatrix) && modelMatrix.length === 16) object3D.matrix.fromArray(modelMatrix)
+    else object3D.matrix.identity()
+    object3D.matrixWorldNeedsUpdate = true
+    object3D.updateMatrixWorld(true)
+  }, [object3D, modelMatrix])
 
   useEffect(() => {
     if (!object3D) return
@@ -2286,7 +2816,22 @@ export default function ClientPage() {
   const [comparisonTolerance, setComparisonTolerance] = useState(0.25)
   const [comparisonStats, setComparisonStats] = useState(null)
   const [restoringAnalysisMode, setRestoringAnalysisMode] = useState(null)
-  
+
+  // -- ZAROVNÁNÍ / REGISTRACE MODELŮ --
+  const [alignmentMode, setAlignmentMode] = useState(false)
+  const [alignmentSelection, setAlignmentSelection] = useState([])
+  const [alignmentTool, setAlignmentTool] = useState("points") // points | roi
+  const [alignmentPointsA, setAlignmentPointsA] = useState([])
+  const [alignmentPointsB, setAlignmentPointsB] = useState([])
+  const [alignmentRoiA, setAlignmentRoiA] = useState([])
+  const [alignmentRoiB, setAlignmentRoiB] = useState([])
+  const [alignmentBrushRadius, setAlignmentBrushRadius] = useState(3)
+  const [alignmentBusy, setAlignmentBusy] = useState(false)
+  const [alignmentProgress, setAlignmentProgress] = useState(null)
+  const [alignmentStats, setAlignmentStats] = useState(null)
+  const [alignmentMessage, setAlignmentMessage] = useState("")
+  const [modelTransforms, setModelTransforms] = useState({})
+
   const [pinnedNotes, setPinnedNotes] = useState([])
   const [pendingViewerState, setPendingViewerState] = useState(null)
   const restoredViewerStateRef = useRef(null)
@@ -2346,6 +2891,7 @@ export default function ClientPage() {
 
   const [hasTexMap, setHasTexMap] = useState({})
   const meshesRef = useRef({})
+  const modelObjectsRef = useRef({})
   const analysisFilesKey = files.map((file) => file.url).join("|")
 
   useEffect(() => {
@@ -2357,7 +2903,18 @@ export default function ClientPage() {
     setShowComparison(false)
     setComparisonStats(null)
     setPinnedNotes([])
+    setAlignmentMode(false)
+    setAlignmentSelection([])
+    setAlignmentPointsA([])
+    setAlignmentPointsB([])
+    setAlignmentRoiA([])
+    setAlignmentRoiB([])
+    setAlignmentStats(null)
+    setAlignmentProgress(null)
+    setAlignmentMessage("")
+    setModelTransforms({})
     meshesRef.current = {}
+    modelObjectsRef.current = {}
   }, [analysisFilesKey])
   
   const handleMeshReady = useCallback((mesh, url) => {
@@ -2365,6 +2922,230 @@ export default function ClientPage() {
     const hasC = !!(mesh.geometry.attributes.color || mesh.geometry.attributes.uv);
     setHasTexMap(prev => ({ ...prev, [url]: hasC }))
   }, [])
+
+  const handleObjectReady = useCallback((object, url) => {
+    modelObjectsRef.current[url] = object
+    const matrix = modelTransforms[url]
+    object.matrixAutoUpdate = false
+    if (Array.isArray(matrix) && matrix.length === 16) object.matrix.fromArray(matrix)
+    else object.matrix.identity()
+    object.updateMatrixWorld(true)
+  }, [modelTransforms])
+
+  const applyModelTransform = useCallback((url, matrixValue) => {
+    const array = matrixArrayOrIdentity(matrixValue).slice()
+    setModelTransforms((previous) => ({ ...previous, [url]: array }))
+    const object = modelObjectsRef.current[url]
+    if (object) {
+      object.matrixAutoUpdate = false
+      object.matrix.fromArray(array)
+      object.matrixWorldNeedsUpdate = true
+      object.updateMatrixWorld(true)
+    }
+    rootGroupRef.current?.updateMatrixWorld(true)
+    setDidInitialFrame(false)
+  }, [])
+
+  const getAlignmentPair = useCallback(() => {
+    if (alignmentSelection.length !== 2) return { aUrl: null, bUrl: null, fileA: null, fileB: null }
+    const [aUrl, bUrl] = alignmentSelection
+    return {
+      aUrl,
+      bUrl,
+      fileA: files.find((file) => file.url === aUrl) || null,
+      fileB: files.find((file) => file.url === bUrl) || null,
+    }
+  }, [alignmentSelection, files])
+
+  const openAlignmentMode = useCallback(() => {
+    const eligible = files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url)))
+    if (eligible.length < 2) {
+      setAlignmentMessage("Pro zarovnání jsou potřeba alespoň dva 3D modely.")
+      return
+    }
+    setAlignmentSelection((previous) => {
+      if (previous.length === 2 && eligible.some((f) => f.url === previous[0]) && eligible.some((f) => f.url === previous[1]) && previous[0] !== previous[1]) return previous
+      return [eligible[0].url, eligible[1].url]
+    })
+    setAlignmentMode(true)
+    setAlignmentTool("points")
+    setAlignmentMessage("Označte stejný bod nejprve na Reference A a potom na Moving B.")
+    setAlignmentProgress(null)
+    setAlignmentStats(null)
+    setIsAutoRotating(false)
+    setHeatmapMenuOpen(false)
+    setComparisonMenuOpen(false)
+    setShowHeatmap(false)
+    setShowComparison(false)
+  }, [files])
+
+  const changeAlignmentSelection = useCallback((side, url) => {
+    setAlignmentSelection((previous) => {
+      const next = previous.length === 2 ? [...previous] : [files[0]?.url || "", files[1]?.url || ""]
+      const index = side === "A" ? 0 : 1
+      const otherIndex = index === 0 ? 1 : 0
+      if (next[otherIndex] === url) next[otherIndex] = next[index]
+      next[index] = url
+      return next
+    })
+    setAlignmentPointsA([])
+    setAlignmentPointsB([])
+    setAlignmentRoiA([])
+    setAlignmentRoiB([])
+    setAlignmentStats(null)
+    setAlignmentProgress(null)
+    setAlignmentMessage("Výběr modelů byl změněn. Označte nové korespondenční body.")
+  }, [files])
+
+  const handleAlignmentPickA = useCallback((point) => {
+    if (alignmentPointsA.length !== alignmentPointsB.length) {
+      setAlignmentMessage("Nejdřív označte odpovídající bod na Moving B.")
+      return
+    }
+    if (alignmentPointsA.length >= 8) return
+    setAlignmentPointsA((previous) => [...previous, point])
+    setAlignmentMessage(`Bod ${alignmentPointsA.length + 1}: teď označte stejné místo na Moving B.`)
+  }, [alignmentPointsA.length, alignmentPointsB.length])
+
+  const handleAlignmentPickB = useCallback((point) => {
+    if (alignmentPointsA.length !== alignmentPointsB.length + 1) {
+      setAlignmentMessage("Nejdřív označte nový bod na Reference A.")
+      return
+    }
+    if (alignmentPointsB.length >= 8) return
+    const pairNumber = alignmentPointsB.length + 1
+    setAlignmentPointsB((previous) => [...previous, point])
+    setAlignmentMessage(pairNumber >= 3
+      ? `${pairNumber} párů označeno. Můžete přidat další body nebo spustit Předzarovnání.`
+      : `Pár ${pairNumber} hotový. Označte bod ${pairNumber + 1} na Reference A.`)
+  }, [alignmentPointsA.length, alignmentPointsB.length])
+
+  const appendAlignmentRoi = useCallback((side, point) => {
+    const setter = side === "A" ? setAlignmentRoiA : setAlignmentRoiB
+    setter((previous) => {
+      if (previous.length >= 1600) return previous
+      const last = previous[previous.length - 1]
+      if (last) {
+        const dx = point[0] - last[0], dy = point[1] - last[1], dz = point[2] - last[2]
+        if (dx * dx + dy * dy + dz * dz < Math.pow(Math.max(0.12, alignmentBrushRadius * 0.12), 2)) return previous
+      }
+      return [...previous, point]
+    })
+  }, [alignmentBrushRadius])
+
+  const undoAlignmentPoint = useCallback(() => {
+    if (alignmentPointsA.length > alignmentPointsB.length) {
+      setAlignmentPointsA((previous) => previous.slice(0, -1))
+    } else if (alignmentPointsB.length > 0) {
+      setAlignmentPointsB((previous) => previous.slice(0, -1))
+    } else if (alignmentPointsA.length > 0) {
+      setAlignmentPointsA((previous) => previous.slice(0, -1))
+    }
+    setAlignmentStats(null)
+  }, [alignmentPointsA.length, alignmentPointsB.length])
+
+  const refreshAlignmentMetrics = useCallback(async (aUrl, bUrl) => {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    rootGroupRef.current?.updateMatrixWorld(true)
+    meshesRef.current[aUrl]?.updateMatrixWorld(true)
+    meshesRef.current[bUrl]?.updateMatrixWorld(true)
+    const stats = computeAlignmentMetrics(meshesRef.current[aUrl], meshesRef.current[bUrl], 0.25)
+    setAlignmentStats(stats)
+    return stats
+  }, [])
+
+  const handleAlignmentLandmarkFit = useCallback(async () => {
+    const { aUrl, bUrl } = getAlignmentPair()
+    const pairCount = Math.min(alignmentPointsA.length, alignmentPointsB.length)
+    if (!aUrl || !bUrl || pairCount < 3) {
+      setAlignmentMessage("Pro předzarovnání označte alespoň 3 páry bodů.")
+      return
+    }
+    const matrixA = new THREE.Matrix4().fromArray(matrixArrayOrIdentity(modelTransforms[aUrl]))
+    const source = alignmentPointsB.slice(0, pairCount).map((point) => new THREE.Vector3(...point))
+    const target = alignmentPointsA.slice(0, pairCount).map((point) => new THREE.Vector3(...point).applyMatrix4(matrixA))
+    const matrix = rigidTransformHorn(source, target)
+    if (!matrix) return
+    applyModelTransform(bUrl, matrix.toArray())
+    setAlignmentMessage(`Předzarovnání z ${pairCount} párů dokončeno. Teď spusťte Best Fit.`)
+    setAlignmentProgress({ label: "Landmark fit", rms: null })
+    await refreshAlignmentMetrics(aUrl, bUrl)
+  }, [getAlignmentPair, alignmentPointsA, alignmentPointsB, modelTransforms, applyModelTransform, refreshAlignmentMetrics])
+
+  const handleAlignmentBestFit = useCallback(async () => {
+    const { aUrl, bUrl } = getAlignmentPair()
+    const sourceMesh = meshesRef.current[bUrl]
+    const targetMesh = meshesRef.current[aUrl]
+    const sourceRoot = modelObjectsRef.current[bUrl]
+    const targetRoot = modelObjectsRef.current[aUrl]
+    if (!aUrl || !bUrl || !sourceMesh || !targetMesh || !sourceRoot || !targetRoot) {
+      setAlignmentMessage("Vybrané modely ještě nejsou připravené.")
+      return
+    }
+    setAlignmentBusy(true)
+    setAlignmentStats(null)
+    setAlignmentMessage("Probíhá robustní multi-scale Best Fit…")
+    setShowComparison(false)
+    setShowHeatmap(false)
+    try {
+      const result = await robustPointToPlaneICP({
+        sourceMesh,
+        sourceRoot,
+        targetMesh,
+        targetRoot,
+        initialMatrix: modelTransforms[bUrl],
+        sourceRoi: alignmentRoiB,
+        targetRoi: alignmentRoiA,
+        roiRadius: alignmentBrushRadius,
+        onProgress: (progress) => setAlignmentProgress(progress),
+      })
+      applyModelTransform(bUrl, result.matrix)
+      const stats = await refreshAlignmentMetrics(aUrl, bUrl)
+      setAlignmentMessage(stats
+        ? `Best Fit dokončen · RMS ${stats.rms.toFixed(3)} mm · 95 % ${stats.percentile95.toFixed(3)} mm`
+        : "Best Fit dokončen.")
+    } catch (error) {
+      console.error("Alignment Best Fit error:", error)
+      setAlignmentMessage(error?.message || "Best Fit se nepodařilo dokončit.")
+    } finally {
+      setAlignmentBusy(false)
+    }
+  }, [getAlignmentPair, modelTransforms, alignmentRoiA, alignmentRoiB, alignmentBrushRadius, applyModelTransform, refreshAlignmentMetrics])
+
+  const resetAlignmentTransform = useCallback(async () => {
+    const { aUrl, bUrl } = getAlignmentPair()
+    if (!bUrl) return
+    applyModelTransform(bUrl, IDENTITY_MATRIX_ARRAY)
+    setAlignmentStats(null)
+    setAlignmentProgress(null)
+    setShowComparison(false)
+    setAlignmentMessage("Transformace Moving B byla vrácena do původní polohy.")
+    if (aUrl) await refreshAlignmentMetrics(aUrl, bUrl)
+  }, [getAlignmentPair, applyModelTransform, refreshAlignmentMetrics])
+
+  const showAlignmentDeviation = useCallback(async () => {
+    const { aUrl, bUrl } = getAlignmentPair()
+    const meshA = meshesRef.current[aUrl]
+    const meshB = meshesRef.current[bUrl]
+    if (!meshA || !meshB) return
+    setAlignmentBusy(true)
+    setAlignmentMessage("Počítám mapu odchylek…")
+    try {
+      rootGroupRef.current?.updateMatrixWorld(true)
+      const tolerance = 0.25
+      const stats = applySurfaceComparison(meshA, meshB, tolerance)
+      setComparisonSelection([aUrl, bUrl])
+      setComparisonTolerance(tolerance)
+      setComparisonStats(stats)
+      setHasComputedComparison(true)
+      setShowComparison(true)
+      setShowHeatmap(false)
+      setAlignmentStats(stats)
+      setAlignmentMessage("Mapa odchylek je zobrazena v horní scéně.")
+    } finally {
+      setAlignmentBusy(false)
+    }
+  }, [getAlignmentPair])
 
   const toggleHeatmapModel = (url) => {
     setHeatmapSelection((prev) => {
@@ -2460,6 +3241,14 @@ export default function ClientPage() {
         tolerance: comparisonTolerance,
         visible: showComparison && hasComputedComparison,
       },
+      alignment: {
+        reference: selectionNames(alignmentSelection)[0] || null,
+        moving: selectionNames(alignmentSelection)[1] || null,
+        transforms: files.map((file) => ({
+          file: file.rawName || file.name || file.url,
+          matrix: matrixArrayOrIdentity(modelTransforms[file.url]).slice(),
+        })),
+      },
       pinnedNotes: pinnedNotes.map((note) => ({
         id: note.id,
         mode: note.mode,
@@ -2495,7 +3284,7 @@ export default function ClientPage() {
     }
   }, [
     activeAnalysisMode, files, heatmapSelection, showHeatmap, hasComputedHeatmap,
-    comparisonSelection, comparisonTolerance, showComparison, hasComputedComparison,
+    comparisonSelection, comparisonTolerance, showComparison, hasComputedComparison, modelTransforms, alignmentSelection,
     pinnedNotes, clippingEnabled, activeSlice, sliceRigGroup, planeGroup, horizontalPlaneGroup, measureState, horizontalMeasureState,
     dicomSource, dicomSettings,
   ])
@@ -2764,11 +3553,33 @@ export default function ClientPage() {
     restoredViewerStateRef.current = pendingViewerState
     const occlusionSelection = resolveSelection(pendingViewerState.occlusion?.files)
     const savedComparisonSelection = resolveSelection(pendingViewerState.comparison?.files)
+    const savedAlignmentSelection = resolveSelection([pendingViewerState.alignment?.reference, pendingViewerState.alignment?.moving].filter(Boolean))
     const savedTolerance = Math.max(0.05, Math.min(1, Number(pendingViewerState.comparison?.tolerance) || 0.25))
     const mode = pendingViewerState.activeAnalysisMode
 
+    const restoredTransforms = {}
+    const savedTransforms = Array.isArray(pendingViewerState.alignment?.transforms) ? pendingViewerState.alignment.transforms : []
+    savedTransforms.forEach((entry) => {
+      if (!Array.isArray(entry?.matrix) || entry.matrix.length !== 16) return
+      const file = files.find((item) => item.url === entry.file || item.rawName === entry.file || item.name === stripExt(entry.file) || item.name === entry.file)
+      if (!file) return
+      restoredTransforms[file.url] = entry.matrix.slice()
+      const object = modelObjectsRef.current[file.url]
+      if (object) {
+        object.matrixAutoUpdate = false
+        object.matrix.fromArray(entry.matrix)
+        object.matrixWorldNeedsUpdate = true
+        object.updateMatrixWorld(true)
+      }
+    })
+    if (Object.keys(restoredTransforms).length) {
+      setModelTransforms((previous) => ({ ...previous, ...restoredTransforms }))
+      rootGroupRef.current?.updateMatrixWorld(true)
+    }
+
     setHeatmapSelection(occlusionSelection)
     setComparisonSelection(savedComparisonSelection)
+    if (savedAlignmentSelection.length === 2) setAlignmentSelection(savedAlignmentSelection)
     setComparisonTolerance(savedTolerance)
     setShowHeatmap(false)
     setShowComparison(false)
@@ -3450,7 +4261,7 @@ export default function ClientPage() {
     </>
   )
 
-  const dicomLayoutActive = !!dicomSource && dicomStatus === "ready" && !isMobile
+  const dicomLayoutActive = !!dicomSource && dicomStatus === "ready" && !isMobile && !alignmentMode
   const dicomPanelWidth = "clamp(360px, 34vw, 560px)"
   const activePlaneGroup = activeSlice === "horizontal" ? horizontalPlaneGroup : planeGroup
 
@@ -3512,6 +4323,26 @@ export default function ClientPage() {
       color: "white",
     }}>
       
+      <div style={{ width: dicomLayoutActive ? 120 : 270 }}>
+        <button
+          onClick={openAlignmentMode}
+          disabled={files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url))).length < 2}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            background: "rgba(0,0,0,.25)", backdropFilter: "blur(3px)",
+            border: "1px solid rgba(255,255,255,.15)", borderRadius: 10, padding: "10px 14px",
+            color: "white", cursor: "pointer", fontWeight: "bold", fontSize: 14, width: "100%",
+            opacity: files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url))).length < 2 ? 0.45 : 1,
+          }}
+          title="Zarovnání dvou 3D modelů pomocí bodů a robustního Best Fit"
+        >
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="8" cy="8" r="3"/><circle cx="16" cy="16" r="3"/><path d="M10.5 10.5l3 3"/><path d="M14 5h5v5"/><path d="M10 19H5v-5"/>
+          </svg>
+          Zarovnání
+        </button>
+      </div>
+
       <div style={{ width: dicomLayoutActive ? 120 : 270 }}>
         <button 
           onClick={() => { setHeatmapMenuOpen(prev => !prev); setComparisonMenuOpen(false) }}
@@ -3803,12 +4634,141 @@ export default function ClientPage() {
     startDicomLoad()
   }, [sceneReadyForDicom, dicomSource, dicomStatus, startDicomLoad])
 
+  const alignmentBottomHeight = "38vh"
+  const alignmentEligibleFiles = files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url)))
+  const alignmentPair = getAlignmentPair()
+  const alignmentPairCount = Math.min(alignmentPointsA.length, alignmentPointsB.length)
+  const alignmentNextSide = alignmentPointsA.length === alignmentPointsB.length ? "A" : "B"
+  const alignmentButtonStyle = (active = false, disabled = false, accent = "#fbbf24") => ({
+    height: 34, padding: "0 12px", borderRadius: 8,
+    border: `1px solid ${active ? accent : "rgba(255,255,255,.18)"}`,
+    background: active ? `${accent}22` : "rgba(255,255,255,.07)",
+    color: disabled ? "#666" : active ? accent : "#fff",
+    fontSize: 11, fontWeight: 800, cursor: disabled ? "not-allowed" : "pointer",
+    whiteSpace: "nowrap", opacity: disabled ? 0.55 : 1,
+  })
+
+  const alignmentWorkspace = alignmentMode && alignmentPair.aUrl && alignmentPair.bUrl && (
+    <>
+      <div style={{
+        position: "absolute", top: 0, left: 0, right: 0, zIndex: 30,
+        minHeight: 68, padding: "8px 10px", boxSizing: "border-box",
+        background: "linear-gradient(to bottom, rgba(5,5,5,.97), rgba(5,5,5,.82))",
+        borderBottom: "1px solid rgba(255,255,255,.16)", backdropFilter: "blur(10px)",
+        display: "flex", alignItems: "center", gap: 8, color: "white", fontFamily: "sans-serif",
+      }}>
+        <div style={{ minWidth: 118, paddingRight: 8 }}>
+          <div style={{ fontSize: 14, fontWeight: 900, letterSpacing: ".02em" }}>ARTHETIC Align</div>
+          <div style={{ fontSize: 9, color: "#888", marginTop: 2 }}>Rigid registration · mm</div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "auto minmax(110px,170px) auto minmax(110px,170px)", gap: 5, alignItems: "center" }}>
+          <span style={{ fontSize: 10, fontWeight: 900, color: "#60a5fa" }}>A</span>
+          <select
+            value={alignmentPair.aUrl}
+            onChange={(e) => changeAlignmentSelection("A", e.target.value)}
+            disabled={alignmentBusy}
+            style={{ height: 32, borderRadius: 7, border: "1px solid rgba(255,255,255,.18)", background: "#151515", color: "white", padding: "0 7px", fontSize: 10, minWidth: 0 }}
+          >
+            {alignmentEligibleFiles.map((file) => <option key={`a-${file.url}`} value={file.url}>{stripExt(file.name || file.rawName || "Model")}</option>)}
+          </select>
+          <span style={{ fontSize: 10, fontWeight: 900, color: "#f472b6" }}>B</span>
+          <select
+            value={alignmentPair.bUrl}
+            onChange={(e) => changeAlignmentSelection("B", e.target.value)}
+            disabled={alignmentBusy}
+            style={{ height: 32, borderRadius: 7, border: "1px solid rgba(255,255,255,.18)", background: "#151515", color: "white", padding: "0 7px", fontSize: 10, minWidth: 0 }}
+          >
+            {alignmentEligibleFiles.map((file) => <option key={`b-${file.url}`} value={file.url}>{stripExt(file.name || file.rawName || "Model")}</option>)}
+          </select>
+        </div>
+
+        <div style={{ width: 1, alignSelf: "stretch", background: "rgba(255,255,255,.12)", margin: "0 3px" }} />
+
+        <button onClick={() => setAlignmentTool("points")} disabled={alignmentBusy} style={alignmentButtonStyle(alignmentTool === "points", alignmentBusy, "#fbbf24")}>● Body</button>
+        <button onClick={() => setAlignmentTool("roi")} disabled={alignmentBusy} style={alignmentButtonStyle(alignmentTool === "roi", alignmentBusy, "#34d399")}>◌ Oblast</button>
+
+        {alignmentTool === "roi" && (
+          <div style={{ width: 112, padding: "0 4px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#aaa", marginBottom: 2 }}><span>Štětec</span><b>{alignmentBrushRadius.toFixed(1)} mm</b></div>
+            <input type="range" min={0.8} max={8} step={0.2} value={alignmentBrushRadius} onChange={(e) => setAlignmentBrushRadius(Number(e.target.value))} style={{ width: "100%" }} />
+          </div>
+        )}
+
+        <div style={{ width: 1, alignSelf: "stretch", background: "rgba(255,255,255,.12)", margin: "0 3px" }} />
+
+        <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
+          <button onClick={undoAlignmentPoint} disabled={alignmentBusy || (!alignmentPointsA.length && !alignmentPointsB.length)} style={alignmentButtonStyle(false, alignmentBusy || (!alignmentPointsA.length && !alignmentPointsB.length))}>Zpět</button>
+          <button onClick={() => { setAlignmentPointsA([]); setAlignmentPointsB([]); setAlignmentStats(null); setAlignmentMessage("Body byly vymazány.") }} disabled={alignmentBusy} style={alignmentButtonStyle(false, alignmentBusy)}>Smazat body</button>
+          {alignmentTool === "roi" && <button onClick={() => { setAlignmentRoiA([]); setAlignmentRoiB([]); setAlignmentMessage("Referenční oblasti byly vymazány.") }} disabled={alignmentBusy} style={alignmentButtonStyle(false, alignmentBusy)}>Smazat oblast</button>}
+        </div>
+
+        <div style={{ marginLeft: "auto", display: "flex", gap: 5, alignItems: "center" }}>
+          <button onClick={handleAlignmentLandmarkFit} disabled={alignmentBusy || alignmentPairCount < 3} style={alignmentButtonStyle(alignmentPairCount >= 3, alignmentBusy || alignmentPairCount < 3, "#60a5fa")}>Předzarovnat</button>
+          <button onClick={handleAlignmentBestFit} disabled={alignmentBusy} style={{ ...alignmentButtonStyle(true, alignmentBusy, "#34d399"), background: alignmentBusy ? "rgba(255,255,255,.06)" : "rgba(52,211,153,.18)" }}>Best Fit</button>
+          <button onClick={showAlignmentDeviation} disabled={alignmentBusy || !alignmentStats} style={alignmentButtonStyle(false, alignmentBusy || !alignmentStats, "#c084fc")}>Odchylky</button>
+          <button onClick={resetAlignmentTransform} disabled={alignmentBusy} style={alignmentButtonStyle(false, alignmentBusy)}>Reset B</button>
+          <button onClick={() => { setAlignmentMode(false); setAlignmentMessage("") }} disabled={alignmentBusy} style={{ ...alignmentButtonStyle(true, alignmentBusy, "#fbbf24"), padding: "0 16px" }}>Hotovo</button>
+        </div>
+      </div>
+
+      <div style={{
+        position: "absolute", top: 72, left: "50%", transform: "translateX(-50%)", zIndex: 29,
+        maxWidth: "min(760px, calc(100vw - 40px))", padding: "7px 12px", borderRadius: 9,
+        background: "rgba(0,0,0,.68)", border: "1px solid rgba(255,255,255,.13)", backdropFilter: "blur(6px)",
+        color: alignmentBusy ? "#34d399" : "#d1d5db", fontFamily: "sans-serif", fontSize: 10, fontWeight: 700,
+        display: "flex", alignItems: "center", gap: 12, pointerEvents: "none",
+      }}>
+        <span>{alignmentBusy ? "⏳" : alignmentTool === "points" ? `Body ${alignmentPairCount} párů · další ${alignmentNextSide}` : `ROI A ${alignmentRoiA.length} · B ${alignmentRoiB.length}`}</span>
+        <span style={{ opacity: .75 }}>{alignmentMessage}</span>
+        {alignmentProgress?.rms != null && <b style={{ color: "#34d399", marginLeft: "auto" }}>Pass {alignmentProgress.stage}/{alignmentProgress.stages} · RMS {alignmentProgress.rms.toFixed(4)} mm</b>}
+        {alignmentStats && !alignmentBusy && <b style={{ color: "#fbbf24", marginLeft: "auto" }}>RMS {alignmentStats.rms.toFixed(3)} · P95 {alignmentStats.percentile95.toFixed(3)} mm</b>}
+      </div>
+
+      <div style={{
+        position: "absolute", left: 0, right: 0, bottom: 0, height: alignmentBottomHeight, zIndex: 25,
+        display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1,
+        background: "rgba(255,255,255,.18)", borderTop: "1px solid rgba(255,255,255,.24)", boxShadow: "0 -12px 35px rgba(0,0,0,.55)",
+      }}>
+        <AlignmentPreviewViewport
+          title={`Reference A · ${stripExt(alignmentPair.fileA?.name || alignmentPair.fileA?.rawName || "")}`}
+          badge="A"
+          file={alignmentPair.fileA}
+          sourceObject={modelObjectsRef.current[alignmentPair.aUrl]}
+          color="#60a5fa"
+          points={alignmentPointsA}
+          roiPoints={alignmentRoiA}
+          mode={alignmentTool}
+          active={!alignmentBusy && (alignmentTool === "roi" || alignmentNextSide === "A")}
+          brushRadius={alignmentBrushRadius}
+          onPickPoint={handleAlignmentPickA}
+          onPaintPoint={(point) => appendAlignmentRoi("A", point)}
+        />
+        <AlignmentPreviewViewport
+          title={`Moving B · ${stripExt(alignmentPair.fileB?.name || alignmentPair.fileB?.rawName || "")}`}
+          badge="B"
+          file={alignmentPair.fileB}
+          sourceObject={modelObjectsRef.current[alignmentPair.bUrl]}
+          color="#f472b6"
+          points={alignmentPointsB}
+          roiPoints={alignmentRoiB}
+          mode={alignmentTool}
+          active={!alignmentBusy && (alignmentTool === "roi" || alignmentNextSide === "B")}
+          brushRadius={alignmentBrushRadius}
+          onPickPoint={handleAlignmentPickB}
+          onPaintPoint={(point) => appendAlignmentRoi("B", point)}
+        />
+      </div>
+    </>
+  )
+
   return (
     <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
       <PreloadIcons />
-      {logoEl}
-      {!hideSidebar && sidebar}
-      {topBarRight}
+      {!alignmentMode && logoEl}
+      {!hideSidebar && !alignmentMode && sidebar}
+      {!alignmentMode && topBarRight}
+      {alignmentWorkspace}
 
       {dicomLayoutActive && (
         <div style={{
@@ -3923,7 +4883,7 @@ export default function ClientPage() {
 
       {showHeatmap && hasComputedHeatmap && (
         <div style={{
-          position: "absolute", top: 20, left: "50%", transform: "translateX(-50%)",
+          position: "absolute", top: alignmentMode ? 106 : 20, left: "50%", transform: "translateX(-50%)",
           zIndex: 100, background: "rgba(0,0,0,0.65)", padding: "12px 24px",
           borderRadius: 12, border: "1px solid rgba(255,255,255,0.2)",
           color: "white", fontFamily: "sans-serif", fontSize: 12,
@@ -3970,7 +4930,7 @@ export default function ClientPage() {
 
       {showComparison && hasComputedComparison && (
         <div style={{
-          position: "absolute", top: 20, left: "50%", transform: "translateX(-50%)",
+          position: "absolute", top: alignmentMode ? 106 : 20, left: "50%", transform: "translateX(-50%)",
           zIndex: 100, background: "rgba(0,0,0,0.65)", padding: "12px 24px",
           borderRadius: 12, border: "1px solid rgba(255,255,255,0.2)",
           color: "white", fontFamily: "sans-serif", fontSize: 12,
@@ -3985,7 +4945,7 @@ export default function ClientPage() {
         </div>
       )}
 
-      {!dicomLayoutActive && clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />}
+      {!alignmentMode && !dicomLayoutActive && clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />}
 
       <Canvas
         orthographic
@@ -3995,7 +4955,7 @@ export default function ClientPage() {
             gl.setClearAlpha(0)
             gl.localClippingEnabled = false
         }}
-        style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: dicomLayoutActive ? dicomPanelWidth : 0, zIndex: 1, background: "transparent" }}
+        style={{ position: "absolute", top: 0, bottom: alignmentMode ? alignmentBottomHeight : 0, left: 0, right: dicomLayoutActive ? dicomPanelWidth : 0, zIndex: 1, background: "transparent" }}
       >
         <ambientLight intensity={0.35 * sceneIntensity} />
         <directionalLight position={[0, 5, 5]} intensity={1.2 * sceneIntensity} />
@@ -4005,7 +4965,7 @@ export default function ClientPage() {
 
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
 
-        <AutoRotateScene enabled={isAutoRotating} target={cameraTarget} speedFactor={spinSpeed} />
+        <AutoRotateScene enabled={!alignmentMode && isAutoRotating} target={cameraTarget} speedFactor={spinSpeed} />
 
         <group ref={rootGroupRef}>
           <Suspense fallback={null}>
@@ -4019,6 +4979,8 @@ export default function ClientPage() {
                 visible={visibles[i] ?? true}
                 onLoaded={handleModelLoaded}
                 onMeshReady={handleMeshReady}
+                onObjectReady={handleObjectReady}
+                modelMatrix={modelTransforms[f.url]}
                 autoSmooth={true}
                 smoothAngle={DEFAULT_SMOOTH_ANGLE}
                 wireframe={wireframes[i] || false}
@@ -4079,7 +5041,7 @@ export default function ClientPage() {
           ))}
         </group>
 
-        {dicomVolume && dicomSettings.viewMode !== "only2d" && (
+        {!alignmentMode && dicomVolume && dicomSettings.viewMode !== "only2d" && (
           <DicomVolume
             volume={dicomVolume}
             settings={dicomSettings}
@@ -4087,7 +5049,7 @@ export default function ClientPage() {
           />
         )}
 
-        {clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && (
+        {!alignmentMode && clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && (
           <group ref={setSliceRigGroup}>
             <group ref={setPlaneGroup} visible={!dicomLayoutActive || activeSlice === "vertical"}>
               <mesh>
@@ -4113,7 +5075,7 @@ export default function ClientPage() {
           </group>
         )}
 
-        {clippingEnabled && !isMobile && activePlaneGroup && (
+        {!alignmentMode && clippingEnabled && !isMobile && activePlaneGroup && (
           <>
             <TransformControls
               ref={transformRotateRef}
@@ -4150,7 +5112,7 @@ export default function ClientPage() {
 
         <ViewStateSync trackballRef={trackballRef} getViewerState={buildViewerState} />
 
-        {frameKey && !initialCameraState && (
+        {frameKey && (!initialCameraState || alignmentMode) && (
           <AutoCenterAndFrame
             rootRef={rootGroupRef}
             triggerKey={frameKey}
@@ -4164,7 +5126,7 @@ export default function ClientPage() {
           />
         )}
 
-        {frameKey && initialCameraState && (
+        {frameKey && initialCameraState && !alignmentMode && (
           <CustomCameraSetter
             camState={initialCameraState}
             triggerKey={frameKey}
@@ -4173,7 +5135,7 @@ export default function ClientPage() {
           />
         )}
 
-        <TouchTrackballControls ref={trackballRef} target={cameraTarget} enabled={!sliceOverlayInteracting} onInteractionChange={handleCameraInteraction} />
+        <TouchTrackballControls ref={trackballRef} target={cameraTarget} enabled={!sliceOverlayInteracting && !alignmentBusy} onInteractionChange={handleCameraInteraction} />
         <RightButtonPan setTarget={setCameraTarget} trackballRef={trackballRef} />
       </Canvas>
 
