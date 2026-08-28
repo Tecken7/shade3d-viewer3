@@ -1789,7 +1789,7 @@ function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", dis
   )
 }
 
-function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, active, dimmed = false, selectionDisabled = false, inactivePointHint = "", onPickPoint, forceLoading = false, locked = false, onPreviewLoaded, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 }, eligibleFiles = [], selectedUrl = "", otherSelectedUrl = "", onSelectModel, selectStyle = {} }) {
+function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, active, dimmed = false, selectionDisabled = false, inactivePointHint = "", onPickPoint, onClearPoints, forceLoading = false, locked = false, onPreviewLoaded, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 }, eligibleFiles = [], selectedUrl = "", otherSelectedUrl = "", onSelectModel, selectStyle = {} }) {
   const rootRef = useRef(null)
   const controlsRef = useRef(null)
   const viewportRef = useRef(null)
@@ -1905,12 +1905,35 @@ function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, ac
 
       {selectorDocked && (
         <div style={{
-          position: "absolute", top: 17, right: 17, zIndex: 12, pointerEvents: "none",
-          color: "rgba(255,255,255,.82)", fontSize: 10, fontWeight: 700, letterSpacing: "-.01em",
-          textShadow: "0 2px 12px rgba(0,0,0,.55)",
+          position: "absolute", top: 12, right: 14, zIndex: 22,
+          display: "flex", alignItems: "center", gap: 8,
           fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
           opacity: selectionDisabled ? .45 : 1, transition: "opacity .24s ease",
-        }}>{roleLabel}</div>
+        }}>
+          <div style={{
+            color: "rgba(255,255,255,.82)", fontSize: 10, fontWeight: 700, letterSpacing: "-.01em",
+            textShadow: "0 2px 12px rgba(0,0,0,.55)", pointerEvents: "none",
+          }}>{roleLabel}</div>
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); onClearPoints?.() }}
+            disabled={locked || !points?.length}
+            title={`Smazat body v okně ${badge}`}
+            style={{
+              height: 27, padding: "0 9px", borderRadius: 8,
+              border: "1px solid rgba(255,255,255,.09)",
+              background: points?.length && !locked ? "rgba(255,255,255,.055)" : "rgba(255,255,255,.025)",
+              color: points?.length && !locked ? "#bdbdbd" : "#555",
+              fontSize: 9, fontWeight: 680, whiteSpace: "nowrap",
+              cursor: points?.length && !locked ? "pointer" : "not-allowed",
+              transition: "background .16s ease, border-color .16s ease, color .16s ease, opacity .16s ease",
+            }}
+            onPointerEnter={(event) => { if (points?.length && !locked) { event.currentTarget.style.background = "rgba(255,255,255,.09)"; event.currentTarget.style.color = "#eeeeee" } }}
+            onPointerLeave={(event) => { if (points?.length && !locked) { event.currentTarget.style.background = "rgba(255,255,255,.055)"; event.currentTarget.style.color = "#bdbdbd" } }}
+          >
+            Smazat body
+          </button>
+        </div>
       )}
 
       {showInactivePointHint && (
@@ -3831,45 +3854,63 @@ export default function ClientPage() {
 
   const handleAlignmentPickA = useCallback((point) => {
     if (alignmentStep !== "points") return
-    if (alignmentPointsA.length !== alignmentPointsB.length) {
-      setAlignmentMessage("Nejdřív označte odpovídající bod na Moving B.")
+    if (alignmentPointsA.length >= 3) return
+    if (alignmentPointsA.length > alignmentPointsB.length) {
+      setAlignmentMessage("Nejdřív doplňte bod na Moving B.")
       return
     }
-    if (alignmentPointsA.length >= 3) return
+    const nextA = alignmentPointsA.length + 1
+    const nextB = alignmentPointsB.length
     setAlignmentPointsA((previous) => [...previous, point])
     setAlignmentWorkflowStage("points")
-    setAlignmentMessage(`Bod ${alignmentPointsA.length + 1}: teď označte stejné místo na Moving B.`)
+    const complete = nextA >= 3 && nextB >= 3
+    if (complete) {
+      setAlignmentStep("prealign")
+      setAlignmentMessage("Tři korespondenční body jsou připravené. Spusťte Předzarovnat.")
+      return
+    }
+    const nextSide = nextA <= nextB ? "A" : "B"
+    const nextNumber = nextSide === "A" ? nextA + 1 : nextB + 1
+    setAlignmentMessage(`Teď označte bod ${nextNumber} na ${nextSide === "A" ? "Reference A" : "Moving B"}.`)
   }, [alignmentStep, alignmentPointsA.length, alignmentPointsB.length])
 
   const handleAlignmentPickB = useCallback((point) => {
     if (alignmentStep !== "points") return
-    if (alignmentPointsA.length !== alignmentPointsB.length + 1) {
-      setAlignmentMessage("Nejdřív označte nový bod na Reference A.")
+    if (alignmentPointsB.length >= 3) return
+    if (alignmentPointsB.length >= alignmentPointsA.length) {
+      setAlignmentMessage("Nejdřív doplňte bod na Reference A.")
       return
     }
-    if (alignmentPointsB.length >= 3) return
-    const pairNumber = alignmentPointsB.length + 1
+    const nextA = alignmentPointsA.length
+    const nextB = alignmentPointsB.length + 1
     setAlignmentPointsB((previous) => [...previous, point])
     setAlignmentWorkflowStage("points")
-    if (pairNumber >= 3) setAlignmentStep("prealign")
-    setAlignmentMessage(pairNumber >= 3
-      ? "Tři korespondenční body jsou připravené. Spusťte Předzarovnat."
-      : `Pár ${pairNumber} hotový. Označte bod ${pairNumber + 1} na Reference A.`)
+    const complete = nextA >= 3 && nextB >= 3
+    if (complete) {
+      setAlignmentStep("prealign")
+      setAlignmentMessage("Tři korespondenční body jsou připravené. Spusťte Předzarovnat.")
+      return
+    }
+    const nextSide = nextA <= nextB ? "A" : "B"
+    const nextNumber = nextSide === "A" ? nextA + 1 : nextB + 1
+    setAlignmentMessage(`Teď označte bod ${nextNumber} na ${nextSide === "A" ? "Reference A" : "Moving B"}.`)
   }, [alignmentStep, alignmentPointsA.length, alignmentPointsB.length])
 
-  const undoAlignmentPoint = useCallback(() => {
-    if (alignmentPointsA.length > alignmentPointsB.length) {
-      setAlignmentPointsA((previous) => previous.slice(0, -1))
-    } else if (alignmentPointsB.length > 0) {
-      setAlignmentPointsB((previous) => previous.slice(0, -1))
-    } else if (alignmentPointsA.length > 0) {
-      setAlignmentPointsA((previous) => previous.slice(0, -1))
-    }
+  const clearAlignmentPointsForSide = useCallback((side) => {
+    if (alignmentBusy) return
+    const { bUrl } = getAlignmentPair()
+    if (bUrl) applyModelTransform(bUrl, IDENTITY_MATRIX_ARRAY)
+    if (side === "A") setAlignmentPointsA([])
+    else setAlignmentPointsB([])
     setAlignmentStats(null)
-    setAlignmentWorkflowStage("points")
-    setAlignmentStep("points")
+    setAlignmentProgress(null)
     setAlignmentPrealignMatrix(null)
-  }, [alignmentPointsA.length, alignmentPointsB.length])
+    setAlignmentWorkflowStage("points")
+    setAlignmentStep(alignmentModelsSelected ? "points" : "models")
+    setShowComparison(false)
+    setShowHeatmap(false)
+    setAlignmentMessage(`Body v okně ${side} byly vymazány. Doplňte je znovu.`)
+  }, [alignmentBusy, getAlignmentPair, applyModelTransform, alignmentModelsSelected])
 
   const refreshAlignmentMetrics = useCallback(async (aUrl, bUrl, onProgress = null) => {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
@@ -5563,8 +5604,10 @@ export default function ClientPage() {
   const alignmentEligibleFiles = files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url)))
   const alignmentPair = getAlignmentPair()
   const alignmentPairCount = Math.min(alignmentPointsA.length, alignmentPointsB.length)
-  const alignmentPointsComplete = alignmentPairCount >= 3 && alignmentPointsA.length === alignmentPointsB.length
-  const alignmentNextSide = alignmentPointsComplete ? null : (alignmentPointsA.length === alignmentPointsB.length ? "A" : "B")
+  const alignmentPointsComplete = alignmentPointsA.length >= 3 && alignmentPointsB.length >= 3
+  // Po smazání bodů jen v jednom viewportu dovolíme danou stranu znovu doplnit
+  // bez nutnosti mazat správně umístěné body v druhém okně.
+  const alignmentNextSide = alignmentPointsComplete ? null : (alignmentPointsA.length <= alignmentPointsB.length ? "A" : "B")
   const alignmentNextPointNumber = alignmentPointsComplete ? 3 : (alignmentNextSide === "A" ? alignmentPointsA.length + 1 : alignmentPointsB.length + 1)
   const alignmentHasA = !!alignmentPair.aUrl
   const alignmentHasB = !!alignmentPair.bUrl
@@ -5659,6 +5702,14 @@ export default function ClientPage() {
     if (alignmentBusy) return false
     if (step === "prealign") return alignmentStep === "prealign" && alignmentModelsSelected && alignmentPointsComplete
     if (step === "bestfit") return alignmentStep === "bestfit" && alignmentModelsSelected && alignmentPointsComplete && !!alignmentPrealignMatrix && alignmentWorkflowStage !== "bestfit"
+    return false
+  }
+
+  const alignmentStepCompleted = (step) => {
+    if (step === "models") return alignmentModelsSelected
+    if (step === "points") return alignmentPointsComplete
+    if (step === "prealign") return !!alignmentPrealignMatrix && (alignmentWorkflowStage === "prealigned" || alignmentWorkflowStage === "bestfit")
+    if (step === "bestfit") return alignmentWorkflowStage === "bestfit"
     return false
   }
 
@@ -5824,10 +5875,31 @@ export default function ClientPage() {
                       <i className="artheticAlignReadyParticle" />
                     </span>
                   )}
-                  <span>{alignmentStepLabels[step]}</span>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    {alignmentStepCompleted(step) && (
+                      <span aria-hidden="true" style={{
+                        width: 14, height: 14, borderRadius: "50%", display: "inline-grid", placeItems: "center",
+                        background: alignmentStep === step ? "rgba(134,239,172,.16)" : "rgba(34,197,94,.12)",
+                        border: "1px solid rgba(74,222,128,.24)", color: "#86efac", flex: "0 0 auto",
+                      }}>
+                        <svg width="9" height="9" viewBox="0 0 12 12" fill="none">
+                          <path d="M2.2 6.2L4.8 8.6L9.8 3.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </span>
+                    )}
+                    <span>{alignmentStepLabels[step]}</span>
+                  </span>
                 </button>
               </React.Fragment>
             ))}
+            {alignmentWorkflowStage === "bestfit" && !alignmentBusy && (
+              <>
+                <div style={{ width: 18, height: 1, background: "rgba(255,255,255,.08)", flex: "0 0 auto" }} />
+                <button onClick={showAlignmentDeviation} disabled={!alignmentStats} style={{ ...alignmentButtonStyle("secondary", !alignmentStats), height: 32, fontSize: 10, padding: "0 11px" }}>Odchylka</button>
+                <button onClick={resetAlignmentTransform} style={{ ...alignmentButtonStyle("danger", false), height: 32, fontSize: 10, padding: "0 11px" }}>Reset polohy</button>
+                <button onClick={() => { setAlignmentMode(false); setAlignmentMessage("") }} style={{ ...alignmentButtonStyle("primary", false), height: 32, fontSize: 10, padding: "0 12px" }}>Hotovo</button>
+              </>
+            )}
           </div>
           <div style={{ maxWidth: 720, color: "#777", fontSize: 8.8, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", textAlign: "center" }}>
             {alignmentTopInstruction}{alignmentWorkflowStage !== "points" && alignmentMessage ? ` · ${alignmentMessage}` : ""}
@@ -5836,26 +5908,20 @@ export default function ClientPage() {
 
         <div style={{ width: 1, height: 34, background: "rgba(255,255,255,.07)", flex: "0 0 auto" }} />
 
-        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+        <div style={{ display: "flex", alignItems: "center", flex: "0 0 auto" }}>
           <button
-            onClick={undoAlignmentPoint}
-            title="Zpět o jeden bod"
-            aria-label="Zpět o jeden bod"
-            disabled={alignmentBusy || (!alignmentPointsA.length && !alignmentPointsB.length)}
-            style={{ ...alignmentButtonStyle("secondary", alignmentBusy || (!alignmentPointsA.length && !alignmentPointsB.length)), width: 36, padding: 0, display: "grid", placeItems: "center" }}
+            type="button"
+            onClick={() => { if (!alignmentBusy) { setAlignmentMode(false); setAlignmentMessage("") } }}
+            disabled={alignmentBusy}
+            title="Vrátit se zpět na hlavní scénu"
+            style={{ ...alignmentButtonStyle("secondary", alignmentBusy), height: 36, display: "inline-flex", alignItems: "center", gap: 8, padding: "0 12px" }}
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path d="M10 7L5 12L10 17" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-              <path d="M5.5 12H14.5C17.5 12 19 13.6 19 16.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M15 6L9 12L15 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M9.5 12H20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
             </svg>
+            <span>Vrátit se zpět na hlavní scénu</span>
           </button>
-          <button onClick={() => { setAlignmentPointsA([]); setAlignmentPointsB([]); setAlignmentStats(null); setAlignmentPrealignMatrix(null); setAlignmentWorkflowStage("points"); setAlignmentStep(alignmentModelsSelected ? "points" : "models"); setAlignmentMessage(alignmentModelsSelected ? "Body byly vymazány. Začněte bodem na Reference A." : "Vyberte oba modely a potom umístěte tři páry bodů.") }} disabled={alignmentBusy || !alignmentModelsSelected} style={alignmentButtonStyle("danger", alignmentBusy || !alignmentModelsSelected)}>Smazat body</button>
-        </div>
-
-        <div style={{ display: "flex", gap: 7, alignItems: "center" }}>
-          <button onClick={showAlignmentDeviation} disabled={alignmentBusy || !alignmentStats} style={alignmentButtonStyle("secondary", alignmentBusy || !alignmentStats)}>Odchylky</button>
-          <button onClick={resetAlignmentTransform} disabled={alignmentBusy || !alignmentPair.bUrl} style={alignmentButtonStyle("danger", alignmentBusy || !alignmentPair.bUrl)}>Reset polohy</button>
-          <button onClick={() => { setAlignmentMode(false); setAlignmentMessage("") }} disabled={alignmentBusy} style={alignmentButtonStyle("primary", alignmentBusy)}>Hotovo</button>
         </div>
       </div>
 
@@ -5940,6 +6006,7 @@ export default function ClientPage() {
           selectionDisabled={false}
           inactivePointHint={alignmentStep === "points" && alignmentModelsSelected && alignmentNextSide === "B" && !alignmentBusy ? "Nejdříve umístěte bod v okně B" : ""}
           onPickPoint={handleAlignmentPickA}
+          onClearPoints={() => clearAlignmentPointsForSide("A")}
           forceLoading={alignmentPreviewBusy.A}
           locked={alignmentBusy && !!alignmentProgress}
           eligibleFiles={alignmentEligibleFiles}
@@ -5967,6 +6034,7 @@ export default function ClientPage() {
           selectionDisabled={alignmentStep === "models" && !alignmentHasA}
           inactivePointHint={alignmentStep === "points" && alignmentModelsSelected && alignmentNextSide === "A" && !alignmentBusy ? "Nejdříve umístěte bod v okně A" : ""}
           onPickPoint={handleAlignmentPickB}
+          onClearPoints={() => clearAlignmentPointsForSide("B")}
           forceLoading={alignmentPreviewBusy.B}
           locked={alignmentBusy && !!alignmentProgress}
           eligibleFiles={alignmentEligibleFiles}
