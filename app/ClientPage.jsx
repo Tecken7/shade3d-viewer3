@@ -1713,7 +1713,7 @@ function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", dis
   }
 
   return (
-    <div ref={rootRef} style={{ position: "relative", width: docked ? 205 : "100%", minWidth: docked ? 180 : 0, maxWidth: docked ? 280 : "none", ...style }}>
+    <div ref={rootRef} style={{ position: "relative", zIndex: open ? 500 : 1, width: docked ? 205 : "100%", minWidth: docked ? 180 : 0, maxWidth: docked ? 280 : "none", ...style }}>
       <button
         type="button"
         disabled={disabled}
@@ -1733,7 +1733,7 @@ function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", dis
           transition: "background .16s ease, border-color .16s ease, box-shadow .16s ease, color .16s ease",
         }}
       >
-        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "left" }}>{selectedLabel}</span>
+        <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "left" }}>{selectedLabel}</span>
         <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true" style={{ flex: "0 0 auto", opacity: .66, transform: open ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .18s ease" }}>
           <path d="M5.5 7.5L10 12L14.5 7.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
@@ -1741,7 +1741,7 @@ function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", dis
 
       {open && !disabled && (
         <div role="listbox" style={{
-          position: "absolute", left: 0, right: 0, top: "calc(100% + 6px)", zIndex: 80,
+          position: "absolute", left: 0, right: 0, top: "calc(100% + 6px)", zIndex: 510,
           padding: 5, maxHeight: 238, overflowY: "auto", overscrollBehavior: "contain",
           borderRadius: 12, border: "1px solid rgba(255,255,255,.10)",
           background: "rgba(17,17,17,.97)", boxShadow: "0 18px 46px rgba(0,0,0,.52)",
@@ -5400,6 +5400,7 @@ export default function ClientPage() {
         flexDirection: "column",
         alignItems: "stretch",
         position: "relative",
+        zIndex: heatmapMenuOpen ? 420 : 2,
       }}>
         <button
           onClick={() => { setHeatmapMenuOpen((prev) => !prev); setComparisonMenuOpen(false) }}
@@ -5416,6 +5417,7 @@ export default function ClientPage() {
         {heatmapMenuOpen && (
           <div style={{
             marginTop: 8, width: dicomLayoutActive ? 320 : 310, maxWidth: "calc(100vw - 20px)", alignSelf: "flex-end", padding: 14, boxSizing: "border-box",
+            position: "relative", zIndex: 430, overflow: "visible",
             borderRadius: 15, border: "1px solid rgba(255,255,255,.095)", background: "rgba(12,12,12,.96)",
             boxShadow: "0 24px 64px rgba(0,0,0,.42)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
             color: "#f2f2f2", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
@@ -5490,6 +5492,7 @@ export default function ClientPage() {
         flexDirection: "column",
         alignItems: "stretch",
         position: "relative",
+        zIndex: comparisonMenuOpen ? 420 : 2,
       }}>
         <button
           onClick={() => { setComparisonMenuOpen((prev) => !prev); setHeatmapMenuOpen(false) }}
@@ -5506,6 +5509,7 @@ export default function ClientPage() {
         {comparisonMenuOpen && (
           <div style={{
             marginTop: 8, width: dicomLayoutActive ? 330 : 320, maxWidth: "calc(100vw - 20px)", alignSelf: "flex-end", padding: 14, boxSizing: "border-box",
+            position: "relative", zIndex: 430, overflow: "visible",
             borderRadius: 15, border: "1px solid rgba(255,255,255,.095)", background: "rgba(12,12,12,.96)",
             boxShadow: "0 24px 64px rgba(0,0,0,.42)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
             color: "#f2f2f2", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
@@ -5529,14 +5533,14 @@ export default function ClientPage() {
 
             <div style={{ height: 1, background: "rgba(255,255,255,.07)", margin: "13px 0" }} />
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-              <div>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 8, width: "100%", minWidth: 0 }}>
+              <div style={{ minWidth: 0 }}>
                 <div style={{ marginBottom: 6, color: "#bdbdbd", fontSize: 9.5, fontWeight: 700 }}>A · Model</div>
-                <AlignmentModelDropdown badge="A" value={comparisonSelection[0] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[1] || ""} onChange={(url) => setComparisonSelectionSlot(0, url)} />
+                <AlignmentModelDropdown badge="A" value={comparisonSelection[0] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[1] || ""} onChange={(url) => setComparisonSelectionSlot(0, url)} style={{ minWidth: 0, maxWidth: "100%" }} />
               </div>
-              <div>
+              <div style={{ minWidth: 0 }}>
                 <div style={{ marginBottom: 6, color: "#bdbdbd", fontSize: 9.5, fontWeight: 700 }}>B · Model</div>
-                <AlignmentModelDropdown badge="B" value={comparisonSelection[1] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0]} onChange={(url) => setComparisonSelectionSlot(1, url)} />
+                <AlignmentModelDropdown badge="B" value={comparisonSelection[1] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0]} onChange={(url) => setComparisonSelectionSlot(1, url)} style={{ minWidth: 0, maxWidth: "100%" }} />
               </div>
             </div>
 
