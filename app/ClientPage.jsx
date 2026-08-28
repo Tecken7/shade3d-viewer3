@@ -5353,6 +5353,7 @@ export default function ClientPage() {
       gap: dicomLayoutActive ? 8 : 10,
       fontFamily: "sans-serif",
       color: "white",
+      maxWidth: "calc(100vw - 20px)",
     }}>
       
       <div style={{ width: dicomLayoutActive ? 120 : 270 }}>
@@ -5393,7 +5394,13 @@ export default function ClientPage() {
         .artheticAnalysisRange { accent-color:#4ade80; cursor:pointer; }
       `}</style>
 
-      <div style={{ width: dicomLayoutActive ? 120 : 270 }}>
+      <div style={{
+        width: dicomLayoutActive ? 120 : 270,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "stretch",
+        position: "relative",
+      }}>
         <button
           onClick={() => { setHeatmapMenuOpen((prev) => !prev); setComparisonMenuOpen(false) }}
           style={analysisToolbarButtonStyle(heatmapMenuOpen, analysisEligibleFiles.length < 2)}
@@ -5408,7 +5415,7 @@ export default function ClientPage() {
 
         {heatmapMenuOpen && (
           <div style={{
-            marginTop: 8, width: dicomLayoutActive ? 320 : 310, padding: 14, boxSizing: "border-box",
+            marginTop: 8, width: dicomLayoutActive ? 320 : 310, maxWidth: "calc(100vw - 20px)", alignSelf: "flex-end", padding: 14, boxSizing: "border-box",
             borderRadius: 15, border: "1px solid rgba(255,255,255,.095)", background: "rgba(12,12,12,.96)",
             boxShadow: "0 24px 64px rgba(0,0,0,.42)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
             color: "#f2f2f2", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
@@ -5477,7 +5484,13 @@ export default function ClientPage() {
         )}
       </div>
 
-      <div style={{ width: dicomLayoutActive ? 120 : 270 }}>
+      <div style={{
+        width: dicomLayoutActive ? 120 : 270,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "stretch",
+        position: "relative",
+      }}>
         <button
           onClick={() => { setComparisonMenuOpen((prev) => !prev); setHeatmapMenuOpen(false) }}
           style={analysisToolbarButtonStyle(comparisonMenuOpen, analysisEligibleFiles.length < 2)}
@@ -5492,7 +5505,7 @@ export default function ClientPage() {
 
         {comparisonMenuOpen && (
           <div style={{
-            marginTop: 8, width: dicomLayoutActive ? 330 : 320, padding: 14, boxSizing: "border-box",
+            marginTop: 8, width: dicomLayoutActive ? 330 : 320, maxWidth: "calc(100vw - 20px)", alignSelf: "flex-end", padding: 14, boxSizing: "border-box",
             borderRadius: 15, border: "1px solid rgba(255,255,255,.095)", background: "rgba(12,12,12,.96)",
             boxShadow: "0 24px 64px rgba(0,0,0,.42)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
             color: "#f2f2f2", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
@@ -6170,7 +6183,7 @@ export default function ClientPage() {
   )
 
   return (
-    <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black" }}>
+    <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black", overflow: "hidden" }}>
       <PreloadIcons />
       {!alignmentMode && logoEl}
       {!hideSidebar && !alignmentMode && sidebar}
