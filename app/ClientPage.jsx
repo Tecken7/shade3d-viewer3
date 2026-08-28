@@ -1036,9 +1036,11 @@ async function robustPointToPlaneICP({
   sourceRoi = [],
   targetRoi = [],
   roiRadius = 3,
+  landmarkSeeded = false,
   onProgress,
 }) {
   if (!sourceMesh || !sourceRoot || !targetMesh || !targetRoot) throw new Error("Chybí model pro Best Fit.")
+
   sourceRoot.updateMatrixWorld(true)
   targetRoot.updateMatrixWorld(true)
   sourceMesh.updateMatrixWorld(true)
@@ -1047,120 +1049,286 @@ async function robustPointToPlaneICP({
   const sourcePosition = sourceMesh.geometry.getAttribute("position")
   if (!sourcePosition?.count) throw new Error("Moving model nemá použitelnou geometrii.")
 
+  // Geometrii Moving B držíme v lokálním prostoru jeho kořenového objektu.
+  // Samotnou ICP transformaci řešíme v prostoru společného parentu modelů.
+  // Díky tomu nejsme závislí na tom, jestli je rootGroup ve world prostoru identita.
   const sourceRootInverse = new THREE.Matrix4().copy(sourceRoot.matrixWorld).invert()
   const meshToRoot = new THREE.Matrix4().multiplyMatrices(sourceRootInverse, sourceMesh.matrixWorld)
+  const parentWorld = sourceRoot.parent?.matrixWorld?.clone?.() || new THREE.Matrix4().identity()
+  const parentWorldInverse = new THREE.Matrix4().copy(parentWorld).invert()
+  const worldNormalToParent = new THREE.Matrix3().setFromMatrix4(parentWorldInverse)
+
   const targetRootInverse = new THREE.Matrix4().copy(targetRoot.matrixWorld).invert()
   const query = makeClosestSurfaceQuery(targetMesh)
   const targetBox = new THREE.Box3().setFromObject(targetRoot)
   const targetSize = targetBox.getSize(new THREE.Vector3())
   const diagonal = Math.max(1, targetSize.length())
   const radiusSq = Math.max(0.01, roiRadius * roiRadius)
-  const current = new THREE.Matrix4().fromArray(matrixArrayOrIdentity(initialMatrix))
 
-  const stages = [
-    { samples: 2400, iterations: 10, maxDistance: Math.max(3.5, diagonal * 0.075), trim: 0.72 },
-    { samples: 6000, iterations: 12, maxDistance: Math.max(1.8, diagonal * 0.038), trim: 0.80 },
-    { samples: 12000, iterations: 14, maxDistance: Math.max(0.75, diagonal * 0.018), trim: 0.86 },
-  ]
+  // Bereme skutečnou aktuální matici objektu, pokud je k dispozici. Tím se
+  // vyhneme závodu s React state při rychlém kliknutí Předzarovnat -> Best Fit.
+  const current = new THREE.Matrix4()
+  if (sourceRoot.matrix && sourceRoot.matrix.elements?.length === 16) current.copy(sourceRoot.matrix)
+  else current.fromArray(matrixArrayOrIdentity(initialMatrix))
+  const initialCurrent = current.clone()
+
+  // Pokud Best Fit navazuje na landmarkové předzarovnání, chová se jako refinement,
+  // ne jako nový globální alignment. Hlídáme proto celkový drift od dobrého seedu.
+  const centroidIndices = sampledVertexIndices(sourcePosition.count, 2500)
+  const sourceCentroidRoot = new THREE.Vector3()
+  const centroidPoint = new THREE.Vector3()
+  for (let i = 0; i < centroidIndices.length; i++) {
+    centroidPoint.fromBufferAttribute(sourcePosition, centroidIndices[i]).applyMatrix4(meshToRoot)
+    sourceCentroidRoot.add(centroidPoint)
+  }
+  sourceCentroidRoot.multiplyScalar(1 / Math.max(1, centroidIndices.length))
+  const initialCentroidParent = sourceCentroidRoot.clone().applyMatrix4(initialCurrent)
+  const initialPosition = new THREE.Vector3(), initialQuaternion = new THREE.Quaternion(), initialScale = new THREE.Vector3()
+  initialCurrent.decompose(initialPosition, initialQuaternion, initialScale)
+  const maxSeedDrift = Math.max(2.5, diagonal * 0.035)
+  const maxSeedRotation = THREE.MathUtils.degToRad(7)
 
   const pMesh = new THREE.Vector3()
   const pRoot = new THREE.Vector3()
+  const pParent = new THREE.Vector3()
   const pWorld = new THREE.Vector3()
   const qTargetRoot = new THREE.Vector3()
+  const qParent = new THREE.Vector3()
+  const nParent = new THREE.Vector3()
   const delta = new THREE.Vector3()
   const cross = new THREE.Vector3()
-  let finalRms = Infinity
-  let finalCount = 0
+
+  const makeCorrespondences = (matrix, indices, maxDistance, trim) => {
+    const result = []
+    for (let k = 0; k < indices.length; k++) {
+      pMesh.fromBufferAttribute(sourcePosition, indices[k])
+      pRoot.copy(pMesh).applyMatrix4(meshToRoot)
+      if (!isInsideAlignmentRoi(pRoot, sourceRoi, radiusSq)) continue
+
+      pParent.copy(pRoot).applyMatrix4(matrix)
+      pWorld.copy(pParent).applyMatrix4(parentWorld)
+      const hit = query(pWorld)
+      if (!Number.isFinite(hit.distance) || hit.distance > maxDistance) continue
+
+      qTargetRoot.copy(hit.pointWorld).applyMatrix4(targetRootInverse)
+      if (!isInsideAlignmentRoi(qTargetRoot, targetRoi, radiusSq)) continue
+
+      qParent.copy(hit.pointWorld).applyMatrix4(parentWorldInverse)
+      nParent.copy(hit.normalWorld).applyMatrix3(worldNormalToParent).normalize()
+      result.push({
+        p: pParent.clone(),
+        q: qParent.clone(),
+        n: nParent.clone(),
+        distance: pParent.distanceTo(qParent),
+      })
+    }
+
+    result.sort((a, b) => a.distance - b.distance)
+    const keepCount = Math.min(result.length, Math.max(30, Math.floor(result.length * trim)))
+    if (result.length > keepCount) result.length = keepCount
+    return result
+  }
+
+  const evaluateMatrix = (matrix, indices, maxDistance, trim) => {
+    const correspondences = makeCorrespondences(matrix, indices, maxDistance, trim)
+    if (correspondences.length < 30) return { rms: Infinity, mean: Infinity, count: correspondences.length }
+    let sum = 0, sumSq = 0
+    for (let i = 0; i < correspondences.length; i++) {
+      const d = correspondences[i].distance
+      sum += d
+      sumSq += d * d
+    }
+    return {
+      rms: Math.sqrt(sumSq / correspondences.length),
+      mean: sum / correspondences.length,
+      count: correspondences.length,
+    }
+  }
+
+  const scaleRigidIncrement = (matrix, factor, maxTranslation, maxRotation) => {
+    const position = new THREE.Vector3()
+    const quaternion = new THREE.Quaternion()
+    const scale = new THREE.Vector3()
+    matrix.decompose(position, quaternion, scale)
+    quaternion.normalize()
+    if (quaternion.w < 0) quaternion.set(-quaternion.x, -quaternion.y, -quaternion.z, -quaternion.w)
+
+    let angle = 2 * Math.acos(THREE.MathUtils.clamp(quaternion.w, -1, 1))
+    if (!Number.isFinite(angle)) angle = 0
+    const rotationFactor = angle > maxRotation && angle > 1e-12 ? maxRotation / angle : 1
+    // Translaci neomezujeme podle world-origin decomposition. U rotace kolem vzdáleného
+    // centroidu obsahuje translation část matice přirozeně i kompenzaci pivotu.
+    const applied = Math.min(1, factor, rotationFactor)
+
+    const q = new THREE.Quaternion().slerp(quaternion, applied)
+    const t = position.multiplyScalar(applied)
+    return new THREE.Matrix4().compose(t, q, new THREE.Vector3(1, 1, 1))
+  }
+
+  const pointToPlaneIncrement = (correspondences) => {
+    // Rotaci řešíme kolem centroidu korespondencí, nikoliv kolem world origin.
+    // U intraorálních scanů to výrazně zlepšuje numerickou stabilitu 6DOF systému.
+    const pivot = new THREE.Vector3()
+    for (let i = 0; i < correspondences.length; i++) pivot.add(correspondences[i].p)
+    pivot.multiplyScalar(1 / Math.max(1, correspondences.length))
+
+    const residualAbs = correspondences
+      .map((c) => Math.abs(c.n.dot(delta.subVectors(c.p, c.q))))
+      .sort((a, b) => a - b)
+    const medianResidual = residualAbs[Math.floor(residualAbs.length / 2)] || 0.01
+    const robustScale = Math.max(0.02, medianResidual * 1.4826 * 4.685)
+
+    const normalMatrix = new Float64Array(36)
+    const rhs = new Float64Array(6)
+    const centered = new THREE.Vector3()
+    let used = 0
+
+    for (let i = 0; i < correspondences.length; i++) {
+      const c = correspondences[i]
+      delta.subVectors(c.p, c.q)
+      const residual = c.n.dot(delta)
+      const u = Math.abs(residual) / robustScale
+      if (u >= 1) continue
+      const robustWeight = Math.pow(1 - u * u, 2)
+      centered.subVectors(c.p, pivot)
+      cross.crossVectors(centered, c.n)
+      const J = [cross.x, cross.y, cross.z, c.n.x, c.n.y, c.n.z]
+      for (let r = 0; r < 6; r++) {
+        rhs[r] += -robustWeight * J[r] * residual
+        for (let col = 0; col < 6; col++) normalMatrix[r * 6 + col] += robustWeight * J[r] * J[col]
+      }
+      used++
+    }
+
+    if (used < 20) return null
+    for (let d = 0; d < 6; d++) normalMatrix[d * 6 + d] += 1e-7
+    const solution = solveLinearSystem6(normalMatrix, rhs)
+    if (!solution) return null
+
+    const rotationVector = new THREE.Vector3(solution[0], solution[1], solution[2])
+    const rotationAngle = rotationVector.length()
+    const quaternion = rotationAngle > 1e-12
+      ? new THREE.Quaternion().setFromAxisAngle(rotationVector.clone().normalize(), rotationAngle)
+      : new THREE.Quaternion()
+    const localTranslation = new THREE.Vector3(solution[3], solution[4], solution[5])
+
+    // p' = R(p-pivot) + pivot + t
+    const rotatedPivot = pivot.clone().applyQuaternion(quaternion)
+    const matrixTranslation = pivot.clone().add(localTranslation).sub(rotatedPivot)
+    return new THREE.Matrix4().compose(matrixTranslation, quaternion, new THREE.Vector3(1, 1, 1))
+  }
+
+  // První dva průchody jsou robustní trimmed point-to-point ICP. Je o něco
+  // konzervativnější než čistý point-to-plane a na zubních obloucích méně klouže.
+  // Poslední průchod používá point-to-plane pouze jako jemný submilimetrový refinement.
+  const stages = [
+    { mode: "point", samples: 3600, iterations: 12, maxDistance: Math.max(3.0, diagonal * 0.055), trim: 0.70, maxTranslation: 1.2, maxRotation: THREE.MathUtils.degToRad(5) },
+    { mode: "point", samples: 8000, iterations: 14, maxDistance: Math.max(1.5, diagonal * 0.030), trim: 0.80, maxTranslation: 0.65, maxRotation: THREE.MathUtils.degToRad(2.5) },
+    { mode: "plane", samples: 14000, iterations: 10, maxDistance: Math.max(0.65, diagonal * 0.014), trim: 0.86, maxTranslation: 0.22, maxRotation: THREE.MathUtils.degToRad(0.8) },
+  ]
+
+  const validationIndices = sampledVertexIndices(sourcePosition.count, 10000)
+  const validationMaxDistance = Math.max(4.0, diagonal * 0.065)
+  const validationTrim = 0.82
+  const initialValidation = evaluateMatrix(current, validationIndices, validationMaxDistance, validationTrim)
+  let bestMatrix = current.clone()
+  let bestValidationRms = initialValidation.rms
+  let finalRms = initialValidation.rms
+  let finalCount = initialValidation.count
 
   for (let stageIndex = 0; stageIndex < stages.length; stageIndex++) {
     const stage = stages[stageIndex]
     const indices = sampledVertexIndices(sourcePosition.count, stage.samples)
 
     for (let iteration = 0; iteration < stage.iterations; iteration++) {
-      const correspondences = []
-      for (let k = 0; k < indices.length; k++) {
-        pMesh.fromBufferAttribute(sourcePosition, indices[k])
-        pRoot.copy(pMesh).applyMatrix4(meshToRoot)
-        if (!isInsideAlignmentRoi(pRoot, sourceRoi, radiusSq)) continue
-        pWorld.copy(pRoot).applyMatrix4(current)
-        const hit = query(pWorld)
-        if (!Number.isFinite(hit.distance) || hit.distance > stage.maxDistance) continue
-        qTargetRoot.copy(hit.pointWorld).applyMatrix4(targetRootInverse)
-        if (!isInsideAlignmentRoi(qTargetRoot, targetRoi, radiusSq)) continue
-        correspondences.push({
-          p: pWorld.clone(),
-          q: hit.pointWorld.clone(),
-          n: hit.normalWorld.clone(),
-          distance: hit.distance,
-        })
+      const correspondences = makeCorrespondences(current, indices, stage.maxDistance, stage.trim)
+      if (correspondences.length < 30) {
+        if (stageIndex === 0 && iteration === 0) throw new Error("Příliš málo překrývající se geometrie pro Best Fit.")
+        break
       }
 
-      if (correspondences.length < 30) throw new Error("Příliš málo překrývající se geometrie pro Best Fit.")
-      correspondences.sort((a, b) => a.distance - b.distance)
-      const keepCount = Math.max(30, Math.floor(correspondences.length * stage.trim))
-      correspondences.length = keepCount
+      const currentEval = evaluateMatrix(current, indices, stage.maxDistance, stage.trim)
+      let rawIncrement = null
 
-      const residualAbs = correspondences.map((c) => Math.abs(c.n.dot(delta.subVectors(c.p, c.q)))).sort((a, b) => a - b)
-      const medianResidual = residualAbs[Math.floor(residualAbs.length / 2)] || 0.01
-      const robustScale = Math.max(0.025, medianResidual * 1.4826 * 4.685)
+      if (stage.mode === "point") {
+        const source = correspondences.map((c) => c.p)
+        const target = correspondences.map((c) => c.q)
+        rawIncrement = rigidTransformHorn(source, target)
+      } else {
+        rawIncrement = pointToPlaneIncrement(correspondences)
+      }
+      if (!rawIncrement) break
 
-      const normalMatrix = new Float64Array(36)
-      const rhs = new Float64Array(6)
-      let sumSq = 0, used = 0
+      // Backtracking line search: krok se přijme pouze tehdy, pokud po novém
+      // nearest-surface vyhledání opravdu sníží trimmed Euclidean RMS.
+      let accepted = null
+      const factors = [1, 0.5, 0.25, 0.125]
+      for (let f = 0; f < factors.length; f++) {
+        const increment = scaleRigidIncrement(rawIncrement, factors[f], stage.maxTranslation, stage.maxRotation)
+        const candidate = current.clone().premultiply(increment)
 
-      for (let i = 0; i < correspondences.length; i++) {
-        const c = correspondences[i]
-        delta.subVectors(c.p, c.q)
-        const residual = c.n.dot(delta)
-        const u = Math.abs(residual) / robustScale
-        if (u >= 1) continue
-        const robustWeight = Math.pow(1 - u * u, 2)
-        cross.crossVectors(c.p, c.n)
-        const J = [cross.x, cross.y, cross.z, c.n.x, c.n.y, c.n.z]
-        for (let r = 0; r < 6; r++) {
-          rhs[r] += -robustWeight * J[r] * residual
-          for (let col = 0; col < 6; col++) normalMatrix[r * 6 + col] += robustWeight * J[r] * J[col]
+        if (landmarkSeeded) {
+          const candidateCentroid = sourceCentroidRoot.clone().applyMatrix4(candidate)
+          const candidatePosition = new THREE.Vector3(), candidateQuaternion = new THREE.Quaternion(), candidateScale = new THREE.Vector3()
+          candidate.decompose(candidatePosition, candidateQuaternion, candidateScale)
+          const centroidDrift = candidateCentroid.distanceTo(initialCentroidParent)
+          const rotationDrift = initialQuaternion.angleTo(candidateQuaternion)
+          if (centroidDrift > maxSeedDrift || rotationDrift > maxSeedRotation) continue
         }
-        sumSq += residual * residual
-        used++
+
+        const candidateEval = evaluateMatrix(candidate, indices, stage.maxDistance, stage.trim)
+        const enoughPairs = candidateEval.count >= Math.max(30, Math.floor(currentEval.count * 0.65))
+        if (enoughPairs && candidateEval.rms + 1e-6 < currentEval.rms) {
+          accepted = { matrix: candidate, eval: candidateEval, increment }
+          break
+        }
       }
 
-      if (used < 20) throw new Error("Best Fit nemá dostatek spolehlivých korespondencí.")
-      for (let d = 0; d < 6; d++) normalMatrix[d * 6 + d] += 1e-8
-      const solution = solveLinearSystem6(normalMatrix, rhs)
-      if (!solution) break
+      // Pokud ani čtvrtinový/osminový krok nepomůže, na tomto scale jsme hotovi.
+      if (!accepted) break
+      current.copy(accepted.matrix)
+      finalRms = accepted.eval.rms
+      finalCount = accepted.eval.count
 
-      const rotationVector = new THREE.Vector3(solution[0], solution[1], solution[2])
-      let rotationAngle = rotationVector.length()
-      if (rotationAngle > 0.18) {
-        rotationVector.multiplyScalar(0.18 / rotationAngle)
-        rotationAngle = 0.18
+      const validation = evaluateMatrix(current, validationIndices, validationMaxDistance, validationTrim)
+      if (validation.count >= 30 && validation.rms < bestValidationRms) {
+        bestValidationRms = validation.rms
+        bestMatrix.copy(current)
       }
-      const translation = new THREE.Vector3(solution[3], solution[4], solution[5])
-      if (translation.length() > 2.5) translation.setLength(2.5)
-      const quaternion = rotationAngle > 1e-10
-        ? new THREE.Quaternion().setFromAxisAngle(rotationVector.clone().normalize(), rotationAngle)
-        : new THREE.Quaternion()
-      const increment = new THREE.Matrix4().compose(translation, quaternion, new THREE.Vector3(1, 1, 1))
-      current.premultiply(increment)
 
-      finalRms = Math.sqrt(sumSq / Math.max(1, used))
-      finalCount = used
+      const incPosition = new THREE.Vector3()
+      const incQuaternion = new THREE.Quaternion()
+      const incScale = new THREE.Vector3()
+      accepted.increment.decompose(incPosition, incQuaternion, incScale)
+      const incAngle = 2 * Math.acos(THREE.MathUtils.clamp(Math.abs(incQuaternion.w), -1, 1))
+
       onProgress?.({
         stage: stageIndex + 1,
         stages: stages.length,
         iteration: iteration + 1,
         iterations: stage.iterations,
         rms: finalRms,
-        correspondences: used,
+        correspondences: finalCount,
+        mode: stage.mode,
       })
       await new Promise((resolve) => requestAnimationFrame(resolve))
 
-      if (translation.length() < 0.001 && rotationAngle < 0.00008) break
+      if (incPosition.length() < 0.0005 && incAngle < 0.00004) break
     }
   }
 
-  return { matrix: current.toArray(), rms: finalRms, correspondences: finalCount }
+  // Bezpečnostní pojistka: Best Fit nesmí zhoršit výchozí předzarovnání.
+  // Pokud žádná iterace neudělala robustní validační metriku lepší, vrátíme
+  // přesně původní matici.
+  const improved = Number.isFinite(bestValidationRms) && (
+    !Number.isFinite(initialValidation.rms) || bestValidationRms + 1e-5 < initialValidation.rms
+  )
+  return {
+    matrix: (improved ? bestMatrix : initialCurrent).toArray(),
+    rms: improved ? bestValidationRms : initialValidation.rms,
+    correspondences: finalCount,
+    improved,
+  }
 }
 
 function computeAlignmentMetrics(meshA, meshB, tolerance = 0.25, maxSamples = 12000) {
@@ -1356,7 +1524,7 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, roiPoints, m
   )
 }
 
-function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, points, roiPoints, mode, active, brushRadius, onPickPoint, onPaintPoint }) {
+function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, points, roiPoints, mode, active, brushRadius, onPickPoint, onPaintPoint, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 } }) {
   const rootRef = useRef(null)
   const controlsRef = useRef(null)
   const [target, setTarget] = useState([0, 0, 0])
@@ -1375,9 +1543,12 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
       </div>
       <Canvas orthographic camera={{ position: [0, 0, 250], near: 0.01, far: 100000, zoom: 1 }} gl={{ antialias: true }} style={{ position: "absolute", inset: 0 }}>
         <color attach="background" args={["#080808"]} />
-        <ambientLight intensity={0.6} />
-        <directionalLight position={[0, 5, 8]} intensity={1.4} />
-        <directionalLight position={[-8, -2, 3]} intensity={0.55} />
+        <ambientLight intensity={0.35 * sceneIntensity} />
+        <directionalLight position={[0, 5, 5]} intensity={1.2 * sceneIntensity} />
+        <directionalLight position={[-10, 0, 0]} intensity={0.9 * sceneIntensity} />
+        <directionalLight position={[10, 0, 0]} intensity={1.0 * sceneIntensity} />
+        <directionalLight position={[0, -5, -5]} intensity={0.7 * sceneIntensity} />
+        <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
         <group ref={rootRef}>
           {file && (
             <AlignmentPreviewModel
@@ -2943,7 +3114,7 @@ export default function ClientPage() {
       object.updateMatrixWorld(true)
     }
     rootGroupRef.current?.updateMatrixWorld(true)
-    setDidInitialFrame(false)
+    // Alignment transform nesmí měnit kameru ani znovu spouštět AutoFrame.
   }, [])
 
   const getAlignmentPair = useCallback(() => {
@@ -3093,24 +3264,27 @@ export default function ClientPage() {
         sourceRoot,
         targetMesh,
         targetRoot,
-        initialMatrix: modelTransforms[bUrl],
+        initialMatrix: sourceRoot.matrix?.toArray?.() || modelTransforms[bUrl],
         sourceRoi: alignmentRoiB,
         targetRoi: alignmentRoiA,
         roiRadius: alignmentBrushRadius,
+        landmarkSeeded: alignmentPairCount >= 3,
         onProgress: (progress) => setAlignmentProgress(progress),
       })
       applyModelTransform(bUrl, result.matrix)
       const stats = await refreshAlignmentMetrics(aUrl, bUrl)
-      setAlignmentMessage(stats
-        ? `Best Fit dokončen · RMS ${stats.rms.toFixed(3)} mm · 95 % ${stats.percentile95.toFixed(3)} mm`
-        : "Best Fit dokončen.")
+      setAlignmentMessage(result.improved
+        ? (stats
+          ? `Best Fit dokončen · RMS ${stats.rms.toFixed(3)} mm · 95 % ${stats.percentile95.toFixed(3)} mm`
+          : "Best Fit dokončen.")
+        : "Best Fit nenašel bezpečně lepší polohu. Předzarovnání bylo zachováno beze změny.")
     } catch (error) {
       console.error("Alignment Best Fit error:", error)
       setAlignmentMessage(error?.message || "Best Fit se nepodařilo dokončit.")
     } finally {
       setAlignmentBusy(false)
     }
-  }, [getAlignmentPair, modelTransforms, alignmentRoiA, alignmentRoiB, alignmentBrushRadius, applyModelTransform, refreshAlignmentMetrics])
+  }, [getAlignmentPair, modelTransforms, alignmentRoiA, alignmentRoiB, alignmentBrushRadius, alignmentPairCount, applyModelTransform, refreshAlignmentMetrics])
 
   const resetAlignmentTransform = useCallback(async () => {
     const { aUrl, bUrl } = getAlignmentPair()
@@ -4743,6 +4917,9 @@ export default function ClientPage() {
           brushRadius={alignmentBrushRadius}
           onPickPoint={handleAlignmentPickA}
           onPaintPoint={(point) => appendAlignmentRoi("A", point)}
+          sceneIntensity={sceneIntensity}
+          highlightIntensity={highlightIntensity}
+          headlightCfg={headlightCfg}
         />
         <AlignmentPreviewViewport
           title={`Moving B · ${stripExt(alignmentPair.fileB?.name || alignmentPair.fileB?.rawName || "")}`}
@@ -4757,6 +4934,9 @@ export default function ClientPage() {
           brushRadius={alignmentBrushRadius}
           onPickPoint={handleAlignmentPickB}
           onPaintPoint={(point) => appendAlignmentRoi("B", point)}
+          sceneIntensity={sceneIntensity}
+          highlightIntensity={highlightIntensity}
+          headlightCfg={headlightCfg}
         />
       </div>
     </>
