@@ -1569,19 +1569,21 @@ async function computeAlignmentMetrics(meshA, meshB, tolerance = 0.25, maxSample
   }
 }
 
-function AlignmentMarker({ point, index, radius = 0.8 }) {
+function AlignmentMarker({ point, index, radius = 0.8, muted = false }) {
   const color = ALIGNMENT_POINT_COLORS[index % ALIGNMENT_POINT_COLORS.length]
   return (
     <group position={point}>
       <mesh renderOrder={1000}>
         <sphereGeometry args={[radius, 20, 14]} />
-        <meshBasicMaterial color={color} depthTest={false} depthWrite={false} />
+        <meshBasicMaterial color={color} transparent opacity={muted ? 0.62 : 1} depthTest={false} depthWrite={false} />
       </mesh>
       <Html center style={{ pointerEvents: "none" }} zIndexRange={[1000, 0]}>
         <div style={{
           width: 22, height: 22, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
           background: color, color: "#050505", fontFamily: "sans-serif", fontSize: 11, fontWeight: 900,
           border: "2px solid rgba(0,0,0,.7)", boxShadow: "0 2px 6px rgba(0,0,0,.55)", transform: "translate(12px,-12px)",
+          opacity: muted ? 0.66 : 1, filter: muted ? "saturate(.72) brightness(.92)" : "none",
+          transition: "opacity .22s ease, filter .22s ease",
         }}>{index + 1}</div>
       </Html>
     </group>
@@ -1674,7 +1676,7 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, active, mute
           if (local) onPickPoint?.([local.x, local.y, local.z])
         } : undefined}
       />
-      {(points || []).map((p, index) => <AlignmentMarker key={`${index}-${p.join("-")}`} point={p} index={index} radius={0.55} />)}
+      {(points || []).map((p, index) => <AlignmentMarker key={`${index}-${p.join("-")}`} point={p} index={index} radius={0.55} muted={muted} />)}
     </group>
   )
 }
@@ -1872,8 +1874,8 @@ function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, ac
         gl={{ antialias: true }}
         style={{
           position: "absolute", inset: 0,
-          filter: selectionDisabled && !locked ? "brightness(.62) blur(.65px)" : "none",
-          opacity: selectionDisabled && !locked ? .68 : 1,
+          filter: (selectionDisabled || dimmed) && !locked ? "grayscale(1) saturate(0) brightness(.67) blur(.55px)" : "none",
+          opacity: (selectionDisabled || dimmed) && !locked ? .72 : 1,
           transition: "filter .26s ease, opacity .26s ease",
         }}
       >
@@ -5588,6 +5590,13 @@ export default function ClientPage() {
     }
   }
 
+  const alignmentStepNeedsAttention = (step) => {
+    if (alignmentBusy) return false
+    if (step === "prealign") return alignmentStep === "prealign" && alignmentModelsSelected && alignmentPointsComplete
+    if (step === "bestfit") return alignmentStep === "bestfit" && alignmentModelsSelected && alignmentPointsComplete && !!alignmentPrealignMatrix && alignmentWorkflowStage !== "bestfit"
+    return false
+  }
+
   const handleAlignmentStepClick = async (step) => {
     if (!alignmentStepAvailable(step) || alignmentBusy) return
     if (step === "models") {
@@ -5617,6 +5626,35 @@ export default function ClientPage() {
         @keyframes artheticAlignAttention { 0%,100% { box-shadow:0 0 0 0 rgba(255,255,255,.04); border-color:rgba(255,255,255,.10); } 50% { box-shadow:0 0 0 5px rgba(255,255,255,.055), 0 0 22px rgba(255,255,255,.08); border-color:rgba(255,255,255,.24); } }
         @keyframes artheticAlignCardIn { from { opacity:0; transform:translate(-50%,-46%) scale(.97); } to { opacity:1; transform:translate(-50%,-50%) scale(1); } }
         @keyframes artheticAlignMenuIn { from { opacity:0; transform:translateY(-4px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
+        @keyframes artheticAlignReadyGlow {
+          0%,100% { border-color:rgba(74,222,128,.40); box-shadow:0 0 0 1px rgba(74,222,128,.035), 0 0 8px rgba(34,197,94,.10); }
+          50% { border-color:rgba(134,239,172,.92); box-shadow:0 0 0 1px rgba(74,222,128,.16), 0 0 18px rgba(34,197,94,.32), 0 0 30px rgba(34,197,94,.10); }
+        }
+        @keyframes artheticAlignReadySweep {
+          to { transform:rotate(360deg); }
+        }
+        .artheticAlignReadyAction {
+          position:relative;
+          isolation:isolate;
+          overflow:hidden;
+          animation:artheticAlignReadyGlow 1.65s ease-in-out infinite;
+        }
+        .artheticAlignReadyAction::after {
+          content:"";
+          position:absolute;
+          inset:-18px;
+          pointer-events:none;
+          z-index:0;
+          background:conic-gradient(from 0deg, transparent 0deg 286deg, rgba(187,247,208,0) 286deg, rgba(187,247,208,.95) 323deg, rgba(74,222,128,.18) 346deg, transparent 360deg);
+          animation:artheticAlignReadySweep 2.15s linear infinite;
+          opacity:.42;
+          -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+          -webkit-mask-composite:xor;
+          mask-composite:exclude;
+          padding:19px;
+          border-radius:28px;
+        }
+        .artheticAlignReadyAction > * { position:relative; z-index:1; }
       `}</style>
 
       <div style={{
@@ -5641,8 +5679,13 @@ export default function ClientPage() {
             {alignmentStepOrder.map((step, index) => (
               <React.Fragment key={step}>
                 {index > 0 && <div style={{ width: 18, height: 1, background: "rgba(255,255,255,.08)", flex: "0 0 auto" }} />}
-                <button onClick={() => handleAlignmentStepClick(step)} disabled={!alignmentStepAvailable(step) || alignmentBusy} style={alignmentStepStyle(step)}>
-                  {alignmentStepLabels[step]}
+                <button
+                  className={alignmentStepNeedsAttention(step) ? "artheticAlignReadyAction" : undefined}
+                  onClick={() => handleAlignmentStepClick(step)}
+                  disabled={!alignmentStepAvailable(step) || alignmentBusy}
+                  style={alignmentStepStyle(step)}
+                >
+                  <span>{alignmentStepLabels[step]}</span>
                 </button>
               </React.Fragment>
             ))}
