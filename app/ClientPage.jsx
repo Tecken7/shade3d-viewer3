@@ -1789,14 +1789,53 @@ function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", dis
   )
 }
 
-function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, active, dimmed = false, selectionDisabled = false, onPickPoint, forceLoading = false, locked = false, onPreviewLoaded, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 }, eligibleFiles = [], selectedUrl = "", otherSelectedUrl = "", onSelectModel, selectStyle = {} }) {
+function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, active, dimmed = false, selectionDisabled = false, inactivePointHint = "", onPickPoint, forceLoading = false, locked = false, onPreviewLoaded, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 }, eligibleFiles = [], selectedUrl = "", otherSelectedUrl = "", onSelectModel, selectStyle = {} }) {
   const rootRef = useRef(null)
   const controlsRef = useRef(null)
+  const viewportRef = useRef(null)
+  const inactiveHintRef = useRef(null)
+  const inactiveHintFrameRef = useRef(0)
+  const inactiveHintPositionRef = useRef({ x: 0, y: 0 })
   const [target, setTarget] = useState([0, 0, 0])
   const [loadedNonce, setLoadedNonce] = useState(0)
   const [previewLoading, setPreviewLoading] = useState(!!file)
   const roleLabel = badge === "A" ? "Reference A" : "Moving B"
   const selectorDocked = !!file && !previewLoading && !forceLoading
+  const showInactivePointHint = !!inactivePointHint && dimmed && !locked && !previewLoading && !forceLoading
+
+  const updateInactivePointHint = useCallback((event) => {
+    if (!showInactivePointHint || !viewportRef.current || !inactiveHintRef.current) return
+    inactiveHintPositionRef.current.x = event.clientX
+    inactiveHintPositionRef.current.y = event.clientY
+    if (inactiveHintFrameRef.current) return
+    inactiveHintFrameRef.current = requestAnimationFrame(() => {
+      inactiveHintFrameRef.current = 0
+      const viewport = viewportRef.current
+      const hint = inactiveHintRef.current
+      if (!viewport || !hint) return
+      const rect = viewport.getBoundingClientRect()
+      const x = Math.max(8, Math.min(rect.width - 12, inactiveHintPositionRef.current.x - rect.left + 14))
+      const y = Math.max(8, Math.min(rect.height - 12, inactiveHintPositionRef.current.y - rect.top + 14))
+      hint.style.transform = `translate3d(${x}px,${y}px,0)`
+      hint.style.opacity = "1"
+    })
+  }, [showInactivePointHint])
+
+  const hideInactivePointHint = useCallback(() => {
+    if (inactiveHintFrameRef.current) {
+      cancelAnimationFrame(inactiveHintFrameRef.current)
+      inactiveHintFrameRef.current = 0
+    }
+    if (inactiveHintRef.current) inactiveHintRef.current.style.opacity = "0"
+  }, [])
+
+  useEffect(() => () => {
+    if (inactiveHintFrameRef.current) cancelAnimationFrame(inactiveHintFrameRef.current)
+  }, [])
+
+  useEffect(() => {
+    if (!showInactivePointHint) hideInactivePointHint()
+  }, [showInactivePointHint, hideInactivePointHint])
 
   useEffect(() => {
     setPreviewLoading(!!file)
@@ -1804,7 +1843,13 @@ function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, ac
   }, [file?.url])
 
   return (
-    <div style={{ position: "relative", minWidth: 0, minHeight: 0, background: "#0C0C0C", overflow: "hidden", borderRadius: 13 }}>
+    <div
+      ref={viewportRef}
+      onPointerEnter={updateInactivePointHint}
+      onPointerMove={updateInactivePointHint}
+      onPointerLeave={hideInactivePointHint}
+      style={{ position: "relative", minWidth: 0, minHeight: 0, background: "#0C0C0C", overflow: "hidden", borderRadius: 13 }}
+    >
       <div style={{
         position: "absolute", zIndex: 12,
         top: selectorDocked ? 12 : "50%",
@@ -1868,14 +1913,34 @@ function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, ac
         }}>{roleLabel}</div>
       )}
 
+      {showInactivePointHint && (
+        <div
+          ref={inactiveHintRef}
+          style={{
+            position: "absolute", left: 0, top: 0, zIndex: 34, opacity: 0, pointerEvents: "none",
+            transform: "translate3d(-9999px,-9999px,0)", willChange: "transform, opacity",
+            display: "flex", alignItems: "center", gap: 7,
+            minHeight: 30, padding: "7px 10px", borderRadius: 10,
+            background: "rgba(12,12,12,.93)", border: "1px solid rgba(255,255,255,.12)",
+            boxShadow: "0 8px 28px rgba(0,0,0,.34)", backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)",
+            color: "#eeeeee", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+            fontSize: 9.5, fontWeight: 720, whiteSpace: "nowrap",
+            transition: "opacity .10s ease",
+          }}
+        >
+          <span style={{ width: 6, height: 6, borderRadius: "50%", flex: "0 0 auto", background: "#9a9a9a" }} />
+          <span>{inactivePointHint}</span>
+        </div>
+      )}
+
       <Canvas
         orthographic
         camera={{ position: [0, 0, 250], near: 0.01, far: 100000, zoom: 1 }}
         gl={{ antialias: true }}
         style={{
           position: "absolute", inset: 0,
-          filter: (selectionDisabled || dimmed) && !locked ? "grayscale(1) saturate(0) brightness(.67) blur(.55px)" : "none",
-          opacity: (selectionDisabled || dimmed) && !locked ? .72 : 1,
+          filter: (selectionDisabled || dimmed) && !locked ? "brightness(.69) blur(.55px)" : "none",
+          opacity: (selectionDisabled || dimmed) && !locked ? .74 : 1,
           transition: "filter .26s ease, opacity .26s ease",
         }}
       >
@@ -5626,35 +5691,62 @@ export default function ClientPage() {
         @keyframes artheticAlignAttention { 0%,100% { box-shadow:0 0 0 0 rgba(255,255,255,.04); border-color:rgba(255,255,255,.10); } 50% { box-shadow:0 0 0 5px rgba(255,255,255,.055), 0 0 22px rgba(255,255,255,.08); border-color:rgba(255,255,255,.24); } }
         @keyframes artheticAlignCardIn { from { opacity:0; transform:translate(-50%,-46%) scale(.97); } to { opacity:1; transform:translate(-50%,-50%) scale(1); } }
         @keyframes artheticAlignMenuIn { from { opacity:0; transform:translateY(-4px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
-        @keyframes artheticAlignReadyGlow {
-          0%,100% { border-color:rgba(74,222,128,.40); box-shadow:0 0 0 1px rgba(74,222,128,.035), 0 0 8px rgba(34,197,94,.10); }
-          50% { border-color:rgba(134,239,172,.92); box-shadow:0 0 0 1px rgba(74,222,128,.16), 0 0 18px rgba(34,197,94,.32), 0 0 30px rgba(34,197,94,.10); }
+        @property --artheticAlignBeamAngle {
+          syntax: "<angle>";
+          inherits: false;
+          initial-value: 0deg;
         }
-        @keyframes artheticAlignReadySweep {
-          to { transform:rotate(360deg); }
+        @keyframes artheticAlignReadyBeam {
+          to { --artheticAlignBeamAngle:360deg; }
+        }
+        @keyframes artheticAlignReadyBreath {
+          0%,100% { box-shadow:0 7px 24px rgba(34,197,94,.055), 0 0 7px rgba(34,197,94,.08); }
+          50% { box-shadow:0 7px 24px rgba(34,197,94,.075), 0 0 13px rgba(74,222,128,.15); }
         }
         .artheticAlignReadyAction {
           position:relative;
           isolation:isolate;
-          overflow:hidden;
-          animation:artheticAlignReadyGlow 1.65s ease-in-out infinite;
+          overflow:visible;
+          border:1px solid transparent !important;
+          background:
+            linear-gradient(rgba(34,197,94,.13), rgba(34,197,94,.13)) padding-box,
+            conic-gradient(
+              from var(--artheticAlignBeamAngle),
+              rgba(74,222,128,0) 0deg 278deg,
+              rgba(74,222,128,.08) 296deg,
+              rgba(74,222,128,.55) 316deg,
+              rgba(187,247,208,1) 330deg,
+              rgba(240,253,244,1) 336deg,
+              rgba(74,222,128,.42) 346deg,
+              rgba(74,222,128,0) 360deg
+            ) border-box !important;
+          animation:artheticAlignReadyBeam 1.85s linear infinite, artheticAlignReadyBreath 2.2s ease-in-out infinite;
         }
-        .artheticAlignReadyAction::after {
+        .artheticAlignReadyAction::before {
           content:"";
           position:absolute;
-          inset:-18px;
+          inset:-4px;
+          padding:4px;
+          border-radius:inherit;
           pointer-events:none;
           z-index:0;
-          background:conic-gradient(from 0deg, transparent 0deg 286deg, rgba(187,247,208,0) 286deg, rgba(187,247,208,.95) 323deg, rgba(74,222,128,.18) 346deg, transparent 360deg);
-          animation:artheticAlignReadySweep 2.15s linear infinite;
-          opacity:.42;
+          opacity:.72;
+          background:conic-gradient(
+            from var(--artheticAlignBeamAngle),
+            rgba(74,222,128,0) 0deg 294deg,
+            rgba(74,222,128,.10) 307deg,
+            rgba(134,239,172,.58) 326deg,
+            rgba(220,252,231,.96) 336deg,
+            rgba(74,222,128,.22) 351deg,
+            rgba(74,222,128,0) 360deg
+          );
           -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
           -webkit-mask-composite:xor;
           mask-composite:exclude;
-          padding:19px;
-          border-radius:28px;
+          filter:blur(3.6px);
+          animation:artheticAlignReadyBeam 1.85s linear infinite;
         }
-        .artheticAlignReadyAction > * { position:relative; z-index:1; }
+        .artheticAlignReadyAction > * { position:relative; z-index:2; }
       `}</style>
 
       <div style={{
@@ -5799,6 +5891,7 @@ export default function ClientPage() {
           active={(alignmentStep === "models" && !alignmentHasA && !alignmentBusy) || (alignmentStep === "points" && !!alignmentPair.aUrl && alignmentModelsSelected && !alignmentBusy && !alignmentPreviewBusy.A && !alignmentPreviewBusy.B && alignmentNextSide === "A")}
           dimmed={alignmentStep === "points" && alignmentModelsSelected && alignmentNextSide !== "A" && !alignmentBusy}
           selectionDisabled={false}
+          inactivePointHint={alignmentStep === "points" && alignmentModelsSelected && alignmentNextSide === "B" && !alignmentBusy ? "Nejdříve umístěte bod v okně B" : ""}
           onPickPoint={handleAlignmentPickA}
           forceLoading={alignmentPreviewBusy.A}
           locked={alignmentBusy && !!alignmentProgress}
@@ -5825,6 +5918,7 @@ export default function ClientPage() {
           active={(alignmentStep === "models" && alignmentHasA && !alignmentHasB && !alignmentBusy) || (alignmentStep === "points" && !!alignmentPair.bUrl && alignmentModelsSelected && !alignmentBusy && !alignmentPreviewBusy.A && !alignmentPreviewBusy.B && alignmentNextSide === "B")}
           dimmed={alignmentStep === "points" && alignmentModelsSelected && alignmentNextSide !== "B" && !alignmentBusy}
           selectionDisabled={alignmentStep === "models" && !alignmentHasA}
+          inactivePointHint={alignmentStep === "points" && alignmentModelsSelected && alignmentNextSide === "A" && !alignmentBusy ? "Nejdříve umístěte bod v okně A" : ""}
           onPickPoint={handleAlignmentPickB}
           forceLoading={alignmentPreviewBusy.B}
           locked={alignmentBusy && !!alignmentProgress}
