@@ -5699,54 +5699,92 @@ export default function ClientPage() {
         @keyframes artheticAlignReadyBeam {
           to { --artheticAlignBeamAngle:360deg; }
         }
-        @keyframes artheticAlignReadyBreath {
-          0%,100% { box-shadow:0 7px 24px rgba(34,197,94,.055), 0 0 7px rgba(34,197,94,.08); }
-          50% { box-shadow:0 7px 24px rgba(34,197,94,.075), 0 0 13px rgba(74,222,128,.15); }
+        @keyframes artheticAlignReadyParticle {
+          0%   { offset-distance:0%; opacity:0; transform:scale(.45) translateY(0); }
+          7%   { opacity:.92; transform:scale(1) translateY(-1px); }
+          44%  { opacity:.58; transform:scale(.78) translateY(-2px); }
+          72%  { opacity:.16; transform:scale(.55) translateY(-4px); }
+          100% { offset-distance:100%; opacity:0; transform:scale(.35) translateY(-6px); }
         }
         .artheticAlignReadyAction {
           position:relative;
           isolation:isolate;
           overflow:visible;
           border:1px solid transparent !important;
-          background:
-            linear-gradient(rgba(34,197,94,.13), rgba(34,197,94,.13)) padding-box,
-            conic-gradient(
-              from var(--artheticAlignBeamAngle),
-              rgba(74,222,128,0) 0deg 278deg,
-              rgba(74,222,128,.08) 296deg,
-              rgba(74,222,128,.55) 316deg,
-              rgba(187,247,208,1) 330deg,
-              rgba(240,253,244,1) 336deg,
-              rgba(74,222,128,.42) 346deg,
-              rgba(74,222,128,0) 360deg
-            ) border-box !important;
-          animation:artheticAlignReadyBeam 1.85s linear infinite, artheticAlignReadyBreath 2.2s ease-in-out infinite;
+          background:transparent !important;
+          box-shadow:none !important;
         }
+        /* Vnější glow + ostrý světelný hotspot. Vnitřek se následně překryje ::after. */
         .artheticAlignReadyAction::before {
           content:"";
           position:absolute;
-          inset:-4px;
-          padding:4px;
-          border-radius:inherit;
+          inset:-2px;
+          padding:2px;
+          border-radius:12px;
           pointer-events:none;
           z-index:0;
-          opacity:.72;
           background:conic-gradient(
             from var(--artheticAlignBeamAngle),
-            rgba(74,222,128,0) 0deg 294deg,
-            rgba(74,222,128,.10) 307deg,
-            rgba(134,239,172,.58) 326deg,
-            rgba(220,252,231,.96) 336deg,
-            rgba(74,222,128,.22) 351deg,
+            rgba(74,222,128,0) 0deg 286deg,
+            rgba(74,222,128,.05) 301deg,
+            rgba(74,222,128,.42) 316deg,
+            rgba(187,247,208,.96) 328deg,
+            rgba(240,253,244,1) 334deg,
+            rgba(134,239,172,.72) 342deg,
+            rgba(74,222,128,.08) 353deg,
             rgba(74,222,128,0) 360deg
           );
           -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
           -webkit-mask-composite:xor;
           mask-composite:exclude;
-          filter:blur(3.6px);
-          animation:artheticAlignReadyBeam 1.85s linear infinite;
+          filter:drop-shadow(0 0 2px rgba(134,239,172,.75)) drop-shadow(0 0 6px rgba(34,197,94,.35));
+          animation:artheticAlignReadyBeam 1.9s linear infinite;
         }
-        .artheticAlignReadyAction > * { position:relative; z-index:2; }
+        /* Tohle je krycí vrstva: drží glow mimo vnitřek tlačítka. */
+        .artheticAlignReadyAction::after {
+          content:"";
+          position:absolute;
+          inset:1px;
+          border-radius:8px;
+          z-index:1;
+          pointer-events:none;
+          background:rgba(18,42,27,.96);
+          box-shadow:inset 0 0 0 1px rgba(34,197,94,.12);
+        }
+        .artheticAlignReadyAction > * { position:relative; z-index:3; }
+        .artheticAlignReadyParticles {
+          position:absolute !important;
+          inset:-7px;
+          z-index:2 !important;
+          pointer-events:none;
+          overflow:visible;
+        }
+        .artheticAlignReadyParticle {
+          position:absolute !important;
+          left:0;
+          top:0;
+          width:3px;
+          height:3px;
+          border-radius:50%;
+          background:rgba(187,247,208,.95);
+          box-shadow:0 0 3px rgba(134,239,172,.9), 0 0 7px rgba(34,197,94,.45);
+          offset-path:inset(7px round 10px);
+          offset-rotate:0deg;
+          opacity:0;
+          animation:artheticAlignReadyParticle 2.35s linear infinite;
+        }
+        .artheticAlignReadyParticle:nth-child(2) {
+          width:2px; height:2px; animation-delay:-.42s; animation-duration:2.7s; opacity:.72;
+        }
+        .artheticAlignReadyParticle:nth-child(3) {
+          width:2.5px; height:2.5px; animation-delay:-.96s; animation-duration:3.05s; opacity:.58;
+        }
+        .artheticAlignReadyParticle:nth-child(4) {
+          width:1.5px; height:1.5px; animation-delay:-1.48s; animation-duration:2.55s; opacity:.5;
+        }
+        .artheticAlignReadyParticle:nth-child(5) {
+          width:2px; height:2px; animation-delay:-1.82s; animation-duration:3.25s; opacity:.42;
+        }
       `}</style>
 
       <div style={{
@@ -5777,6 +5815,15 @@ export default function ClientPage() {
                   disabled={!alignmentStepAvailable(step) || alignmentBusy}
                   style={alignmentStepStyle(step)}
                 >
+                  {alignmentStepNeedsAttention(step) && (
+                    <span className="artheticAlignReadyParticles" aria-hidden="true">
+                      <i className="artheticAlignReadyParticle" />
+                      <i className="artheticAlignReadyParticle" />
+                      <i className="artheticAlignReadyParticle" />
+                      <i className="artheticAlignReadyParticle" />
+                      <i className="artheticAlignReadyParticle" />
+                    </span>
+                  )}
                   <span>{alignmentStepLabels[step]}</span>
                 </button>
               </React.Fragment>
