@@ -3459,15 +3459,11 @@ function ArtheticInlineColorPicker({ value, onChange }) {
       marginTop: 2, padding: 10, borderRadius: 11, gridColumn: "1 / -1",
       background: "rgba(8,8,8,.96)", border: "1px solid rgba(255,255,255,.085)",
       boxShadow: "0 14px 34px rgba(0,0,0,.28)", overflow: "hidden",
-      animation: "artheticColorPickerReveal .2s cubic-bezier(.2,.75,.25,1) both",
     }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 9 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <span style={{ width: 22, height: 22, borderRadius: 7, background: currentHex, border: "1px solid rgba(255,255,255,.20)", boxShadow: "0 0 0 2px rgba(255,255,255,.035)" }} />
-          <div>
-            <div style={{ color: "#d7d7d7", fontSize: 9.5, fontWeight: 720 }}>Barva modelu</div>
-            <div style={{ color: "#676767", fontSize: 8.4, marginTop: 1 }}>HEX / RGB</div>
-          </div>
+        <div>
+          <div style={{ color: "#d7d7d7", fontSize: 9.5, fontWeight: 720 }}>Barva modelu</div>
+          <div style={{ color: "#676767", fontSize: 8.4, marginTop: 1 }}>HEX / RGB</div>
         </div>
         <span style={{ color: "#8a8a8a", fontSize: 9, fontVariantNumeric: "tabular-nums" }}>{currentHex.toUpperCase()}</span>
       </div>
@@ -5416,8 +5412,11 @@ export default function ClientPage() {
         return (
           <div key={`${f.url}-${i}`} className="control-row" style={{
             display: "grid", gridTemplateColumns: "32px minmax(0,1fr) 30px 30px 32px", alignItems: "center", columnGap: 7, rowGap: 8,
-            margin: "7px 0", padding: "9px 10px", borderRadius: 11, boxSizing: "border-box",
-            background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.065)", position: "relative",
+            margin: "7px 0", padding: "9px 10px", borderRadius: openColorPickerUrl === f.url ? 14 : 11, boxSizing: "border-box",
+            background: openColorPickerUrl === f.url ? "rgba(12,12,12,.96)" : "rgba(255,255,255,.025)",
+            border: openColorPickerUrl === f.url ? "1px solid rgba(255,255,255,.10)" : "1px solid rgba(255,255,255,.065)",
+            boxShadow: openColorPickerUrl === f.url ? "0 18px 46px rgba(0,0,0,.30)" : "none", position: "relative",
+            transition: "border-radius .32s ease, background .28s ease, border-color .28s ease, box-shadow .32s ease",
           }}>
             <div className="row-label" style={{
               gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
@@ -5475,12 +5474,23 @@ export default function ClientPage() {
               <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
             </button>
 
-            {openColorPickerUrl === f.url && (
-              <ArtheticInlineColorPicker
-                value={colors[i] ?? "#ffffff"}
-                onChange={(nextColor) => setColors((prev) => prev.map((current, idx) => idx === i ? nextColor : current))}
-              />
-            )}
+            <div style={{
+              gridColumn: "1 / -1", display: "grid",
+              gridTemplateRows: openColorPickerUrl === f.url ? "1fr" : "0fr",
+              opacity: openColorPickerUrl === f.url ? 1 : 0,
+              transform: openColorPickerUrl === f.url ? "translateY(0) scale(1)" : "translateY(-7px) scale(.988)",
+              filter: openColorPickerUrl === f.url ? "blur(0)" : "blur(2.5px)",
+              pointerEvents: openColorPickerUrl === f.url ? "auto" : "none",
+              overflow: "hidden",
+              transition: "grid-template-rows .40s cubic-bezier(.2,.75,.25,1), opacity .22s .06s ease, transform .36s cubic-bezier(.2,.75,.25,1), filter .25s ease",
+            }}>
+              <div style={{ minHeight: 0, overflow: "hidden" }}>
+                <ArtheticInlineColorPicker
+                  value={colors[i] ?? "#ffffff"}
+                  onChange={(nextColor) => setColors((prev) => prev.map((current, idx) => idx === i ? nextColor : current))}
+                />
+              </div>
+            </div>
           </div>
         );
       })}
@@ -5686,7 +5696,7 @@ export default function ClientPage() {
             disabled={analysisEligibleFiles.length < 2}
             title="Změřit mezeru a průnik mezi dvěma modely"
             style={{
-              position: "relative", width: "100%", height: heatmapMenuOpen ? 54 : 40, padding: 0,
+              position: "relative", width: "100%", height: heatmapMenuOpen ? 54 : 38, padding: 0,
               border: 0, borderRadius: "inherit", background: "transparent", color: analysisEligibleFiles.length < 2 ? "#666" : "#ededed",
               cursor: analysisEligibleFiles.length < 2 ? "not-allowed" : "pointer", fontFamily: "inherit", overflow: "hidden",
               transition: "height .32s cubic-bezier(.2,.75,.25,1), color .18s ease",
@@ -5830,7 +5840,7 @@ export default function ClientPage() {
             disabled={analysisEligibleFiles.length < 2}
             title="Oboustranně porovnat podobnost povrchů dvou modelů"
             style={{
-              position: "relative", width: "100%", height: comparisonMenuOpen ? 54 : 40, padding: 0,
+              position: "relative", width: "100%", height: comparisonMenuOpen ? 54 : 38, padding: 0,
               border: 0, borderRadius: "inherit", background: "transparent", color: analysisEligibleFiles.length < 2 ? "#666" : "#ededed",
               cursor: analysisEligibleFiles.length < 2 ? "not-allowed" : "pointer", fontFamily: "inherit", overflow: "hidden",
               transition: "height .32s cubic-bezier(.2,.75,.25,1), color .18s ease",
