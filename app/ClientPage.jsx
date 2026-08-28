@@ -904,15 +904,99 @@ function matrixArrayOrIdentity(value) {
   return Array.isArray(value) && value.length === 16 ? value : IDENTITY_MATRIX_ARRAY
 }
 
+function largestEigenvectorSymmetric4(values) {
+  // Jacobiho diagonalizace 4x4 symetrické matice. Hornova registration potřebuje
+  // vlastní vektor NEJVĚTŠÍ ALGEBRAICKÉ vlastní hodnoty. Obyčejná power iteration
+  // zde není bezpečná: Hornova N matice často obsahuje ±lambda se stejnou absolutní
+  // velikostí a power iteration pak může skončit u nesprávného quaternionu.
+  const a = Array.from({ length: 4 }, (_, r) =>
+    Array.from({ length: 4 }, (_, c) => Number(values[r * 4 + c]) || 0)
+  )
+  const v = Array.from({ length: 4 }, (_, r) =>
+    Array.from({ length: 4 }, (_, c) => (r === c ? 1 : 0))
+  )
+
+  for (let sweep = 0; sweep < 64; sweep++) {
+    let p = 0, q = 1, largest = 0
+    for (let r = 0; r < 4; r++) {
+      for (let c = r + 1; c < 4; c++) {
+        const magnitude = Math.abs(a[r][c])
+        if (magnitude > largest) { largest = magnitude; p = r; q = c }
+      }
+    }
+    if (largest < 1e-12) break
+
+    const app = a[p][p]
+    const aqq = a[q][q]
+    const apq = a[p][q]
+    const angle = 0.5 * Math.atan2(2 * apq, aqq - app)
+    const cos = Math.cos(angle)
+    const sin = Math.sin(angle)
+
+    for (let k = 0; k < 4; k++) {
+      if (k === p || k === q) continue
+      const akp = a[k][p]
+      const akq = a[k][q]
+      a[k][p] = a[p][k] = cos * akp - sin * akq
+      a[k][q] = a[q][k] = sin * akp + cos * akq
+    }
+
+    a[p][p] = cos * cos * app - 2 * sin * cos * apq + sin * sin * aqq
+    a[q][q] = sin * sin * app + 2 * sin * cos * apq + cos * cos * aqq
+    a[p][q] = a[q][p] = 0
+
+    for (let k = 0; k < 4; k++) {
+      const vkp = v[k][p]
+      const vkq = v[k][q]
+      v[k][p] = cos * vkp - sin * vkq
+      v[k][q] = sin * vkp + cos * vkq
+    }
+  }
+
+  let best = 0
+  for (let i = 1; i < 4; i++) if (a[i][i] > a[best][best]) best = i
+  const result = [v[0][best], v[1][best], v[2][best], v[3][best]]
+  const length = Math.hypot(result[0], result[1], result[2], result[3])
+  if (!Number.isFinite(length) || length < 1e-12) return null
+  return result.map((value) => value / length)
+}
+
+function landmarkConfigurationIsDegenerate(points) {
+  if (!points || points.length < 3) return true
+  let maxBaselineSq = 0
+  let maxArea2 = 0
+  const ab = new THREE.Vector3()
+  const ac = new THREE.Vector3()
+  const cross = new THREE.Vector3()
+  for (let i = 0; i < points.length; i++) {
+    for (let j = i + 1; j < points.length; j++) {
+      maxBaselineSq = Math.max(maxBaselineSq, points[i].distanceToSquared(points[j]))
+      for (let k = j + 1; k < points.length; k++) {
+        ab.subVectors(points[j], points[i])
+        ac.subVectors(points[k], points[i])
+        maxArea2 = Math.max(maxArea2, cross.crossVectors(ab, ac).length())
+      }
+    }
+  }
+  if (maxBaselineSq < 1e-10) return true
+  // 2*plocha trojúhelníku je |AB x AC|. Povolujeme i poměrně ploché landmarky,
+  // ale odmítneme prakticky kolineární konfiguraci, u níž rotace není jednoznačná.
+  return maxArea2 < maxBaselineSq * 1e-4
+}
+
 function rigidTransformHorn(sourcePoints, targetPoints) {
   const count = Math.min(sourcePoints?.length || 0, targetPoints?.length || 0)
   if (count < 3) return null
 
+  const source = sourcePoints.slice(0, count)
+  const target = targetPoints.slice(0, count)
+  if (landmarkConfigurationIsDegenerate(source) || landmarkConfigurationIsDegenerate(target)) return null
+
   const sourceCenter = new THREE.Vector3()
   const targetCenter = new THREE.Vector3()
   for (let i = 0; i < count; i++) {
-    sourceCenter.add(sourcePoints[i])
-    targetCenter.add(targetPoints[i])
+    sourceCenter.add(source[i])
+    targetCenter.add(target[i])
   }
   sourceCenter.multiplyScalar(1 / count)
   targetCenter.multiplyScalar(1 / count)
@@ -921,8 +1005,8 @@ function rigidTransformHorn(sourcePoints, targetPoints) {
   let syx = 0, syy = 0, syz = 0
   let szx = 0, szy = 0, szz = 0
   for (let i = 0; i < count; i++) {
-    const a = sourcePoints[i].clone().sub(sourceCenter)
-    const b = targetPoints[i].clone().sub(targetCenter)
+    const a = source[i].clone().sub(sourceCenter)
+    const b = target[i].clone().sub(targetCenter)
     sxx += a.x * b.x; sxy += a.x * b.y; sxz += a.x * b.z
     syx += a.y * b.x; syy += a.y * b.y; syz += a.y * b.z
     szx += a.z * b.x; szy += a.z * b.y; szz += a.z * b.z
@@ -930,26 +1014,32 @@ function rigidTransformHorn(sourcePoints, targetPoints) {
 
   const trace = sxx + syy + szz
   const N = [
-    trace,       syz - szy,  szx - sxz,  sxy - syx,
-    syz - szy,  sxx-syy-szz, sxy+syx,    szx+sxz,
-    szx - sxz,  sxy+syx,    -sxx+syy-szz, syz+szy,
-    sxy - syx,  szx+sxz,     syz+szy,    -sxx-syy+szz,
+    trace,        syz - szy,    szx - sxz,     sxy - syx,
+    syz - szy,    sxx-syy-szz,  sxy+syx,       szx+sxz,
+    szx - sxz,    sxy+syx,     -sxx+syy-szz,   syz+szy,
+    sxy - syx,    szx+sxz,      syz+szy,       -sxx-syy+szz,
   ]
 
-  let q = [1, 0, 0, 0]
-  for (let iter = 0; iter < 40; iter++) {
-    const next = [0, 0, 0, 0]
-    for (let r = 0; r < 4; r++) {
-      for (let c = 0; c < 4; c++) next[r] += N[r * 4 + c] * q[c]
-    }
-    const length = Math.hypot(next[0], next[1], next[2], next[3]) || 1
-    q = next.map((v) => v / length)
-  }
+  const q = largestEigenvectorSymmetric4(N)
+  if (!q) return null
 
+  // Hornův vektor je [w, x, y, z].
   const rotation = new THREE.Quaternion(q[1], q[2], q[3], q[0]).normalize()
   const rotatedSourceCenter = sourceCenter.clone().applyQuaternion(rotation)
   const translation = targetCenter.clone().sub(rotatedSourceCenter)
   return new THREE.Matrix4().compose(translation, rotation, new THREE.Vector3(1, 1, 1))
+}
+
+function landmarkFitRms(sourcePoints, targetPoints, matrix) {
+  const count = Math.min(sourcePoints?.length || 0, targetPoints?.length || 0)
+  if (!count || !matrix) return Infinity
+  const point = new THREE.Vector3()
+  let sumSq = 0
+  for (let i = 0; i < count; i++) {
+    point.copy(sourcePoints[i]).applyMatrix4(matrix)
+    sumSq += point.distanceToSquared(targetPoints[i])
+  }
+  return Math.sqrt(sumSq / count)
 }
 
 function solveLinearSystem6(matrix, rhs) {
@@ -3232,14 +3322,33 @@ export default function ClientPage() {
       setAlignmentMessage("Pro předzarovnání označte alespoň 3 páry bodů.")
       return
     }
-    const matrixA = new THREE.Matrix4().fromArray(matrixArrayOrIdentity(modelTransforms[aUrl]))
+
+    // Body ve spodních A/B oknech jsou uložené v lokálním prostoru rootu modelu.
+    // B chceme převést přímo do společného parent-space. A proto převedeme jeho
+    // landmarky aktuální skutečnou maticí reference (ne pouze případně opožděným state).
+    const referenceRoot = modelObjectsRef.current[aUrl]
+    referenceRoot?.updateMatrixWorld(true)
+    const matrixA = referenceRoot?.matrix?.elements?.length === 16
+      ? referenceRoot.matrix.clone()
+      : new THREE.Matrix4().fromArray(matrixArrayOrIdentity(modelTransforms[aUrl]))
+
     const source = alignmentPointsB.slice(0, pairCount).map((point) => new THREE.Vector3(...point))
     const target = alignmentPointsA.slice(0, pairCount).map((point) => new THREE.Vector3(...point).applyMatrix4(matrixA))
     const matrix = rigidTransformHorn(source, target)
-    if (!matrix) return
+    if (!matrix) {
+      setAlignmentMessage("Předzarovnání nelze jednoznačně spočítat. Rozmístěte 3 body více do trojúhelníku, ne téměř do jedné přímky.")
+      return
+    }
+
+    const landmarkRms = landmarkFitRms(source, target, matrix)
+    if (!Number.isFinite(landmarkRms)) {
+      setAlignmentMessage("Předzarovnání se nepodařilo numericky ověřit.")
+      return
+    }
+
     applyModelTransform(bUrl, matrix.toArray())
-    setAlignmentMessage(`Předzarovnání z ${pairCount} párů dokončeno. Teď spusťte Best Fit.`)
-    setAlignmentProgress({ label: "Landmark fit", rms: null })
+    setAlignmentMessage(`Předzarovnání z ${pairCount} párů dokončeno · Landmark RMS ${landmarkRms.toFixed(3)} mm. Teď spusťte Best Fit.`)
+    setAlignmentProgress({ label: "Landmark fit", rms: landmarkRms })
     await refreshAlignmentMetrics(aUrl, bUrl)
   }, [getAlignmentPair, alignmentPointsA, alignmentPointsB, modelTransforms, applyModelTransform, refreshAlignmentMetrics])
 
