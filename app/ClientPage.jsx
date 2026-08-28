@@ -3347,6 +3347,203 @@ function GizmoManager({ rotateRef, translateRef, secondaryTranslateRef, trackbal
 }
 
 /* ---------- Hlavní komponenta ---------- */
+
+/* ---------- ARTHETIC Color Picker ---------- */
+function normalizeColorHex(value, fallback = "#ffffff") {
+  const text = String(value || "").trim()
+  const short = text.match(/^#?([0-9a-f]{3})$/i)
+  if (short) return `#${short[1].split("").map((part) => part + part).join("")}`.toLowerCase()
+  const full = text.match(/^#?([0-9a-f]{6})$/i)
+  return full ? `#${full[1]}`.toLowerCase() : fallback
+}
+
+function colorHexToRgb(value) {
+  const hex = normalizeColorHex(value).slice(1)
+  return {
+    r: parseInt(hex.slice(0, 2), 16),
+    g: parseInt(hex.slice(2, 4), 16),
+    b: parseInt(hex.slice(4, 6), 16),
+  }
+}
+
+function colorRgbToHex({ r, g, b }) {
+  const part = (value) => Math.max(0, Math.min(255, Math.round(Number(value) || 0))).toString(16).padStart(2, "0")
+  return `#${part(r)}${part(g)}${part(b)}`
+}
+
+function colorRgbToHsv({ r, g, b }) {
+  const rn = r / 255, gn = g / 255, bn = b / 255
+  const max = Math.max(rn, gn, bn), min = Math.min(rn, gn, bn)
+  const delta = max - min
+  let h = 0
+  if (delta > 0.000001) {
+    if (max === rn) h = 60 * (((gn - bn) / delta) % 6)
+    else if (max === gn) h = 60 * (((bn - rn) / delta) + 2)
+    else h = 60 * (((rn - gn) / delta) + 4)
+  }
+  if (h < 0) h += 360
+  return { h, s: max === 0 ? 0 : delta / max, v: max }
+}
+
+function colorHsvToRgb({ h, s, v }) {
+  const hue = ((h % 360) + 360) % 360
+  const c = v * s
+  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1))
+  const m = v - c
+  let rn = 0, gn = 0, bn = 0
+  if (hue < 60) [rn, gn, bn] = [c, x, 0]
+  else if (hue < 120) [rn, gn, bn] = [x, c, 0]
+  else if (hue < 180) [rn, gn, bn] = [0, c, x]
+  else if (hue < 240) [rn, gn, bn] = [0, x, c]
+  else if (hue < 300) [rn, gn, bn] = [x, 0, c]
+  else [rn, gn, bn] = [c, 0, x]
+  return { r: (rn + m) * 255, g: (gn + m) * 255, b: (bn + m) * 255 }
+}
+
+function ArtheticInlineColorPicker({ value, onChange }) {
+  const initialHex = normalizeColorHex(value)
+  const [hsv, setHsv] = useState(() => colorRgbToHsv(colorHexToRgb(initialHex)))
+  const [hexDraft, setHexDraft] = useState(initialHex.toUpperCase())
+  const svRef = useRef(null)
+  const hueRef = useRef(null)
+
+  useEffect(() => {
+    const normalized = normalizeColorHex(value)
+    setHsv(colorRgbToHsv(colorHexToRgb(normalized)))
+    setHexDraft(normalized.toUpperCase())
+  }, [value])
+
+  const emitHsv = useCallback((next) => {
+    const normalized = {
+      h: ((Number(next.h) || 0) % 360 + 360) % 360,
+      s: Math.max(0, Math.min(1, Number(next.s) || 0)),
+      v: Math.max(0, Math.min(1, Number(next.v) || 0)),
+    }
+    setHsv(normalized)
+    const nextHex = colorRgbToHex(colorHsvToRgb(normalized))
+    setHexDraft(nextHex.toUpperCase())
+    onChange?.(nextHex)
+  }, [onChange])
+
+  const updateSvFromPointer = useCallback((event) => {
+    const element = svRef.current
+    if (!element) return
+    const rect = element.getBoundingClientRect()
+    const s = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)))
+    const v = 1 - Math.max(0, Math.min(1, (event.clientY - rect.top) / Math.max(1, rect.height)))
+    emitHsv({ ...hsv, s, v })
+  }, [emitHsv, hsv])
+
+  const updateHueFromPointer = useCallback((event) => {
+    const element = hueRef.current
+    if (!element) return
+    const rect = element.getBoundingClientRect()
+    const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)))
+    emitHsv({ ...hsv, h: ratio * 360 })
+  }, [emitHsv, hsv])
+
+  const rgb = colorHsvToRgb(hsv)
+  const rgbRounded = { r: Math.round(rgb.r), g: Math.round(rgb.g), b: Math.round(rgb.b) }
+  const currentHex = colorRgbToHex(rgbRounded)
+
+  const updateRgbChannel = (channel, rawValue) => {
+    const nextRgb = { ...rgbRounded, [channel]: Math.max(0, Math.min(255, Number(rawValue) || 0)) }
+    const nextHex = colorRgbToHex(nextRgb)
+    setHexDraft(nextHex.toUpperCase())
+    setHsv(colorRgbToHsv(nextRgb))
+    onChange?.(nextHex)
+  }
+
+  return (
+    <div style={{
+      marginTop: 2, padding: 10, borderRadius: 11, gridColumn: "1 / -1",
+      background: "rgba(8,8,8,.96)", border: "1px solid rgba(255,255,255,.085)",
+      boxShadow: "0 14px 34px rgba(0,0,0,.28)", overflow: "hidden",
+      animation: "artheticColorPickerReveal .2s cubic-bezier(.2,.75,.25,1) both",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 9 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          <span style={{ width: 22, height: 22, borderRadius: 7, background: currentHex, border: "1px solid rgba(255,255,255,.20)", boxShadow: "0 0 0 2px rgba(255,255,255,.035)" }} />
+          <div>
+            <div style={{ color: "#d7d7d7", fontSize: 9.5, fontWeight: 720 }}>Barva modelu</div>
+            <div style={{ color: "#676767", fontSize: 8.4, marginTop: 1 }}>HEX / RGB</div>
+          </div>
+        </div>
+        <span style={{ color: "#8a8a8a", fontSize: 9, fontVariantNumeric: "tabular-nums" }}>{currentHex.toUpperCase()}</span>
+      </div>
+
+      <div
+        ref={svRef}
+        onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture?.(event.pointerId); updateSvFromPointer(event) }}
+        onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture?.(event.pointerId)) updateSvFromPointer(event) }}
+        onPointerUp={(event) => { try { event.currentTarget.releasePointerCapture?.(event.pointerId) } catch {} }}
+        onPointerCancel={(event) => { try { event.currentTarget.releasePointerCapture?.(event.pointerId) } catch {} }}
+        style={{
+          position: "relative", height: 118, borderRadius: 9, overflow: "hidden", cursor: "crosshair", touchAction: "none",
+          background: `linear-gradient(to top, #000 0%, transparent 100%), linear-gradient(to right, #fff 0%, hsl(${hsv.h}, 100%, 50%) 100%)`,
+          border: "1px solid rgba(255,255,255,.08)", boxShadow: "inset 0 0 0 1px rgba(0,0,0,.18)",
+        }}
+      >
+        <span style={{
+          position: "absolute", left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%`, width: 13, height: 13,
+          borderRadius: "50%", border: "2px solid white", boxShadow: "0 1px 5px rgba(0,0,0,.8)",
+          transform: "translate(-50%, -50%)", pointerEvents: "none", background: "transparent",
+        }} />
+      </div>
+
+      <div
+        ref={hueRef}
+        onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture?.(event.pointerId); updateHueFromPointer(event) }}
+        onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture?.(event.pointerId)) updateHueFromPointer(event) }}
+        onPointerUp={(event) => { try { event.currentTarget.releasePointerCapture?.(event.pointerId) } catch {} }}
+        onPointerCancel={(event) => { try { event.currentTarget.releasePointerCapture?.(event.pointerId) } catch {} }}
+        style={{
+          position: "relative", height: 12, marginTop: 9, borderRadius: 999, cursor: "ew-resize", touchAction: "none",
+          background: "linear-gradient(90deg,#ff3b30 0%,#ffd60a 16.6%,#32d74b 33.3%,#64d2ff 50%,#0a84ff 66.6%,#bf5af2 83.3%,#ff375f 100%)",
+          border: "1px solid rgba(255,255,255,.08)",
+        }}
+      >
+        <span style={{
+          position: "absolute", left: `${(hsv.h / 360) * 100}%`, top: "50%", width: 14, height: 14, borderRadius: "50%",
+          background: `hsl(${hsv.h},100%,50%)`, border: "2px solid white", boxShadow: "0 1px 5px rgba(0,0,0,.7)",
+          transform: "translate(-50%, -50%)", pointerEvents: "none",
+        }} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1.35fr repeat(3, minmax(0,.72fr))", gap: 6, marginTop: 10 }}>
+        <label style={{ minWidth: 0 }}>
+          <span style={{ display: "block", color: "#666", fontSize: 8, fontWeight: 700, marginBottom: 4 }}>HEX</span>
+          <input
+            value={hexDraft}
+            onChange={(event) => {
+              const text = event.target.value.toUpperCase()
+              setHexDraft(text)
+              if (/^#?[0-9A-F]{6}$/.test(text)) {
+                const nextHex = normalizeColorHex(text)
+                setHsv(colorRgbToHsv(colorHexToRgb(nextHex)))
+                onChange?.(nextHex)
+              }
+            }}
+            onBlur={() => setHexDraft(normalizeColorHex(value).toUpperCase())}
+            spellCheck={false}
+            style={{ width: "100%", height: 29, boxSizing: "border-box", borderRadius: 7, border: "1px solid rgba(255,255,255,.085)", background: "rgba(255,255,255,.035)", color: "#e5e5e5", padding: "0 8px", outline: "none", fontSize: 9, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", textTransform: "uppercase" }}
+          />
+        </label>
+        {[['r','R'],['g','G'],['b','B']].map(([channel,label]) => (
+          <label key={channel} style={{ minWidth: 0 }}>
+            <span style={{ display: "block", color: "#666", fontSize: 8, fontWeight: 700, marginBottom: 4 }}>{label}</span>
+            <input
+              type="number" min="0" max="255" value={rgbRounded[channel]}
+              onChange={(event) => updateRgbChannel(channel, event.target.value)}
+              style={{ width: "100%", height: 29, boxSizing: "border-box", borderRadius: 7, border: "1px solid rgba(255,255,255,.085)", background: "rgba(255,255,255,.035)", color: "#e5e5e5", padding: "0 5px", outline: "none", fontSize: 9, textAlign: "center", fontVariantNumeric: "tabular-nums" }}
+            />
+          </label>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function ClientPage() {
   const hideSidebar = getParam("hideSidebar") === "1"; // ÚPRAVA 1: Zjištění, jestli máme schovat levý panel
   const [sceneIntensity, setSceneIntensity] = useState(1)
@@ -3390,6 +3587,7 @@ export default function ClientPage() {
 
   const [files, setFiles] = useState([])
   const [colors, setColors] = useState([])
+  const [openColorPickerUrl, setOpenColorPickerUrl] = useState(null)
   const [opacities, setOpacities] = useState([])
   const [visibles, setVisibles] = useState([])
   const [roughnesses, setRoughnesses] = useState([])
@@ -5219,14 +5417,27 @@ export default function ClientPage() {
           <div key={`${f.url}-${i}`} className="control-row" style={{
             display: "grid", gridTemplateColumns: "32px minmax(0,1fr) 30px 30px 32px", alignItems: "center", columnGap: 7, rowGap: 8,
             margin: "7px 0", padding: "9px 10px", borderRadius: 11, boxSizing: "border-box",
-            background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.065)",
+            background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.065)", position: "relative",
           }}>
             <div className="row-label" style={{
               gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
               color: "#d7d7d7", fontSize: 10.5, fontWeight: 680, letterSpacing: "-.01em",
             }} title={f.rawName || f.name}>{stripExt(f.name)}</div>
             
-            <input type="color" value={colors[i] ?? "#ffffff"} onChange={(e) => setColors((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))} aria-label={`${f.name} color`} className="color-input" style={{ width: 32, height: 24, border: "1px solid rgba(255,255,255,.14)", borderRadius: 7, padding: 2, cursor: "pointer", background: "rgba(255,255,255,.035)" }}/>
+            <button
+              type="button"
+              onClick={() => setOpenColorPickerUrl((previous) => previous === f.url ? null : f.url)}
+              aria-label={`${f.name} color`}
+              aria-expanded={openColorPickerUrl === f.url}
+              title="Změnit barvu modelu"
+              style={{
+                width: 32, height: 24, border: openColorPickerUrl === f.url ? "1px solid rgba(255,255,255,.24)" : "1px solid rgba(255,255,255,.12)",
+                borderRadius: 7, padding: 3, cursor: "pointer", background: "rgba(255,255,255,.025)", boxSizing: "border-box",
+                display: "grid", placeItems: "stretch", transition: "border-color .16s ease, background .16s ease, transform .16s ease",
+              }}
+            >
+              <span style={{ width: "100%", height: "100%", borderRadius: 4, background: colors[i] ?? "#ffffff", border: "1px solid rgba(255,255,255,.14)", boxShadow: "inset 0 0 0 1px rgba(0,0,0,.12)" }} />
+            </button>
             
             <input className="slider" type="range" min={0} max={1} step={0.01} value={opacities[i] ?? 1} onChange={(e) => { const v = parseFloat(e.target.value); setOpacities((prev) => prev.map((x, idx) => (idx === i ? v : x))) }} style={{ width: "100%", minWidth: 0, accentColor: "#bdbdbd" }} aria-label={`${f.name} opacity`} />
             
@@ -5263,6 +5474,13 @@ export default function ClientPage() {
             <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 32, height: 24, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: visibles[i] ? "rgba(255,255,255,.025)" : "rgba(255,255,255,.012)", border: "1px solid rgba(255,255,255,.09)", borderRadius: 7, cursor: "pointer", opacity: visibles[i] ? 1 : .56 }}>
               <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
             </button>
+
+            {openColorPickerUrl === f.url && (
+              <ArtheticInlineColorPicker
+                value={colors[i] ?? "#ffffff"}
+                onChange={(nextColor) => setColors((prev) => prev.map((current, idx) => idx === i ? nextColor : current))}
+              />
+            )}
           </div>
         );
       })}
@@ -5406,6 +5624,7 @@ export default function ClientPage() {
         @keyframes artheticAnalysisMenuIn { from { opacity:0; transform:translateY(-5px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
         @keyframes artheticAlignMenuIn { from { opacity:0; transform:translateY(-4px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
         @keyframes artheticAnalysisSpin { to { transform:rotate(360deg); } }
+        @keyframes artheticColorPickerReveal { from { opacity:0; transform:translateY(-5px) scale(.985); filter:blur(3px); } to { opacity:1; transform:translateY(0) scale(1); filter:blur(0); } }
         @property --artheticAnalysisBeamAngle { syntax:"<angle>"; inherits:false; initial-value:0deg; }
         @keyframes artheticAnalysisReadyBeam { to { --artheticAnalysisBeamAngle:360deg; } }
         .artheticAnalysisReadyAction { position:relative; isolation:isolate; overflow:visible; border:1px solid transparent !important; background:transparent !important; }
@@ -5436,11 +5655,11 @@ export default function ClientPage() {
           width: heatmapMenuOpen ? (dicomLayoutActive ? 320 : 310) : "100%",
           maxWidth: "calc(100vw - 20px)",
           boxSizing: "border-box",
-          borderRadius: heatmapMenuOpen ? 15 : 10,
-          border: heatmapMenuOpen ? "1px solid rgba(255,255,255,.095)" : "1px solid rgba(255,255,255,.15)",
-          background: heatmapMenuOpen ? "rgba(12,12,12,.96)" : "rgba(0,0,0,.25)",
-          backdropFilter: heatmapMenuOpen ? "blur(20px)" : "blur(3px)",
-          WebkitBackdropFilter: heatmapMenuOpen ? "blur(20px)" : "blur(3px)",
+          borderRadius: heatmapMenuOpen ? 15 : 11,
+          border: heatmapMenuOpen ? "1px solid rgba(255,255,255,.095)" : "1px solid rgba(255,255,255,.10)",
+          background: heatmapMenuOpen ? "rgba(12,12,12,.96)" : "rgba(12,12,12,.72)",
+          backdropFilter: heatmapMenuOpen ? "blur(20px)" : "blur(14px)",
+          WebkitBackdropFilter: heatmapMenuOpen ? "blur(20px)" : "blur(14px)",
           boxShadow: heatmapMenuOpen ? "0 24px 64px rgba(0,0,0,.42)" : "none",
           color: "#f2f2f2",
           fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
@@ -5580,11 +5799,11 @@ export default function ClientPage() {
           width: comparisonMenuOpen ? (dicomLayoutActive ? 330 : 320) : "100%",
           maxWidth: "calc(100vw - 20px)",
           boxSizing: "border-box",
-          borderRadius: comparisonMenuOpen ? 15 : 10,
-          border: comparisonMenuOpen ? "1px solid rgba(255,255,255,.095)" : "1px solid rgba(255,255,255,.15)",
-          background: comparisonMenuOpen ? "rgba(12,12,12,.96)" : "rgba(0,0,0,.25)",
-          backdropFilter: comparisonMenuOpen ? "blur(20px)" : "blur(3px)",
-          WebkitBackdropFilter: comparisonMenuOpen ? "blur(20px)" : "blur(3px)",
+          borderRadius: comparisonMenuOpen ? 15 : 11,
+          border: comparisonMenuOpen ? "1px solid rgba(255,255,255,.095)" : "1px solid rgba(255,255,255,.10)",
+          background: comparisonMenuOpen ? "rgba(12,12,12,.96)" : "rgba(12,12,12,.72)",
+          backdropFilter: comparisonMenuOpen ? "blur(20px)" : "blur(14px)",
+          WebkitBackdropFilter: comparisonMenuOpen ? "blur(20px)" : "blur(14px)",
           boxShadow: comparisonMenuOpen ? "0 24px 64px rgba(0,0,0,.42)" : "none",
           color: "#f2f2f2",
           fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
