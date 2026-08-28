@@ -1107,16 +1107,23 @@ function sampledVertexIndices(positionCount, desiredCount) {
   return result
 }
 
+const ALIGNMENT_CPU_SLICE_MS = 8
+
 async function alignmentYield() {
-  // scheduler.yield() je v novějších Chrome optimalizovaný přímo pro dlouhé výpočty.
-  // Fallback přes setTimeout udrží kompatibilitu a hlavně pravidelně uvolní main thread.
-  try {
-    if (typeof scheduler !== "undefined" && typeof scheduler.yield === "function") {
-      await scheduler.yield()
-      return
-    }
-  } catch {}
+  // Používáme skutečný nový macrotask místo scheduler.yield(). Continuation ze
+  // scheduler.yield() může mít vysokou prioritu a na některých sestavách Chrome
+  // nepustí React paint/input dostatečně často. setTimeout(0) dá browseru prostor
+  // pro vykreslení progressu, výběr textu, pointer eventy i další UI práci.
   await new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+async function alignmentPaintYield() {
+  // Garantuje alespoň jednu možnost vykreslení loaderu před těžší synchronní prací.
+  if (typeof requestAnimationFrame !== "function") {
+    await alignmentYield()
+    return
+  }
+  await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)))
 }
 
 async function robustPointToPlaneICP({
@@ -1209,10 +1216,14 @@ async function robustPointToPlaneICP({
     }
   }
 
-  // Nejdražší část Best Fitu. Je async a po několika stovkách BVH dotazů vrací
-  // řízení prohlížeči, takže Chrome nezamrzne ani na velkém intraorálním scanu.
-  const makeCorrespondences = async (matrix, sourceSamples, maxDistance, trim, yieldEvery = 420, progressTick = null) => {
+  // Nejdražší část Best Fitu. Místo pevného počtu BVH dotazů používáme
+  // časové řezy. Na hustém scanu může být 420 dotazů několik sekund práce,
+  // zatímco na lehkém modelu jen pár ms. Po ~8 ms CPU proto vždy uvolníme
+  // hlavní vlákno a zároveň pošleme skutečný průběh do UI.
+  const makeCorrespondences = async (matrix, sourceSamples, maxDistance, trim, progressTick = null) => {
     const result = []
+    let sliceStarted = performance.now()
+    let lastProgress = -1
     for (let k = 0; k < sourceSamples.length; k++) {
       const pRoot = sourceSamples[k]
       pParent.copy(pRoot).applyMatrix4(matrix)
@@ -1229,9 +1240,16 @@ async function robustPointToPlaneICP({
         })
       }
 
-      if (yieldEvery > 0 && k > 0 && k % yieldEvery === 0) {
-        progressTick?.(Math.min(1, k / Math.max(1, sourceSamples.length)))
+      const now = performance.now()
+      if (now - sliceStarted >= ALIGNMENT_CPU_SLICE_MS) {
+        const fraction = Math.min(1, (k + 1) / Math.max(1, sourceSamples.length))
+        // Nezahlcujeme React tisíci prakticky totožnými aktualizacemi.
+        if (fraction - lastProgress >= 0.004 || lastProgress < 0) {
+          progressTick?.(fraction)
+          lastProgress = fraction
+        }
         await alignmentYield()
+        sliceStarted = performance.now()
       }
     }
     progressTick?.(1)
@@ -1243,7 +1261,7 @@ async function robustPointToPlaneICP({
   }
 
   const evaluateMatrix = async (matrix, sourceSamples, maxDistance, trim, progressTick = null) => {
-    return metricsFromCorrespondences(await makeCorrespondences(matrix, sourceSamples, maxDistance, trim, 420, progressTick))
+    return metricsFromCorrespondences(await makeCorrespondences(matrix, sourceSamples, maxDistance, trim, progressTick))
   }
 
   const scaleRigidIncrement = (matrix, factor, maxTranslation, maxRotation) => {
@@ -1379,7 +1397,7 @@ async function robustPointToPlaneICP({
       // Correspondence hledáme pro current pouze jednou. Jeho RMS spočítáme rovnou
       // ze stejného výsledku — v2.2 zde dělala druhý kompletní BVH průchod.
       const correspondences = await makeCorrespondences(
-        current, samples, stage.maxDistance, stage.trim, 420,
+        current, samples, stage.maxDistance, stage.trim,
         (fraction) => emitStageProgress(fraction * 0.55, { phase: "correspondences" })
       )
       if (correspondences.length < 30) {
@@ -1426,7 +1444,7 @@ async function robustPointToPlaneICP({
         }
 
         const candidateCorrespondences = await makeCorrespondences(
-          candidate, samples, stage.maxDistance, stage.trim, 420,
+          candidate, samples, stage.maxDistance, stage.trim,
           (fraction) => emitStageProgress(0.58 + ((f + fraction) / Math.max(1, factorCandidates.length)) * 0.32, { phase: "verify" })
         )
         const candidateEval = metricsFromCorrespondences(candidateCorrespondences)
@@ -1513,6 +1531,7 @@ async function computeAlignmentMetrics(meshA, meshB, tolerance = 0.25, maxSample
 
   const collect = async (position, mesh, sampler, progressStart, progressSpan) => {
     const indices = sampledVertexIndices(position.count, Math.floor(maxSamples / 2))
+    let sliceStarted = performance.now()
     for (let i = 0; i < indices.length; i++) {
       point.fromBufferAttribute(position, indices[i]).applyMatrix4(mesh.matrixWorld)
       const distance = sampler(point).distance
@@ -1523,9 +1542,11 @@ async function computeAlignmentMetrics(meshA, meshB, tolerance = 0.25, maxSample
         max = Math.max(max, distance)
         if (distance <= tolerance) within++
       }
-      if (i > 0 && i % 500 === 0) {
-        onProgress?.(progressStart + (i / Math.max(1, indices.length)) * progressSpan)
+      const now = performance.now()
+      if (now - sliceStarted >= ALIGNMENT_CPU_SLICE_MS) {
+        onProgress?.(progressStart + ((i + 1) / Math.max(1, indices.length)) * progressSpan)
         await alignmentYield()
+        sliceStarted = performance.now()
       }
     }
     onProgress?.(progressStart + progressSpan)
@@ -1652,7 +1673,7 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, active, onPi
   )
 }
 
-function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, points, active, nextPointNumber, onPickPoint, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 } }) {
+function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, points, active, nextPointNumber, onPickPoint, forceLoading = false, onPreviewLoaded, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 } }) {
   const rootRef = useRef(null)
   const controlsRef = useRef(null)
   const [target, setTarget] = useState([0, 0, 0])
@@ -1712,7 +1733,11 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
               points={points}
               active={active}
               onPickPoint={onPickPoint}
-              onLoaded={() => { setPreviewLoading(false); setLoadedNonce((n) => n + 1) }}
+              onLoaded={() => {
+                setPreviewLoading(false)
+                setLoadedNonce((n) => n + 1)
+                onPreviewLoaded?.()
+              }}
             />
           )}
         </group>
@@ -1730,7 +1755,7 @@ function AlignmentPreviewViewport({ title, badge, file, sourceObject, color, poi
         <TouchTrackballControls ref={controlsRef} target={target} enabled={true} />
         <RightButtonPan setTarget={setTarget} trackballRef={controlsRef} />
       </Canvas>
-      {previewLoading && (
+      {(previewLoading || forceLoading) && (
         <div style={{
           position: "absolute", inset: 0, zIndex: 7, display: "flex", alignItems: "center", justifyContent: "center",
           background: "rgba(12,12,12,.72)", backdropFilter: "blur(2px)", pointerEvents: "all",
@@ -3170,6 +3195,7 @@ export default function ClientPage() {
   const [alignmentMessage, setAlignmentMessage] = useState("")
   const [alignmentStartedAt, setAlignmentStartedAt] = useState(null)
   const [alignmentElapsed, setAlignmentElapsed] = useState(0)
+  const [alignmentPreviewBusy, setAlignmentPreviewBusy] = useState({ A: false, B: false })
   const [modelTransforms, setModelTransforms] = useState({})
 
   useEffect(() => {
@@ -3327,7 +3353,13 @@ export default function ClientPage() {
     setShowComparison(false)
   }, [files])
 
-  const changeAlignmentSelection = useCallback((side, url) => {
+  const changeAlignmentSelection = useCallback(async (side, url) => {
+    // Loader zapneme ještě PŘED změnou modelu a necháme ho jeden frame vykreslit.
+    // Teprve potom spustíme klonování geometrie / přípravu BVH, která může být
+    // na hustém intraorálním scanu synchronně náročná.
+    setAlignmentPreviewBusy((previous) => ({ ...previous, [side]: true }))
+    await alignmentPaintYield()
+
     setAlignmentSelection((previous) => {
       const next = previous.length === 2 ? [...previous] : [files[0]?.url || "", files[1]?.url || ""]
       const index = side === "A" ? 0 : 1
@@ -3340,7 +3372,7 @@ export default function ClientPage() {
     setAlignmentPointsB([])
     setAlignmentStats(null)
     setAlignmentProgress(null)
-    setAlignmentMessage("Výběr modelů byl změněn. Označte nové korespondenční body.")
+    setAlignmentMessage("Výběr modelů byl změněn. Načítám pracovní náhled…")
   }, [files])
 
   const handleAlignmentPickA = useCallback((point) => {
@@ -3442,6 +3474,9 @@ export default function ClientPage() {
     setAlignmentMessage("Připravuji povrchy pro Best Fit…")
     setShowComparison(false)
     setShowHeatmap(false)
+    // Než začne první drahý nearest-surface průchod, necháme React loader
+    // skutečně vykreslit. Dále už ICP samo pracuje v krátkých CPU řezech.
+    await alignmentPaintYield()
     try {
       const result = await robustPointToPlaneICP({
         sourceMesh,
@@ -5079,11 +5114,11 @@ export default function ClientPage() {
 
         <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
           <span style={{ width: 22, height: 22, borderRadius: 7, display: "grid", placeItems: "center", background: "rgba(96,165,250,.12)", color: "#93c5fd", fontSize: 10, fontWeight: 850 }}>A</span>
-          <select value={alignmentPair.aUrl} onChange={(e) => changeAlignmentSelection("A", e.target.value)} disabled={alignmentBusy} style={alignmentSelectStyle}>
+          <select value={alignmentPair.aUrl} onChange={(e) => changeAlignmentSelection("A", e.target.value)} disabled={alignmentBusy || alignmentPreviewBusy.A || alignmentPreviewBusy.B} style={alignmentSelectStyle}>
             {alignmentEligibleFiles.map((file) => <option key={`a-${file.url}`} value={file.url}>{stripExt(file.name || file.rawName || "Model")}</option>)}
           </select>
           <span style={{ width: 22, height: 22, borderRadius: 7, display: "grid", placeItems: "center", background: "rgba(244,114,182,.12)", color: "#f9a8d4", fontSize: 10, fontWeight: 850, marginLeft: 2 }}>B</span>
-          <select value={alignmentPair.bUrl} onChange={(e) => changeAlignmentSelection("B", e.target.value)} disabled={alignmentBusy} style={alignmentSelectStyle}>
+          <select value={alignmentPair.bUrl} onChange={(e) => changeAlignmentSelection("B", e.target.value)} disabled={alignmentBusy || alignmentPreviewBusy.A || alignmentPreviewBusy.B} style={alignmentSelectStyle}>
             {alignmentEligibleFiles.map((file) => <option key={`b-${file.url}`} value={file.url}>{stripExt(file.name || file.rawName || "Model")}</option>)}
           </select>
         </div>
@@ -5183,9 +5218,14 @@ export default function ClientPage() {
           sourceObject={modelObjectsRef.current[alignmentPair.aUrl]}
           color="#60a5fa"
           points={alignmentPointsA}
-          active={!alignmentBusy && alignmentNextSide === "A"}
+          active={!alignmentBusy && !alignmentPreviewBusy.A && !alignmentPreviewBusy.B && alignmentNextSide === "A"}
           nextPointNumber={Math.min(3, alignmentPointsA.length + 1)}
           onPickPoint={handleAlignmentPickA}
+          forceLoading={alignmentPreviewBusy.A}
+          onPreviewLoaded={() => {
+            setAlignmentPreviewBusy((previous) => ({ ...previous, A: false }))
+            setAlignmentMessage("Model A je připraven. Označte nové korespondenční body.")
+          }}
           sceneIntensity={sceneIntensity}
           highlightIntensity={highlightIntensity}
           headlightCfg={headlightCfg}
@@ -5197,9 +5237,14 @@ export default function ClientPage() {
           sourceObject={modelObjectsRef.current[alignmentPair.bUrl]}
           color="#f472b6"
           points={alignmentPointsB}
-          active={!alignmentBusy && alignmentNextSide === "B"}
+          active={!alignmentBusy && !alignmentPreviewBusy.A && !alignmentPreviewBusy.B && alignmentNextSide === "B"}
           nextPointNumber={Math.min(3, alignmentPointsB.length + 1)}
           onPickPoint={handleAlignmentPickB}
+          forceLoading={alignmentPreviewBusy.B}
+          onPreviewLoaded={() => {
+            setAlignmentPreviewBusy((previous) => ({ ...previous, B: false }))
+            setAlignmentMessage("Model B je připraven. Označte nové korespondenční body.")
+          }}
           sceneIntensity={sceneIntensity}
           highlightIntensity={highlightIntensity}
           headlightCfg={headlightCfg}
