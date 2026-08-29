@@ -6969,8 +6969,14 @@ export default function ClientPage() {
         <div style={{ border: "1px solid rgba(255,255,255,.055)", borderRadius: 11, padding: 6, background: "rgba(255,255,255,.012)" }}>{slidersContent}</div>
       )}
 
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: isMobile ? 6 : 12, marginTop: 10 }}>
-        <div style={{ minWidth: 0, flex: isMobile ? "1 1 auto" : "0 0 auto" }}>
+      <div style={{
+        display: isMobile ? "grid" : "flex",
+        gridTemplateColumns: isMobile
+          ? (caseCloudContext.labCaseId && getParam("mode") !== "live" ? "repeat(3, minmax(0, 1fr))" : "repeat(2, minmax(0, 1fr))")
+          : undefined,
+        alignItems: "center", justifyContent: "space-between", gap: isMobile ? 6 : 12, marginTop: 10,
+      }}>
+        <div style={{ minWidth: 0, width: isMobile ? "100%" : "auto", flex: isMobile ? "initial" : "0 0 auto" }}>
           {caseCloudContext.labCaseId && getParam("mode") !== "live" && (
             <button
               type="button"
@@ -6995,20 +7001,19 @@ export default function ClientPage() {
           <button
             type="button"
             onClick={() => { setHeatmapMenuOpen(false); setComparisonMenuOpen(false); setMobileFunctionsOpen(true) }}
-            disabled={analysisEligibleFiles.length < 2}
             style={{
-              flex: "0 0 auto", minWidth: 66,
-              background: showHeatmap || showComparison || heatmapMenuOpen || comparisonMenuOpen ? "rgba(34,197,94,.075)" : "rgba(255,255,255,.035)",
-              border: showHeatmap || showComparison || heatmapMenuOpen || comparisonMenuOpen ? "1px solid rgba(74,222,128,.19)" : "1px solid rgba(255,255,255,.085)",
-              borderRadius: 8, color: analysisEligibleFiles.length < 2 ? "#5d5d5d" : showHeatmap || showComparison ? "#c8f8d5" : "#bdbdbd",
-              padding: "6px 7px", fontSize: 9, cursor: analysisEligibleFiles.length < 2 ? "not-allowed" : "pointer",
+              width: "100%", minWidth: 0,
+              background: showHeatmap || showComparison || heatmapMenuOpen || comparisonMenuOpen || isAutoRotating || clippingEnabled ? "rgba(34,197,94,.075)" : "rgba(255,255,255,.035)",
+              border: showHeatmap || showComparison || heatmapMenuOpen || comparisonMenuOpen || isAutoRotating || clippingEnabled ? "1px solid rgba(74,222,128,.19)" : "1px solid rgba(255,255,255,.085)",
+              borderRadius: 8, color: showHeatmap || showComparison || isAutoRotating || clippingEnabled ? "#c8f8d5" : "#bdbdbd",
+              padding: "6px 7px", fontSize: 9, cursor: "pointer",
               transition: "background .16s ease, color .16s ease, border-color .16s ease", fontWeight: 680,
               fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
             }}
             title="Otevřít analytické funkce"
           >
             <span>Funkce</span>
-            {(showHeatmap || showComparison) && <span aria-hidden="true" style={{ width: 5, height: 5, borderRadius: "50%", background: "#86efac", boxShadow: "0 0 8px rgba(74,222,128,.38)" }} />}
+            {(showHeatmap || showComparison || isAutoRotating || clippingEnabled) && <span aria-hidden="true" style={{ width: 5, height: 5, borderRadius: "50%", background: "#86efac", boxShadow: "0 0 8px rgba(74,222,128,.38)" }} />}
           </button>
         )}
         <button
@@ -7017,13 +7022,39 @@ export default function ClientPage() {
             background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.085)",
             borderRadius: 8, color: "#bdbdbd", padding: isMobile ? "6px 7px" : "6px 10px", fontSize: isMobile ? 9 : 9.5, cursor: "pointer",
             transition: "background .16s ease, color .16s ease, border-color .16s ease", fontWeight: 680,
-            fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", whiteSpace: "nowrap", flex: isMobile ? "0 0 auto" : "initial"
+            fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", whiteSpace: "nowrap", width: isMobile ? "100%" : "auto", minWidth: 0, flex: isMobile ? "initial" : "initial"
           }}
           title="Vrátí kameru do výchozí polohy"
         >
           Reset view
         </button>
       </div>
+
+      {isMobile && !heatmapMenuOpen && !comparisonMenuOpen && showHeatmap && hasComputedHeatmap && (
+        <div style={{ marginTop: 8, padding: "8px 10px 7px", borderRadius: 10, background: "rgba(255,255,255,.022)", border: "1px solid rgba(255,255,255,.065)" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
+            <span style={{ color: "#cfcfcf", fontSize: 9.2, fontWeight: 720 }}>Okluze</span>
+            <span style={{ color: "#626262", fontSize: 7.8, fontWeight: 620 }}>průnik · mezera · mm</span>
+          </div>
+          <div style={{ height: 5, borderRadius: 999, background: "linear-gradient(to right, #7e22ce 0%, #ef4444 25%, #facc15 37.5%, #22c55e 62.5%, #ffffff 100%)", boxShadow: "inset 0 1px 2px rgba(0,0,0,.35)" }} />
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, color: "#686868", fontSize: 7.3, fontWeight: 650, fontVariantNumeric: "tabular-nums" }}>
+            <span>-1.0−</span><span>-0.5</span><span>0</span><span>1.0</span><span>2.0+</span>
+          </div>
+        </div>
+      )}
+
+      {isMobile && !heatmapMenuOpen && !comparisonMenuOpen && showComparison && hasComputedComparison && (
+        <div style={{ marginTop: 8, padding: "8px 10px 7px", borderRadius: 10, background: "rgba(255,255,255,.022)", border: "1px solid rgba(255,255,255,.065)" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
+            <span style={{ color: "#cfcfcf", fontSize: 9.2, fontWeight: 720 }}>Porovnání · {comparisonDirection === "A_TO_B" ? "A → B" : "B → A"}</span>
+            <span style={{ color: "#626262", fontSize: 7.8, fontWeight: 620 }}>odchylka · mm</span>
+          </div>
+          <div style={{ height: 5, borderRadius: 999, background: "linear-gradient(to right, #2563eb 0%, #22c55e 25%, #facc15 50%, #ef4444 75%, #a21caf 100%)" }} />
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, color: "#686868", fontSize: 7.3, fontWeight: 650, fontVariantNumeric: "tabular-nums" }}>
+            <span>0</span><span>{comparisonTolerance.toFixed(2)}</span><span>{(comparisonTolerance * 2).toFixed(2)}</span><span>{(comparisonTolerance * 4).toFixed(2)}</span><span>více</span>
+          </div>
+        </div>
+      )}
 
       {photos && photos.length > 0 && (
         <div style={{ marginTop: 10 }}>
@@ -7461,7 +7492,7 @@ export default function ClientPage() {
         </div>
       </div>
 
-      <div style={{ width: dicomLayoutActive ? 120 : 270 }}>
+      <div style={{ width: dicomLayoutActive ? 120 : 270, display: isMobile ? "none" : "block" }}>
         <button 
           onClick={() => setIsAutoRotating(p => !p)}
           style={viewerToolbarButtonStyle(false, isAutoRotating)}
@@ -7516,7 +7547,7 @@ export default function ClientPage() {
       </div>
 
       <div style={{
-        width: dicomLayoutActive ? 190 : 270, boxSizing: "border-box",
+        width: dicomLayoutActive ? 190 : 270, boxSizing: "border-box", display: isMobile ? "none" : "block",
         background: "rgba(12,12,12,.72)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
         border: clippingEnabled ? "1px solid rgba(74,222,128,.20)" : "1px solid rgba(255,255,255,.10)",
         borderRadius: 11, padding: clippingEnabled ? (dicomLayoutActive ? 8 : "8px 12px") : (dicomLayoutActive ? 8 : "8px 12px"),
@@ -8595,7 +8626,7 @@ export default function ClientPage() {
           `}</style>
           <div style={{
             position: "absolute", left: 10, right: 10, bottom: 10, zIndex: 449,
-            padding: "10px 10px 12px", borderRadius: 18,
+            padding: "10px 10px 12px", borderRadius: 18, maxHeight: "min(78vh, 620px)", overflowY: "auto", overscrollBehavior: "contain",
             background: "rgba(12,12,12,.97)", border: "1px solid rgba(255,255,255,.10)",
             boxShadow: "0 28px 80px rgba(0,0,0,.58)", backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
             color: "#ededed", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
@@ -8605,7 +8636,7 @@ export default function ClientPage() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "2px 4px 10px" }}>
               <div>
                 <div style={{ fontSize: 13, fontWeight: 780, letterSpacing: "-.015em" }}>Funkce</div>
-                <div style={{ marginTop: 3, color: "#686868", fontSize: 9.2, fontWeight: 610 }}>Analýza dvou 3D povrchů</div>
+                <div style={{ marginTop: 3, color: "#686868", fontSize: 9.2, fontWeight: 610 }}>Nástroje hlavní 3D scény</div>
               </div>
               <button
                 type="button"
@@ -8663,6 +8694,71 @@ export default function ClientPage() {
                 </span>
                 {showComparison && <span style={{ color: "#86efac", fontSize: 9, fontWeight: 720 }}>Aktivní</span>}
               </button>
+
+              <button
+                type="button"
+                onClick={() => setIsAutoRotating((previous) => !previous)}
+                style={{
+                  width: "100%", minHeight: 58, padding: "10px 12px", borderRadius: 13, textAlign: "left",
+                  display: "flex", alignItems: "center", gap: 11, boxSizing: "border-box",
+                  border: isAutoRotating ? "1px solid rgba(74,222,128,.19)" : "1px solid rgba(255,255,255,.075)",
+                  background: isAutoRotating ? "rgba(34,197,94,.065)" : "rgba(255,255,255,.026)",
+                  color: "#e8e8e8", cursor: "pointer", fontFamily: "inherit",
+                }}
+              >
+                <span style={{ width: 34, height: 34, flex: "0 0 auto", display: "grid", placeItems: "center", borderRadius: 10, background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.07)" }}>
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+                </span>
+                <span style={{ minWidth: 0, flex: "1 1 auto" }}>
+                  <span style={{ display: "block", fontSize: 11.5, fontWeight: 740 }}>360° Spin</span>
+                  <span style={{ display: "block", marginTop: 3, color: "#6f6f6f", fontSize: 9, lineHeight: 1.35 }}>Automatická rotace modelu v hlavní scéně</span>
+                </span>
+                <span style={{ color: isAutoRotating ? "#86efac" : "#737373", fontSize: 9, fontWeight: 720 }}>{isAutoRotating ? "Zapnuto" : "Vypnuto"}</span>
+              </button>
+
+              {isAutoRotating && (
+                <div style={{ margin: "-1px 4px 1px", padding: "9px 10px", borderRadius: 11, background: "rgba(255,255,255,.018)", border: "1px solid rgba(255,255,255,.055)" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 7, color: "#858585", fontSize: 8.8, fontWeight: 680 }}>
+                    <span>Rychlost rotace</span><span style={{ color: "#cfcfcf", fontVariantNumeric: "tabular-nums" }}>{Math.round(spinSpeed * 100)}%</span>
+                  </div>
+                  <input className="slider" type="range" min={0.05} max={1} step={0.05} value={spinSpeed} onChange={(e) => setSpinSpeed(parseFloat(e.target.value))} style={{ width: "100%", margin: 0 }} />
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !clippingEnabled
+                  if (!next && dicomSettings.viewMode === "only2d") setDicomSettings((previous) => ({ ...previous, viewMode: "solid" }))
+                  setClippingEnabled(next)
+                }}
+                style={{
+                  width: "100%", minHeight: 58, padding: "10px 12px", borderRadius: 13, textAlign: "left",
+                  display: "flex", alignItems: "center", gap: 11, boxSizing: "border-box",
+                  border: clippingEnabled ? "1px solid rgba(74,222,128,.19)" : "1px solid rgba(255,255,255,.075)",
+                  background: clippingEnabled ? "rgba(34,197,94,.065)" : "rgba(255,255,255,.026)",
+                  color: "#e8e8e8", cursor: "pointer", fontFamily: "inherit",
+                }}
+              >
+                <span style={{ width: 34, height: 34, flex: "0 0 auto", display: "grid", placeItems: "center", borderRadius: 10, background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.07)" }}>
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 6h16M4 18h16"/><path d="M7 3v6M17 15v6"/><path d="M4 12h16"/></svg>
+                </span>
+                <span style={{ minWidth: 0, flex: "1 1 auto" }}>
+                  <span style={{ display: "block", fontSize: 11.5, fontWeight: 740 }}>Průřez</span>
+                  <span style={{ display: "block", marginTop: 3, color: "#6f6f6f", fontSize: 9, lineHeight: 1.35 }}>Zobrazit řez modely ve scéně</span>
+                </span>
+                <span style={{ color: clippingEnabled ? "#86efac" : "#737373", fontSize: 9, fontWeight: 720 }}>{clippingEnabled ? "Zapnuto" : "Vypnuto"}</span>
+              </button>
+
+              {clippingEnabled && (
+                <button
+                  type="button"
+                  onClick={handleResetPlane}
+                  style={{ margin: "-1px 4px 1px", height: 34, borderRadius: 10, border: "1px solid rgba(255,255,255,.065)", background: "rgba(255,255,255,.025)", color: "#9a9a9a", fontFamily: "inherit", fontSize: 9, fontWeight: 690, cursor: "pointer" }}
+                >
+                  Resetovat polohu průřezu
+                </button>
+              )}
             </div>
 
             {analysisEligibleFiles.length < 2 && (
@@ -8963,7 +9059,7 @@ export default function ClientPage() {
         }}
       />
 
-      {showHeatmap && hasComputedHeatmap && (
+      {!isMobile && showHeatmap && hasComputedHeatmap && (
         <div style={{
           position: "absolute", top: alignmentMode ? 106 : 20, left: "50%", transform: "translateX(-50%)", zIndex: 100,
           minWidth: 330, padding: "11px 14px 10px", borderRadius: 13,
@@ -9008,7 +9104,7 @@ export default function ClientPage() {
         </div>
       )}
 
-      {showComparison && hasComputedComparison && (
+      {!isMobile && showComparison && hasComputedComparison && (
         <div style={{
           position: "absolute", top: alignmentMode ? 106 : 20, left: "50%", transform: "translateX(-50%)", zIndex: 100,
           minWidth: 330, padding: "11px 14px 10px", borderRadius: 13,
