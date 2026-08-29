@@ -4707,9 +4707,11 @@ export default function ClientPage() {
     setSurfaceAnalysisElapsed(completedElapsed)
     setSurfaceAnalysisStartedAt(null)
     setSurfaceAnalysisCompletion({ kind, phase: "show", elapsed: completedElapsed })
-    await new Promise((resolve) => window.setTimeout(resolve, 2600))
+    // Hlavní scéna: closing sekvence Porovnání/Okluze je záměrně svižnější
+    // než BestFit / Odchylka uvnitř režimu Zarovnání.
+    await new Promise((resolve) => window.setTimeout(resolve, 1650))
     setSurfaceAnalysisCompletion((current) => current ? { ...current, phase: "fade" } : current)
-    await new Promise((resolve) => window.setTimeout(resolve, 620))
+    await new Promise((resolve) => window.setTimeout(resolve, 360))
   }, [])
 
   const [pinnedNotes, setPinnedNotes] = useState([])
@@ -7866,19 +7868,19 @@ export default function ClientPage() {
     if (surfaceAnalysisCompletion) {
       if (surfaceAnalysisCompletion.kind === "comparison") {
         return [
-          { id: "comparison-complete-1", stamp: "", text: "COMPARISON FINISHED", tone: "complete", typewriter: true, delay: 70 },
-          { id: "comparison-complete-2", stamp: "", text: "bidirectional surface map validated", tone: "data", typewriter: true, delay: 520 },
-          { id: "comparison-complete-3", stamp: "", text: "analysis result stored", tone: "normal", typewriter: true, delay: 980 },
-          { id: "comparison-complete-4", stamp: "", text: "ending comparison session", tone: "normal", typewriter: true, delay: 1450 },
-          { id: "comparison-complete-5", stamp: "", text: "session closed", tone: "muted", typewriter: true, delay: 2010 },
+          { id: "comparison-complete-1", stamp: "", text: "COMPARISON FINISHED", tone: "complete", typewriter: true, delay: 40 },
+          { id: "comparison-complete-2", stamp: "", text: "bidirectional surface map validated", tone: "data", typewriter: true, delay: 250 },
+          { id: "comparison-complete-3", stamp: "", text: "analysis result stored", tone: "normal", typewriter: true, delay: 520 },
+          { id: "comparison-complete-4", stamp: "", text: "ending comparison session", tone: "normal", typewriter: true, delay: 800 },
+          { id: "comparison-complete-5", stamp: "", text: "session closed", tone: "muted", typewriter: true, delay: 1080 },
         ]
       }
       return [
-        { id: "occlusion-complete-1", stamp: "", text: "OCCLUSION ANALYSIS FINISHED", tone: "complete", typewriter: true, delay: 70 },
-        { id: "occlusion-complete-2", stamp: "", text: "contact surface map validated", tone: "data", typewriter: true, delay: 520 },
-        { id: "occlusion-complete-3", stamp: "", text: "penetration / clearance result ready", tone: "normal", typewriter: true, delay: 980 },
-        { id: "occlusion-complete-4", stamp: "", text: "ending analysis session", tone: "normal", typewriter: true, delay: 1450 },
-        { id: "occlusion-complete-5", stamp: "", text: "session closed", tone: "muted", typewriter: true, delay: 2010 },
+        { id: "occlusion-complete-1", stamp: "", text: "OCCLUSION ANALYSIS FINISHED", tone: "complete", typewriter: true, delay: 40 },
+        { id: "occlusion-complete-2", stamp: "", text: "contact surface map validated", tone: "data", typewriter: true, delay: 250 },
+        { id: "occlusion-complete-3", stamp: "", text: "penetration / clearance result ready", tone: "normal", typewriter: true, delay: 520 },
+        { id: "occlusion-complete-4", stamp: "", text: "ending analysis session", tone: "normal", typewriter: true, delay: 800 },
+        { id: "occlusion-complete-5", stamp: "", text: "session closed", tone: "muted", typewriter: true, delay: 1080 },
       ]
     }
 
@@ -8356,7 +8358,7 @@ export default function ClientPage() {
           position: "absolute", top: 0, left: 0, right: 0, bottom: alignmentBottomHeight, zIndex: 31,
           background: "rgba(0,0,0,.22)", backdropFilter: "blur(2px)", pointerEvents: "all",
           opacity: alignmentCompletion?.phase === "fade" ? 0 : 1,
-          transition: "opacity .58s ease",
+          transition: "opacity .34s ease",
         }}>
           <div style={{
             position: "absolute", left: "50%", top: "50%", transform: "translate(-50%,-50%)",
@@ -8706,7 +8708,7 @@ export default function ClientPage() {
               boxShadow: "0 28px 90px rgba(0,0,0,.56)", backdropFilter: "blur(22px)", WebkitBackdropFilter: "blur(22px)",
               color: "#f5f5f5",
               animation: surfaceAnalysisCompletion?.phase === "fade"
-                ? "artheticSurfaceCardOut .58s cubic-bezier(.4,0,.2,1) both"
+                ? "artheticSurfaceCardOut .34s cubic-bezier(.4,0,.2,1) both"
                 : "artheticSurfaceCardIn .22s ease-out both",
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
@@ -8784,7 +8786,7 @@ export default function ClientPage() {
                         {!surfaceAnalysisCompletion && <span style={{ color: "#3f3f3f", fontVariantNumeric: "tabular-nums" }}>{line.stamp}</span>}
                         {!surfaceAnalysisCompletion && <span style={{ color: line.tone === "accent" || line.tone === "complete" ? "#d8d8d8" : "#555" }}>{line.tone === "accent" || line.tone === "complete" ? "◆" : "›"}</span>}
                         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          <AlignmentTerminalTypedText text={line.text} enabled={!!line.typewriter} speed={14} delay={line.delay ?? 28} />
+                          <AlignmentTerminalTypedText text={line.text} enabled={!!line.typewriter} speed={10} delay={line.delay ?? 28} />
                           {isLast && !surfaceAnalysisCompletion && (
                             <i aria-hidden="true" style={{
                               display: "inline-block", width: 4, height: 8, marginLeft: 4, verticalAlign: "-1px",
