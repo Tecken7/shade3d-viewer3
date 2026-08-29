@@ -4341,7 +4341,8 @@ export default function ClientPage() {
   const [alignmentStartedAt, setAlignmentStartedAt] = useState(null)
   const [alignmentElapsed, setAlignmentElapsed] = useState(0)
   const alignmentElapsedDisplayRef = useRef(null)
-  const [alignmentCompletion, setAlignmentCompletion] = useState(null) // null | { phase: "show" | "fade", elapsed, improved }
+  const [alignmentCompletion, setAlignmentCompletion] = useState(null) // null | { kind: "alignment" | "deviation", phase: "show" | "fade", elapsed, improved? }
+  const [alignmentOperation, setAlignmentOperation] = useState(null) // null | "bestfit" | "deviation"
   const [alignmentPreviewBusy, setAlignmentPreviewBusy] = useState({ A: false, B: false })
   const [alignmentWorkflowStage, setAlignmentWorkflowStage] = useState("points") // points | prealigned | bestfit
   const [alignmentStep, setAlignmentStep] = useState("models") // models | points | prealign | bestfit
@@ -4636,6 +4637,8 @@ export default function ClientPage() {
     setAlignmentPointsB([])
     setAlignmentStats(null)
     setAlignmentProgress(null)
+    setAlignmentCompletion(null)
+    setAlignmentOperation(null)
     setAlignmentMessage("")
     setAlignmentWorkflowStage("points")
     setAlignmentStep("models")
@@ -5126,6 +5129,7 @@ export default function ClientPage() {
 
     const bestFitStartedAt = performance.now()
     setAlignmentCompletion(null)
+    setAlignmentOperation("bestfit")
     setAlignmentBusy(true)
     setAlignmentStartedAt(bestFitStartedAt)
     setAlignmentElapsed(0)
@@ -5224,7 +5228,7 @@ export default function ClientPage() {
       const completedElapsed = Math.max(0, (performance.now() - bestFitStartedAt) / 1000)
       setAlignmentElapsed(completedElapsed)
       setAlignmentStartedAt(null)
-      setAlignmentCompletion({ phase: "show", elapsed: completedElapsed, improved: !!result.improved })
+      setAlignmentCompletion({ kind: "alignment", phase: "show", elapsed: completedElapsed, improved: !!result.improved })
       await new Promise((resolve) => window.setTimeout(resolve, 2600))
       setAlignmentCompletion((current) => current ? { ...current, phase: "fade" } : current)
       await new Promise((resolve) => window.setTimeout(resolve, 620))
@@ -5239,6 +5243,7 @@ export default function ClientPage() {
       setAlignmentBusy(false)
       setAlignmentStartedAt(null)
       setAlignmentProgress(null)
+      setAlignmentOperation(null)
     }
   }, [getAlignmentPair, modelTransforms, alignmentPointsA.length, alignmentPointsB.length, applyModelTransform, refreshAlignmentMetrics, runAlignmentWorkerBestFit])
 
@@ -5261,20 +5266,35 @@ export default function ClientPage() {
     const meshA = meshesRef.current[aUrl]
     const meshB = meshesRef.current[bUrl]
     if (!meshA || !meshB) return
+
     // Odchylka po Alignu se VŽDY počítá znovu. Nepřebíráme žádnou předchozí
     // heatmapu ani cached metrics, protože uživatel mohl změnit polohu modelu.
+    const deviationStartedAt = performance.now()
     setComparisonSnapshot(null)
     setHasComputedComparison(false)
     setShowComparison(false)
+    setAlignmentCompletion(null)
+    setAlignmentOperation("deviation")
     setAlignmentBusy(true)
-    setAlignmentProgress({ mode: "metrics", percent: 2 })
+    setAlignmentStartedAt(deviationStartedAt)
+    setAlignmentElapsed(0)
+    setAlignmentProgress({ mode: "deviation", percent: 2, phase: "prepare", processed: 0, total: 0 })
     setAlignmentMessage("Počítám mapu odchylek…")
+
+    let completedWithUiSequence = false
     try {
       rootGroupRef.current?.updateMatrixWorld(true)
       const tolerance = 0.25
       const { stats, snapshotData } = await runComparisonAnalysis(meshA, meshB, tolerance, (progress) => {
-        setAlignmentProgress({ mode: "metrics", percent: Math.max(2, Number(progress?.percent) || 2) })
+        setAlignmentProgress({
+          mode: "deviation",
+          percent: Math.max(2, Number(progress?.percent) || 2),
+          phase: progress?.phase || "prepare",
+          processed: Number(progress?.processed) || 0,
+          total: Number(progress?.total) || 0,
+        })
       })
+
       setComparisonSelection([aUrl, bUrl])
       setComparisonTolerance(tolerance)
       setComparisonStats(stats)
@@ -5282,15 +5302,37 @@ export default function ClientPage() {
       setHasComputedComparison(true)
       setShowComparison(true)
       setShowHeatmap(false)
+
+      // Porovnání po návratu z Align workspace zůstane rovnou rozbalené.
+      // Uživatel tak okamžitě vidí, že deviation mapa je stále aktivní,
+      // a má po ruce přepínač pro její vypnutí / možnost panel sbalit.
+      setComparisonMenuOpen(true)
+
       setAlignmentStats(stats)
-      setAlignmentProgress({ mode: "metrics", percent: 100 })
-      setAlignmentMessage("Mapa odchylek je zobrazena v horní scéně.")
+      setAlignmentProgress({ mode: "deviation", percent: 100, phase: "done", processed: 1, total: 1 })
+      setAlignmentMessage("Mapa odchylek je zobrazena v hlavní scéně.")
+
+      // Stejná dokončovací sekvence jako u Best Fitu: výpočet neskončí náhlým
+      // zmizením overlaye. Terminál se vyčistí, zobrazí se fajfka, vypíše se
+      // krátké ukončení surface-analysis session a karta následně jemně zmizí.
+      completedWithUiSequence = true
+      const completedElapsed = Math.max(0, (performance.now() - deviationStartedAt) / 1000)
+      setAlignmentElapsed(completedElapsed)
+      setAlignmentStartedAt(null)
+      setAlignmentCompletion({ kind: "deviation", phase: "show", elapsed: completedElapsed })
+      await new Promise((resolve) => window.setTimeout(resolve, 2600))
+      setAlignmentCompletion((current) => current ? { ...current, phase: "fade" } : current)
+      await new Promise((resolve) => window.setTimeout(resolve, 620))
+      setAlignmentCompletion(null)
     } catch (error) {
       console.error("Alignment deviation error:", error)
       setAlignmentMessage(error?.message || "Mapu odchylek se nepodařilo vypočítat.")
     } finally {
+      if (!completedWithUiSequence) setAlignmentCompletion(null)
       setAlignmentBusy(false)
+      setAlignmentStartedAt(null)
       setAlignmentProgress(null)
+      setAlignmentOperation(null)
     }
   }, [getAlignmentPair, runComparisonAnalysis, createComparisonSnapshotEnvelope])
 
@@ -7348,14 +7390,34 @@ export default function ClientPage() {
               : "Předzarovnání dokončeno · spusťte Best Fit"
 
   const alignmentProgressUi = (() => {
-    if (alignmentCompletion) return {
-      code: "COMPLETE",
-      label: "Zarovnání dokončeno",
-      detail: alignmentCompletion.improved ? "Finální poloha byla ověřena a uložena" : "Výpočet dokončen · bezpečná výchozí poloha zachována",
-      percent: 100,
+    if (alignmentCompletion) {
+      if (alignmentCompletion.kind === "deviation") return {
+        code: "COMPLETE",
+        label: "Odchylka dokončena",
+        detail: "Mapa odchylek byla ověřena a je připravena v hlavní scéně",
+        percent: 100,
+      }
+      return {
+        code: "COMPLETE",
+        label: "Zarovnání dokončeno",
+        detail: alignmentCompletion.improved ? "Finální poloha byla ověřena a uložena" : "Výpočet dokončen · bezpečná výchozí poloha zachována",
+        percent: 100,
+      }
     }
     if (!alignmentBusy) return null
     const progress = alignmentProgress || {}
+    if (progress.mode === "deviation") {
+      const phase = String(progress.phase || "prepare")
+      const phaseUi = {
+        A_TO_B: ["A_TO_B", "Výpočet odchylky", "Analyzuji povrch A vůči referenci B"],
+        B_TO_A: ["B_TO_A", "Výpočet odchylky", "Analyzuji povrch B vůči referenci A"],
+        snapshot: ["SNAPSHOT", "Ukládám mapu odchylek", "Připravuji výsledek pro okamžité zobrazení"],
+        done: ["COMPLETE", "Odchylka dokončena", "Finální mapa povrchových odchylek je připravena"],
+        prepare: ["PREPARE", "Příprava odchylky", "Připravuji geometrii a prostorové vyhledávání"],
+      }
+      const current = phaseUi[phase] || phaseUi.prepare
+      return { code: current[0], label: current[1], detail: current[2], percent: Number.isFinite(progress.percent) ? progress.percent : 2 }
+    }
     if (progress.mode === "metrics") return { code: "METROLOGY", label: "Kontrola výsledku", detail: "Počítám odchylky a metrologické hodnoty", percent: Number.isFinite(progress.percent) ? progress.percent : 94 }
     if (progress.mode === "validation") return { code: "VALIDATE", label: "Kontrola výsledku", detail: "Ověřuji, že Best Fit skutečně zlepšil překryv", percent: Number.isFinite(progress.percent) ? progress.percent : 90 }
     if (progress.mode === "prepare" || !progress.stage) return { code: "PREPARE", label: "Příprava povrchů", detail: "Vzorkuji geometrii a kontroluji překryv", percent: Number.isFinite(progress.percent) ? progress.percent : 3 }
@@ -7382,6 +7444,15 @@ export default function ClientPage() {
     if (alignmentCompletion) {
       // Po dokončení smažeme pracovní log a vypíšeme čistou closing sekvenci.
       // Delay je kumulativní, takže řádky působí jako skutečný terminál.
+      if (alignmentCompletion.kind === "deviation") {
+        return [
+          { id: "deviation-complete-1", stamp: "", text: "DEVIATION ANALYSIS FINISHED", tone: "complete", typewriter: true, delay: 70 },
+          { id: "deviation-complete-2", stamp: "", text: "surface map validated", tone: "data", typewriter: true, delay: 520 },
+          { id: "deviation-complete-3", stamp: "", text: "comparison result stored", tone: "normal", typewriter: true, delay: 980 },
+          { id: "deviation-complete-4", stamp: "", text: "ending analysis session", tone: "normal", typewriter: true, delay: 1450 },
+          { id: "deviation-complete-5", stamp: "", text: "session closed", tone: "muted", typewriter: true, delay: 2010 },
+        ]
+      }
       return [
         { id: "complete-1", stamp: "", text: "ALIGNMENT FINISHED", tone: "complete", typewriter: true, delay: 70 },
         { id: "complete-2", stamp: "", text: "final transform validated", tone: "data", typewriter: true, delay: 510 },
@@ -7392,6 +7463,65 @@ export default function ClientPage() {
     }
 
     const progress = alignmentProgress || {}
+
+    if (alignmentOperation === "deviation") {
+      const phase = String(progress.phase || "prepare")
+      const tickSeconds = 1.16
+      const tick = Math.max(0, Math.floor(alignmentElapsed / tickSeconds))
+      const activityByPhase = {
+        prepare: [
+          "reading aligned geometry buffers",
+          "building bidirectional surface queries",
+          "preparing deviation sample sets",
+          "checking model transforms",
+        ],
+        A_TO_B: [
+          "querying surface A against reference B",
+          "measuring closest-point distances",
+          "accumulating deviation samples",
+          "updating A → B surface map",
+        ],
+        B_TO_A: [
+          "querying surface B against reference A",
+          "measuring reverse surface distances",
+          "accumulating reverse deviation samples",
+          "updating B → A validation pass",
+        ],
+        snapshot: [
+          "quantizing deviation distances",
+          "packing comparison snapshot",
+          "writing reusable surface result",
+          "finalizing analysis payload",
+        ],
+        done: [
+          "validating final deviation map",
+          "preparing comparison display",
+        ],
+      }
+      const activity = activityByPhase[phase] || activityByPhase.prepare
+      const lines = []
+      const stamp = (seconds) => String(Math.max(0, seconds).toFixed(1)).padStart(6, "0")
+      const push = (id, seconds, value, tone = "normal", typewriter = false, delay = 28) => lines.push({ id, stamp: stamp(seconds), text: value, tone, typewriter, delay })
+
+      push("deviation-header", 0, "ARTHETIC SURFACE ANALYSIS / DEVIATION", "muted", false)
+      push(`deviation-phase-${alignmentProgressUi.code}`, Math.min(alignmentElapsed, .2), `phase ${alignmentProgressUi.code}`, "accent", true)
+
+      const visibleHeartbeat = 4
+      const firstTick = Math.max(0, tick - visibleHeartbeat + 1)
+      for (let t = firstTick; t <= tick; t += 1) {
+        const message = activity[t % activity.length]
+        push(`deviation-heartbeat-${phase}-${t}`, t * tickSeconds, message, t === tick ? "active" : "normal", true)
+      }
+
+      const processed = Number(progress.processed) || 0
+      const total = Number(progress.total) || 0
+      if (processed > 0 && total > 0) {
+        push(`deviation-samples-${Math.round(processed / 250)}`, alignmentElapsed, `${processed.toLocaleString("cs-CZ")} / ${total.toLocaleString("cs-CZ")} surface samples`, "data", false)
+      }
+
+      return lines.slice(-7)
+    }
+
     const stage = Math.max(0, Math.min(3, Number(progress.stage) || 0))
     const iteration = Math.max(0, Number(progress.iteration) || 0)
     const iterations = Math.max(1, Number(progress.iterations) || 1)
@@ -7941,7 +8071,9 @@ export default function ClientPage() {
             <div style={{ marginTop: 13, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
               <div style={{ color: "#666", fontSize: 8.4, fontWeight: 620 }}>
                 {alignmentCompletion
-                  ? "Registrace byla dokončena · uzavírám výpočetní relaci."
+                  ? (alignmentCompletion.kind === "deviation"
+                    ? "Mapa odchylek je připravena · uzavírám analytickou relaci."
+                    : "Registrace byla dokončena · uzavírám výpočetní relaci.")
                   : "Výpočet stále probíhá · stránku neobnovujte ani nezavírejte."}
               </div>
               <div style={{ color: "#8a8a8a", fontSize: 9, fontVariantNumeric: "tabular-nums", fontWeight: 730, whiteSpace: "nowrap" }}>
@@ -7962,7 +8094,15 @@ export default function ClientPage() {
               {!alignmentCompletion && alignmentProgress?.rms != null && Number.isFinite(alignmentProgress.rms) && alignmentProgress?.stage > 0 && alignmentProgress?.stage <= 3 && <span>·</span>}
               {!alignmentCompletion && alignmentProgress?.stage > 0 && alignmentProgress?.stage <= 3 && <span>Pass {alignmentProgress.stage} / 3</span>}
               {!alignmentCompletion && Number.isFinite(alignmentProgress?.correspondences) && alignmentProgress.correspondences > 0 && <><span>·</span><span>{Math.round(alignmentProgress.correspondences).toLocaleString("cs-CZ")} párů</span></>}
-              {alignmentCompletion && <span>{alignmentCompletion.improved ? "Alignment stored successfully" : "Best Fit session completed safely"}</span>}
+              {alignmentCompletion && (
+                <span>
+                  {alignmentCompletion.kind === "deviation"
+                    ? "Deviation map ready"
+                    : alignmentCompletion.improved
+                      ? "Alignment stored successfully"
+                      : "Best Fit session completed safely"}
+                </span>
+              )}
             </div>
           </div>
         </div>
