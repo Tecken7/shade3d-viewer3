@@ -1,5 +1,6 @@
 import * as THREE from "three"
 import { computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh"
+import { gzipSync, gunzipSync } from "fflate"
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree
@@ -684,6 +685,114 @@ function cleanupPair(pair) {
 const OCCLUSION_COLORS = ["#7e22ce", "#ef4444", "#facc15", "#22c55e", "#ffffff"].map((value) => new THREE.Color(value))
 const COMPARISON_COLORS = ["#2563eb", "#22c55e", "#facc15", "#ef4444", "#a21caf"].map((value) => new THREE.Color(value))
 
+const COMPARISON_SNAPSHOT_VERSION = 1
+const COMPARISON_SNAPSHOT_ENCODING = "q16-gzip-base64"
+
+function bytesToBase64(bytes) {
+  let binary = ""
+  const chunkSize = 0x8000
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, Math.min(bytes.length, offset + chunkSize))
+    binary += String.fromCharCode(...chunk)
+  }
+  return btoa(binary)
+}
+
+function base64ToBytes(value) {
+  const binary = atob(String(value || ""))
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
+
+function packComparisonDistances(aDistances, bDistances, maxDistance) {
+  // Uložená deviation mapa nemusí nést 32bit float pro každý vertex. Dynamická
+  // 16bit kvantizace zachová submikronové až mikronové rozlišení u běžných
+  // dentálních rozsahů a po gzipu výrazně zmenší viewerState.
+  const safeMax = Math.max(0, Number(maxDistance) || 0)
+  const scale = Math.max(1e-6, safeMax / 65534)
+
+  const packOne = (distances) => {
+    const quantized = new Uint16Array(distances.length)
+    for (let i = 0; i < distances.length; i++) {
+      quantized[i] = Math.min(65534, Math.max(0, Math.round((Number(distances[i]) || 0) / scale)))
+    }
+    const rawBytes = new Uint8Array(quantized.buffer, quantized.byteOffset, quantized.byteLength)
+    return bytesToBase64(gzipSync(rawBytes, { level: 6 }))
+  }
+
+  return {
+    version: COMPARISON_SNAPSHOT_VERSION,
+    encoding: COMPARISON_SNAPSHOT_ENCODING,
+    scale,
+    aCount: aDistances.length,
+    bCount: bDistances.length,
+    aData: packOne(aDistances),
+    bData: packOne(bDistances),
+  }
+}
+
+function unpackComparisonDistances(snapshot) {
+  if (!snapshot || snapshot.version !== COMPARISON_SNAPSHOT_VERSION || snapshot.encoding !== COMPARISON_SNAPSHOT_ENCODING) {
+    throw new Error("Uložená mapa odchylek má nepodporovaný formát.")
+  }
+  const scale = Number(snapshot.scale)
+  if (!(scale > 0)) throw new Error("Uložená mapa odchylek má neplatné měřítko.")
+
+  const unpackOne = (data, expectedCount) => {
+    const raw = gunzipSync(base64ToBytes(data))
+    if (raw.byteLength % 2 !== 0) throw new Error("Uložená mapa odchylek je poškozená.")
+    const count = raw.byteLength / 2
+    if (Number(expectedCount) !== count) throw new Error("Uložená mapa odchylek neodpovídá geometrii modelu.")
+    const alignedRaw = raw.byteOffset % 2 === 0 ? raw : new Uint8Array(raw)
+    const q = new Uint16Array(alignedRaw.buffer, alignedRaw.byteOffset, count)
+    const distances = new Float32Array(count)
+    for (let i = 0; i < count; i++) distances[i] = q[i] * scale
+    return distances
+  }
+
+  return {
+    a: unpackOne(snapshot.aData, snapshot.aCount),
+    b: unpackOne(snapshot.bData, snapshot.bCount),
+  }
+}
+
+function colorsFromComparisonDistances(distances, tolerance, requestId, startPercent, endPercent, phase) {
+  const colors = new Float32Array(distances.length * 3)
+  const color = new THREE.Color()
+  let lastProgressAt = -Infinity
+  for (let i = 0; i < distances.length; i++) {
+    writeColor(colors, i, comparisonColor(distances[i], tolerance, color))
+    const now = performance.now()
+    if (now - lastProgressAt >= 22 || i === distances.length - 1) {
+      lastProgressAt = now
+      emitSurfaceProgress(requestId, {
+        percent: startPercent + ((i + 1) / Math.max(1, distances.length)) * (endPercent - startPercent),
+        phase,
+        processed: i + 1,
+        total: distances.length,
+      })
+    }
+  }
+  return colors
+}
+
+function restoreComparisonSnapshotWorker(payload, requestId) {
+  const tolerance = Math.max(0.0001, Number(payload?.tolerance) || 0.25)
+  emitSurfaceProgress(requestId, { percent: 8, phase: "snapshot-decode" })
+  const decoded = unpackComparisonDistances(payload?.snapshot)
+  emitSurfaceProgress(requestId, { percent: 20, phase: "snapshot-colors-A" })
+  const colorsA = colorsFromComparisonDistances(decoded.a, tolerance, requestId, 20, 56, "snapshot-colors-A")
+  emitSurfaceProgress(requestId, { percent: 58, phase: "snapshot-colors-B" })
+  const colorsB = colorsFromComparisonDistances(decoded.b, tolerance, requestId, 58, 96, "snapshot-colors-B")
+  emitSurfaceProgress(requestId, { percent: 100, phase: "done" })
+  return {
+    a: { colors: colorsA, distances: decoded.a },
+    b: { colors: colorsB, distances: decoded.b },
+    stats: payload?.stats || null,
+  }
+}
+
 function writeColor(target, index, color) {
   target[index * 3] = color.r
   target[index * 3 + 1] = color.g
@@ -874,11 +983,14 @@ function computeComparisonWorker(pair, payload, requestId) {
     withinTolerance: ((a.within + b.within) / Math.max(1, count)) * 100,
     samples: count,
   }
+  emitSurfaceProgress(requestId, { percent: 98, phase: "snapshot" })
+  const snapshot = packComparisonDistances(a.distances, b.distances, stats.max)
   emitSurfaceProgress(requestId, { percent: 100, phase: "done" })
   return {
     a: { colors: a.colors, distances: a.distances },
     b: { colors: b.colors, distances: b.distances },
     stats,
+    snapshot,
   }
 }
 
@@ -958,6 +1070,38 @@ self.onmessage = async (event) => {
       })
     } finally {
       cleanupPair(pair)
+    }
+    return
+  }
+
+  if (message.type === "RESTORE_COMPARISON_SNAPSHOT") {
+    const startedAt = performance.now()
+    try {
+      const result = restoreComparisonSnapshotWorker(payload, requestId)
+      const finishedAt = performance.now()
+      self.postMessage({
+        type: "RESULT",
+        requestId,
+        result,
+        timings: {
+          reconstructMs: 0,
+          bvhMs: 0,
+          analysisMs: finishedAt - startedAt,
+          totalMs: finishedAt - startedAt,
+          restoredSnapshot: true,
+        },
+      }, [
+        result.a.colors.buffer, result.a.distances.buffer,
+        result.b.colors.buffer, result.b.distances.buffer,
+      ])
+    } catch (error) {
+      self.postMessage({
+        type: "ERROR",
+        requestId,
+        kind: "algorithm",
+        message: error?.message || "Uloženou mapu odchylek se nepodařilo obnovit.",
+        stack: error?.stack || "",
+      })
     }
     return
   }
