@@ -1060,6 +1060,14 @@ function matrixArrayOrIdentity(value) {
   return Array.isArray(value) && value.length === 16 ? value : IDENTITY_MATRIX_ARRAY
 }
 
+function matrixArraysAlmostEqual(a, b, epsilon = 1e-5) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== 16 || b.length !== 16) return false
+  for (let i = 0; i < 16; i++) {
+    if (Math.abs((Number(a[i]) || 0) - (Number(b[i]) || 0)) > epsilon) return false
+  }
+  return true
+}
+
 function largestEigenvectorSymmetric4(values) {
   // Jacobiho diagonalizace 4x4 symetrické matice. Hornova registration potřebuje
   // vlastní vektor NEJVĚTŠÍ ALGEBRAICKÉ vlastní hodnoty. Obyčejná power iteration
@@ -3936,6 +3944,9 @@ export default function ClientPage() {
   const [comparisonTolerance, setComparisonTolerance] = useState(0.25)
   const [comparisonStats, setComparisonStats] = useState(null)
   const [comparisonDirection, setComparisonDirection] = useState("A_TO_B") // A_TO_B | B_TO_A
+  // Persistovaný výsledek deviation mapy. Obsahuje komprimované vzdálenosti pro
+  // oba směry + fingerprint modelů a jejich přesných transformací.
+  const [comparisonSnapshot, setComparisonSnapshot] = useState(null)
   const [restoringAnalysisMode, setRestoringAnalysisMode] = useState(null)
 
   // -- ZAROVNÁNÍ / REGISTRACE MODELŮ --
@@ -4102,7 +4113,7 @@ export default function ClientPage() {
         const response = await runSurfaceWorkerAnalysis("COMPARISON", payload, transferables, onProgress)
         const stats = installWorkerComparisonResult(meshA, meshB, response.result)
         if (response.timings) console.info("[ARTHETIC Analysis Worker] Porovnání timing", response.timings)
-        return stats
+        return { stats, snapshotData: response.result?.snapshot || null }
       } catch (workerError) {
         if (workerError?.alignmentWorkerKind === "algorithm") throw workerError
         console.warn("[ARTHETIC Analysis Worker] Porovnání používá legacy výpočet:", workerError)
@@ -4111,7 +4122,24 @@ export default function ClientPage() {
     onProgress?.({ percent: 5, phase: "legacy" })
     const stats = applySurfaceComparison(meshA, meshB, tolerance)
     onProgress?.({ percent: 100, phase: "done" })
-    return stats
+    return { stats, snapshotData: null }
+  }, [runSurfaceWorkerAnalysis])
+
+  const restoreComparisonAnalysisSnapshot = useCallback(async (meshA, meshB, snapshotEnvelope, tolerance, onProgress) => {
+    if (!snapshotEnvelope?.data) throw new Error("Uložený výsledek odchylky neobsahuje data.")
+    const worker = alignmentWorkerRef.current
+    if (!USE_ALIGNMENT_WORKER || !worker || alignmentWorkerFailedRef.current) {
+      throw new Error("Analysis Worker není připravený pro rychlé obnovení uložené odchylky.")
+    }
+    const response = await runSurfaceWorkerAnalysis(
+      "RESTORE_COMPARISON_SNAPSHOT",
+      { snapshot: snapshotEnvelope.data, tolerance, stats: snapshotEnvelope.stats || null },
+      [],
+      onProgress,
+    )
+    const stats = installWorkerComparisonResult(meshA, meshB, response.result)
+    if (response.timings) console.info("[ARTHETIC Analysis Worker] Uložená odchylka obnovena", response.timings)
+    return stats || snapshotEnvelope.stats || null
   }, [runSurfaceWorkerAnalysis])
 
   useEffect(() => {
@@ -4195,6 +4223,7 @@ export default function ClientPage() {
     setShowHeatmap(false)
     setShowComparison(false)
     setComparisonStats(null)
+    setComparisonSnapshot(null)
     setPinnedNotes([])
     setAlignmentMode(false)
     setAlignmentSelection([])
@@ -4254,8 +4283,57 @@ export default function ClientPage() {
     }
   }, [modelTransforms, files, detectObjectTextureData])
 
+  const comparisonModelFingerprint = useCallback((url) => {
+    const file = files.find((item) => item.url === url)
+    const mesh = meshesRef.current[url]
+    const object = modelObjectsRef.current[url]
+    const vertexCount = mesh?.geometry?.getAttribute?.("position")?.count || 0
+    return {
+      file: file?.rawName || file?.name || url,
+      vertexCount,
+      matrix: object?.matrix?.toArray?.() || IDENTITY_MATRIX_ARRAY.slice(),
+    }
+  }, [files])
+
+  const createComparisonSnapshotEnvelope = useCallback((snapshotData, aUrl, bUrl, tolerance, stats) => {
+    if (!snapshotData || !aUrl || !bUrl) return null
+    return {
+      version: 1,
+      kind: "surface-comparison",
+      tolerance: Number(tolerance) || 0.25,
+      a: comparisonModelFingerprint(aUrl),
+      b: comparisonModelFingerprint(bUrl),
+      stats: stats ? { ...stats } : null,
+      data: snapshotData,
+    }
+  }, [comparisonModelFingerprint])
+
+  const isComparisonSnapshotValid = useCallback((snapshot, aUrl, bUrl, tolerance) => {
+    if (!snapshot || snapshot.version !== 1 || snapshot.kind !== "surface-comparison") return false
+    if (Math.abs((Number(snapshot.tolerance) || 0) - (Number(tolerance) || 0)) > 1e-9) return false
+    const currentA = comparisonModelFingerprint(aUrl)
+    const currentB = comparisonModelFingerprint(bUrl)
+    const sameModel = (saved, current) => !!saved && !!current &&
+      saved.file === current.file &&
+      Number(saved.vertexCount) === Number(current.vertexCount) &&
+      matrixArraysAlmostEqual(saved.matrix, current.matrix)
+    return sameModel(snapshot.a, currentA) && sameModel(snapshot.b, currentB) && !!snapshot.data
+  }, [comparisonModelFingerprint])
+
+  const invalidateComparisonResult = useCallback(() => {
+    setHasComputedComparison(false)
+    setShowComparison(false)
+    setComparisonStats(null)
+    setComparisonSnapshot(null)
+    setPinnedNotes((previous) => previous.filter((note) => note.mode !== "comparison"))
+    if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
+  }, [])
+
   const applyModelTransform = useCallback((url, matrixValue) => {
     const array = matrixArrayOrIdentity(matrixValue).slice()
+    // Jakákoli změna polohy modelu zneplatní dříve spočítanou deviation mapu.
+    // Nikdy tak nezůstane heatmapa/metrika svázaná se starou transformací.
+    invalidateComparisonResult()
     setModelTransforms((previous) => ({ ...previous, [url]: array }))
     const object = modelObjectsRef.current[url]
     if (object) {
@@ -4266,7 +4344,7 @@ export default function ClientPage() {
     }
     rootGroupRef.current?.updateMatrixWorld(true)
     // Alignment transform nesmí měnit kameru ani znovu spouštět AutoFrame.
-  }, [])
+  }, [invalidateComparisonResult])
 
   const getAlignmentPair = useCallback(() => {
     if (alignmentSelection.length !== 2) return { aUrl: null, bUrl: null, fileA: null, fileB: null }
@@ -4736,18 +4814,24 @@ export default function ClientPage() {
     const meshA = meshesRef.current[aUrl]
     const meshB = meshesRef.current[bUrl]
     if (!meshA || !meshB) return
+    // Odchylka po Alignu se VŽDY počítá znovu. Nepřebíráme žádnou předchozí
+    // heatmapu ani cached metrics, protože uživatel mohl změnit polohu modelu.
+    setComparisonSnapshot(null)
+    setHasComputedComparison(false)
+    setShowComparison(false)
     setAlignmentBusy(true)
     setAlignmentProgress({ mode: "metrics", percent: 2 })
     setAlignmentMessage("Počítám mapu odchylek…")
     try {
       rootGroupRef.current?.updateMatrixWorld(true)
       const tolerance = 0.25
-      const stats = await runComparisonAnalysis(meshA, meshB, tolerance, (progress) => {
+      const { stats, snapshotData } = await runComparisonAnalysis(meshA, meshB, tolerance, (progress) => {
         setAlignmentProgress({ mode: "metrics", percent: Math.max(2, Number(progress?.percent) || 2) })
       })
       setComparisonSelection([aUrl, bUrl])
       setComparisonTolerance(tolerance)
       setComparisonStats(stats)
+      setComparisonSnapshot(createComparisonSnapshotEnvelope(snapshotData, aUrl, bUrl, tolerance, stats))
       setHasComputedComparison(true)
       setShowComparison(true)
       setShowHeatmap(false)
@@ -4761,7 +4845,7 @@ export default function ClientPage() {
       setAlignmentBusy(false)
       setAlignmentProgress(null)
     }
-  }, [getAlignmentPair, runComparisonAnalysis])
+  }, [getAlignmentPair, runComparisonAnalysis, createComparisonSnapshotEnvelope])
 
   const toggleHeatmapModel = (url) => {
     setHeatmapSelection((prev) => {
@@ -4781,6 +4865,7 @@ export default function ClientPage() {
     setHasComputedComparison(false)
     setShowComparison(false)
     setComparisonStats(null)
+    setComparisonSnapshot(null)
     setPinnedNotes([])
     if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
   }
@@ -4820,6 +4905,7 @@ export default function ClientPage() {
     setHasComputedComparison(false)
     setShowComparison(false)
     setComparisonStats(null)
+    setComparisonSnapshot(null)
     setPinnedNotes([])
     if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
   }
@@ -4873,6 +4959,11 @@ export default function ClientPage() {
 
   const handleApplyComparison = async () => {
     if (comparisonSelection.length !== 2) return
+    // Explicitní kliknutí na Vypočítat znamená vždy čerstvý výpočet pro aktuální
+    // polohu modelů. Starý snapshot se před startem zahodí.
+    setComparisonSnapshot(null)
+    setHasComputedComparison(false)
+    setShowComparison(false)
     setIsCalculatingComparison(true)
     setSurfaceAnalysisProgress({ type: "comparison", percent: 1, phase: "prepare" })
     setPinnedNotes([])
@@ -4883,10 +4974,17 @@ export default function ClientPage() {
       const meshA = meshesRef.current[comparisonSelection[0]]
       const meshB = meshesRef.current[comparisonSelection[1]]
       if (meshA && meshB) {
-        const stats = await runComparisonAnalysis(meshA, meshB, comparisonTolerance, (progress) => {
+        const { stats, snapshotData } = await runComparisonAnalysis(meshA, meshB, comparisonTolerance, (progress) => {
           setSurfaceAnalysisProgress({ type: "comparison", ...progress })
         })
         setComparisonStats(stats)
+        setComparisonSnapshot(createComparisonSnapshotEnvelope(
+          snapshotData,
+          comparisonSelection[0],
+          comparisonSelection[1],
+          comparisonTolerance,
+          stats,
+        ))
 
         // Reference není jen vizuálně přepsaná na 50 %. Hodnotu zapíšeme
         // přímo do stejného state, který řídí opacity slider v levém panelu.
@@ -4931,6 +5029,9 @@ export default function ClientPage() {
         tolerance: comparisonTolerance,
         direction: comparisonDirection,
         visible: showComparison && hasComputedComparison,
+        // Snapshot se ukládá pouze pokud je právě zobrazený výsledek stále validní.
+        // Díky tomu může doktor dostat hotovou heatmapu bez nového BVH výpočtu.
+        snapshot: showComparison && hasComputedComparison ? comparisonSnapshot : null,
       },
       alignment: {
         reference: selectionNames(alignmentSelection)[0] || null,
@@ -4975,7 +5076,7 @@ export default function ClientPage() {
     }
   }, [
     activeAnalysisMode, files, heatmapSelection, showHeatmap, hasComputedHeatmap,
-    comparisonSelection, comparisonTolerance, comparisonDirection, showComparison, hasComputedComparison, modelTransforms, alignmentSelection,
+    comparisonSelection, comparisonTolerance, comparisonDirection, showComparison, hasComputedComparison, comparisonSnapshot, modelTransforms, alignmentSelection,
     pinnedNotes, clippingEnabled, activeSlice, sliceRigGroup, planeGroup, horizontalPlaneGroup, measureState, horizontalMeasureState,
     dicomSource, dicomSettings,
   ])
@@ -5278,6 +5379,7 @@ export default function ClientPage() {
     setShowComparison(false)
     setHasComputedHeatmap(false)
     setHasComputedComparison(false)
+    setComparisonSnapshot(null)
     setPinnedNotes(Array.isArray(pendingViewerState.pinnedNotes) ? pendingViewerState.pinnedNotes : [])
 
     if (pendingViewerState.dicom?.settings) {
@@ -5319,15 +5421,43 @@ export default function ClientPage() {
             setShowHeatmap(pendingViewerState.occlusion?.visible !== false)
           }
         } else if (restoringComparison) {
-          const meshA = meshesRef.current[savedComparisonSelection[0]]
-          const meshB = meshesRef.current[savedComparisonSelection[1]]
+          const aUrl = savedComparisonSelection[0]
+          const bUrl = savedComparisonSelection[1]
+          const meshA = meshesRef.current[aUrl]
+          const meshB = meshesRef.current[bUrl]
           if (meshA && meshB) {
-            const stats = await runComparisonAnalysis(meshA, meshB, savedTolerance, (progress) => {
-              setSurfaceAnalysisProgress({ type: "comparison", ...progress })
-            })
+            const savedSnapshot = pendingViewerState.comparison?.snapshot || null
+            let stats = null
+            let restoredFromSnapshot = false
+
+            // Pokud fingerprint sedí na stejné soubory, vertex count i transformace,
+            // obnovíme jen uložené distances. Žádný nearest-surface/BVH výpočet.
+            if (isComparisonSnapshotValid(savedSnapshot, aUrl, bUrl, savedTolerance)) {
+              try {
+                setSurfaceAnalysisProgress({ type: "comparison", percent: 4, phase: "snapshot" })
+                stats = await restoreComparisonAnalysisSnapshot(meshA, meshB, savedSnapshot, savedTolerance, (progress) => {
+                  setSurfaceAnalysisProgress({ type: "comparison", ...progress })
+                })
+                setComparisonSnapshot(savedSnapshot)
+                restoredFromSnapshot = true
+              } catch (snapshotError) {
+                console.warn("Uloženou odchylku se nepodařilo rychle obnovit, počítám ji znovu:", snapshotError)
+              }
+            }
+
+            // Starší scény bez snapshotu nebo snapshot s neplatným fingerprintem
+            // bezpečně přepočítáme z aktuální geometrie.
+            if (!restoredFromSnapshot) {
+              const fresh = await runComparisonAnalysis(meshA, meshB, savedTolerance, (progress) => {
+                setSurfaceAnalysisProgress({ type: "comparison", ...progress })
+              })
+              stats = fresh.stats
+              setComparisonSnapshot(createComparisonSnapshotEnvelope(fresh.snapshotData, aUrl, bUrl, savedTolerance, stats))
+            }
+
             setComparisonStats(stats)
 
-            const referenceUrl = savedComparisonDirection === "B_TO_A" ? savedComparisonSelection[0] : savedComparisonSelection[1]
+            const referenceUrl = savedComparisonDirection === "B_TO_A" ? aUrl : bUrl
             const referenceIndex = files.findIndex((file) => file.url === referenceUrl)
             if (referenceIndex >= 0) {
               setOpacities((previous) => previous.map((value, index) => index === referenceIndex ? 0.5 : value))
@@ -5346,7 +5476,7 @@ export default function ClientPage() {
         setRestoringAnalysisMode(null)
       }
     }, 100)
-  }, [pendingViewerState, files, loadedUrls, dicomSource, runOcclusionAnalysis, runComparisonAnalysis])
+  }, [pendingViewerState, files, loadedUrls, dicomSource, runOcclusionAnalysis, runComparisonAnalysis, restoreComparisonAnalysisSnapshot, isComparisonSnapshotValid, createComparisonSnapshotEnvelope])
 
   useEffect(() => {
     const savedClip = pendingClipStateRef.current
@@ -6446,7 +6576,7 @@ export default function ClientPage() {
                     <span style={{ color: "#8a8a8a", fontSize: 9.3, fontWeight: 650 }}>Tolerance shody</span>
                     <span style={{ color: "#d7d7d7", fontSize: 9.5, fontWeight: 730, fontVariantNumeric: "tabular-nums" }}>{comparisonTolerance.toFixed(2)} mm</span>
                   </div>
-                  <input className="artheticAnalysisRange" type="range" min={0.05} max={1} step={0.05} value={comparisonTolerance} onChange={(e) => { setComparisonTolerance(Number(e.target.value)); setHasComputedComparison(false); setShowComparison(false) }} style={{ width: "100%", margin: 0 }} />
+                  <input className="artheticAnalysisRange" type="range" min={0.05} max={1} step={0.05} value={comparisonTolerance} onChange={(e) => { setComparisonTolerance(Number(e.target.value)); setHasComputedComparison(false); setShowComparison(false); setComparisonStats(null); setComparisonSnapshot(null) }} style={{ width: "100%", margin: 0 }} />
                 </div>
 
                 <button
@@ -7232,7 +7362,15 @@ export default function ClientPage() {
                 </div>
                 <div style={{ marginTop: 3, color: "#777", fontSize: 9.5, fontWeight: 610 }}>
                   {isCalculatingComparison
-                    ? (surfaceAnalysisProgress?.phase === "A_TO_B" ? "Analyzuji povrch A vůči referenci B." : surfaceAnalysisProgress?.phase === "B_TO_A" ? "Analyzuji povrch B vůči referenci A." : "Připravuji oboustranné porovnání povrchů.")
+                    ? (restoringAnalysisMode === "comparison" && String(surfaceAnalysisProgress?.phase || "").startsWith("snapshot")
+                      ? "Obnovuji uloženou mapu odchylek bez nového geometrického výpočtu."
+                      : surfaceAnalysisProgress?.phase === "A_TO_B"
+                        ? "Analyzuji povrch A vůči referenci B."
+                        : surfaceAnalysisProgress?.phase === "B_TO_A"
+                          ? "Analyzuji povrch B vůči referenci A."
+                          : surfaceAnalysisProgress?.phase === "snapshot"
+                            ? "Ukládám výsledek pro okamžité obnovení scény."
+                            : "Připravuji oboustranné porovnání povrchů.")
                     : (surfaceAnalysisProgress?.phase === "distances" ? "Počítám průnik a mezeru vůči referenčnímu modelu." : "Připravuji geometrii a BVH strukturu.")}
                 </div>
               </div>
