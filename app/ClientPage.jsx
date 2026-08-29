@@ -899,6 +899,109 @@ export function applySurfaceComparison(meshA, meshB, tolerance = 0.25) {
 /* ---------- Zarovnání modelů / metrologie ---------- */
 const ALIGNMENT_POINT_COLORS = ["#fbbf24", "#ef4444", "#22c55e"]
 const IDENTITY_MATRIX_ARRAY = new THREE.Matrix4().identity().toArray()
+const USE_ALIGNMENT_WORKER = true
+
+function copyPositionAttributeForWorker(attribute) {
+  if (!attribute?.count) return null
+  const output = new Float32Array(attribute.count * 3)
+
+  if (!attribute.isInterleavedBufferAttribute && attribute.itemSize === 3 && attribute.array) {
+    const source = attribute.array
+    const usable = Math.min(output.length, source.length)
+    if (typeof source.subarray === "function") output.set(source.subarray(0, usable))
+    else {
+      for (let i = 0; i < usable; i++) output[i] = source[i]
+    }
+    return output
+  }
+
+  for (let i = 0; i < attribute.count; i++) {
+    output[i * 3] = attribute.getX(i)
+    output[i * 3 + 1] = attribute.getY(i)
+    output[i * 3 + 2] = attribute.getZ(i)
+  }
+  return output
+}
+
+function copyIndexAttributeForWorker(attribute) {
+  if (!attribute?.count) return null
+  const output = new Uint32Array(attribute.count)
+
+  if (!attribute.isInterleavedBufferAttribute && attribute.itemSize === 1 && attribute.array) {
+    const source = attribute.array
+    for (let i = 0; i < output.length; i++) output[i] = source[i]
+    return output
+  }
+
+  for (let i = 0; i < attribute.count; i++) output[i] = attribute.getX(i)
+  return output
+}
+
+function objectLocalMatrixArray(object) {
+  if (object?.matrix?.elements?.length === 16) return object.matrix.toArray()
+  return IDENTITY_MATRIX_ARRAY.slice()
+}
+
+function objectParentWorldMatrixArray(object) {
+  if (object?.parent?.matrixWorld?.elements?.length === 16) return object.parent.matrixWorld.toArray()
+  return IDENTITY_MATRIX_ARRAY.slice()
+}
+
+function meshRelativeToRootMatrixArray(root, mesh) {
+  const inverseRoot = new THREE.Matrix4().copy(root.matrixWorld).invert()
+  return new THREE.Matrix4().multiplyMatrices(inverseRoot, mesh.matrixWorld).toArray()
+}
+
+function buildAlignmentWorkerPayload({
+  sourceMesh,
+  sourceRoot,
+  targetMesh,
+  targetRoot,
+  initialMatrix,
+  landmarkSeeded,
+}) {
+  sourceRoot.parent?.updateMatrixWorld?.(true)
+  targetRoot.parent?.updateMatrixWorld?.(true)
+  sourceRoot.updateMatrixWorld(true)
+  targetRoot.updateMatrixWorld(true)
+  sourceMesh.updateMatrixWorld(true)
+  targetMesh.updateMatrixWorld(true)
+
+  const sourcePosition = sourceMesh.geometry?.getAttribute?.("position")
+  const targetPosition = targetMesh.geometry?.getAttribute?.("position")
+  if (!sourcePosition?.count || !targetPosition?.count) throw new Error("Vybrané modely nemají použitelnou geometrii pro Best Fit.")
+
+  const sourcePositions = copyPositionAttributeForWorker(sourcePosition)
+  const targetPositions = copyPositionAttributeForWorker(targetPosition)
+  const targetIndex = copyIndexAttributeForWorker(targetMesh.geometry?.index)
+
+  const targetBox = new THREE.Box3().setFromObject(targetRoot)
+  const targetDiagonal = Math.max(1, targetBox.getSize(new THREE.Vector3()).length())
+
+  const payload = {
+    source: {
+      positions: sourcePositions,
+      parentWorld: objectParentWorldMatrixArray(sourceRoot),
+      rootLocal: objectLocalMatrixArray(sourceRoot),
+      meshLocal: meshRelativeToRootMatrixArray(sourceRoot, sourceMesh),
+    },
+    target: {
+      positions: targetPositions,
+      index: targetIndex,
+      parentWorld: objectParentWorldMatrixArray(targetRoot),
+      rootLocal: objectLocalMatrixArray(targetRoot),
+      meshLocal: meshRelativeToRootMatrixArray(targetRoot, targetMesh),
+    },
+    initialMatrix: matrixArrayOrIdentity(initialMatrix).slice(),
+    targetDiagonal,
+    landmarkSeeded: !!landmarkSeeded,
+  }
+
+  const transferables = [sourcePositions.buffer, targetPositions.buffer]
+  if (targetIndex) transferables.push(targetIndex.buffer)
+
+  return { payload, transferables }
+}
 
 function matrixArrayOrIdentity(value) {
   return Array.isArray(value) && value.length === 16 ? value : IDENTITY_MATRIX_ARRAY
@@ -3754,6 +3857,105 @@ export default function ClientPage() {
   const [modelTransforms, setModelTransforms] = useState({})
   const alignmentPointerHintRef = useRef(null)
   const alignmentSceneHoveredUrlRef = useRef("")
+  const alignmentWorkerRef = useRef(null)
+  const alignmentWorkerRequestsRef = useRef(new Map())
+  const alignmentWorkerRequestIdRef = useRef(0)
+  const alignmentWorkerFailedRef = useRef(false)
+
+  useEffect(() => {
+    if (!USE_ALIGNMENT_WORKER || typeof Worker === "undefined") return undefined
+
+    let worker = null
+    try {
+      worker = new Worker(new URL("./workers/analysis.worker.js", import.meta.url), { type: "module" })
+    } catch (error) {
+      alignmentWorkerFailedRef.current = true
+      console.warn("[ARTHETIC Align Worker] Worker se nepodařilo vytvořit, používám legacy Best Fit.", error)
+      return undefined
+    }
+
+    alignmentWorkerRef.current = worker
+    alignmentWorkerFailedRef.current = false
+
+    const rejectAll = (error) => {
+      for (const request of alignmentWorkerRequestsRef.current.values()) request.reject(error)
+      alignmentWorkerRequestsRef.current.clear()
+    }
+
+    const handleMessage = (event) => {
+      const message = event.data || {}
+      if (message.type === "READY") {
+        console.info("[ARTHETIC Align Worker] připraven")
+        return
+      }
+
+      const request = alignmentWorkerRequestsRef.current.get(message.requestId)
+      if (!request) return
+
+      if (message.type === "PROGRESS") {
+        request.onProgress?.(message.progress)
+        return
+      }
+
+      alignmentWorkerRequestsRef.current.delete(message.requestId)
+
+      if (message.type === "RESULT") {
+        request.resolve({ result: message.result, timings: message.timings || null })
+        return
+      }
+
+      if (message.type === "ERROR") {
+        const error = new Error(message.message || "Best Fit Worker selhal.")
+        error.alignmentWorkerKind = message.kind || "algorithm"
+        if (message.stack) error.workerStack = message.stack
+        request.reject(error)
+      }
+    }
+
+    const handleError = (event) => {
+      alignmentWorkerFailedRef.current = true
+      const error = new Error(event?.message || "Best Fit Worker není dostupný.")
+      error.alignmentWorkerKind = "infrastructure"
+      console.error("[ARTHETIC Align Worker] runtime error:", event)
+      rejectAll(error)
+      try { worker?.terminate() } catch {}
+      if (alignmentWorkerRef.current === worker) alignmentWorkerRef.current = null
+    }
+
+    worker.addEventListener("message", handleMessage)
+    worker.addEventListener("error", handleError)
+
+    return () => {
+      worker.removeEventListener("message", handleMessage)
+      worker.removeEventListener("error", handleError)
+      const error = new Error("Best Fit Worker byl ukončen.")
+      error.alignmentWorkerKind = "infrastructure"
+      rejectAll(error)
+      try { worker.terminate() } catch {}
+      if (alignmentWorkerRef.current === worker) alignmentWorkerRef.current = null
+    }
+  }, [])
+
+  const runAlignmentWorkerBestFit = useCallback((payload, transferables, onProgress) => {
+    const worker = alignmentWorkerRef.current
+    if (!USE_ALIGNMENT_WORKER || !worker || alignmentWorkerFailedRef.current) {
+      const error = new Error("Best Fit Worker není připravený.")
+      error.alignmentWorkerKind = "infrastructure"
+      return Promise.reject(error)
+    }
+
+    const requestId = `align-${Date.now()}-${++alignmentWorkerRequestIdRef.current}`
+    return new Promise((resolve, reject) => {
+      alignmentWorkerRequestsRef.current.set(requestId, { resolve, reject, onProgress })
+      try {
+        worker.postMessage({ type: "BEST_FIT", requestId, payload }, transferables)
+      } catch (error) {
+        alignmentWorkerRequestsRef.current.delete(requestId)
+        error.alignmentWorkerKind = "infrastructure"
+        reject(error)
+      }
+    })
+  }, [])
 
   useEffect(() => {
     if (!alignmentBusy || !alignmentStartedAt) {
@@ -4230,6 +4432,7 @@ export default function ClientPage() {
       setAlignmentMessage("Vybrané modely ještě nejsou připravené.")
       return
     }
+
     setAlignmentBusy(true)
     setAlignmentStartedAt(performance.now())
     setAlignmentElapsed(0)
@@ -4238,25 +4441,74 @@ export default function ClientPage() {
     setAlignmentMessage("Připravuji povrchy pro Best Fit…")
     setShowComparison(false)
     setShowHeatmap(false)
-    // Než začne první drahý nearest-surface průchod, necháme React loader
-    // skutečně vykreslit. Dále už ICP samo pracuje v krátkých CPU řezech.
+
+    const handleBestFitProgress = (progress) => {
+      setAlignmentProgress(progress)
+      if (progress?.mode === "prepare") setAlignmentMessage("Připravuji povrchy a kontroluji překryv…")
+      else if (progress?.stage === 1) setAlignmentMessage("Hrubé zarovnání povrchů…")
+      else if (progress?.stage === 2) setAlignmentMessage("Střední zpřesnění zarovnání…")
+      else if (progress?.stage === 3) setAlignmentMessage("Jemné point-to-plane zpřesnění…")
+    }
+
+    // Loader necháme vykreslit ještě před kopírováním geometrie / spuštěním výpočtu.
     await alignmentPaintYield()
+
     try {
-      const result = await robustPointToPlaneICP({
-        sourceMesh,
-        sourceRoot,
-        targetMesh,
-        targetRoot,
-        initialMatrix: sourceRoot.matrix?.toArray?.() || modelTransforms[bUrl],
-        landmarkSeeded: Math.min(alignmentPointsA.length, alignmentPointsB.length) >= 3,
-        onProgress: (progress) => {
-          setAlignmentProgress(progress)
-          if (progress?.mode === "prepare") setAlignmentMessage("Připravuji povrchy a kontroluji překryv…")
-          else if (progress?.stage === 1) setAlignmentMessage("Hrubé zarovnání povrchů…")
-          else if (progress?.stage === 2) setAlignmentMessage("Střední zpřesnění zarovnání…")
-          else if (progress?.stage === 3) setAlignmentMessage("Jemné point-to-plane zpřesnění…")
-        },
-      })
+      const initialMatrix = sourceRoot.matrix?.toArray?.() || modelTransforms[bUrl]
+      const landmarkSeeded = Math.min(alignmentPointsA.length, alignmentPointsB.length) >= 3
+      let result = null
+      let workerUsed = false
+
+      if (USE_ALIGNMENT_WORKER && alignmentWorkerRef.current && !alignmentWorkerFailedRef.current) {
+        const prepareStartedAt = performance.now()
+        try {
+          setAlignmentMessage("Připravuji data pro výpočet na samostatném vlákně…")
+          const { payload, transferables } = buildAlignmentWorkerPayload({
+            sourceMesh,
+            sourceRoot,
+            targetMesh,
+            targetRoot,
+            initialMatrix,
+            landmarkSeeded,
+          })
+          const preparedAt = performance.now()
+
+          const workerResponse = await runAlignmentWorkerBestFit(payload, transferables, handleBestFitProgress)
+          result = workerResponse.result
+          workerUsed = true
+
+          const timings = workerResponse.timings || {}
+          console.info("[ARTHETIC Align Worker] Best Fit timing", {
+            mainPrepareMs: +(preparedAt - prepareStartedAt).toFixed(1),
+            reconstructMs: Number.isFinite(timings.reconstructMs) ? +timings.reconstructMs.toFixed(1) : null,
+            bvhMs: Number.isFinite(timings.bvhMs) ? +timings.bvhMs.toFixed(1) : null,
+            icpMs: Number.isFinite(timings.icpMs) ? +timings.icpMs.toFixed(1) : null,
+            workerTotalMs: Number.isFinite(timings.totalMs) ? +timings.totalMs.toFixed(1) : null,
+          })
+        } catch (workerError) {
+          if (workerError?.alignmentWorkerKind === "algorithm") throw workerError
+
+          // Pokud selže samotná Worker infrastruktura/bundling, bezpečně použijeme
+          // původní ověřený engine. Matematické chyby z Workeru na legacy neopakujeme.
+          alignmentWorkerFailedRef.current = true
+          console.warn("[ARTHETIC Align Worker] přepínám na legacy Best Fit:", workerError)
+          setAlignmentMessage("Samostatné výpočetní vlákno není dostupné · pokračuji kompatibilním režimem…")
+          await alignmentPaintYield()
+        }
+      }
+
+      if (!workerUsed) {
+        result = await robustPointToPlaneICP({
+          sourceMesh,
+          sourceRoot,
+          targetMesh,
+          targetRoot,
+          initialMatrix,
+          landmarkSeeded,
+          onProgress: handleBestFitProgress,
+        })
+      }
+
       applyModelTransform(bUrl, result.matrix)
       setAlignmentProgress({ mode: "metrics", stage: 4, stages: 4, iteration: 0, iterations: 1, rms: result.rms, correspondences: result.correspondences, percent: 94 })
       setAlignmentMessage("Kontroluji výsledek a počítám metrologii…")
@@ -4278,7 +4530,7 @@ export default function ClientPage() {
       setAlignmentStartedAt(null)
       setAlignmentProgress(null)
     }
-  }, [getAlignmentPair, modelTransforms, alignmentPointsA.length, alignmentPointsB.length, applyModelTransform, refreshAlignmentMetrics])
+  }, [getAlignmentPair, modelTransforms, alignmentPointsA.length, alignmentPointsB.length, applyModelTransform, refreshAlignmentMetrics, runAlignmentWorkerBestFit])
 
   const resetAlignmentTransform = useCallback(async () => {
     const { aUrl, bUrl } = getAlignmentPair()
