@@ -756,18 +756,44 @@ const GHOST_VERTEX_SHADER = `
   varying vec3 vGhostNormalView;
   varying vec3 vGhostViewDir;
 
+  #ifdef USE_COLOR
+    varying vec3 vGhostVertexColor;
+  #endif
+
+  #ifdef USE_GHOST_MAP
+    varying vec2 vGhostUv;
+    uniform mat3 uGhostMapTransform;
+  #endif
+
   void main() {
     vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
     vGhostNormalView = normalize(normalMatrix * normal);
     vGhostViewDir = normalize(-mvPosition.xyz);
+
+    #ifdef USE_COLOR
+      vGhostVertexColor = color;
+    #endif
+
+    #ifdef USE_GHOST_MAP
+      vGhostUv = (uGhostMapTransform * vec3(uv, 1.0)).xy;
+    #endif
+
     gl_Position = projectionMatrix * mvPosition;
   }
 `
 
 const GHOST_FRAGMENT_SHADER = `
-  uniform vec3 uGhostFill;
-  uniform vec3 uGhostRim;
+  uniform vec3 uGhostBase;
   uniform float uGhostStrength;
+
+  #ifdef USE_GHOST_MAP
+    uniform sampler2D uGhostMap;
+    varying vec2 vGhostUv;
+  #endif
+
+  #ifdef USE_COLOR
+    varying vec3 vGhostVertexColor;
+  #endif
 
   varying vec3 vGhostNormalView;
   varying vec3 vGhostViewDir;
@@ -779,26 +805,82 @@ const GHOST_FRAGMENT_SHADER = `
     float fresnel = pow(clamp(1.0 - facing, 0.0, 1.0), 1.45);
     float rim = smoothstep(0.05, 0.92, fresnel);
 
-    // Téměř bílá transparentní skořepina + výraznější ARTHETIC zelená silueta.
-    // Backfaces jsou o trochu zelenější, aby byl čitelný i vnitřní tvar modelu.
+    // Ghost respektuje skutečný vzhled modelu. Když je TEX aktivní,
+    // použijeme vertex colors / mapu; jinak vycházíme z color pickeru.
+    vec3 sourceColor = uGhostBase;
+
+    #ifdef USE_GHOST_TEXTURE_DATA
+      sourceColor = vec3(1.0);
+
+      #ifdef USE_GHOST_MAP
+        sourceColor *= texture2D(uGhostMap, vGhostUv).rgb;
+      #endif
+
+      #ifdef USE_COLOR
+        sourceColor *= vGhostVertexColor;
+      #endif
+    #endif
+
+    sourceColor = clamp(sourceColor, 0.0, 1.0);
+
+    // Fill je velmi světlý a jemně tónovaný, rim nese většinu původní
+    // barvy/textury. Díky tomu zůstává shell čistý a přitom identifikovatelný.
+    vec3 fillColor = mix(vec3(1.0), sourceColor, 0.30);
+    vec3 rimColor = mix(vec3(0.93), sourceColor, 0.84);
+
+    // Backfaces jsou o něco výraznější, aby zůstal čitelný vnitřní tvar.
     float backBoost = gl_FrontFacing ? 0.0 : 0.12;
-    vec3 color = mix(uGhostFill, uGhostRim, clamp(rim + backBoost, 0.0, 1.0));
+    vec3 ghostColor = mix(fillColor, rimColor, clamp(rim + backBoost, 0.0, 1.0));
     float alpha = (0.065 + 0.54 * pow(fresnel, 0.72) + backBoost * 0.16) * uGhostStrength;
     alpha = clamp(alpha, 0.0, 0.74);
 
-    gl_FragColor = vec4(color, alpha);
+    gl_FragColor = vec4(ghostColor, alpha);
   }
 `
 
-function makeGhostMaterial(opacity = 1) {
+function ghostMaterialList(material) {
+  return Array.isArray(material) ? material.filter(Boolean) : (material ? [material] : [])
+}
+
+function disposeGhostMaterial(material) {
+  ghostMaterialList(material).forEach((item) => {
+    if (item?.userData?._artheticGhost) item.dispose?.()
+  })
+}
+
+function getGhostSourceMap(sourceMaterial, useTextureData) {
+  if (!useTextureData || !sourceMaterial || Array.isArray(sourceMaterial)) return null
+  const map = sourceMaterial.map || null
+  if (map?.updateMatrix) map.updateMatrix()
+  return map
+}
+
+function makeGhostSingleMaterial(sourceMaterial, {
+  opacity = 1,
+  baseColor = '#ffffff',
+  useTextureData = false,
+  hasVertexColors = false,
+} = {}) {
+  const sourceMap = getGhostSourceMap(sourceMaterial, useTextureData)
+  const useMap = !!sourceMap
+  const useColors = !!useTextureData && !!hasVertexColors
+  const useVisualData = useMap || useColors
+
+  const defines = {}
+  if (useVisualData) defines.USE_GHOST_TEXTURE_DATA = 1
+  if (useMap) defines.USE_GHOST_MAP = 1
+
   const material = new THREE.ShaderMaterial({
+    defines,
     uniforms: {
-      uGhostFill: { value: new THREE.Color('#f6fffc') },
-      uGhostRim: { value: new THREE.Color('#4ad5a2') },
+      uGhostBase: { value: new THREE.Color(baseColor || '#ffffff') },
       uGhostStrength: { value: clamp01(opacity) },
+      uGhostMap: { value: sourceMap },
+      uGhostMapTransform: { value: sourceMap?.matrix?.clone?.() || new THREE.Matrix3() },
     },
     vertexShader: GHOST_VERTEX_SHADER,
     fragmentShader: GHOST_FRAGMENT_SHADER,
+    vertexColors: useColors,
     transparent: true,
     depthTest: true,
     depthWrite: false,
@@ -806,13 +888,66 @@ function makeGhostMaterial(opacity = 1) {
     blending: THREE.NormalBlending,
     toneMapped: false,
   })
+
   material.userData._artheticGhost = true
+  material.userData._ghostVariant = `${useMap ? 1 : 0}:${useColors ? 1 : 0}`
+  material.userData._ghostMapUuid = sourceMap?.uuid || ''
   if ('forceSinglePass' in material) material.forceSinglePass = false
   return material
 }
 
+function makeGhostMaterial(sourceMaterial, options = {}) {
+  if (Array.isArray(sourceMaterial)) {
+    return sourceMaterial.map((material) => makeGhostSingleMaterial(material, options))
+  }
+  return makeGhostSingleMaterial(sourceMaterial, options)
+}
+
 function isGhostMaterial(material) {
-  return !!material && !Array.isArray(material) && !!material.userData?._artheticGhost
+  const materials = ghostMaterialList(material)
+  return materials.length > 0 && materials.every((item) => !!item?.userData?._artheticGhost)
+}
+
+function updateGhostMaterial(material, sourceMaterial, {
+  opacity = 1,
+  baseColor = '#ffffff',
+  useTextureData = false,
+  hasVertexColors = false,
+} = {}) {
+  const ghosts = ghostMaterialList(material)
+  const sources = Array.isArray(sourceMaterial) ? sourceMaterial.filter(Boolean) : (sourceMaterial ? [sourceMaterial] : [])
+  if (!ghosts.length || ghosts.length !== sources.length) return false
+
+  for (let i = 0; i < ghosts.length; i += 1) {
+    const ghostMaterial = ghosts[i]
+    const source = sources[i]
+    const sourceMap = getGhostSourceMap(source, useTextureData)
+    const useMap = !!sourceMap
+    const useColors = !!useTextureData && !!hasVertexColors
+    const expectedVariant = `${useMap ? 1 : 0}:${useColors ? 1 : 0}`
+
+    if (
+      ghostMaterial.userData?._ghostVariant !== expectedVariant ||
+      (ghostMaterial.userData?._ghostMapUuid || '') !== (sourceMap?.uuid || '')
+    ) {
+      return false
+    }
+  }
+
+  for (let i = 0; i < ghosts.length; i += 1) {
+    const ghostMaterial = ghosts[i]
+    const source = sources[i]
+    const sourceMap = getGhostSourceMap(source, useTextureData)
+
+    ghostMaterial.uniforms?.uGhostBase?.value?.set?.(baseColor || '#ffffff')
+    if (ghostMaterial.uniforms?.uGhostStrength) ghostMaterial.uniforms.uGhostStrength.value = clamp01(opacity)
+    if (ghostMaterial.uniforms?.uGhostMap) ghostMaterial.uniforms.uGhostMap.value = sourceMap
+    if (ghostMaterial.uniforms?.uGhostMapTransform && sourceMap?.matrix) {
+      ghostMaterial.uniforms.uGhostMapTransform.value.copy(sourceMap.matrix)
+    }
+  }
+
+  return true
 }
 
 function faceNormalLocal(geometry, faceIndex, target, a, b, c) {
@@ -2624,22 +2759,40 @@ function AnyModel({
 
       // Ghost je samostatný diagnostický render režim. Původní materiál si necháváme
       // bokem, aby vypnutí Ghostu přesně navázalo na aktuální TEX/WF/barvu/opacity.
+      // Pokud je TEX aktivní, Ghost převezme reálnou mapu / vertex colors modelu;
+      // jinak používá aktuální barvu z color pickeru.
       if (!ghostActive && isGhostMaterial(child.material)) {
         const ghostMaterial = child.material
         const restoreMaterial = child.userData._preGhostMaterial
         if (restoreMaterial) child.material = restoreMaterial
         child.userData._preGhostMaterial = null
-        ghostMaterial.dispose()
+        disposeGhostMaterial(ghostMaterial)
       }
 
       if (ghostActive) {
+        const ghostOptions = {
+          opacity,
+          baseColor: color || '#ffffff',
+          useTextureData: !!useVertexColors,
+          hasVertexColors: !!child.userData._originalColors,
+        }
+
         if (!isGhostMaterial(child.material)) {
           child.userData._preGhostMaterial = child.material
-          child.material = makeGhostMaterial(opacity)
-        } else if (child.material.uniforms?.uGhostStrength) {
-          child.material.uniforms.uGhostStrength.value = clamp01(opacity)
+          child.material = makeGhostMaterial(child.material, ghostOptions)
+        } else {
+          const sourceMaterial = child.userData._preGhostMaterial
+          const updated = updateGhostMaterial(child.material, sourceMaterial, ghostOptions)
+          if (!updated && sourceMaterial) {
+            const oldGhostMaterial = child.material
+            child.material = makeGhostMaterial(sourceMaterial, ghostOptions)
+            disposeGhostMaterial(oldGhostMaterial)
+          }
         }
-        child.material.needsUpdate = true
+
+        ghostMaterialList(child.material).forEach((material) => {
+          material.needsUpdate = true
+        })
         return
       }
 
