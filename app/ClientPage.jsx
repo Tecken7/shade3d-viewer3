@@ -4083,6 +4083,46 @@ function ArtheticInlineColorPicker({ value, onChange }) {
   )
 }
 
+
+function AlignmentTerminalTypedText({ text, speed = 15, enabled = true }) {
+  const safeText = String(text || "")
+  const [visibleLength, setVisibleLength] = useState(enabled ? 0 : safeText.length)
+
+  useEffect(() => {
+    if (!enabled) {
+      setVisibleLength(safeText.length)
+      return undefined
+    }
+
+    setVisibleLength(0)
+    if (!safeText) return undefined
+
+    let cancelled = false
+    let timer = null
+    let index = 0
+
+    const typeNext = () => {
+      if (cancelled) return
+      index = Math.min(safeText.length, index + 1)
+      setVisibleLength(index)
+      if (index >= safeText.length) return
+
+      const previousChar = safeText[index - 1] || ""
+      const pause = /[.,:;/]/.test(previousChar) ? 24 : previousChar === " " ? 4 : 0
+      timer = window.setTimeout(typeNext, speed + pause)
+    }
+
+    // Malé zpoždění působí přirozeněji než okamžité spuštění každého nového řádku.
+    timer = window.setTimeout(typeNext, 28)
+    return () => {
+      cancelled = true
+      if (timer != null) window.clearTimeout(timer)
+    }
+  }, [safeText, speed, enabled])
+
+  return <>{safeText.slice(0, visibleLength)}</>
+}
+
 export default function ClientPage() {
   const hideSidebar = getParam("hideSidebar") === "1"; // ÚPRAVA 1: Zjištění, jestli máme schovat levý panel
   const [sceneIntensity, setSceneIntensity] = useState(1)
@@ -4300,6 +4340,7 @@ export default function ClientPage() {
   const [alignmentMessage, setAlignmentMessage] = useState("")
   const [alignmentStartedAt, setAlignmentStartedAt] = useState(null)
   const [alignmentElapsed, setAlignmentElapsed] = useState(0)
+  const alignmentElapsedDisplayRef = useRef(null)
   const [alignmentPreviewBusy, setAlignmentPreviewBusy] = useState({ A: false, B: false })
   const [alignmentWorkflowStage, setAlignmentWorkflowStage] = useState("points") // points | prealigned | bestfit
   const [alignmentStep, setAlignmentStep] = useState("models") // models | points | prealign | bestfit
@@ -4485,12 +4526,29 @@ export default function ClientPage() {
   useEffect(() => {
     if (!alignmentBusy || !alignmentStartedAt) {
       if (!alignmentBusy) setAlignmentElapsed(0)
-      return
+      if (alignmentElapsedDisplayRef.current) alignmentElapsedDisplayRef.current.textContent = "0.00 s"
+      return undefined
     }
-    const update = () => setAlignmentElapsed(Math.max(0, (performance.now() - alignmentStartedAt) / 1000))
-    update()
-    const timer = setInterval(update, 250)
-    return () => clearInterval(timer)
+
+    let raf = 0
+    let lastStateUpdateAt = 0
+    const update = (now) => {
+      const elapsed = Math.max(0, (performance.now() - alignmentStartedAt) / 1000)
+
+      // Čas vpravo aktualizujeme přímo přes rAF, takže běží plynule bez rerenderu
+      // celého vieweru na každém snímku. React state stačí pro heartbeat terminálu.
+      if (alignmentElapsedDisplayRef.current) {
+        alignmentElapsedDisplayRef.current.textContent = `${elapsed.toFixed(2)} s`
+      }
+      if (now - lastStateUpdateAt >= 180) {
+        lastStateUpdateAt = now
+        setAlignmentElapsed(elapsed)
+      }
+      raf = requestAnimationFrame(update)
+    }
+
+    raf = requestAnimationFrame(update)
+    return () => cancelAnimationFrame(raf)
   }, [alignmentBusy, alignmentStartedAt])
 
   const [pinnedNotes, setPinnedNotes] = useState([])
@@ -7294,7 +7352,7 @@ export default function ClientPage() {
     const iterations = Math.max(1, Number(progress.iterations) || 1)
     const rms = Number.isFinite(progress.rms) ? progress.rms : null
     const pairs = Number.isFinite(progress.correspondences) ? Math.max(0, Math.round(progress.correspondences)) : null
-    const tickSeconds = 1.65
+    const tickSeconds = 1.28
     const tick = Math.max(0, Math.floor(alignmentElapsed / tickSeconds))
 
     const activityByStage = {
@@ -7340,18 +7398,34 @@ export default function ClientPage() {
       "finalizing metrology result",
     ]
 
+    const workerPhaseActivity = {
+      correspondences: [
+        "querying closest surface points",
+        "collecting surface correspondences",
+        "trimming distant surface pairs",
+        "updating overlap sample",
+      ],
+      verify: [
+        "verifying rigid candidate",
+        "re-measuring candidate residuals",
+        "checking candidate improvement",
+        "accepting stable transform step",
+      ],
+      validation: validationActivity,
+    }
+
     const activity = progress.mode === "metrics"
       ? metricsActivity
       : progress.mode === "validation"
         ? validationActivity
-        : activityByStage[stage] || activityByStage[0]
+        : workerPhaseActivity[progress.phase] || activityByStage[stage] || activityByStage[0]
 
     const lines = []
     const stamp = (seconds) => String(Math.max(0, seconds).toFixed(1)).padStart(6, "0")
-    const push = (seconds, text, tone = "normal") => lines.push({ stamp: stamp(seconds), text, tone })
+    const push = (id, seconds, text, tone = "normal", typewriter = false) => lines.push({ id, stamp: stamp(seconds), text, tone, typewriter })
 
-    push(0, "ARTHETIC REGISTRATION ENGINE / BEST_FIT", "muted")
-    push(Math.min(alignmentElapsed, .2), `phase ${alignmentProgressUi.code} · engine active`, "accent")
+    push("header", 0, "ARTHETIC REGISTRATION ENGINE / BEST_FIT", "muted", false)
+    push(`phase-${alignmentProgressUi.code}`, Math.min(alignmentElapsed, .2), `phase ${alignmentProgressUi.code}`, "accent", true)
 
     // Poslední čtyři heartbeat záznamy se posouvají jako terminál. Díky tomu se
     // něco děje i ve chvíli, kdy jeden náročný ICP krok několik sekund nehlásí progress.
@@ -7359,12 +7433,12 @@ export default function ClientPage() {
     const firstTick = Math.max(0, tick - visibleHeartbeat + 1)
     for (let t = firstTick; t <= tick; t += 1) {
       const message = activity[t % activity.length]
-      push(t * tickSeconds, message, t === tick ? "active" : "normal")
+      push(`heartbeat-${t}`, t * tickSeconds, message, t === tick ? "active" : "normal", true)
     }
 
-    if (stage > 0) push(alignmentElapsed, `pass ${stage}/3 · iteration ${Math.min(iteration, iterations)}/${iterations}`, "data")
-    if (pairs != null && pairs > 0) push(alignmentElapsed, `${pairs.toLocaleString("cs-CZ")} surface pairs accepted`, "data")
-    if (rms != null) push(alignmentElapsed, `RMS ${rms.toFixed(4)} mm`, "data")
+    if (stage > 0) push(`pass-${stage}-${Math.floor(iteration * 10)}`, alignmentElapsed, `pass ${stage}/3 · iteration ${Math.min(iteration, iterations).toFixed(1)}/${iterations}`, "data", false)
+    if (pairs != null && pairs > 0) push(`pairs-${Math.round(pairs / 25)}`, alignmentElapsed, `${pairs.toLocaleString("cs-CZ")} surface pairs accepted`, "data", false)
+    if (rms != null) push(`rms-${rms.toFixed(3)}`, alignmentElapsed, `RMS ${rms.toFixed(4)} mm`, "data", false)
 
     return lines.slice(-7)
   })()
@@ -7466,25 +7540,12 @@ export default function ClientPage() {
         @keyframes artheticAlignAttention { 0%,100% { box-shadow:0 0 0 0 rgba(255,255,255,.04); border-color:rgba(255,255,255,.10); } 50% { box-shadow:0 0 0 5px rgba(255,255,255,.055), 0 0 22px rgba(255,255,255,.08); border-color:rgba(255,255,255,.24); } }
         @keyframes artheticAlignCardIn { from { opacity:0; transform:translate(-50%,-46%) scale(.97); } to { opacity:1; transform:translate(-50%,-50%) scale(1); } }
         @keyframes artheticAlignMenuIn { from { opacity:0; transform:translateY(-4px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
-        @keyframes artheticAlignEngineBlink { 0%,100% { opacity:.32; } 50% { opacity:1; } }
-        @keyframes artheticAlignTerminalScan { 0% { transform:translateY(-14px); opacity:0; } 12% { opacity:.18; } 88% { opacity:.08; } 100% { transform:translateY(126px); opacity:0; } }
         @keyframes artheticAlignTerminalCursor { 0%,46% { opacity:1; } 47%,100% { opacity:.16; } }
         @keyframes artheticAlignEngineSweep { 0% { transform:translateX(-110%); opacity:0; } 18% { opacity:.34; } 72% { opacity:.12; } 100% { transform:translateX(310%); opacity:0; } }
         .artheticAlignTerminal {
           position:relative;
           overflow:hidden;
           isolation:isolate;
-        }
-        .artheticAlignTerminal::before {
-          content:"";
-          position:absolute;
-          left:0; right:0; top:0;
-          height:1px;
-          background:linear-gradient(90deg, transparent, rgba(134,239,172,.72), transparent);
-          filter:blur(.2px);
-          pointer-events:none;
-          z-index:2;
-          animation:artheticAlignTerminalScan 3.2s linear infinite;
         }
         .artheticAlignTerminal::after {
           content:"";
@@ -7760,7 +7821,7 @@ export default function ClientPage() {
                 }} />
                 <div style={{
                   position: "absolute", left: -18, top: 0, width: 16, height: "100%",
-                  background: "linear-gradient(90deg, transparent, rgba(134,239,172,.14), transparent)",
+                  background: "linear-gradient(90deg, transparent, rgba(255,255,255,.10), transparent)",
                   transform: "skewX(-14deg)", animation: "artheticAlignEngineSweep 2.6s ease-in-out infinite",
                 }} />
               </div>
@@ -7768,20 +7829,12 @@ export default function ClientPage() {
               <div style={{ minWidth: 0, flex: "1 1 auto" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                   <div style={{ fontSize: 13, fontWeight: 790, letterSpacing: "-.012em" }}>{alignmentProgressUi.label}</div>
-                  <span style={{
-                    height: 17, display: "inline-flex", alignItems: "center", gap: 5, padding: "0 6px", borderRadius: 999,
-                    background: "rgba(34,197,94,.065)", border: "1px solid rgba(74,222,128,.14)",
-                    color: "#9ad9ac", fontSize: 7.7, fontWeight: 760, letterSpacing: ".055em",
-                  }}>
-                    <i style={{ width: 4, height: 4, borderRadius: "50%", background: "#86efac", boxShadow: "0 0 8px rgba(134,239,172,.55)", animation: "artheticAlignEngineBlink 1.05s ease-in-out infinite" }} />
-                    ENGINE ACTIVE
-                  </span>
                 </div>
                 <div style={{ marginTop: 3, color: "#777", fontSize: 9.7, fontWeight: 620 }}>{alignmentProgressUi.detail}</div>
               </div>
 
               <div style={{ textAlign: "right", flex: "0 0 auto" }}>
-                <div style={{ color: "#b7b7b7", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: 10.5, fontVariantNumeric: "tabular-nums", fontWeight: 720 }}>{alignmentElapsed.toFixed(1)} s</div>
+                <div ref={alignmentElapsedDisplayRef} style={{ color: "#b7b7b7", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: 10.5, fontVariantNumeric: "tabular-nums", fontWeight: 720 }}>0.00 s</div>
                 <div style={{ marginTop: 2, color: "#555", fontSize: 7.6, fontWeight: 720, letterSpacing: ".055em" }}>{alignmentProgressUi.code}</div>
               </div>
             </div>
@@ -7809,7 +7862,7 @@ export default function ClientPage() {
                           ? "#aabbb0"
                           : "#777"
                   return (
-                    <div key={`${line.stamp}-${index}-${line.text}`} style={{
+                    <div key={line.id || `${line.stamp}-${index}-${line.text}`} style={{
                       display: "grid", gridTemplateColumns: "43px 8px 1fr", alignItems: "baseline", gap: 4,
                       minHeight: 11, color: toneColor, fontSize: 8.2, lineHeight: 1.16, letterSpacing: ".005em",
                       opacity: line.tone === "muted" ? .72 : 1,
@@ -7817,7 +7870,8 @@ export default function ClientPage() {
                       <span style={{ color: "#3f4742", fontVariantNumeric: "tabular-nums" }}>{line.stamp}</span>
                       <span style={{ color: line.tone === "accent" ? "#86efac" : "#536057" }}>{line.tone === "accent" ? "◆" : "›"}</span>
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {line.text}{isLast && <i aria-hidden="true" style={{ display: "inline-block", width: 4, height: 8, marginLeft: 4, verticalAlign: "-1px", background: "#86efac", animation: "artheticAlignTerminalCursor .92s steps(1,end) infinite" }} />}
+                        <AlignmentTerminalTypedText text={line.text} enabled={!!line.typewriter} speed={14} />
+                        {isLast && <i aria-hidden="true" style={{ display: "inline-block", width: 4, height: 8, marginLeft: 4, verticalAlign: "-1px", background: "#86efac", animation: "artheticAlignTerminalCursor .92s steps(1,end) infinite" }} />}
                       </span>
                     </div>
                   )
@@ -7837,7 +7891,7 @@ export default function ClientPage() {
             <div style={{ marginTop: 7, height: 5, borderRadius: 999, background: "rgba(255,255,255,.06)", overflow: "hidden", position: "relative" }}>
               <div style={{
                 height: "100%", width: `${Math.max(2, Math.min(100, alignmentProgressUi.percent))}%`, borderRadius: 999,
-                background: "linear-gradient(90deg, rgba(134,239,172,.42), rgba(255,255,255,.88))",
+                background: "linear-gradient(90deg, rgba(255,255,255,.62), rgba(255,255,255,.96))",
                 transition: "width .28s cubic-bezier(.22,.61,.36,1)",
               }} />
             </div>
