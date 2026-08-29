@@ -1587,6 +1587,23 @@ function sampledVertexIndices(positionCount, desiredCount) {
   return result
 }
 
+const ALIGNMENT_CPU_SLICE_MS = 8
+
+async function alignmentYield() {
+  // Skutečný nový macrotask dá browseru prostor pro React paint, pointer eventy
+  // a hlavně přípravu A/B preview oken bez zamrznutí UI.
+  await new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+async function alignmentPaintYield() {
+  // Garantuje alespoň jeden paint před těžší synchronní částí výpočtu.
+  if (typeof requestAnimationFrame !== "function") {
+    await alignmentYield()
+    return
+  }
+  await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)))
+}
+
 function alignmentCellHash(value) {
   let x = value | 0
   x ^= x >>> 16
