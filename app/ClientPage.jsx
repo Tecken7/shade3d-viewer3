@@ -4527,6 +4527,29 @@ export default function ClientPage() {
     }
   }, [modelTransforms, files, detectObjectTextureData])
 
+  // Report the *real* texture capability/state back to embedding editors.
+  // This keeps LabCaseDetail / New Case controls in sync with what the loaded
+  // geometry actually contains instead of relying on manifest defaults.
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const targetWindow = window.top || window.parent
+    if (!targetWindow) return
+
+    files.forEach((file, index) => {
+      if (!file?.url || !Object.prototype.hasOwnProperty.call(hasTexMap, file.url)) return
+      const hasTextureData = !!hasTexMap[file.url]
+      targetWindow.postMessage({
+        type: "SHADE3D_MODEL_TEXTURE_STATE",
+        payload: {
+          url: file.url,
+          name: file.rawName || file.name || `Model ${index + 1}`,
+          hasTextureData,
+          enabled: hasTextureData && !!vertexColors[index],
+        },
+      }, "*")
+    })
+  }, [files, hasTexMap, vertexColors])
+
   const comparisonModelFingerprint = useCallback((url) => {
     const file = files.find((item) => item.url === url)
     const mesh = meshesRef.current[url]
