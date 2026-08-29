@@ -1003,6 +1003,59 @@ function buildAlignmentWorkerPayload({
   return { payload, transferables }
 }
 
+function buildSurfaceAnalysisWorkerPayload(meshA, meshB, extra = {}) {
+  meshA?.updateMatrixWorld?.(true)
+  meshB?.updateMatrixWorld?.(true)
+
+  const positionA = meshA?.geometry?.getAttribute?.("position")
+  const positionB = meshB?.geometry?.getAttribute?.("position")
+  if (!positionA?.count || !positionB?.count) throw new Error("Vybrané modely nemají použitelnou geometrii pro analýzu.")
+
+  const positionsA = copyPositionAttributeForWorker(positionA)
+  const positionsB = copyPositionAttributeForWorker(positionB)
+  const indexA = copyIndexAttributeForWorker(meshA.geometry?.index)
+  const indexB = copyIndexAttributeForWorker(meshB.geometry?.index)
+
+  const payload = {
+    a: {
+      positions: positionsA,
+      index: indexA,
+      matrixWorld: meshA.matrixWorld.toArray(),
+    },
+    b: {
+      positions: positionsB,
+      index: indexB,
+      matrixWorld: meshB.matrixWorld.toArray(),
+    },
+    ...extra,
+  }
+
+  const transferables = [positionsA.buffer, positionsB.buffer]
+  if (indexA) transferables.push(indexA.buffer)
+  if (indexB) transferables.push(indexB.buffer)
+  return { payload, transferables }
+}
+
+function installWorkerOcclusionResult(mesh, result) {
+  if (!mesh || !result?.colors || !result?.distances) throw new Error("Worker nevrátil platnou mapu okluze.")
+  rememberOriginalColors(mesh)
+  mesh.userData._occlusionColors = new THREE.BufferAttribute(result.colors, 3)
+  mesh.userData._occlusionDistances = new THREE.BufferAttribute(result.distances, 1)
+}
+
+function installWorkerComparisonResult(meshA, meshB, result) {
+  if (!meshA || !meshB || !result?.a?.colors || !result?.a?.distances || !result?.b?.colors || !result?.b?.distances) {
+    throw new Error("Worker nevrátil platná data porovnání povrchů.")
+  }
+  rememberOriginalColors(meshA)
+  rememberOriginalColors(meshB)
+  meshA.userData._comparisonColors = new THREE.BufferAttribute(result.a.colors, 3)
+  meshA.userData._comparisonDistances = new THREE.BufferAttribute(result.a.distances, 1)
+  meshB.userData._comparisonColors = new THREE.BufferAttribute(result.b.colors, 3)
+  meshB.userData._comparisonDistances = new THREE.BufferAttribute(result.b.distances, 1)
+  return result.stats || null
+}
+
 function matrixArrayOrIdentity(value) {
   return Array.isArray(value) && value.length === 16 ? value : IDENTITY_MATRIX_ARRAY
 }
@@ -3877,6 +3930,7 @@ export default function ClientPage() {
   const [comparisonMenuOpen, setComparisonMenuOpen] = useState(false)
   const [comparisonSelection, setComparisonSelection] = useState([])
   const [isCalculatingComparison, setIsCalculatingComparison] = useState(false)
+  const [surfaceAnalysisProgress, setSurfaceAnalysisProgress] = useState(null)
   const [hasComputedComparison, setHasComputedComparison] = useState(false)
   const [showComparison, setShowComparison] = useState(false)
   const [comparisonTolerance, setComparisonTolerance] = useState(0.25)
@@ -4001,6 +4055,64 @@ export default function ClientPage() {
       }
     })
   }, [])
+
+  const runSurfaceWorkerAnalysis = useCallback((type, payload, transferables, onProgress) => {
+    const worker = alignmentWorkerRef.current
+    if (!USE_ALIGNMENT_WORKER || !worker || alignmentWorkerFailedRef.current) {
+      const error = new Error("Analysis Worker není připravený.")
+      error.alignmentWorkerKind = "infrastructure"
+      return Promise.reject(error)
+    }
+
+    const requestId = `surface-${Date.now()}-${++alignmentWorkerRequestIdRef.current}`
+    return new Promise((resolve, reject) => {
+      alignmentWorkerRequestsRef.current.set(requestId, { resolve, reject, onProgress })
+      try {
+        worker.postMessage({ type, requestId, payload }, transferables)
+      } catch (error) {
+        alignmentWorkerRequestsRef.current.delete(requestId)
+        error.alignmentWorkerKind = "infrastructure"
+        reject(error)
+      }
+    })
+  }, [])
+
+  const runOcclusionAnalysis = useCallback(async (meshA, meshB, maxDist = 2.0, invertSign = false, onProgress) => {
+    if (USE_ALIGNMENT_WORKER && alignmentWorkerRef.current && !alignmentWorkerFailedRef.current) {
+      try {
+        const { payload, transferables } = buildSurfaceAnalysisWorkerPayload(meshA, meshB, { maxDist, invertSign })
+        const response = await runSurfaceWorkerAnalysis("OCCLUSION", payload, transferables, onProgress)
+        installWorkerOcclusionResult(meshA, response.result)
+        if (response.timings) console.info("[ARTHETIC Analysis Worker] Okluze timing", response.timings)
+        return
+      } catch (workerError) {
+        if (workerError?.alignmentWorkerKind === "algorithm") throw workerError
+        console.warn("[ARTHETIC Analysis Worker] Okluze používá legacy výpočet:", workerError)
+      }
+    }
+    onProgress?.({ percent: 5, phase: "legacy" })
+    applyOcclusionHeatmap(meshA, meshB, maxDist, invertSign)
+    onProgress?.({ percent: 100, phase: "done" })
+  }, [runSurfaceWorkerAnalysis])
+
+  const runComparisonAnalysis = useCallback(async (meshA, meshB, tolerance = 0.25, onProgress) => {
+    if (USE_ALIGNMENT_WORKER && alignmentWorkerRef.current && !alignmentWorkerFailedRef.current) {
+      try {
+        const { payload, transferables } = buildSurfaceAnalysisWorkerPayload(meshA, meshB, { tolerance })
+        const response = await runSurfaceWorkerAnalysis("COMPARISON", payload, transferables, onProgress)
+        const stats = installWorkerComparisonResult(meshA, meshB, response.result)
+        if (response.timings) console.info("[ARTHETIC Analysis Worker] Porovnání timing", response.timings)
+        return stats
+      } catch (workerError) {
+        if (workerError?.alignmentWorkerKind === "algorithm") throw workerError
+        console.warn("[ARTHETIC Analysis Worker] Porovnání používá legacy výpočet:", workerError)
+      }
+    }
+    onProgress?.({ percent: 5, phase: "legacy" })
+    const stats = applySurfaceComparison(meshA, meshB, tolerance)
+    onProgress?.({ percent: 100, phase: "done" })
+    return stats
+  }, [runSurfaceWorkerAnalysis])
 
   useEffect(() => {
     if (!alignmentBusy || !alignmentStartedAt) {
@@ -4625,11 +4737,14 @@ export default function ClientPage() {
     const meshB = meshesRef.current[bUrl]
     if (!meshA || !meshB) return
     setAlignmentBusy(true)
+    setAlignmentProgress({ mode: "metrics", percent: 2 })
     setAlignmentMessage("Počítám mapu odchylek…")
     try {
       rootGroupRef.current?.updateMatrixWorld(true)
       const tolerance = 0.25
-      const stats = applySurfaceComparison(meshA, meshB, tolerance)
+      const stats = await runComparisonAnalysis(meshA, meshB, tolerance, (progress) => {
+        setAlignmentProgress({ mode: "metrics", percent: Math.max(2, Number(progress?.percent) || 2) })
+      })
       setComparisonSelection([aUrl, bUrl])
       setComparisonTolerance(tolerance)
       setComparisonStats(stats)
@@ -4637,11 +4752,16 @@ export default function ClientPage() {
       setShowComparison(true)
       setShowHeatmap(false)
       setAlignmentStats(stats)
+      setAlignmentProgress({ mode: "metrics", percent: 100 })
       setAlignmentMessage("Mapa odchylek je zobrazena v horní scéně.")
+    } catch (error) {
+      console.error("Alignment deviation error:", error)
+      setAlignmentMessage(error?.message || "Mapu odchylek se nepodařilo vypočítat.")
     } finally {
       setAlignmentBusy(false)
+      setAlignmentProgress(null)
     }
-  }, [getAlignmentPair])
+  }, [getAlignmentPair, runComparisonAnalysis])
 
   const toggleHeatmapModel = (url) => {
     setHeatmapSelection((prev) => {
@@ -4723,62 +4843,69 @@ export default function ClientPage() {
     if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
   }
 
-  const handleApplyHeatmap = () => {
+  const handleApplyHeatmap = async () => {
     if (heatmapSelection.length !== 2) return
-    setIsCalculatingHeatmap(true);
-    setPinnedNotes([]); 
-
-    setTimeout(() => {
-      try {
-        const meshA = meshesRef.current[heatmapSelection[0]]
-        const meshB = meshesRef.current[heatmapSelection[1]]
-
-        if (meshA && meshB) {
-          applyOcclusionHeatmap(meshA, meshB, 2.0, false)
-          
-          setHasComputedHeatmap(true)
-          setShowHeatmap(true)
-          setShowComparison(false)
-        }
-      } catch(e) {
-        console.error("Heatmap chyba:", e)
-      } finally {
-        setIsCalculatingHeatmap(false);
-      }
-    }, 150) 
-  }
-
-  const handleApplyComparison = () => {
-    if (comparisonSelection.length !== 2) return
-    setIsCalculatingComparison(true)
+    setIsCalculatingHeatmap(true)
+    setSurfaceAnalysisProgress({ type: "occlusion", percent: 1, phase: "prepare" })
     setPinnedNotes([])
 
-    setTimeout(() => {
-      try {
-        const meshA = meshesRef.current[comparisonSelection[0]]
-        const meshB = meshesRef.current[comparisonSelection[1]]
-        if (meshA && meshB) {
-          const stats = applySurfaceComparison(meshA, meshB, comparisonTolerance)
-          setComparisonStats(stats)
+    try {
+      await new Promise((resolve) => requestAnimationFrame(() => resolve()))
+      rootGroupRef.current?.updateMatrixWorld(true)
+      const meshA = meshesRef.current[heatmapSelection[0]]
+      const meshB = meshesRef.current[heatmapSelection[1]]
 
-          // Reference není jen vizuálně přepsaná na 50 %. Hodnotu zapíšeme
-          // přímo do stejného state, který řídí opacity slider v levém panelu.
-          const referenceUrl = comparisonDirection === "B_TO_A" ? comparisonSelection[0] : comparisonSelection[1]
-          const referenceIndex = files.findIndex((file) => file.url === referenceUrl)
-          if (referenceIndex >= 0) {
-            setOpacities((previous) => previous.map((value, index) => index === referenceIndex ? 0.5 : value))
-          }
-
-          setHasComputedComparison(true)
-          setShowComparison(true)
-          setShowHeatmap(false)
-        }
-      } catch (e) {
-        console.error("Chyba porovnání povrchů:", e)
-      } finally {
-        setIsCalculatingComparison(false)
+      if (meshA && meshB) {
+        await runOcclusionAnalysis(meshA, meshB, 2.0, false, (progress) => {
+          setSurfaceAnalysisProgress({ type: "occlusion", ...progress })
+        })
+        setHasComputedHeatmap(true)
+        setShowHeatmap(true)
+        setShowComparison(false)
       }
-    }, 150)
+    } catch (e) {
+      console.error("Heatmap chyba:", e)
+    } finally {
+      setSurfaceAnalysisProgress(null)
+      setIsCalculatingHeatmap(false)
+    }
+  }
+
+  const handleApplyComparison = async () => {
+    if (comparisonSelection.length !== 2) return
+    setIsCalculatingComparison(true)
+    setSurfaceAnalysisProgress({ type: "comparison", percent: 1, phase: "prepare" })
+    setPinnedNotes([])
+
+    try {
+      await new Promise((resolve) => requestAnimationFrame(() => resolve()))
+      rootGroupRef.current?.updateMatrixWorld(true)
+      const meshA = meshesRef.current[comparisonSelection[0]]
+      const meshB = meshesRef.current[comparisonSelection[1]]
+      if (meshA && meshB) {
+        const stats = await runComparisonAnalysis(meshA, meshB, comparisonTolerance, (progress) => {
+          setSurfaceAnalysisProgress({ type: "comparison", ...progress })
+        })
+        setComparisonStats(stats)
+
+        // Reference není jen vizuálně přepsaná na 50 %. Hodnotu zapíšeme
+        // přímo do stejného state, který řídí opacity slider v levém panelu.
+        const referenceUrl = comparisonDirection === "B_TO_A" ? comparisonSelection[0] : comparisonSelection[1]
+        const referenceIndex = files.findIndex((file) => file.url === referenceUrl)
+        if (referenceIndex >= 0) {
+          setOpacities((previous) => previous.map((value, index) => index === referenceIndex ? 0.5 : value))
+        }
+
+        setHasComputedComparison(true)
+        setShowComparison(true)
+        setShowHeatmap(false)
+      }
+    } catch (e) {
+      console.error("Chyba porovnání povrchů:", e)
+    } finally {
+      setSurfaceAnalysisProgress(null)
+      setIsCalculatingComparison(false)
+    }
   }
 
   const activeAnalysisMode = showHeatmap ? "occlusion" : showComparison ? "comparison" : null
@@ -5177,13 +5304,17 @@ export default function ClientPage() {
     setIsCalculatingHeatmap(restoringOcclusion)
     setIsCalculatingComparison(restoringComparison)
 
-    setTimeout(() => {
+    setSurfaceAnalysisProgress({ type: mode, percent: 1, phase: "prepare" })
+    setTimeout(async () => {
       try {
+        rootGroupRef.current?.updateMatrixWorld(true)
         if (restoringOcclusion) {
           const meshA = meshesRef.current[occlusionSelection[0]]
           const meshB = meshesRef.current[occlusionSelection[1]]
           if (meshA && meshB) {
-            applyOcclusionHeatmap(meshA, meshB, 2.0, false)
+            await runOcclusionAnalysis(meshA, meshB, 2.0, false, (progress) => {
+              setSurfaceAnalysisProgress({ type: "occlusion", ...progress })
+            })
             setHasComputedHeatmap(true)
             setShowHeatmap(pendingViewerState.occlusion?.visible !== false)
           }
@@ -5191,7 +5322,10 @@ export default function ClientPage() {
           const meshA = meshesRef.current[savedComparisonSelection[0]]
           const meshB = meshesRef.current[savedComparisonSelection[1]]
           if (meshA && meshB) {
-            setComparisonStats(applySurfaceComparison(meshA, meshB, savedTolerance))
+            const stats = await runComparisonAnalysis(meshA, meshB, savedTolerance, (progress) => {
+              setSurfaceAnalysisProgress({ type: "comparison", ...progress })
+            })
+            setComparisonStats(stats)
 
             const referenceUrl = savedComparisonDirection === "B_TO_A" ? savedComparisonSelection[0] : savedComparisonSelection[1]
             const referenceIndex = files.findIndex((file) => file.url === referenceUrl)
@@ -5203,13 +5337,16 @@ export default function ClientPage() {
             setShowComparison(pendingViewerState.comparison?.visible !== false)
           }
         }
+      } catch (error) {
+        console.error("Obnovení analýzy selhalo:", error)
       } finally {
+        setSurfaceAnalysisProgress(null)
         setIsCalculatingHeatmap(false)
         setIsCalculatingComparison(false)
         setRestoringAnalysisMode(null)
       }
     }, 100)
-  }, [pendingViewerState, files, loadedUrls, dicomSource])
+  }, [pendingViewerState, files, loadedUrls, dicomSource, runOcclusionAnalysis, runComparisonAnalysis])
 
   useEffect(() => {
     const savedClip = pendingClipStateRef.current
@@ -7094,15 +7231,27 @@ export default function ClientPage() {
                         : "Vypočítávám okluzi"}
                 </div>
                 <div style={{ marginTop: 3, color: "#777", fontSize: 9.5, fontWeight: 610 }}>
-                  {isCalculatingComparison ? "Počítám oboustranné vzdálenosti mezi povrchy." : "Počítám průnik a mezeru vůči referenčnímu modelu."}
+                  {isCalculatingComparison
+                    ? (surfaceAnalysisProgress?.phase === "A_TO_B" ? "Analyzuji povrch A vůči referenci B." : surfaceAnalysisProgress?.phase === "B_TO_A" ? "Analyzuji povrch B vůči referenci A." : "Připravuji oboustranné porovnání povrchů.")
+                    : (surfaceAnalysisProgress?.phase === "distances" ? "Počítám průnik a mezeru vůči referenčnímu modelu." : "Připravuji geometrii a BVH strukturu.")}
                 </div>
               </div>
             </div>
-            <div style={{ marginTop: 17, height: 4, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.06)" }}>
-              <div style={{ width: "38%", height: "100%", borderRadius: 999, background: "linear-gradient(90deg, rgba(255,255,255,.22), rgba(255,255,255,.92), rgba(255,255,255,.22))", animation: "artheticAnalysisLoadBar 1.25s ease-in-out infinite alternate" }} />
+            <div style={{ marginTop: 17, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+              <div style={{ flex: 1, height: 4, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.06)" }}>
+                <div style={{
+                  width: `${Math.max(2, Math.min(100, Number(surfaceAnalysisProgress?.percent) || 2))}%`,
+                  height: "100%", borderRadius: 999,
+                  background: "linear-gradient(90deg, rgba(255,255,255,.45), rgba(255,255,255,.96))",
+                  boxShadow: "0 0 12px rgba(255,255,255,.10)",
+                  transition: "width .16s linear"
+                }} />
+              </div>
+              <span style={{ width: 34, textAlign: "right", color: "#7d7d7d", fontSize: 9, fontWeight: 720, fontVariantNumeric: "tabular-nums" }}>
+                {Math.round(Math.max(0, Math.min(100, Number(surfaceAnalysisProgress?.percent) || 0)))} %
+              </span>
             </div>
           </div>
-          <style>{`@keyframes artheticAnalysisLoadBar { from { transform:translateX(-10%); } to { transform:translateX(175%); } }`}</style>
         </div>
       )}
 
