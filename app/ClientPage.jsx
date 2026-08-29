@@ -71,7 +71,14 @@ async function resolveCaseCloudManifestKey(requestedKey) {
     // Nový resolver vrací kromě CURRENT revision také aktuální zakázku a jméno
     // pacienta. Jméno se proto nikdy necachuje v manifestu a po přejmenování
     // pacienta stačí viewer znovu otevřít / refreshnout.
-    const contextResponse = await rpcFetch("get_case_cloud_scene_context")
+    // v1.40: nový resolver v2 používá DB-triggerovanou vazbu scene -> lab_case.
+    // Nový název RPC zároveň obchází případnou starou PostgREST schema cache
+    // po předchozím CREATE OR REPLACE stejné funkce.
+    let contextResponse = await rpcFetch("get_case_cloud_scene_context_v2")
+    if (!contextResponse.ok) {
+      // Zpětná kompatibilita během postupného deploye SQL/vieweru.
+      contextResponse = await rpcFetch("get_case_cloud_scene_context")
+    }
     if (contextResponse.ok) {
       const payload = await contextResponse.json()
       const row = Array.isArray(payload) ? payload[0] : payload
