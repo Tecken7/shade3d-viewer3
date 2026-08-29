@@ -269,7 +269,7 @@ function alignmentCellHash(value) {
 // Vytvoří jeden prostorově rovnoměrný master sample. STL často obsahuje stejné
 // vrcholy opakovaně pro každý trojúhelník; voxelový výběr tak automaticky neplýtvá
 // sample budgetem na stejné místo a současně lépe pokryje celý dentální povrch.
-function buildSpatialSamplePool(positionAttribute, matrixToRoot, desiredCount) {
+function buildSpatialSampleIndices(positionAttribute, matrixToSpace, desiredCount) {
   if (!positionAttribute?.count || desiredCount <= 0) return []
 
   const total = positionAttribute.count
@@ -278,7 +278,7 @@ function buildSpatialSamplePool(positionAttribute, matrixToRoot, desiredCount) {
   const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity)
 
   for (let i = 0; i < total; i++) {
-    point.fromBufferAttribute(positionAttribute, i).applyMatrix4(matrixToRoot)
+    point.fromBufferAttribute(positionAttribute, i).applyMatrix4(matrixToSpace)
     min.min(point)
     max.max(point)
   }
@@ -299,7 +299,7 @@ function buildSpatialSamplePool(positionAttribute, matrixToRoot, desiredCount) {
     const cells = new Map()
 
     for (let i = 0; i < total; i++) {
-      point.fromBufferAttribute(positionAttribute, i).applyMatrix4(matrixToRoot)
+      point.fromBufferAttribute(positionAttribute, i).applyMatrix4(matrixToSpace)
       const ix = Math.min(resolution, Math.max(0, Math.floor(((point.x - min.x) / safeX) * resolution)))
       const iy = Math.min(resolution, Math.max(0, Math.floor(((point.y - min.y) / safeY) * resolution)))
       const iz = Math.min(resolution, Math.max(0, Math.floor(((point.z - min.z) / safeZ) * resolution)))
@@ -312,8 +312,6 @@ function buildSpatialSamplePool(positionAttribute, matrixToRoot, desiredCount) {
     resolution = Math.ceil(resolution * 1.55)
   }
 
-  // Deterministicky promícháme voxel cells, aby případný pořádek trojúhelníků v STL/PLY
-  // neovlivňoval, které oblasti se dostanou do menšího coarse sample.
   selectedEntries.sort((a, b) => alignmentCellHash(a[0]) - alignmentCellHash(b[0]))
 
   const take = Math.min(target, selectedEntries.length)
@@ -321,8 +319,19 @@ function buildSpatialSamplePool(positionAttribute, matrixToRoot, desiredCount) {
   const step = selectedEntries.length / Math.max(1, take)
   for (let i = 0; i < take; i++) {
     const entryIndex = Math.min(selectedEntries.length - 1, Math.floor((i + 0.37) * step))
-    const sourceIndex = selectedEntries[entryIndex][1]
-    output[i] = new THREE.Vector3().fromBufferAttribute(positionAttribute, sourceIndex).applyMatrix4(matrixToRoot)
+    output[i] = selectedEntries[entryIndex][1]
+  }
+  return output
+}
+
+// Vytvoří jeden prostorově rovnoměrný master sample. STL často obsahuje stejné
+// vrcholy opakovaně pro každý trojúhelník; voxelový výběr tak automaticky neplýtvá
+// sample budgetem na stejné místo a současně lépe pokryje celý dentální povrch.
+function buildSpatialSamplePool(positionAttribute, matrixToRoot, desiredCount) {
+  const indices = buildSpatialSampleIndices(positionAttribute, matrixToRoot, desiredCount)
+  const output = new Array(indices.length)
+  for (let i = 0; i < indices.length; i++) {
+    output[i] = new THREE.Vector3().fromBufferAttribute(positionAttribute, indices[i]).applyMatrix4(matrixToRoot)
   }
   return output
 }
@@ -339,6 +348,125 @@ function resampleSpatialPool(pool, desiredCount) {
   return result
 }
 
+// Multi-resolution proxy pro první ICP průchody. Proxy nijak nemění finální model:
+// pouze zrychlí hledání korespondencí v coarse/medium fázi. Jemný pass a všechny
+// safety metriky dál používají exact triangle BVH.
+function makeTargetProxyQuery(targetMesh, targetDiagonal, desiredCount = 24000) {
+  targetMesh.updateMatrixWorld(true)
+  const geometry = targetMesh.geometry
+  const position = geometry.getAttribute('position')
+  if (!position?.count) throw new Error('Reference model nemá použitelnou geometrii.')
+
+  if (!geometry.getAttribute('normal')) geometry.computeVertexNormals()
+  const normal = geometry.getAttribute('normal')
+  const indices = buildSpatialSampleIndices(position, targetMesh.matrixWorld, desiredCount)
+  if (indices.length < 100) throw new Error('Reference model nemá dostatek bodů pro multi-resolution Best Fit.')
+
+  const count = indices.length
+  const points = new Float32Array(count * 3)
+  const normals = new Float32Array(count * 3)
+  const point = new THREE.Vector3()
+  const normalValue = new THREE.Vector3()
+  const normalMatrix = new THREE.Matrix3().getNormalMatrix(targetMesh.matrixWorld)
+  const min = new THREE.Vector3(Infinity, Infinity, Infinity)
+  const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity)
+
+  for (let i = 0; i < count; i++) {
+    const sourceIndex = indices[i]
+    point.fromBufferAttribute(position, sourceIndex).applyMatrix4(targetMesh.matrixWorld)
+    if (normal) normalValue.fromBufferAttribute(normal, sourceIndex).applyMatrix3(normalMatrix).normalize()
+    else normalValue.set(0, 0, 1)
+
+    points[i * 3] = point.x
+    points[i * 3 + 1] = point.y
+    points[i * 3 + 2] = point.z
+    normals[i * 3] = normalValue.x
+    normals[i * 3 + 1] = normalValue.y
+    normals[i * 3 + 2] = normalValue.z
+    min.min(point)
+    max.max(point)
+  }
+
+  // Buňka kolem 0.7–1.3 mm je pro dentální data dobrý kompromis: coarse query
+  // projde jen malé lokální okolí, ale proxy je stále mnohem hustší než potřebujeme
+  // pro počáteční rigidní refinement.
+  const cellSize = Math.max(0.55, Math.min(1.35, Math.max(1, targetDiagonal) / 70))
+  const padding = cellSize * 2
+  min.addScalar(-padding)
+  max.addScalar(padding)
+  const nx = Math.max(1, Math.ceil((max.x - min.x) / cellSize) + 1)
+  const ny = Math.max(1, Math.ceil((max.y - min.y) / cellSize) + 1)
+  const nz = Math.max(1, Math.ceil((max.z - min.z) / cellSize) + 1)
+  const strideY = nx
+  const strideZ = nx * ny
+  const cells = new Map()
+
+  const cellCoordinate = (value, origin, maxCell) => Math.max(0, Math.min(maxCell, Math.floor((value - origin) / cellSize)))
+  for (let i = 0; i < count; i++) {
+    const ix = cellCoordinate(points[i * 3], min.x, nx - 1)
+    const iy = cellCoordinate(points[i * 3 + 1], min.y, ny - 1)
+    const iz = cellCoordinate(points[i * 3 + 2], min.z, nz - 1)
+    const key = ix + iy * strideY + iz * strideZ
+    let bucket = cells.get(key)
+    if (!bucket) { bucket = []; cells.set(key, bucket) }
+    bucket.push(i)
+  }
+
+  const output = {
+    pointWorld: new THREE.Vector3(),
+    normalWorld: new THREE.Vector3(),
+    distance: Infinity,
+    faceIndex: -1,
+  }
+
+  const query = (worldPoint, maxWorldDistance = Infinity, needNormal = true) => {
+    const maxDistance = Number.isFinite(maxWorldDistance) ? Math.max(0, maxWorldDistance) : Math.max(1, targetDiagonal)
+    const maxDistanceSq = maxDistance * maxDistance
+    const cx = Math.floor((worldPoint.x - min.x) / cellSize)
+    const cy = Math.floor((worldPoint.y - min.y) / cellSize)
+    const cz = Math.floor((worldPoint.z - min.z) / cellSize)
+    const radius = Math.max(1, Math.ceil(maxDistance / cellSize))
+
+    const x0 = Math.max(0, cx - radius), x1 = Math.min(nx - 1, cx + radius)
+    const y0 = Math.max(0, cy - radius), y1 = Math.min(ny - 1, cy + radius)
+    const z0 = Math.max(0, cz - radius), z1 = Math.min(nz - 1, cz + radius)
+    if (x0 > x1 || y0 > y1 || z0 > z1) return null
+
+    let bestIndex = -1
+    let bestSq = maxDistanceSq
+    for (let iz = z0; iz <= z1; iz++) {
+      for (let iy = y0; iy <= y1; iy++) {
+        const rowKey = iy * strideY + iz * strideZ
+        for (let ix = x0; ix <= x1; ix++) {
+          const bucket = cells.get(ix + rowKey)
+          if (!bucket) continue
+          for (let b = 0; b < bucket.length; b++) {
+            const index = bucket[b]
+            const dx = worldPoint.x - points[index * 3]
+            const dy = worldPoint.y - points[index * 3 + 1]
+            const dz = worldPoint.z - points[index * 3 + 2]
+            const distanceSq = dx * dx + dy * dy + dz * dz
+            if (distanceSq < bestSq) {
+              bestSq = distanceSq
+              bestIndex = index
+            }
+          }
+        }
+      }
+    }
+
+    if (bestIndex < 0) return null
+    output.pointWorld.set(points[bestIndex * 3], points[bestIndex * 3 + 1], points[bestIndex * 3 + 2])
+    if (needNormal) output.normalWorld.set(normals[bestIndex * 3], normals[bestIndex * 3 + 1], normals[bestIndex * 3 + 2])
+    else output.normalWorld.set(0, 0, 0)
+    output.distance = Math.sqrt(bestSq)
+    output.faceIndex = -1
+    return output
+  }
+
+  return { query, count, cellSize }
+}
+
 async function robustPointToPlaneICP({
   sourceMesh,
   sourceRoot,
@@ -351,6 +479,7 @@ async function robustPointToPlaneICP({
 }) {
   if (!sourceMesh || !sourceRoot || !targetMesh || !targetRoot) throw new Error("Chybí model pro Best Fit.")
 
+  const algorithmStartedAt = performance.now()
   sourceRoot.updateMatrixWorld(true)
   targetRoot.updateMatrixWorld(true)
   sourceMesh.updateMatrixWorld(true)
@@ -359,31 +488,30 @@ async function robustPointToPlaneICP({
   const sourcePosition = sourceMesh.geometry.getAttribute("position")
   if (!sourcePosition?.count) throw new Error("Moving model nemá použitelnou geometrii.")
 
-  // Geometrii Moving B držíme v lokálním prostoru jeho kořenového objektu.
-  // ICP transformaci řešíme v prostoru společného parentu modelů.
   const sourceRootInverse = new THREE.Matrix4().copy(sourceRoot.matrixWorld).invert()
   const meshToRoot = new THREE.Matrix4().multiplyMatrices(sourceRootInverse, sourceMesh.matrixWorld)
   const parentWorld = sourceRoot.parent?.matrixWorld?.clone?.() || new THREE.Matrix4().identity()
   const parentWorldInverse = new THREE.Matrix4().copy(parentWorld).invert()
   const worldNormalToParent = new THREE.Matrix3().setFromMatrix4(parentWorldInverse)
 
-  const query = makeClosestSurfaceQuery(targetMesh)
+  const exactQuery = makeClosestSurfaceQuery(targetMesh)
   const targetBox = new THREE.Box3().setFromObject(targetRoot)
   const targetSize = targetBox.getSize(new THREE.Vector3())
   const diagonal = Number.isFinite(targetDiagonalOverride) ? Math.max(1, targetDiagonalOverride) : Math.max(1, targetSize.length())
 
-  // Skutečná aktuální matice objektu — chrání před závodem React state.
+  onProgress?.({ stage: 0, stages: 3, iteration: 0, iterations: 1, rms: null, correspondences: 0, mode: "prepare", phase: "proxy-build", percent: 2 })
+  const proxyStartedAt = performance.now()
+  const proxySurface = makeTargetProxyQuery(targetMesh, diagonal, 24000)
+  const proxyReadyAt = performance.now()
+
   const current = new THREE.Matrix4()
   if (sourceRoot.matrix && sourceRoot.matrix.elements?.length === 16) current.copy(sourceRoot.matrix)
   else current.fromArray(matrixArrayOrIdentity(initialMatrix))
   const initialCurrent = current.clone()
 
-  // Jeden master spatial sample používáme pro centroid, coarse/fine pass i validaci.
-  // U triangulovaného STL tak stejné vrcholy nezabírají sample budget opakovaně.
   const spatialSamplePool = buildSpatialSamplePool(sourcePosition, meshToRoot, 7200)
   if (spatialSamplePool.length < 30) throw new Error("Moving model nemá dostatek prostorově rozložených bodů pro Best Fit.")
 
-  // Best Fit po landmark seedu je pouze refinement. Hlídáme drift od seedu.
   const centroidSamples = resampleSpatialPool(spatialSamplePool, 1200)
   const sourceCentroidRoot = new THREE.Vector3()
   for (let i = 0; i < centroidSamples.length; i++) sourceCentroidRoot.add(centroidSamples[i])
@@ -401,7 +529,6 @@ async function robustPointToPlaneICP({
   const delta = new THREE.Vector3()
   const cross = new THREE.Vector3()
 
-  // Jednotlivé scale úrovně jsou pouze levné podvýběry z jednoho spatial master poolu.
   const buildSourceSamples = (desiredCount) => resampleSpatialPool(spatialSamplePool, desiredCount)
 
   const metricsFromCorrespondences = (correspondences) => {
@@ -421,11 +548,7 @@ async function robustPointToPlaneICP({
     }
   }
 
-  // Nejdražší část Best Fitu. Místo pevného počtu BVH dotazů používáme
-  // časové řezy. Na hustém scanu může být 420 dotazů několik sekund práce,
-  // zatímco na lehkém modelu jen pár ms. Po ~8 ms CPU proto vždy uvolníme
-  // hlavní vlákno a zároveň pošleme skutečný průběh do UI.
-  const makeCorrespondences = async (matrix, sourceSamples, maxDistance, trim, progressTick = null, needNormals = false) => {
+  const makeCorrespondences = async (queryFn, matrix, sourceSamples, maxDistance, trim, progressTick = null, needNormals = false) => {
     const result = []
     let sliceStarted = performance.now()
     let lastProgress = -1
@@ -433,10 +556,10 @@ async function robustPointToPlaneICP({
       const pRoot = sourceSamples[k]
       pParent.copy(pRoot).applyMatrix4(matrix)
       pWorld.copy(pParent).applyMatrix4(parentWorld)
-      const hit = query(pWorld, maxDistance, needNormals)
+      const hit = queryFn(pWorld, maxDistance, needNormals)
       if (hit && Number.isFinite(hit.distance) && hit.distance <= maxDistance) {
         qParent.copy(hit.pointWorld).applyMatrix4(parentWorldInverse)
-        nParent.copy(hit.normalWorld).applyMatrix3(worldNormalToParent).normalize()
+        if (needNormals) nParent.copy(hit.normalWorld).applyMatrix3(worldNormalToParent).normalize()
         result.push({
           p: pParent.clone(),
           q: qParent.clone(),
@@ -448,7 +571,6 @@ async function robustPointToPlaneICP({
       const now = performance.now()
       if (now - sliceStarted >= ALIGNMENT_CPU_SLICE_MS) {
         const fraction = Math.min(1, (k + 1) / Math.max(1, sourceSamples.length))
-        // Nezahlcujeme React tisíci prakticky totožnými aktualizacemi.
         if (fraction - lastProgress >= 0.004 || lastProgress < 0) {
           progressTick?.(fraction)
           lastProgress = fraction
@@ -465,8 +587,8 @@ async function robustPointToPlaneICP({
     return result
   }
 
-  const evaluateMatrix = async (matrix, sourceSamples, maxDistance, trim, progressTick = null) => {
-    return metricsFromCorrespondences(await makeCorrespondences(matrix, sourceSamples, maxDistance, trim, progressTick, false))
+  const evaluateExactMatrix = async (matrix, sourceSamples, maxDistance, trim, progressTick = null) => {
+    return metricsFromCorrespondences(await makeCorrespondences(exactQuery, matrix, sourceSamples, maxDistance, trim, progressTick, false))
   }
 
   const scaleRigidIncrement = (matrix, factor, maxTranslation, maxRotation) => {
@@ -537,9 +659,6 @@ async function robustPointToPlaneICP({
     return new THREE.Matrix4().compose(matrixTranslation, quaternion, new THREE.Vector3(1, 1, 1))
   }
 
-  // Rychlé ohodnocení line-search faktoru nad JIŽ nalezenými correspondence.
-  // Nevolá BVH. Slouží jen k výběru nejperspektivnějších 1–2 faktorů, které pak
-  // jako jediné ověříme plným nearest-surface dotazem.
   const fixedCorrespondenceRms = (increment, correspondences) => {
     if (!correspondences.length) return Infinity
     const point = new THREE.Vector3()
@@ -552,12 +671,13 @@ async function robustPointToPlaneICP({
     return Math.sqrt(sumSq / correspondences.length)
   }
 
-  // Po kvalitním 3bodovém seedu není potřeba brutálně hustý ICP. Menší počty
-  // vzorků + více scale úrovní dávají velmi podobnou přesnost a podstatně nižší čas.
+  // První dva passy používají hustý spatial proxy. Třetí pass je stále přesný
+  // triangle-surface point-to-plane ICP. Proxy tedy urychluje konvergenci, nikoli
+  // finální metrologii.
   const stages = [
-    { mode: "point", samples: 1600, iterations: 5, maxDistance: Math.max(3.0, diagonal * 0.055), trim: 0.70, maxTranslation: 1.2, maxRotation: THREE.MathUtils.degToRad(5) },
-    { mode: "point", samples: 3200, iterations: 6, maxDistance: Math.max(1.5, diagonal * 0.030), trim: 0.80, maxTranslation: 0.65, maxRotation: THREE.MathUtils.degToRad(2.5) },
-    { mode: "plane", samples: 6000, iterations: 4, maxDistance: Math.max(0.65, diagonal * 0.014), trim: 0.86, maxTranslation: 0.22, maxRotation: THREE.MathUtils.degToRad(0.8) },
+    { mode: "point", query: "proxy", samples: 1400, iterations: 4, maxDistance: Math.max(3.0, diagonal * 0.055), trim: 0.70, maxTranslation: 1.2, maxRotation: THREE.MathUtils.degToRad(5) },
+    { mode: "plane", query: "proxy", samples: 2800, iterations: 4, maxDistance: Math.max(1.4, diagonal * 0.028), trim: 0.82, maxTranslation: 0.55, maxRotation: THREE.MathUtils.degToRad(2.2) },
+    { mode: "plane", query: "exact", samples: 6000, iterations: 3, maxDistance: Math.max(0.60, diagonal * 0.013), trim: 0.87, maxTranslation: 0.20, maxRotation: THREE.MathUtils.degToRad(0.7) },
   ]
 
   const stageSamples = stages.map((stage) => buildSourceSamples(stage.samples))
@@ -565,19 +685,25 @@ async function robustPointToPlaneICP({
   const validationMaxDistance = Math.max(4.0, diagonal * 0.065)
   const validationTrim = 0.82
 
-  onProgress?.({ stage: 0, stages: stages.length, iteration: 0, iterations: 1, rms: null, correspondences: 0, mode: "prepare" })
+  const phaseTimings = { proxyBuildMs: proxyReadyAt - proxyStartedAt, initialValidationMs: 0, coarseMs: 0, coarseValidationMs: 0, exactFineMs: 0, finalValidationMs: 0 }
+
+  onProgress?.({ stage: 0, stages: stages.length, iteration: 0, iterations: 1, rms: null, correspondences: 0, mode: "prepare", phase: "exact-seed-validation", percent: 3 })
   await alignmentYield()
 
-  const initialValidation = await evaluateMatrix(
+  let phaseStartedAt = performance.now()
+  const initialValidation = await evaluateExactMatrix(
     current, validationSamples, validationMaxDistance, validationTrim,
-    (fraction) => onProgress?.({ stage: 0, stages: stages.length, iteration: 0, iterations: 1, rms: null, correspondences: 0, mode: "prepare", percent: 3 + fraction * 7 })
+    (fraction) => onProgress?.({ stage: 0, stages: stages.length, iteration: 0, iterations: 1, rms: null, correspondences: 0, mode: "prepare", phase: "exact-seed-validation", percent: 3 + fraction * 5 })
   )
+  phaseTimings.initialValidationMs = performance.now() - phaseStartedAt
+
   let bestMatrix = current.clone()
   let bestValidationRms = initialValidation.rms
   let finalRms = initialValidation.rms
   let finalCount = initialValidation.count
 
-  const stageRanges = [[10, 34], [34, 62], [62, 88]]
+  const stageRanges = [[8, 28], [28, 50], [58, 88]]
+  phaseStartedAt = performance.now()
 
   for (let stageIndex = 0; stageIndex < stages.length; stageIndex++) {
     const stage = stages[stageIndex]
@@ -585,6 +711,7 @@ async function robustPointToPlaneICP({
     if (samples.length < 30) continue
     const [stageStartPercent, stageEndPercent] = stageRanges[stageIndex]
     const iterationPercentSpan = (stageEndPercent - stageStartPercent) / Math.max(1, stage.iterations)
+    const queryFn = stage.query === "proxy" ? proxySurface.query : exactQuery
 
     for (let iteration = 0; iteration < stage.iterations; iteration++) {
       const iterationStartPercent = stageStartPercent + iteration * iterationPercentSpan
@@ -597,13 +724,13 @@ async function robustPointToPlaneICP({
         correspondences: finalCount,
         mode: stage.mode,
         percent: iterationStartPercent + iterationPercentSpan * Math.min(0.98, Math.max(0, localFraction)),
+        proxy: stage.query === "proxy",
         ...extra,
       })
-      // Correspondence hledáme pro current pouze jednou. Jeho RMS spočítáme rovnou
-      // ze stejného výsledku — v2.2 zde dělala druhý kompletní BVH průchod.
+
       const correspondences = await makeCorrespondences(
-        current, samples, stage.maxDistance, stage.trim,
-        (fraction) => emitStageProgress(fraction * 0.55, { phase: "correspondences" }),
+        queryFn, current, samples, stage.maxDistance, stage.trim,
+        (fraction) => emitStageProgress(fraction * 0.55, { phase: stage.query === "proxy" ? "proxy-correspondences" : "correspondences" }),
         stage.mode === "plane"
       )
       if (correspondences.length < 30) {
@@ -622,8 +749,6 @@ async function robustPointToPlaneICP({
       }
       if (!rawIncrement) break
 
-      // Nejprve velmi levně seřadíme line-search faktory podle fixed correspondences.
-      // Teprve nejlepší kandidáty podrobíme drahému nearest-surface přepočtu.
       const factorCandidates = [1, 0.5, 0.25, 0.125]
         .map((factor) => {
           const increment = scaleRigidIncrement(rawIncrement, factor, stage.maxTranslation, stage.maxRotation)
@@ -650,8 +775,8 @@ async function robustPointToPlaneICP({
         }
 
         const candidateCorrespondences = await makeCorrespondences(
-          candidate, samples, stage.maxDistance, stage.trim,
-          (fraction) => emitStageProgress(0.58 + ((f + fraction) / Math.max(1, factorCandidates.length)) * 0.32, { phase: "verify" }),
+          queryFn, candidate, samples, stage.maxDistance, stage.trim,
+          (fraction) => emitStageProgress(0.58 + ((f + fraction) / Math.max(1, factorCandidates.length)) * 0.32, { phase: stage.query === "proxy" ? "proxy-verify" : "verify" }),
           false
         )
         const candidateEval = metricsFromCorrespondences(candidateCorrespondences)
@@ -681,6 +806,8 @@ async function robustPointToPlaneICP({
         rms: finalRms,
         correspondences: finalCount,
         mode: stage.mode,
+        phase: stage.query === "proxy" ? "proxy-update" : "exact-update",
+        proxy: stage.query === "proxy",
         percent: Math.min(stageEndPercent - 0.5, iterationStartPercent + iterationPercentSpan * 0.96),
       })
       await alignmentYield()
@@ -688,43 +815,65 @@ async function robustPointToPlaneICP({
       if (incPosition.length() < 0.0005 && incAngle < 0.00004) break
     }
 
-    // Drahá 5k validační sada se v2.2 počítala po KAŽDÉ iteraci.
-    // Pro safety rollback ji stačí provést jednou na konci každého scale passu.
-    const validation = await evaluateMatrix(
-      current, validationSamples, validationMaxDistance, validationTrim,
-      (fraction) => onProgress?.({
-        stage: stageIndex + 1, stages: stages.length, iteration: stage.iterations, iterations: stage.iterations,
-        rms: finalRms, correspondences: finalCount, mode: stage.mode, phase: "validation",
-        percent: (stageEndPercent - 1.6) + fraction * 1.6,
-      })
-    )
-    if (validation.count >= 30 && validation.rms < bestValidationRms) {
-      bestValidationRms = validation.rms
-      bestMatrix.copy(current)
+    // Po obou rychlých proxy passech provedeme jednu skutečnou triangle-surface
+    // kontrolu. Pokud proxy seed nezlepšil, vrátíme se před exact fine passem na
+    // původní landmark transformaci. Proxy tedy nemůže bezpečnost výsledku zhoršit.
+    if (stageIndex === 1) {
+      phaseTimings.coarseMs = performance.now() - phaseStartedAt
+      phaseStartedAt = performance.now()
+      const coarseValidation = await evaluateExactMatrix(
+        current, validationSamples, validationMaxDistance, validationTrim,
+        (fraction) => onProgress?.({
+          stage: 2, stages: 3, iteration: stages[1].iterations, iterations: stages[1].iterations,
+          rms: finalRms, correspondences: finalCount, mode: "validation", phase: "proxy-safety-validation",
+          percent: 50 + fraction * 8,
+        })
+      )
+      phaseTimings.coarseValidationMs = performance.now() - phaseStartedAt
+      if (coarseValidation.count >= 30 && coarseValidation.rms + 1e-6 < bestValidationRms) {
+        bestValidationRms = coarseValidation.rms
+        bestMatrix.copy(current)
+      } else {
+        current.copy(bestMatrix)
+      }
+      phaseStartedAt = performance.now()
     }
-    await alignmentYield()
   }
 
-  // Finální safety check. Best Fit nikdy nesmí být horší než landmark seed.
-  const finalValidation = await evaluateMatrix(
-    bestMatrix, validationSamples, validationMaxDistance, validationTrim,
-    (fraction) => onProgress?.({ stage: 4, stages: 4, iteration: 1, iterations: 1, rms: finalRms, correspondences: finalCount, mode: "validation", percent: 88 + fraction * 6 })
+  phaseTimings.exactFineMs = performance.now() - phaseStartedAt
+  phaseStartedAt = performance.now()
+
+  const finalValidation = await evaluateExactMatrix(
+    current, validationSamples, validationMaxDistance, validationTrim,
+    (fraction) => onProgress?.({ stage: 4, stages: 4, iteration: 1, iterations: 1, rms: finalRms, correspondences: finalCount, mode: "validation", phase: "final-exact-validation", percent: 88 + fraction * 6 })
   )
-  if (finalValidation.count >= 30 && finalValidation.rms < bestValidationRms) bestValidationRms = finalValidation.rms
+  phaseTimings.finalValidationMs = performance.now() - phaseStartedAt
+
+  if (finalValidation.count >= 30 && finalValidation.rms + 1e-6 < bestValidationRms) {
+    bestValidationRms = finalValidation.rms
+    bestMatrix.copy(current)
+  }
 
   const improved = Number.isFinite(bestValidationRms) && (
     !Number.isFinite(initialValidation.rms) || bestValidationRms + 1e-5 < initialValidation.rms
   )
+
   return {
     matrix: (improved ? bestMatrix : initialCurrent).toArray(),
     rms: improved ? bestValidationRms : initialValidation.rms,
     correspondences: finalCount,
     improved,
     optimization: {
+      version: "v3-multires-proxy",
       spatialPool: spatialSamplePool.length,
       sourceVertices: sourcePosition.count,
-      bvhStrategy: "SAH",
-      thresholdedClosestPoint: true,
+      targetProxyPoints: proxySurface.count,
+      proxyCellSize: proxySurface.cellSize,
+      exactBvhStrategy: "SAH",
+      exactFinalPass: true,
+      exactSafetyValidation: true,
+      phaseTimings,
+      algorithmMs: performance.now() - algorithmStartedAt,
     },
   }
 }
@@ -1155,6 +1304,7 @@ self.onmessage = async (event) => {
       })
 
       const finishedAt = performance.now()
+      console.info("[ARTHETIC Align Worker v3] Multi-resolution timing", result?.optimization || null)
       self.postMessage({
         type: "RESULT",
         requestId,
