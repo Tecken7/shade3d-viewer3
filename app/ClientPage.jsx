@@ -3476,7 +3476,7 @@ function Switch({ checked, onChange, label }) {
 }
 
 /* ---------- 2D OVERLAY ---------- */
-function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasureState, dicomSlice, onInteractionChange, embedded = false, title = "", active = false, onActivate, accent = "#f59e9e" }) {
+function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasureState, dicomSlice, onInteractionChange, embedded = false, mobile = false, title = "", active = false, onActivate, accent = "#f59e9e" }) {
   const svgRef = useRef(null)
   const containerRef = useRef(null)
 
@@ -3744,14 +3744,18 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
         boxSizing: 'border-box',
         background: '#1a1a1a', border: active ? `2px solid ${accent}` : '1px solid #444', borderRadius: 8,
         zIndex: 100, overflow: embedded ? 'hidden' : 'visible', boxShadow: active ? `inset 0 0 0 1px ${accent}55, 0 0 18px ${accent}33` : embedded ? 'none' : '0 8px 32px rgba(0,0,0,0.5)',
-        cursor: measureState.active ? 'crosshair' : 'grab'
+        cursor: measureState.active ? 'crosshair' : 'grab',
+        touchAction: mobile ? 'none' : 'auto',
+        overscrollBehavior: mobile ? 'contain' : 'auto',
+        WebkitUserSelect: mobile ? 'none' : 'auto',
+        userSelect: mobile ? 'none' : 'auto'
       }}
     >
       <div style={{ position: 'absolute', top: 8, left: 16, fontSize: 11, color: '#aaa', pointerEvents: 'none', zIndex: 11 }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
           <b style={{ color: active ? accent : '#fff' }}>{title || (dicomSlice ? "DICOM řez + obrysy modelů" : "Obrysy modelů")}</b>
           {active && <span style={{ padding: '2px 5px', borderRadius: 4, background: `${accent}30`, border: `1px solid ${accent}88`, color: accent, fontSize: 9, fontWeight: 800 }}>AKTIVNÍ</span>}
-        </span><br/>Levé tl. = posun, Kolečko = zoom, Dvojklik = měření
+        </span><br/>{mobile ? "Tažení = posun · dvojklep = měření" : "Levé tl. = posun, Kolečko = zoom, Dvojklik = měření"}
       </div>
 
       {!embedded && (
@@ -3766,7 +3770,7 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
         ref={svgRef} 
         width="100%" height="100%" 
         viewBox={vBox}
-        style={{ display: 'block', transform: 'scale(1, -1)', borderRadius: 8, overflow: 'hidden' }}
+        style={{ display: 'block', transform: 'scale(1, -1)', borderRadius: 8, overflow: 'hidden', touchAction: mobile ? 'none' : 'auto', overscrollBehavior: mobile ? 'contain' : 'auto' }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -4415,6 +4419,77 @@ export default function ClientPage() {
   }, [dicomSource, dicomSettings.viewMode])
 
   const [mobileFunctionsOpen, setMobileFunctionsOpen] = useState(false)
+  const [mobileFunctionsSheetHeight, setMobileFunctionsSheetHeight] = useState(null)
+  const [mobileFunctionsSheetDragging, setMobileFunctionsSheetDragging] = useState(false)
+  const mobileFunctionsSheetDragRef = useRef(null)
+
+  const getMobileFunctionsSheetBounds = useCallback(() => {
+    if (typeof window === "undefined") return { min: 300, compact: 430, expanded: 650 }
+    const viewport = Math.max(520, window.innerHeight || 0)
+    return {
+      min: Math.min(320, viewport * 0.38),
+      compact: Math.min(500, viewport * 0.56),
+      expanded: Math.min(760, viewport * 0.84),
+    }
+  }, [])
+
+  const beginMobileFunctionsSheetDrag = useCallback((event) => {
+    if (typeof window === "undefined") return
+    event.preventDefault()
+    event.stopPropagation()
+    const bounds = getMobileFunctionsSheetBounds()
+    const startHeight = Number.isFinite(mobileFunctionsSheetHeight) ? mobileFunctionsSheetHeight : bounds.compact
+    const target = event.currentTarget
+    try { target.setPointerCapture?.(event.pointerId) } catch {}
+    mobileFunctionsSheetDragRef.current = {
+      pointerId: event.pointerId,
+      target,
+      startY: event.clientY,
+      startHeight,
+      lastHeight: startHeight,
+      ...bounds,
+    }
+    setMobileFunctionsSheetDragging(true)
+  }, [getMobileFunctionsSheetBounds, mobileFunctionsSheetHeight])
+
+  const moveMobileFunctionsSheetDrag = useCallback((event) => {
+    const drag = mobileFunctionsSheetDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    event.preventDefault()
+    event.stopPropagation()
+    const next = Math.max(drag.min, Math.min(drag.expanded, drag.startHeight + drag.startY - event.clientY))
+    drag.lastHeight = next
+    setMobileFunctionsSheetHeight(next)
+  }, [])
+
+  const endMobileFunctionsSheetDrag = useCallback((event) => {
+    const drag = mobileFunctionsSheetDragRef.current
+    if (!drag || (event?.pointerId != null && drag.pointerId !== event.pointerId)) return
+    event?.preventDefault?.()
+    event?.stopPropagation?.()
+    try { drag.target?.releasePointerCapture?.(drag.pointerId) } catch {}
+    const height = drag.lastHeight
+    mobileFunctionsSheetDragRef.current = null
+    setMobileFunctionsSheetDragging(false)
+
+    if (height < drag.compact * 0.72) {
+      setMobileFunctionsOpen(false)
+      setMobileFunctionsSheetHeight(null)
+      return
+    }
+    const snap = height >= (drag.compact + drag.expanded) / 2 ? drag.expanded : drag.compact
+    setMobileFunctionsSheetHeight(snap)
+  }, [])
+
+  useEffect(() => {
+    if (!mobileFunctionsOpen || !isMobile) return
+    const bounds = getMobileFunctionsSheetBounds()
+    setMobileFunctionsSheetHeight((current) => Number.isFinite(current) ? current : bounds.compact)
+    return () => {
+      mobileFunctionsSheetDragRef.current = null
+      setMobileFunctionsSheetDragging(false)
+    }
+  }, [mobileFunctionsOpen, isMobile, getMobileFunctionsSheetBounds])
   const [heatmapMenuOpen, setHeatmapMenuOpen] = useState(false)
   const [heatmapSelection, setHeatmapSelection] = useState([])
   const [isCalculatingHeatmap, setIsCalculatingHeatmap] = useState(false)
@@ -4441,7 +4516,10 @@ export default function ClientPage() {
   const [surfaceAnalysisCompletion, setSurfaceAnalysisCompletion] = useState(null) // null | { kind: "comparison" | "occlusion", phase: "show" | "fade", elapsed }
 
   useEffect(() => {
-    if (!isMobile) setMobileFunctionsOpen(false)
+    if (!isMobile) {
+      setMobileFunctionsOpen(false)
+      setMobileFunctionsSheetHeight(null)
+    }
   }, [isMobile])
 
   // -- ZAROVNÁNÍ / REGISTRACE MODELŮ --
@@ -6935,7 +7013,7 @@ export default function ClientPage() {
 
   const sidebar = (
     <div className="sidebar" style={{
-      position: "absolute", top: 10, left: 10, zIndex: 2, width: "clamp(270px, 27vw, 400px)", maxWidth: "calc(100vw - 20px)",
+      position: "absolute", top: 10, left: 10, zIndex: isMobile ? 5 : 2, width: "clamp(270px, 27vw, 400px)", maxWidth: "calc(100vw - 20px)",
       color: "#ededed", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: 12,
       backdropFilter: "blur(18px)", WebkitBackdropFilter: "blur(18px)", background: "rgba(12,12,12,.78)",
       border: "1px solid rgba(255,255,255,.09)", borderRadius: 14, padding: 8, boxSizing: "border-box",
@@ -7604,6 +7682,8 @@ export default function ClientPage() {
 
   const alignmentBottomHeight = "38vh"
   const alignmentSceneInsetActive = alignmentMode && alignmentTransition !== "exiting"
+  const mobileSliceSplitActive = isMobile && clippingEnabled && !dicomLayoutActive && !dicomSource && !alignmentMode
+  const mobileSlicePaneHeight = "min(40dvh, 390px)"
   const alignmentEligibleFiles = files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url)))
   const alignmentPair = getAlignmentPair()
   const alignmentPairCount = Math.min(alignmentPointsA.length, alignmentPointsB.length)
@@ -8606,14 +8686,14 @@ export default function ClientPage() {
   return (
     <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black", overflow: "hidden" }}>
       <PreloadIcons />
-      {!alignmentMode && logoEl}
+      {!alignmentMode && !mobileSliceSplitActive && logoEl}
       {!hideSidebar && !alignmentMode && sidebar}
       {!alignmentMode && topBarRight}
 
       {isMobile && mobileFunctionsOpen && !alignmentMode && (
         <>
           <div
-            onClick={() => setMobileFunctionsOpen(false)}
+            onClick={() => { setMobileFunctionsOpen(false); setMobileFunctionsSheetHeight(null) }}
             style={{
               position: "absolute", inset: 0, zIndex: 448,
               background: "rgba(0,0,0,.36)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)",
@@ -8626,13 +8706,26 @@ export default function ClientPage() {
           `}</style>
           <div style={{
             position: "absolute", left: 10, right: 10, bottom: 10, zIndex: 449,
-            padding: "10px 10px 12px", borderRadius: 18, maxHeight: "min(78vh, 620px)", overflowY: "auto", overscrollBehavior: "contain",
+            height: Number.isFinite(mobileFunctionsSheetHeight) ? `${Math.round(mobileFunctionsSheetHeight)}px` : "min(56dvh, 500px)",
+            maxHeight: "calc(100dvh - 20px)",
+            padding: "8px 10px 12px", borderRadius: 18, overflowY: "auto", overscrollBehavior: "contain",
             background: "rgba(12,12,12,.97)", border: "1px solid rgba(255,255,255,.10)",
             boxShadow: "0 28px 80px rgba(0,0,0,.58)", backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
             color: "#ededed", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
             animation: "artheticMobileFunctionsSheetIn .25s cubic-bezier(.2,.75,.25,1) both",
+            transition: mobileFunctionsSheetDragging ? "none" : "height .30s cubic-bezier(.2,.78,.24,1)",
+            willChange: "height",
           }}>
-            <div style={{ width: 34, height: 4, borderRadius: 999, background: "rgba(255,255,255,.13)", margin: "0 auto 10px" }} />
+            <div
+              onPointerDown={beginMobileFunctionsSheetDrag}
+              onPointerMove={moveMobileFunctionsSheetDrag}
+              onPointerUp={endMobileFunctionsSheetDrag}
+              onPointerCancel={endMobileFunctionsSheetDrag}
+              style={{ height: 20, margin: "-3px -2px 2px", display: "grid", placeItems: "center", touchAction: "none", cursor: mobileFunctionsSheetDragging ? "grabbing" : "grab" }}
+              aria-label="Táhnout panel funkcí"
+            >
+              <div style={{ width: 38, height: 4, borderRadius: 999, background: mobileFunctionsSheetDragging ? "rgba(255,255,255,.30)" : "rgba(255,255,255,.14)", transition: "background .15s ease" }} />
+            </div>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "2px 4px 10px" }}>
               <div>
                 <div style={{ fontSize: 13, fontWeight: 780, letterSpacing: "-.015em" }}>Funkce</div>
@@ -8640,7 +8733,7 @@ export default function ClientPage() {
               </div>
               <button
                 type="button"
-                onClick={() => setMobileFunctionsOpen(false)}
+                onClick={() => { setMobileFunctionsOpen(false); setMobileFunctionsSheetHeight(null) }}
                 aria-label="Zavřít funkce"
                 style={{ width: 30, height: 30, padding: 0, display: "grid", placeItems: "center", borderRadius: 9, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.035)", color: "#aaa", cursor: "pointer" }}
               >
@@ -9123,7 +9216,33 @@ export default function ClientPage() {
         </div>
       )}
 
-      {!alignmentMode && !dicomLayoutActive && clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />}
+      {!alignmentMode && !dicomLayoutActive && clippingEnabled && !isMobile && (
+        <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />
+      )}
+
+      {mobileSliceSplitActive && (
+        <div style={{
+          position: "absolute", left: 10, right: 10, bottom: 10, height: mobileSlicePaneHeight, zIndex: 2,
+          borderRadius: 12, overflow: "hidden", background: "#141414",
+          border: "1px solid rgba(255,255,255,.12)", boxShadow: "0 -12px 36px rgba(0,0,0,.34)",
+          touchAction: "none", overscrollBehavior: "contain",
+        }}>
+          <Overlay2D
+            embedded mobile title="Průřez · 2D"
+            segments={sliceSegments}
+            modelColors={colors}
+            boundingBox={sliceBBox}
+            measureState={measureState}
+            setMeasureState={setMeasureState}
+            dicomSlice={dicomSlice2D}
+            onInteractionChange={handleSliceOverlayInteraction}
+          />
+        </div>
+      )}
+
+      {!alignmentMode && !dicomLayoutActive && clippingEnabled && isMobile && !!dicomSource && dicomSettings.viewMode === "only2d" && (
+        <Overlay2D mobile segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />
+      )}
 
       <Canvas
         orthographic
@@ -9134,7 +9253,7 @@ export default function ClientPage() {
             gl.localClippingEnabled = false
             gl.domElement.dataset.artheticMainScene = "1"
         }}
-        style={{ position: "absolute", top: 0, bottom: alignmentSceneInsetActive ? alignmentBottomHeight : 0, left: 0, right: dicomLayoutActive ? dicomPanelWidth : 0, zIndex: 1, background: "transparent", transition: "bottom .44s cubic-bezier(.2,.8,.2,1), right .34s ease", willChange: "bottom" }}
+        style={{ position: "absolute", top: 0, bottom: alignmentSceneInsetActive ? alignmentBottomHeight : (mobileSliceSplitActive ? `calc(${mobileSlicePaneHeight} + 18px)` : 0), left: 0, right: dicomLayoutActive ? dicomPanelWidth : 0, zIndex: 1, background: "transparent", transition: "bottom .44s cubic-bezier(.2,.8,.2,1), right .34s ease", willChange: "bottom" }}
       >
         <ambientLight intensity={0.35 * sceneIntensity} />
         <directionalLight position={[0, 5, 5]} intensity={1.2 * sceneIntensity} />
