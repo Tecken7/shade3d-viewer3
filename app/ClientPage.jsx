@@ -4434,9 +4434,14 @@ export default function ClientPage() {
   // oba směry + fingerprint modelů a jejich přesných transformací.
   const [comparisonSnapshot, setComparisonSnapshot] = useState(null)
   const [restoringAnalysisMode, setRestoringAnalysisMode] = useState(null)
+  const [surfaceAnalysisStartedAt, setSurfaceAnalysisStartedAt] = useState(null)
+  const [surfaceAnalysisElapsed, setSurfaceAnalysisElapsed] = useState(0)
+  const surfaceAnalysisElapsedDisplayRef = useRef(null)
+  const [surfaceAnalysisCompletion, setSurfaceAnalysisCompletion] = useState(null) // null | { kind: "comparison" | "occlusion", phase: "show" | "fade", elapsed }
 
   // -- ZAROVNÁNÍ / REGISTRACE MODELŮ --
   const [alignmentMode, setAlignmentMode] = useState(false)
+  const [alignmentTransition, setAlignmentTransition] = useState("idle") // idle | entering | active | exiting
   const [alignmentSelection, setAlignmentSelection] = useState([])
   const [alignmentPointsA, setAlignmentPointsA] = useState([])
   const [alignmentPointsB, setAlignmentPointsB] = useState([])
@@ -4665,6 +4670,48 @@ export default function ClientPage() {
     return () => cancelAnimationFrame(raf)
   }, [alignmentBusy, alignmentStartedAt, alignmentCompletion])
 
+  useEffect(() => {
+    if (surfaceAnalysisCompletion) {
+      const frozen = Number.isFinite(surfaceAnalysisCompletion.elapsed) ? surfaceAnalysisCompletion.elapsed : surfaceAnalysisElapsed
+      if (surfaceAnalysisElapsedDisplayRef.current) surfaceAnalysisElapsedDisplayRef.current.textContent = `${Math.max(0, frozen).toFixed(2)} s`
+      return undefined
+    }
+
+    const running = isCalculatingHeatmap || isCalculatingComparison
+    if (!running || !surfaceAnalysisStartedAt) {
+      if (!running) setSurfaceAnalysisElapsed(0)
+      if (surfaceAnalysisElapsedDisplayRef.current) surfaceAnalysisElapsedDisplayRef.current.textContent = "0.00 s"
+      return undefined
+    }
+
+    let raf = 0
+    let lastStateUpdateAt = 0
+    const update = (now) => {
+      const elapsed = Math.max(0, (performance.now() - surfaceAnalysisStartedAt) / 1000)
+      if (surfaceAnalysisElapsedDisplayRef.current) {
+        surfaceAnalysisElapsedDisplayRef.current.textContent = `${elapsed.toFixed(2)} s`
+      }
+      if (now - lastStateUpdateAt >= 180) {
+        lastStateUpdateAt = now
+        setSurfaceAnalysisElapsed(elapsed)
+      }
+      raf = requestAnimationFrame(update)
+    }
+
+    raf = requestAnimationFrame(update)
+    return () => cancelAnimationFrame(raf)
+  }, [isCalculatingHeatmap, isCalculatingComparison, surfaceAnalysisStartedAt, surfaceAnalysisCompletion])
+
+  const runSurfaceCompletionSequence = useCallback(async (kind, startedAt) => {
+    const completedElapsed = Math.max(0, (performance.now() - startedAt) / 1000)
+    setSurfaceAnalysisElapsed(completedElapsed)
+    setSurfaceAnalysisStartedAt(null)
+    setSurfaceAnalysisCompletion({ kind, phase: "show", elapsed: completedElapsed })
+    await new Promise((resolve) => window.setTimeout(resolve, 2600))
+    setSurfaceAnalysisCompletion((current) => current ? { ...current, phase: "fade" } : current)
+    await new Promise((resolve) => window.setTimeout(resolve, 620))
+  }, [])
+
   const [pinnedNotes, setPinnedNotes] = useState([])
   const [pendingViewerState, setPendingViewerState] = useState(null)
   const restoredViewerStateRef = useRef(null)
@@ -4738,6 +4785,10 @@ export default function ClientPage() {
     setComparisonSnapshot(null)
     setPinnedNotes([])
     setAlignmentMode(false)
+    setAlignmentTransition("idle")
+    setSurfaceAnalysisCompletion(null)
+    setSurfaceAnalysisStartedAt(null)
+    setSurfaceAnalysisElapsed(0)
     setAlignmentSelection([])
     setAlignmentPointsA([])
     setAlignmentPointsB([])
@@ -4905,7 +4956,9 @@ export default function ClientPage() {
     setAlignmentSelection(["", ""])
     setAlignmentPointsA([])
     setAlignmentPointsB([])
+    setAlignmentTransition("entering")
     setAlignmentMode(true)
+    requestAnimationFrame(() => requestAnimationFrame(() => setAlignmentTransition("active")))
     setAlignmentMessage("Vyberte model Reference A a model Moving B v pracovních oknech dole.")
     setAlignmentProgress(null)
     setAlignmentStats(null)
@@ -4919,6 +4972,16 @@ export default function ClientPage() {
     setShowHeatmap(false)
     setShowComparison(false)
   }, [files])
+
+  const closeAlignmentMode = useCallback(() => {
+    if (alignmentBusy || !alignmentMode || alignmentTransition === "exiting") return
+    setAlignmentTransition("exiting")
+    window.setTimeout(() => {
+      setAlignmentMode(false)
+      setAlignmentTransition("idle")
+      setAlignmentMessage("")
+    }, 480)
+  }, [alignmentBusy, alignmentMode, alignmentTransition])
 
   const changeAlignmentSelection = useCallback(async (side, url) => {
     const index = side === "A" ? 0 : 1
@@ -5527,6 +5590,10 @@ export default function ClientPage() {
 
   const handleApplyHeatmap = async () => {
     if (heatmapSelection.length !== 2) return
+    const analysisStartedAt = performance.now()
+    setSurfaceAnalysisCompletion(null)
+    setSurfaceAnalysisStartedAt(analysisStartedAt)
+    setSurfaceAnalysisElapsed(0)
     setIsCalculatingHeatmap(true)
     setSurfaceAnalysisProgress({ type: "occlusion", percent: 1, phase: "prepare" })
     setPinnedNotes([])
@@ -5544,12 +5611,17 @@ export default function ClientPage() {
         setHasComputedHeatmap(true)
         setShowHeatmap(true)
         setShowComparison(false)
+        setSurfaceAnalysisProgress({ type: "occlusion", percent: 100, phase: "done" })
+
+        await runSurfaceCompletionSequence("occlusion", analysisStartedAt)
       }
     } catch (e) {
       console.error("Heatmap chyba:", e)
     } finally {
       setSurfaceAnalysisProgress(null)
+      setSurfaceAnalysisStartedAt(null)
       setIsCalculatingHeatmap(false)
+      setSurfaceAnalysisCompletion(null)
     }
   }
 
@@ -5557,9 +5629,13 @@ export default function ClientPage() {
     if (comparisonSelection.length !== 2) return
     // Explicitní kliknutí na Vypočítat znamená vždy čerstvý výpočet pro aktuální
     // polohu modelů. Starý snapshot se před startem zahodí.
+    const analysisStartedAt = performance.now()
     setComparisonSnapshot(null)
     setHasComputedComparison(false)
     setShowComparison(false)
+    setSurfaceAnalysisCompletion(null)
+    setSurfaceAnalysisStartedAt(analysisStartedAt)
+    setSurfaceAnalysisElapsed(0)
     setIsCalculatingComparison(true)
     setSurfaceAnalysisProgress({ type: "comparison", percent: 1, phase: "prepare" })
     setPinnedNotes([])
@@ -5593,12 +5669,17 @@ export default function ClientPage() {
         setHasComputedComparison(true)
         setShowComparison(true)
         setShowHeatmap(false)
+        setSurfaceAnalysisProgress({ type: "comparison", percent: 100, phase: "done" })
+
+        await runSurfaceCompletionSequence("comparison", analysisStartedAt)
       }
     } catch (e) {
       console.error("Chyba porovnání povrchů:", e)
     } finally {
       setSurfaceAnalysisProgress(null)
+      setSurfaceAnalysisStartedAt(null)
       setIsCalculatingComparison(false)
+      setSurfaceAnalysisCompletion(null)
     }
   }
 
@@ -6017,6 +6098,9 @@ export default function ClientPage() {
     if (!restoringOcclusion && !restoringComparison) return
 
     setRestoringAnalysisMode(mode)
+    setSurfaceAnalysisCompletion(null)
+    setSurfaceAnalysisStartedAt(performance.now())
+    setSurfaceAnalysisElapsed(0)
     setIsCalculatingHeatmap(restoringOcclusion)
     setIsCalculatingComparison(restoringComparison)
 
@@ -6085,6 +6169,8 @@ export default function ClientPage() {
         console.error("Obnovení analýzy selhalo:", error)
       } finally {
         setSurfaceAnalysisProgress(null)
+        setSurfaceAnalysisStartedAt(null)
+        setSurfaceAnalysisCompletion(null)
         setIsCalculatingHeatmap(false)
         setIsCalculatingComparison(false)
         setRestoringAnalysisMode(null)
@@ -7471,6 +7557,7 @@ export default function ClientPage() {
   }, [sceneReadyForDicom, dicomSource, dicomStatus, startDicomLoad])
 
   const alignmentBottomHeight = "38vh"
+  const alignmentSceneInsetActive = alignmentMode && alignmentTransition !== "exiting"
   const alignmentEligibleFiles = files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url)))
   const alignmentPair = getAlignmentPair()
   const alignmentPairCount = Math.min(alignmentPointsA.length, alignmentPointsB.length)
@@ -7725,6 +7812,170 @@ export default function ClientPage() {
     return lines.slice(-7)
   })()
 
+  const surfaceAnalysisProgressUi = (() => {
+    if (surfaceAnalysisCompletion) {
+      if (surfaceAnalysisCompletion.kind === "comparison") {
+        return {
+          code: "COMPLETE",
+          label: "Porovnání dokončeno",
+          detail: "Oboustranná mapa odchylek je připravena",
+          percent: 100,
+        }
+      }
+      return {
+        code: "COMPLETE",
+        label: "Okluze dokončena",
+        detail: "Mapa kontaktu, průniku a mezery je připravena",
+        percent: 100,
+      }
+    }
+
+    if (!isCalculatingHeatmap && !isCalculatingComparison) return null
+    const progress = surfaceAnalysisProgress || {}
+    const percent = Number.isFinite(progress.percent) ? progress.percent : 2
+    const phase = String(progress.phase || "prepare")
+
+    if (isCalculatingComparison) {
+      const phases = {
+        prepare: ["PREPARE", "Příprava porovnání", "Připravuji geometrii a oboustranné surface queries"],
+        A_TO_B: ["A_TO_B", "Porovnávám povrchy", "Analyzuji povrch A vůči referenci B"],
+        B_TO_A: ["B_TO_A", "Porovnávám povrchy", "Analyzuji povrch B vůči referenci A"],
+        snapshot: ["SNAPSHOT", "Ukládám výsledek", "Připravuji mapu pro okamžité obnovení"],
+        "snapshot-decode": ["RESTORE", "Načítám porovnání", "Dekóduji uloženou mapu odchylek"],
+        "snapshot-colors-A": ["RESTORE_A", "Načítám porovnání", "Obnovuji barvy povrchu A"],
+        "snapshot-colors-B": ["RESTORE_B", "Načítám porovnání", "Obnovuji barvy povrchu B"],
+        metrics: ["METRICS", "Dokončuji porovnání", "Počítám souhrnné metriky"],
+        done: ["COMPLETE", "Porovnání dokončeno", "Mapa odchylek je připravena"],
+      }
+      const current = phases[phase] || phases.prepare
+      return { code: current[0], label: current[1], detail: current[2], percent }
+    }
+
+    const phases = {
+      prepare: ["PREPARE", "Příprava okluze", "Připravuji geometrii a signed-distance dotazy"],
+      distances: ["DISTANCE", "Vypočítávám okluzi", "Měřím průnik, kontakt a mezeru mezi povrchy"],
+      done: ["COMPLETE", "Okluze dokončena", "Kontaktní mapa je připravena"],
+    }
+    const current = phases[phase] || phases.prepare
+    return { code: current[0], label: current[1], detail: current[2], percent }
+  })()
+
+  const surfaceAnalysisTerminalLines = (() => {
+    if ((!isCalculatingHeatmap && !isCalculatingComparison && !surfaceAnalysisCompletion) || !surfaceAnalysisProgressUi) return []
+
+    if (surfaceAnalysisCompletion) {
+      if (surfaceAnalysisCompletion.kind === "comparison") {
+        return [
+          { id: "comparison-complete-1", stamp: "", text: "COMPARISON FINISHED", tone: "complete", typewriter: true, delay: 70 },
+          { id: "comparison-complete-2", stamp: "", text: "bidirectional surface map validated", tone: "data", typewriter: true, delay: 520 },
+          { id: "comparison-complete-3", stamp: "", text: "analysis result stored", tone: "normal", typewriter: true, delay: 980 },
+          { id: "comparison-complete-4", stamp: "", text: "ending comparison session", tone: "normal", typewriter: true, delay: 1450 },
+          { id: "comparison-complete-5", stamp: "", text: "session closed", tone: "muted", typewriter: true, delay: 2010 },
+        ]
+      }
+      return [
+        { id: "occlusion-complete-1", stamp: "", text: "OCCLUSION ANALYSIS FINISHED", tone: "complete", typewriter: true, delay: 70 },
+        { id: "occlusion-complete-2", stamp: "", text: "contact surface map validated", tone: "data", typewriter: true, delay: 520 },
+        { id: "occlusion-complete-3", stamp: "", text: "penetration / clearance result ready", tone: "normal", typewriter: true, delay: 980 },
+        { id: "occlusion-complete-4", stamp: "", text: "ending analysis session", tone: "normal", typewriter: true, delay: 1450 },
+        { id: "occlusion-complete-5", stamp: "", text: "session closed", tone: "muted", typewriter: true, delay: 2010 },
+      ]
+    }
+
+    const progress = surfaceAnalysisProgress || {}
+    const phase = String(progress.phase || "prepare")
+    const type = isCalculatingComparison ? "comparison" : "occlusion"
+    const tickSeconds = 1.12
+    const tick = Math.max(0, Math.floor(surfaceAnalysisElapsed / tickSeconds))
+    const activityByPhase = {
+      comparison: {
+        prepare: [
+          "reading geometry buffers",
+          "building bidirectional surface queries",
+          "checking model transforms",
+          "preparing comparison sample sets",
+        ],
+        A_TO_B: [
+          "querying surface A against reference B",
+          "measuring closest-point distances",
+          "accumulating A → B deviation samples",
+          "updating forward surface map",
+        ],
+        B_TO_A: [
+          "querying surface B against reference A",
+          "measuring reverse surface distances",
+          "accumulating B → A deviation samples",
+          "updating reverse validation map",
+        ],
+        snapshot: [
+          "quantizing deviation distances",
+          "compressing reusable result",
+          "packing comparison snapshot",
+          "finalizing analysis payload",
+        ],
+        "snapshot-decode": [
+          "decoding stored deviation distances",
+          "verifying snapshot geometry",
+          "restoring analysis payload",
+        ],
+        "snapshot-colors-A": [
+          "rebuilding A surface colors",
+          "mapping stored deviation values",
+          "restoring forward analysis layer",
+        ],
+        "snapshot-colors-B": [
+          "rebuilding B surface colors",
+          "mapping reverse deviation values",
+          "restoring comparison result",
+        ],
+        metrics: [
+          "accumulating comparison statistics",
+          "computing surface metrics",
+          "finalizing deviation summary",
+        ],
+        done: ["validating final comparison map"],
+      },
+      occlusion: {
+        prepare: [
+          "reading model transforms",
+          "building signed surface query",
+          "preparing contact analysis",
+          "checking reference geometry",
+        ],
+        distances: [
+          "querying closest surface points",
+          "evaluating signed distances",
+          "classifying penetration / clearance",
+          "updating occlusion surface colors",
+        ],
+        done: ["validating final contact map"],
+      },
+    }
+
+    const activity = activityByPhase[type][phase] || activityByPhase[type].prepare
+    const lines = []
+    const stamp = (seconds) => String(Math.max(0, seconds).toFixed(1)).padStart(6, "0")
+    const push = (id, seconds, value, tone = "normal", typewriter = false, delay = 28) => lines.push({ id, stamp: stamp(seconds), text: value, tone, typewriter, delay })
+
+    push(`${type}-header`, 0, type === "comparison" ? "ARTHETIC SURFACE ANALYSIS / COMPARISON" : "ARTHETIC SURFACE ANALYSIS / OCCLUSION", "muted", false)
+    push(`${type}-phase-${surfaceAnalysisProgressUi.code}`, Math.min(surfaceAnalysisElapsed, .2), `phase ${surfaceAnalysisProgressUi.code}`, "accent", true)
+
+    const visibleHeartbeat = 4
+    const firstTick = Math.max(0, tick - visibleHeartbeat + 1)
+    for (let t = firstTick; t <= tick; t += 1) {
+      const message = activity[t % activity.length]
+      push(`${type}-heartbeat-${phase}-${t}`, t * tickSeconds, message, t === tick ? "active" : "normal", true)
+    }
+
+    const processed = Number(progress.processed) || 0
+    const total = Number(progress.total) || 0
+    if (processed > 0 && total > 0) {
+      push(`${type}-samples-${Math.round(processed / 250)}`, surfaceAnalysisElapsed, `${processed.toLocaleString("cs-CZ")} / ${total.toLocaleString("cs-CZ")} surface samples`, "data", false)
+    }
+
+    return lines.slice(-7)
+  })()
+
   const alignmentButtonStyle = (variant = "secondary", disabled = false) => {
     const variants = {
       secondary: { background: "rgba(255,255,255,.055)", border: "rgba(255,255,255,.10)", color: "#f4f4f4", shadow: "none" },
@@ -7822,6 +8073,12 @@ export default function ClientPage() {
         @keyframes artheticAlignAttention { 0%,100% { box-shadow:0 0 0 0 rgba(255,255,255,.04); border-color:rgba(255,255,255,.10); } 50% { box-shadow:0 0 0 5px rgba(255,255,255,.055), 0 0 22px rgba(255,255,255,.08); border-color:rgba(255,255,255,.24); } }
         @keyframes artheticAlignCardIn { from { opacity:0; transform:translate(-50%,-46%) scale(.97); } to { opacity:1; transform:translate(-50%,-50%) scale(1); } }
         @keyframes artheticAlignCardOut { from { opacity:1; transform:translate(-50%,-50%) scale(1); filter:blur(0); } to { opacity:0; transform:translate(-50%,-51%) scale(.985); filter:blur(3px); } }
+        @keyframes artheticAlignWorkspaceTopIn { from { opacity:0; transform:translateY(-18px) scale(.985); filter:blur(7px); } to { opacity:1; transform:translateY(0) scale(1); filter:blur(0); } }
+        @keyframes artheticAlignWorkspaceTopOut { from { opacity:1; transform:translateY(0) scale(1); filter:blur(0); } to { opacity:0; transform:translateY(-14px) scale(.988); filter:blur(5px); } }
+        @keyframes artheticAlignWorkspaceBottomIn { from { opacity:0; transform:translateY(30px) scale(.985); filter:blur(7px); } to { opacity:1; transform:translateY(0) scale(1); filter:blur(0); } }
+        @keyframes artheticAlignWorkspaceBottomOut { from { opacity:1; transform:translateY(0) scale(1); filter:blur(0); } to { opacity:0; transform:translateY(26px) scale(.99); filter:blur(5px); } }
+        @keyframes artheticAlignWorkspaceWashIn { from { opacity:0; } to { opacity:1; } }
+        @keyframes artheticAlignWorkspaceWashOut { from { opacity:1; } to { opacity:0; } }
         @keyframes artheticAlignMenuIn { from { opacity:0; transform:translateY(-4px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
         @keyframes artheticAlignTerminalCursor { 0%,46% { opacity:1; } 47%,100% { opacity:.16; } }
         @keyframes artheticAlignCheckPop { 0% { opacity:0; transform:scale(.55); } 55% { opacity:1; transform:scale(1.08); } 100% { opacity:1; transform:scale(1); } }
@@ -7951,6 +8208,17 @@ export default function ClientPage() {
         }
       `}</style>
 
+      <div
+        aria-hidden="true"
+        style={{
+          position: "absolute", inset: 0, zIndex: 18, pointerEvents: "none",
+          background: "radial-gradient(circle at 50% 44%, rgba(255,255,255,.018), rgba(0,0,0,.045) 58%, rgba(0,0,0,.10) 100%)",
+          animation: alignmentTransition === "exiting"
+            ? "artheticAlignWorkspaceWashOut .40s ease both"
+            : "artheticAlignWorkspaceWashIn .42s ease both",
+        }}
+      />
+
       <div style={{
         position: "absolute", top: 10, left: 10, right: 10, zIndex: 32,
         minHeight: 58, padding: "10px 12px", boxSizing: "border-box",
@@ -7958,6 +8226,10 @@ export default function ClientPage() {
         boxShadow: "0 14px 42px rgba(0,0,0,.32)", backdropFilter: "blur(18px)",
         display: "flex", alignItems: "center", gap: 10, color: "white",
         fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        animation: alignmentTransition === "exiting"
+          ? "artheticAlignWorkspaceTopOut .36s cubic-bezier(.4,0,.2,1) both"
+          : "artheticAlignWorkspaceTopIn .44s cubic-bezier(.2,.8,.2,1) both",
+        willChange: "transform, opacity, filter",
       }}>
         <div style={{ minWidth: 148, padding: "0 7px 0 2px" }}>
           <div style={{ fontSize: 15, letterSpacing: "-.02em", whiteSpace: "nowrap", lineHeight: 1 }}>
@@ -8011,7 +8283,7 @@ export default function ClientPage() {
                 {[
                   { label: "Odchylka", onClick: showAlignmentDeviation, disabled: !alignmentStats, delay: ".08s" },
                   { label: "Reset polohy", onClick: resetAlignmentTransform, disabled: false, delay: ".23s" },
-                  { label: "Hotovo", onClick: () => { setAlignmentMode(false); setAlignmentMessage("") }, disabled: false, delay: ".38s" },
+                  { label: "Hotovo", onClick: closeAlignmentMode, disabled: false, delay: ".38s" },
                 ].map((action) => (
                   <button
                     key={action.label}
@@ -8044,7 +8316,7 @@ export default function ClientPage() {
         <div style={{ display: "flex", alignItems: "center", flex: "0 0 auto" }}>
           <button
             type="button"
-            onClick={() => { if (!alignmentBusy) { setAlignmentMode(false); setAlignmentMessage("") } }}
+            onClick={closeAlignmentMode}
             disabled={alignmentBusy}
             title="Vrátit se zpět na hlavní scénu"
             style={{ ...alignmentButtonStyle("secondary", alignmentBusy), height: 36, display: "inline-flex", alignItems: "center", gap: 8, padding: "0 12px" }}
@@ -8220,6 +8492,10 @@ export default function ClientPage() {
         display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8,
         background: "transparent", borderRadius: 14, overflow: "hidden",
         boxShadow: "0 -10px 36px rgba(0,0,0,.26)",
+        animation: alignmentTransition === "exiting"
+          ? "artheticAlignWorkspaceBottomOut .38s cubic-bezier(.4,0,.2,1) both"
+          : "artheticAlignWorkspaceBottomIn .46s cubic-bezier(.2,.8,.2,1) both",
+        willChange: "transform, opacity, filter",
       }}>
         <AlignmentPreviewViewport
           badge="A"
@@ -8397,61 +8673,168 @@ export default function ClientPage() {
         )
       })()}
 
-      {/* OVERLAY BĚHEM VÝPOČTU ANALÝZY */}
-      {(isCalculatingHeatmap || isCalculatingComparison) && (
-        <div style={{
-          position: "absolute", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.26)", backdropFilter: "blur(1.5px)", WebkitBackdropFilter: "blur(1.5px)",
-          display: "flex", alignItems: "center", justifyContent: "center", color: "white",
-          fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
-        }}>
+      {/* SJEDNOCENÝ TERMINÁL PRO POROVNÁNÍ / OKLUZI NA HLAVNÍ SCÉNĚ */}
+      {(isCalculatingHeatmap || isCalculatingComparison || surfaceAnalysisCompletion) && surfaceAnalysisProgressUi && (
+        <>
+          <style>{`
+            @keyframes artheticSurfaceSpin { to { transform:rotate(360deg); } }
+            @keyframes artheticSurfaceCardIn { from { opacity:0; transform:translate(-50%,-46%) scale(.97); } to { opacity:1; transform:translate(-50%,-50%) scale(1); } }
+            @keyframes artheticSurfaceCardOut { from { opacity:1; transform:translate(-50%,-50%) scale(1); filter:blur(0); } to { opacity:0; transform:translate(-50%,-51%) scale(.985); filter:blur(3px); } }
+            @keyframes artheticSurfaceCursor { 0%,46% { opacity:1; } 47%,100% { opacity:.16; } }
+            @keyframes artheticSurfaceCheckPop { 0% { opacity:0; transform:scale(.55); } 55% { opacity:1; transform:scale(1.08); } 100% { opacity:1; transform:scale(1); } }
+            @keyframes artheticSurfaceCheckDraw { from { stroke-dashoffset:24; } to { stroke-dashoffset:0; } }
+            .artheticSurfaceTerminal { position:relative; overflow:hidden; isolation:isolate; }
+            .artheticSurfaceTerminal::after {
+              content:""; position:absolute; inset:0;
+              background:repeating-linear-gradient(180deg, transparent 0, transparent 3px, rgba(255,255,255,.012) 4px);
+              pointer-events:none; z-index:1;
+            }
+          `}</style>
+
           <div style={{
-            width: 330, maxWidth: "calc(100vw - 40px)", padding: "20px 20px 18px", borderRadius: 16,
-            background: "rgba(12,12,12,.95)", border: "1px solid rgba(255,255,255,.09)",
-            boxShadow: "0 24px 70px rgba(0,0,0,.48)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
+            position: "absolute", inset: 0, zIndex: 9999,
+            background: "rgba(0,0,0,.22)", backdropFilter: "blur(2px)", WebkitBackdropFilter: "blur(2px)",
+            pointerEvents: "all",
+            opacity: surfaceAnalysisCompletion?.phase === "fade" ? 0 : 1,
+            transition: "opacity .58s ease",
+            fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
           }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <div style={{ width: 34, height: 34, borderRadius: "50%", boxSizing: "border-box", border: "2px solid rgba(255,255,255,.10)", borderTopColor: "#f3f3f3", animation: "artheticAnalysisSpin .85s linear infinite", flex: "0 0 auto" }} />
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 790, letterSpacing: "-.01em" }}>
-                  {restoringAnalysisMode === "comparison"
-                    ? "Načítám porovnání"
-                    : restoringAnalysisMode === "occlusion"
-                      ? "Načítám okluzi"
-                      : isCalculatingComparison
-                        ? "Porovnávám povrchy"
-                        : "Vypočítávám okluzi"}
+            <div style={{
+              position: "absolute", left: "50%", top: "50%", transform: "translate(-50%,-50%)",
+              width: 454, maxWidth: "calc(100vw - 36px)", padding: "17px 17px 15px", borderRadius: 17,
+              background: "rgba(11,11,11,.965)", border: "1px solid rgba(255,255,255,.10)",
+              boxShadow: "0 28px 90px rgba(0,0,0,.56)", backdropFilter: "blur(22px)", WebkitBackdropFilter: "blur(22px)",
+              color: "#f5f5f5",
+              animation: surfaceAnalysisCompletion?.phase === "fade"
+                ? "artheticSurfaceCardOut .58s cubic-bezier(.4,0,.2,1) both"
+                : "artheticSurfaceCardIn .22s ease-out both",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+                <div style={{
+                  position: "relative", width: 34, height: 34, borderRadius: 10, flex: "0 0 auto",
+                  background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.085)",
+                  display: "grid", placeItems: "center", overflow: "hidden",
+                }}>
+                  {surfaceAnalysisCompletion ? (
+                    <svg
+                      width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"
+                      style={{ animation: "artheticSurfaceCheckPop .34s cubic-bezier(.2,.9,.24,1.2) both" }}
+                    >
+                      <path
+                        d="M4.2 10.3 8.2 14.1 15.9 5.9"
+                        stroke="#f4f4f4" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+                        style={{ strokeDasharray: 24, strokeDashoffset: 24, animation: "artheticSurfaceCheckDraw .48s .10s ease-out forwards" }}
+                      />
+                    </svg>
+                  ) : (
+                    <div style={{
+                      width: 18, height: 18, borderRadius: "50%", boxSizing: "border-box",
+                      border: "1.5px solid rgba(255,255,255,.10)", borderTopColor: "#e8e8e8",
+                      animation: "artheticSurfaceSpin .78s linear infinite",
+                    }} />
+                  )}
                 </div>
-                <div style={{ marginTop: 3, color: "#777", fontSize: 9.5, fontWeight: 610 }}>
-                  {isCalculatingComparison
-                    ? (restoringAnalysisMode === "comparison" && String(surfaceAnalysisProgress?.phase || "").startsWith("snapshot")
-                      ? "Obnovuji uloženou mapu odchylek bez nového geometrického výpočtu."
-                      : surfaceAnalysisProgress?.phase === "A_TO_B"
-                        ? "Analyzuji povrch A vůči referenci B."
-                        : surfaceAnalysisProgress?.phase === "B_TO_A"
-                          ? "Analyzuji povrch B vůči referenci A."
-                          : surfaceAnalysisProgress?.phase === "snapshot"
-                            ? "Ukládám výsledek pro okamžité obnovení scény."
-                            : "Připravuji oboustranné porovnání povrchů.")
-                    : (surfaceAnalysisProgress?.phase === "distances" ? "Počítám průnik a mezeru vůči referenčnímu modelu." : "Připravuji geometrii a BVH strukturu.")}
+
+                <div style={{ minWidth: 0, flex: "1 1 auto" }}>
+                  <div style={{ fontSize: 13, fontWeight: 790, letterSpacing: "-.012em" }}>{surfaceAnalysisProgressUi.label}</div>
+                  <div style={{ marginTop: 3, color: "#777", fontSize: 9.7, fontWeight: 620 }}>{surfaceAnalysisProgressUi.detail}</div>
+                </div>
+
+                <div style={{ textAlign: "right", flex: "0 0 auto" }}>
+                  <div ref={surfaceAnalysisElapsedDisplayRef} style={{
+                    color: "#b7b7b7", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                    fontSize: 10.5, fontVariantNumeric: "tabular-nums", fontWeight: 720
+                  }}>0.00 s</div>
+                  <div style={{ marginTop: 2, color: "#555", fontSize: 7.6, fontWeight: 720, letterSpacing: ".055em" }}>
+                    {surfaceAnalysisProgressUi.code}
+                  </div>
                 </div>
               </div>
-            </div>
-            <div style={{ marginTop: 17, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-              <div style={{ flex: 1, height: 4, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.06)" }}>
+
+              <div
+                className="artheticSurfaceTerminal"
+                style={{
+                  marginTop: 14, height: 126, borderRadius: 11,
+                  background: "rgba(2,2,2,.985)",
+                  border: "1px solid rgba(255,255,255,.065)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.018)",
+                  padding: "10px 11px", boxSizing: "border-box",
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace",
+                }}
+              >
+                <div style={{ position: "relative", zIndex: 3, display: "flex", flexDirection: "column", justifyContent: "flex-end", height: "100%", gap: 3 }}>
+                  {surfaceAnalysisTerminalLines.map((line, index) => {
+                    const isLast = index === surfaceAnalysisTerminalLines.length - 1
+                    const toneColor = line.tone === "accent" || line.tone === "complete"
+                      ? "#f1f1f1"
+                      : line.tone === "data"
+                        ? "#c8c8c8"
+                        : line.tone === "muted"
+                          ? "#555"
+                          : line.tone === "active"
+                            ? "#a9a9a9"
+                            : "#777"
+                    return (
+                      <div key={line.id || `${line.stamp}-${index}-${line.text}`} style={{
+                        display: "grid",
+                        gridTemplateColumns: surfaceAnalysisCompletion ? "1fr" : "43px 8px 1fr",
+                        alignItems: "baseline", gap: surfaceAnalysisCompletion ? 0 : 4,
+                        minHeight: 11, color: toneColor, fontSize: 8.2, lineHeight: 1.16, letterSpacing: ".005em",
+                        opacity: line.tone === "muted" ? .72 : 1,
+                      }}>
+                        {!surfaceAnalysisCompletion && <span style={{ color: "#3f3f3f", fontVariantNumeric: "tabular-nums" }}>{line.stamp}</span>}
+                        {!surfaceAnalysisCompletion && <span style={{ color: line.tone === "accent" || line.tone === "complete" ? "#d8d8d8" : "#555" }}>{line.tone === "accent" || line.tone === "complete" ? "◆" : "›"}</span>}
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          <AlignmentTerminalTypedText text={line.text} enabled={!!line.typewriter} speed={14} delay={line.delay ?? 28} />
+                          {isLast && !surfaceAnalysisCompletion && (
+                            <i aria-hidden="true" style={{
+                              display: "inline-block", width: 4, height: 8, marginLeft: 4, verticalAlign: "-1px",
+                              background: "#f2f2f2", animation: "artheticSurfaceCursor .92s steps(1,end) infinite"
+                            }} />
+                          )}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div style={{ marginTop: 13, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                <div style={{ color: "#666", fontSize: 8.4, fontWeight: 620 }}>
+                  {surfaceAnalysisCompletion
+                    ? (surfaceAnalysisCompletion.kind === "comparison"
+                      ? "Porovnání povrchů bylo dokončeno · uzavírám analytickou relaci."
+                      : "Okluzní analýza byla dokončena · uzavírám analytickou relaci.")
+                    : restoringAnalysisMode
+                      ? "Obnovuji uloženou analýzu · stránku neobnovujte ani nezavírejte."
+                      : "Výpočet stále probíhá · stránku neobnovujte ani nezavírejte."}
+                </div>
+                <div style={{ color: "#8a8a8a", fontSize: 9, fontVariantNumeric: "tabular-nums", fontWeight: 730, whiteSpace: "nowrap" }}>
+                  {Math.round(Math.max(0, Math.min(100, surfaceAnalysisProgressUi.percent)))} %
+                </div>
+              </div>
+
+              <div style={{ marginTop: 7, height: 5, borderRadius: 999, background: "rgba(255,255,255,.06)", overflow: "hidden", position: "relative" }}>
                 <div style={{
-                  width: `${Math.max(2, Math.min(100, Number(surfaceAnalysisProgress?.percent) || 2))}%`,
-                  height: "100%", borderRadius: 999,
-                  background: "linear-gradient(90deg, rgba(255,255,255,.45), rgba(255,255,255,.96))",
-                  boxShadow: "0 0 12px rgba(255,255,255,.10)",
-                  transition: "width .16s linear"
+                  height: "100%",
+                  width: `${Math.max(2, Math.min(100, surfaceAnalysisProgressUi.percent))}%`,
+                  borderRadius: 999,
+                  background: "linear-gradient(90deg, rgba(255,255,255,.62), rgba(255,255,255,.96))",
+                  transition: "width .24s cubic-bezier(.22,.61,.36,1)",
                 }} />
               </div>
-              <span style={{ width: 34, textAlign: "right", color: "#7d7d7d", fontSize: 9, fontWeight: 720, fontVariantNumeric: "tabular-nums" }}>
-                {Math.round(Math.max(0, Math.min(100, Number(surfaceAnalysisProgress?.percent) || 0)))} %
-              </span>
+
+              <div style={{ marginTop: 9, display: "flex", alignItems: "center", gap: 8, color: "#626262", fontSize: 8.4, fontWeight: 650, minHeight: 11 }}>
+                {surfaceAnalysisCompletion ? (
+                  <span>{surfaceAnalysisCompletion.kind === "comparison" ? "Comparison map ready" : "Occlusion map ready"}</span>
+                ) : Number(surfaceAnalysisProgress?.processed) > 0 && Number(surfaceAnalysisProgress?.total) > 0 ? (
+                  <span>{Number(surfaceAnalysisProgress.processed).toLocaleString("cs-CZ")} / {Number(surfaceAnalysisProgress.total).toLocaleString("cs-CZ")} vzorků</span>
+                ) : (
+                  <span>{isCalculatingComparison ? "Bidirectional closest-surface analysis" : "Signed closest-surface analysis"}</span>
+                )}
+              </div>
             </div>
           </div>
-        </div>
+        </>
       )}
 
       <div 
@@ -8544,7 +8927,7 @@ export default function ClientPage() {
             gl.localClippingEnabled = false
             gl.domElement.dataset.artheticMainScene = "1"
         }}
-        style={{ position: "absolute", top: 0, bottom: alignmentMode ? alignmentBottomHeight : 0, left: 0, right: dicomLayoutActive ? dicomPanelWidth : 0, zIndex: 1, background: "transparent" }}
+        style={{ position: "absolute", top: 0, bottom: alignmentSceneInsetActive ? alignmentBottomHeight : 0, left: 0, right: dicomLayoutActive ? dicomPanelWidth : 0, zIndex: 1, background: "transparent", transition: "bottom .44s cubic-bezier(.2,.8,.2,1), right .34s ease", willChange: "bottom" }}
       >
         <ambientLight intensity={0.35 * sceneIntensity} />
         <directionalLight position={[0, 5, 5]} intensity={1.2 * sceneIntensity} />
