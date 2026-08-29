@@ -2360,6 +2360,7 @@ function AnyModel({
           obj = new THREE.Mesh(base, mat)
           obj.userData._baseGeom = geom
           obj.userData._derivedGeom = base
+          obj.userData._hasVisualTexture = false
         } else if (ext === "ply") {
           const geom = await new PLYLoader().loadAsync(url)
           const hasVC = !!geom.getAttribute("color")
@@ -2370,8 +2371,16 @@ function AnyModel({
           obj = new THREE.Mesh(base, mat)
           obj.userData._baseGeom = geom
           obj.userData._derivedGeom = base
+          obj.userData._hasVisualTexture = hasVC
         } else {
           const loaded = await new OBJLoader().loadAsync(url)
+          let objHasVisualTexture = false
+          loaded.traverse((ch) => {
+            if (!ch.isMesh) return
+            if (ch.geometry?.getAttribute?.("color")) objHasVisualTexture = true
+            const materials = Array.isArray(ch.material) ? ch.material : [ch.material]
+            if (materials.filter(Boolean).some((material) => !!material.map)) objHasVisualTexture = true
+          })
           if (keepMaterials) {
             loaded.traverse((ch) => {
               if (ch.isMesh && ch.material) {
@@ -2391,6 +2400,7 @@ function AnyModel({
             loaded.traverse((ch) => { if (ch.isMesh) ch.material = mat })
             obj = loaded
           }
+          obj.userData._hasVisualTexture = objHasVisualTexture
         }
         if (!cancelled) {
           obj.userData._viewerColor = color || "#ffffff"
@@ -4054,10 +4064,25 @@ export default function ClientPage() {
     modelObjectsRef.current = {}
   }, [analysisFilesKey])
   
+  const detectObjectTextureData = useCallback((object) => {
+    if (!object) return false
+    if (object.userData?._hasVisualTexture === true) return true
+    let hasTextureData = false
+    object.traverse((child) => {
+      if (hasTextureData || !child?.isMesh) return
+      const geometry = child.geometry
+      if (geometry?.getAttribute?.("color")) {
+        hasTextureData = true
+        return
+      }
+      const materials = Array.isArray(child.material) ? child.material : [child.material]
+      hasTextureData = materials.filter(Boolean).some((material) => !!material.map)
+    })
+    return hasTextureData
+  }, [])
+
   const handleMeshReady = useCallback((mesh, url) => {
     meshesRef.current[url] = mesh
-    const hasC = !!(mesh.geometry.attributes.color || mesh.geometry.attributes.uv);
-    setHasTexMap(prev => ({ ...prev, [url]: hasC }))
   }, [])
 
   const handleObjectReady = useCallback((object, url) => {
@@ -4067,7 +4092,20 @@ export default function ClientPage() {
     if (Array.isArray(matrix) && matrix.length === 16) object.matrix.fromArray(matrix)
     else object.matrix.identity()
     object.updateMatrixWorld(true)
-  }, [modelTransforms])
+
+    const hasTextureData = detectObjectTextureData(object)
+    setHasTexMap((previous) => ({ ...previous, [url]: hasTextureData }))
+
+    const fileIndex = files.findIndex((file) => file.url === url)
+    if (fileIndex >= 0) {
+      const requestedTextureState = files[fileIndex]?.vc
+      setVertexColors((previous) => previous.map((value, index) =>
+        index === fileIndex
+          ? (hasTextureData && requestedTextureState !== false)
+          : value
+      ))
+    }
+  }, [modelTransforms, files, detectObjectTextureData])
 
   const applyModelTransform = useCallback((url, matrixValue) => {
     const array = matrixArrayOrIdentity(matrixValue).slice()
@@ -5365,7 +5403,7 @@ export default function ClientPage() {
           setVisibles(Fs.map((f) => (typeof f.v === "boolean" ? f.v : true)))
           setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
           setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
-          setVertexColors(Fs.map((f) => !!f.vc))
+          setVertexColors(Fs.map(() => false))
           setWireframes(Fs.map((f) => !!f.wf))
           
           setTitle(titleStr ?? (getParam("title") ?? null))
@@ -5398,7 +5436,7 @@ export default function ClientPage() {
             v: typeof x.v === "boolean" ? x.v : true,
             r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
+            vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera, m?.viewer_state)
           applyDicomSource(m?.dicom || null)
@@ -5415,7 +5453,7 @@ export default function ClientPage() {
             v: typeof x.v === "boolean" ? x.v : true,
             r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
+            vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera, m?.viewer_state)
           applyDicomSource(m?.dicom || null)
@@ -5439,7 +5477,7 @@ export default function ClientPage() {
             v: typeof x.v === "boolean" ? x.v : true,
             r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
+            vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf
           }))
           applyFiles(Fs, getParam("title") ?? null, null, null, null)
           const li = parseFloat(getParam("li") || getParam("light") || "")
@@ -5495,7 +5533,7 @@ export default function ClientPage() {
           v: typeof x.v === "boolean" ? x.v : true,
           r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
           m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-          vc: x.vc !== undefined ? !!x.vc : true, km: !!x.km, wf: !!x.wf
+          vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf
         }))
 
         const urlsChanged = filesChanged(files, newFiles)
@@ -5509,7 +5547,7 @@ export default function ClientPage() {
         setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
         
         // ÚPRAVA 6: Správné načítání textur a wireframe místo fixní hodnoty
-        setVertexColors(newFiles.map((f) => !!f.vc))
+        setVertexColors(newFiles.map((f) => !!hasTexMap[f.url] && f.vc !== false))
         setWireframes(newFiles.map((f) => !!f.wf)) 
 
         // ÚPRAVA 7: Zachování kamery, pokud posíláme keepCamera: true
@@ -5535,7 +5573,7 @@ export default function ClientPage() {
     const onMsg = (e) => { const d = e.data; if (d && LIVE_MSG_TYPES.has(d.type) && d.payload) applyLivePayload(d.payload) }
     window.addEventListener("message", onMsg)
     return () => window.removeEventListener("message", onMsg)
-  }, [files, applyDicomSource])
+  }, [files, applyDicomSource, hasTexMap])
 
   useEffect(() => {
     const onDicomCommand = (event) => {
@@ -5698,7 +5736,7 @@ export default function ClientPage() {
   ) : (
     <>
       {files.map((f, i) => {
-        const isTexAvailable = f.vc || hasTexMap[f.url];
+        const isTexAvailable = !!hasTexMap[f.url];
 
         return (
           <div key={`${f.url}-${i}`} className="control-row" style={{
