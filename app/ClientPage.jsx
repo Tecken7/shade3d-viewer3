@@ -6442,29 +6442,45 @@ export default function ClientPage() {
             boxShadow: isExpanded ? "0 18px 46px rgba(0,0,0,.30)" : "none", position: "relative",
             transition: "border-radius .32s ease, background .28s ease, border-color .28s ease, box-shadow .32s ease",
           }}>
-            <div style={{ gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={toggleExpanded}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault()
+                  toggleExpanded()
+                }
+              }}
+              aria-label={`${f.name} advanced material settings`}
+              aria-expanded={isExpanded}
+              title="Kliknutím otevřít barvu, Roughness a Metalness"
+              style={{
+                gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 7, minWidth: 0,
+                margin: "-4px -4px 0", padding: "4px 4px 3px", borderRadius: 8, cursor: "pointer",
+                outline: "none", transition: "background .16s ease",
+              }}
+              onMouseEnter={(event) => { event.currentTarget.style.background = "rgba(255,255,255,.025)" }}
+              onMouseLeave={(event) => { event.currentTarget.style.background = "transparent" }}
+            >
               <div className="row-label" style={{
                 flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                 color: "#d7d7d7", fontSize: 10.5, fontWeight: 680, letterSpacing: "-.01em",
               }} title={f.rawName || f.name}>{stripExt(f.name)}</div>
-              <button
-                type="button"
-                onClick={toggleExpanded}
-                aria-label={`${f.name} advanced material settings`}
-                aria-expanded={isExpanded}
-                title="Barva, Roughness a Metalness"
+              <span
+                aria-hidden
                 style={{
                   width: 24, height: 24, flex: "0 0 24px", padding: 0, display: "grid", placeItems: "center",
                   borderRadius: 7, border: isExpanded ? "1px solid rgba(255,255,255,.18)" : "1px solid rgba(255,255,255,.075)",
                   background: isExpanded ? "rgba(255,255,255,.06)" : "rgba(255,255,255,.02)",
-                  color: isExpanded ? "#ededed" : "#858585", cursor: "pointer",
+                  color: isExpanded ? "#ededed" : "#858585",
                   transition: "background .16s ease, border-color .16s ease, color .16s ease",
                 }}
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden style={{ transform: isExpanded ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .22s cubic-bezier(.2,.75,.25,1)" }}>
                   <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
-              </button>
+              </span>
             </div>
             
             <button
@@ -6572,19 +6588,6 @@ export default function ClientPage() {
         )
       })}
       {dicomControls}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginTop: 10 }}>
-        <button 
-          onClick={() => setDidInitialFrame(false)}
-          style={{
-            background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.085)",
-            borderRadius: 8, color: "#bdbdbd", padding: "6px 10px", fontSize: 9.5, cursor: "pointer",
-            transition: "background .16s ease, color .16s ease, border-color .16s ease", fontWeight: 680, fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
-          }}
-          title="Vrátí kameru do výchozí polohy"
-        >
-          Reset view
-        </button>
-      </div>
     </>
   )
 
@@ -6619,25 +6622,16 @@ export default function ClientPage() {
       boxShadow: "0 18px 50px rgba(0,0,0,.24)", maxHeight: "calc(100vh - 20px)", overflowY: "auto"
     }}>
       {caseCloudContext.patientName ? (
-        <div style={{ marginBottom: 8, padding: "10px 10px 9px", borderRadius: 11, border: "1px solid rgba(255,255,255,.075)", background: "rgba(255,255,255,.026)" }}>
-          <div style={{ color: "#737373", fontSize: 8.5, fontWeight: 760, letterSpacing: ".085em", textTransform: "uppercase", marginBottom: 4 }}>Jméno pacienta</div>
-          <div title={caseCloudContext.patientName} style={{ color: "#ededed", fontSize: 13, lineHeight: 1.25, fontWeight: 720, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", letterSpacing: "-.015em" }}>{caseCloudContext.patientName}</div>
-          {caseCloudContext.labCaseId && getParam("mode") !== "live" && (
-            <button
-              type="button"
-              onClick={() => window.open(`https://www.arthetic.cz/lab-case?caseId=${encodeURIComponent(caseCloudContext.labCaseId)}`, "_blank", "noopener,noreferrer")}
-              style={{
-                width: "100%", height: 30, marginTop: 9, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
-                borderRadius: 8, border: "1px solid rgba(255,255,255,.075)", background: "rgba(255,255,255,.025)",
-                color: "#bdbdbd", padding: "0 9px", cursor: "pointer", fontSize: 9.5, fontWeight: 680,
-                transition: "background .16s ease, border-color .16s ease, color .16s ease",
-              }}
-              title="Otevřít aktuální zakázku v LabCaseDetail"
-            >
-              <span>Otevřít zakázku</span>
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden><path d="M9 18l6-6-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-            </button>
-          )}
+        <div
+          title={caseCloudContext.patientName}
+          style={{
+            marginBottom: 8, padding: "9px 10px", borderRadius: 10,
+            border: "1px solid rgba(255,255,255,.065)", background: "rgba(255,255,255,.025)",
+            color: "#ededed", fontSize: 13, lineHeight: 1.25, fontWeight: 720,
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", letterSpacing: "-.015em"
+          }}
+        >
+          {caseCloudContext.patientName}
         </div>
       ) : title ? (
         <div title={title} style={{ marginBottom: 8, padding: "9px 10px", borderRadius: 10, border: "1px solid rgba(255,255,255,.065)", background: "rgba(255,255,255,.025)", color: "#d7d7d7", fontSize: 10.5, fontWeight: 680, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>
@@ -6654,6 +6648,41 @@ export default function ClientPage() {
       ) : (
         <div style={{ border: "1px solid rgba(255,255,255,.055)", borderRadius: 11, padding: 6, background: "rgba(255,255,255,.012)" }}>{slidersContent}</div>
       )}
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
+        <div>
+          {caseCloudContext.labCaseId && getParam("mode") !== "live" && (
+            <button
+              type="button"
+              onClick={() => window.open(`https://www.arthetic.cz/lab-case?caseId=${encodeURIComponent(caseCloudContext.labCaseId)}`, "_blank", "noopener,noreferrer")}
+              style={{
+                background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.085)",
+                borderRadius: 8, color: "#bdbdbd", padding: "6px 10px", fontSize: 9.5, cursor: "pointer",
+                transition: "background .16s ease, color .16s ease, border-color .16s ease", fontWeight: 680,
+                fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", display: "inline-flex", alignItems: "center", gap: 6,
+              }}
+              title="Otevřít aktuální zakázku v LabCaseDetail"
+            >
+              <span>Otevřít zakázku</span>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <path d="M9 18l6-6-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          )}
+        </div>
+        <button
+          onClick={() => setDidInitialFrame(false)}
+          style={{
+            background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.085)",
+            borderRadius: 8, color: "#bdbdbd", padding: "6px 10px", fontSize: 9.5, cursor: "pointer",
+            transition: "background .16s ease, color .16s ease, border-color .16s ease", fontWeight: 680,
+            fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
+          }}
+          title="Vrátí kameru do výchozí polohy"
+        >
+          Reset view
+        </button>
+      </div>
 
       {photos && photos.length > 0 && (
         <div style={{ marginTop: 10 }}>
