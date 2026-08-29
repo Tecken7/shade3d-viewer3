@@ -8,7 +8,7 @@ import { TrackballControls } from "three/examples/jsm/controls/TrackballControls
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader"
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader"
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader"
-import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from "three-mesh-bvh"
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, SAH } from "three-mesh-bvh"
 import { Unzip, UnzipInflate } from "fflate"
 import * as dicomParser from "dicom-parser"
 
@@ -1185,6 +1185,10 @@ const ALIGNMENT_POINT_COLORS = ["#fbbf24", "#ef4444", "#22c55e"]
 const IDENTITY_MATRIX_ARRAY = new THREE.Matrix4().identity().toArray()
 const USE_ALIGNMENT_WORKER = true
 
+// Stejné nastavení používá i legacy fallback, aby měl při případném selhání Workeru
+// stejnou exact-surface matematiku a podobný výkon jako hlavní Best Fit engine.
+const ALIGNMENT_BVH_OPTIONS = { strategy: SAH, maxLeafTris: 8 }
+
 function copyPositionAttributeForWorker(attribute) {
   if (!attribute?.count) return null
   const output = new Float32Array(attribute.count * 3)
@@ -1516,11 +1520,22 @@ function solveLinearSystem6(matrix, rhs) {
   return a.map((row) => row[n])
 }
 
+function ensureAlignmentBoundsTree(geometry) {
+  if (!geometry?.boundsTree) geometry?.computeBoundsTree?.(ALIGNMENT_BVH_OPTIONS)
+  return geometry?.boundsTree || null
+}
+
 function makeClosestSurfaceQuery(targetMesh) {
   targetMesh.updateMatrixWorld(true)
-  if (!targetMesh.geometry.boundsTree) targetMesh.geometry.computeBoundsTree()
+  const boundsTree = ensureAlignmentBoundsTree(targetMesh.geometry)
+  if (!boundsTree) throw new Error("Nepodařilo se připravit BVH pro Best Fit.")
+
   const inverseTarget = new THREE.Matrix4().copy(targetMesh.matrixWorld).invert()
   const normalMatrix = new THREE.Matrix3().getNormalMatrix(targetMesh.matrixWorld)
+  const targetScale = new THREE.Vector3()
+  targetMesh.matrixWorld.decompose(new THREE.Vector3(), new THREE.Quaternion(), targetScale)
+  const minWorldScale = Math.max(1e-8, Math.min(Math.abs(targetScale.x), Math.abs(targetScale.y), Math.abs(targetScale.z)))
+
   const localPoint = new THREE.Vector3()
   const closestWorld = new THREE.Vector3()
   const deltaWorld = new THREE.Vector3()
@@ -1529,19 +1544,36 @@ function makeClosestSurfaceQuery(targetMesh) {
   const result = { point: new THREE.Vector3(), distance: Infinity, faceIndex: -1 }
   const output = { pointWorld: new THREE.Vector3(), normalWorld: new THREE.Vector3(), distance: Infinity, faceIndex: -1 }
 
-  return (worldPoint) => {
+  return (worldPoint, maxWorldDistance = Infinity, needNormal = true) => {
     localPoint.copy(worldPoint).applyMatrix4(inverseTarget)
     result.distance = Infinity
     result.faceIndex = -1
-    targetMesh.geometry.boundsTree.closestPointToPoint(localPoint, result)
+
+    // three-mesh-bvh umí maxThreshold přímo uvnitř nearest-surface search. Dříve jsme
+    // vždy hledali absolutně nejbližší trojúhelník na celém modelu a teprve potom
+    // výsledek zahodili, pokud byl dál než maxDistance. Tohle dovolí BVH celé vzdálené
+    // větve přeskočit bez jakékoli změny accepted correspondence.
+    const localMaxDistance = Number.isFinite(maxWorldDistance)
+      ? Math.max(0, maxWorldDistance) / minWorldScale
+      : Infinity
+    const hit = boundsTree.closestPointToPoint(localPoint, result, 0, localMaxDistance)
+    if (!hit) return null
+
     closestWorld.copy(result.point).applyMatrix4(targetMesh.matrixWorld)
-    faceNormalLocal(targetMesh.geometry, result.faceIndex, normalWorld, triangleA, triangleB, triangleC)
-      .applyMatrix3(normalMatrix)
-      .normalize()
     output.pointWorld.copy(closestWorld)
-    output.normalWorld.copy(normalWorld)
     output.distance = deltaWorld.subVectors(worldPoint, closestWorld).length()
     output.faceIndex = result.faceIndex
+
+    // Normála je drahá a point-to-point + validační průchody ji vůbec nepotřebují.
+    if (needNormal) {
+      faceNormalLocal(targetMesh.geometry, result.faceIndex, normalWorld, triangleA, triangleB, triangleC)
+        .applyMatrix3(normalMatrix)
+        .normalize()
+      output.normalWorld.copy(normalWorld)
+    } else {
+      output.normalWorld.set(0, 0, 0)
+    }
+
     return output
   }
 }
@@ -1555,23 +1587,87 @@ function sampledVertexIndices(positionCount, desiredCount) {
   return result
 }
 
-const ALIGNMENT_CPU_SLICE_MS = 8
-
-async function alignmentYield() {
-  // Používáme skutečný nový macrotask místo scheduler.yield(). Continuation ze
-  // scheduler.yield() může mít vysokou prioritu a na některých sestavách Chrome
-  // nepustí React paint/input dostatečně často. setTimeout(0) dá browseru prostor
-  // pro vykreslení progressu, výběr textu, pointer eventy i další UI práci.
-  await new Promise((resolve) => setTimeout(resolve, 0))
+function alignmentCellHash(value) {
+  let x = value | 0
+  x ^= x >>> 16
+  x = Math.imul(x, 0x7feb352d)
+  x ^= x >>> 15
+  x = Math.imul(x, 0x846ca68b)
+  x ^= x >>> 16
+  return x >>> 0
 }
 
-async function alignmentPaintYield() {
-  // Garantuje alespoň jednu možnost vykreslení loaderu před těžší synchronní prací.
-  if (typeof requestAnimationFrame !== "function") {
-    await alignmentYield()
-    return
+// Vytvoří jeden prostorově rovnoměrný master sample. STL často obsahuje stejné
+// vrcholy opakovaně pro každý trojúhelník; voxelový výběr tak automaticky neplýtvá
+// sample budgetem na stejné místo a současně lépe pokryje celý dentální povrch.
+function buildSpatialSamplePool(positionAttribute, matrixToRoot, desiredCount) {
+  if (!positionAttribute?.count || desiredCount <= 0) return []
+
+  const total = positionAttribute.count
+  const point = new THREE.Vector3()
+  const min = new THREE.Vector3(Infinity, Infinity, Infinity)
+  const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity)
+
+  for (let i = 0; i < total; i++) {
+    point.fromBufferAttribute(positionAttribute, i).applyMatrix4(matrixToRoot)
+    min.min(point)
+    max.max(point)
   }
-  await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)))
+
+  const size = max.clone().sub(min)
+  const safeX = Math.max(size.x, 1e-8)
+  const safeY = Math.max(size.y, 1e-8)
+  const safeZ = Math.max(size.z, 1e-8)
+  const target = Math.min(total, Math.max(100, desiredCount))
+
+  let resolution = Math.max(16, Math.ceil(Math.sqrt(target) * 1.55))
+  let selectedEntries = []
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    resolution = Math.min(480, resolution)
+    const stride = resolution + 1
+    const stride2 = stride * stride
+    const cells = new Map()
+
+    for (let i = 0; i < total; i++) {
+      point.fromBufferAttribute(positionAttribute, i).applyMatrix4(matrixToRoot)
+      const ix = Math.min(resolution, Math.max(0, Math.floor(((point.x - min.x) / safeX) * resolution)))
+      const iy = Math.min(resolution, Math.max(0, Math.floor(((point.y - min.y) / safeY) * resolution)))
+      const iz = Math.min(resolution, Math.max(0, Math.floor(((point.z - min.z) / safeZ) * resolution)))
+      const key = ix + iy * stride + iz * stride2
+      if (!cells.has(key)) cells.set(key, i)
+    }
+
+    selectedEntries = Array.from(cells.entries())
+    if (selectedEntries.length >= target || resolution >= 480) break
+    resolution = Math.ceil(resolution * 1.55)
+  }
+
+  // Deterministicky promícháme voxel cells, aby případný pořádek trojúhelníků v STL/PLY
+  // neovlivňoval, které oblasti se dostanou do menšího coarse sample.
+  selectedEntries.sort((a, b) => alignmentCellHash(a[0]) - alignmentCellHash(b[0]))
+
+  const take = Math.min(target, selectedEntries.length)
+  const output = new Array(take)
+  const step = selectedEntries.length / Math.max(1, take)
+  for (let i = 0; i < take; i++) {
+    const entryIndex = Math.min(selectedEntries.length - 1, Math.floor((i + 0.37) * step))
+    const sourceIndex = selectedEntries[entryIndex][1]
+    output[i] = new THREE.Vector3().fromBufferAttribute(positionAttribute, sourceIndex).applyMatrix4(matrixToRoot)
+  }
+  return output
+}
+
+function resampleSpatialPool(pool, desiredCount) {
+  if (!pool?.length) return []
+  const count = Math.min(pool.length, Math.max(1, desiredCount || pool.length))
+  if (count === pool.length) return pool.slice()
+  const result = new Array(count)
+  const step = pool.length / count
+  for (let i = 0; i < count; i++) {
+    result[i] = pool[Math.min(pool.length - 1, Math.floor((i + 0.37) * step))]
+  }
+  return result
 }
 
 async function robustPointToPlaneICP({
@@ -1612,15 +1708,16 @@ async function robustPointToPlaneICP({
   else current.fromArray(matrixArrayOrIdentity(initialMatrix))
   const initialCurrent = current.clone()
 
+  // Jeden master spatial sample používáme pro centroid, coarse/fine pass i validaci.
+  // U triangulovaného STL tak stejné vrcholy nezabírají sample budget opakovaně.
+  const spatialSamplePool = buildSpatialSamplePool(sourcePosition, meshToRoot, 7200)
+  if (spatialSamplePool.length < 30) throw new Error("Moving model nemá dostatek prostorově rozložených bodů pro Best Fit.")
+
   // Best Fit po landmark seedu je pouze refinement. Hlídáme drift od seedu.
-  const centroidIndices = sampledVertexIndices(sourcePosition.count, 1200)
+  const centroidSamples = resampleSpatialPool(spatialSamplePool, 1200)
   const sourceCentroidRoot = new THREE.Vector3()
-  const centroidPoint = new THREE.Vector3()
-  for (let i = 0; i < centroidIndices.length; i++) {
-    centroidPoint.fromBufferAttribute(sourcePosition, centroidIndices[i]).applyMatrix4(meshToRoot)
-    sourceCentroidRoot.add(centroidPoint)
-  }
-  sourceCentroidRoot.multiplyScalar(1 / Math.max(1, centroidIndices.length))
+  for (let i = 0; i < centroidSamples.length; i++) sourceCentroidRoot.add(centroidSamples[i])
+  sourceCentroidRoot.multiplyScalar(1 / Math.max(1, centroidSamples.length))
   const initialCentroidParent = sourceCentroidRoot.clone().applyMatrix4(initialCurrent)
   const initialPosition = new THREE.Vector3(), initialQuaternion = new THREE.Quaternion(), initialScale = new THREE.Vector3()
   initialCurrent.decompose(initialPosition, initialQuaternion, initialScale)
@@ -1634,18 +1731,8 @@ async function robustPointToPlaneICP({
   const delta = new THREE.Vector3()
   const cross = new THREE.Vector3()
 
-  // Source sample se z BufferGeometry + meshToRoot převádí pouze JEDNOU pro každý scale,
-  // ne při každé ICP iteraci. Tím odpadne velké množství opakované práce a alokací.
-  const buildSourceSamples = (desiredCount) => {
-    const indices = sampledVertexIndices(sourcePosition.count, desiredCount)
-    const samples = []
-    const point = new THREE.Vector3()
-    for (let i = 0; i < indices.length; i++) {
-      point.fromBufferAttribute(sourcePosition, indices[i]).applyMatrix4(meshToRoot)
-      samples.push(point.clone())
-    }
-    return samples
-  }
+  // Jednotlivé scale úrovně jsou pouze levné podvýběry z jednoho spatial master poolu.
+  const buildSourceSamples = (desiredCount) => resampleSpatialPool(spatialSamplePool, desiredCount)
 
   const metricsFromCorrespondences = (correspondences) => {
     if (!correspondences || correspondences.length < 30) {
@@ -1668,7 +1755,7 @@ async function robustPointToPlaneICP({
   // časové řezy. Na hustém scanu může být 420 dotazů několik sekund práce,
   // zatímco na lehkém modelu jen pár ms. Po ~8 ms CPU proto vždy uvolníme
   // hlavní vlákno a zároveň pošleme skutečný průběh do UI.
-  const makeCorrespondences = async (matrix, sourceSamples, maxDistance, trim, progressTick = null) => {
+  const makeCorrespondences = async (matrix, sourceSamples, maxDistance, trim, progressTick = null, needNormals = false) => {
     const result = []
     let sliceStarted = performance.now()
     let lastProgress = -1
@@ -1676,14 +1763,14 @@ async function robustPointToPlaneICP({
       const pRoot = sourceSamples[k]
       pParent.copy(pRoot).applyMatrix4(matrix)
       pWorld.copy(pParent).applyMatrix4(parentWorld)
-      const hit = query(pWorld)
-      if (Number.isFinite(hit.distance) && hit.distance <= maxDistance) {
+      const hit = query(pWorld, maxDistance, needNormals)
+      if (hit && Number.isFinite(hit.distance) && hit.distance <= maxDistance) {
         qParent.copy(hit.pointWorld).applyMatrix4(parentWorldInverse)
         nParent.copy(hit.normalWorld).applyMatrix3(worldNormalToParent).normalize()
         result.push({
           p: pParent.clone(),
           q: qParent.clone(),
-          n: nParent.clone(),
+          ...(needNormals ? { n: nParent.clone() } : {}),
           distance: pParent.distanceTo(qParent),
         })
       }
@@ -1709,7 +1796,7 @@ async function robustPointToPlaneICP({
   }
 
   const evaluateMatrix = async (matrix, sourceSamples, maxDistance, trim, progressTick = null) => {
-    return metricsFromCorrespondences(await makeCorrespondences(matrix, sourceSamples, maxDistance, trim, progressTick))
+    return metricsFromCorrespondences(await makeCorrespondences(matrix, sourceSamples, maxDistance, trim, progressTick, false))
   }
 
   const scaleRigidIncrement = (matrix, factor, maxTranslation, maxRotation) => {
@@ -1846,7 +1933,8 @@ async function robustPointToPlaneICP({
       // ze stejného výsledku — v2.2 zde dělala druhý kompletní BVH průchod.
       const correspondences = await makeCorrespondences(
         current, samples, stage.maxDistance, stage.trim,
-        (fraction) => emitStageProgress(fraction * 0.55, { phase: "correspondences" })
+        (fraction) => emitStageProgress(fraction * 0.55, { phase: "correspondences" }),
+        stage.mode === "plane"
       )
       if (correspondences.length < 30) {
         if (stageIndex === 0 && iteration === 0) throw new Error("Příliš málo překrývající se geometrie pro Best Fit.")
@@ -1893,7 +1981,8 @@ async function robustPointToPlaneICP({
 
         const candidateCorrespondences = await makeCorrespondences(
           candidate, samples, stage.maxDistance, stage.trim,
-          (fraction) => emitStageProgress(0.58 + ((f + fraction) / Math.max(1, factorCandidates.length)) * 0.32, { phase: "verify" })
+          (fraction) => emitStageProgress(0.58 + ((f + fraction) / Math.max(1, factorCandidates.length)) * 0.32, { phase: "verify" }),
+          false
         )
         const candidateEval = metricsFromCorrespondences(candidateCorrespondences)
         const enoughPairs = candidateEval.count >= Math.max(30, Math.floor(currentEval.count * 0.65))
@@ -5182,6 +5271,7 @@ export default function ClientPage() {
             bvhMs: Number.isFinite(timings.bvhMs) ? +timings.bvhMs.toFixed(1) : null,
             icpMs: Number.isFinite(timings.icpMs) ? +timings.icpMs.toFixed(1) : null,
             workerTotalMs: Number.isFinite(timings.totalMs) ? +timings.totalMs.toFixed(1) : null,
+            optimization: result?.optimization || null,
           })
         } catch (workerError) {
           if (workerError?.alignmentWorkerKind === "algorithm") throw workerError
