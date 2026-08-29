@@ -47,39 +47,68 @@ function getBaseCaseCloudSceneId(value) {
 
 async function resolveCaseCloudManifestKey(requestedKey) {
   const sceneId = getBaseCaseCloudSceneId(requestedKey)
-  if (!sceneId) return { sceneId: null, manifestKey: requestedKey, resolved: false }
+  const fallback = {
+    sceneId,
+    manifestKey: requestedKey,
+    resolved: false,
+    labCaseId: null,
+    patientName: null,
+  }
+  if (!sceneId) return fallback
+
+  const rpcFetch = async (functionName) => fetch(`${SUPABASE_URL}/rest/v1/rpc/${functionName}`, {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ p_scene_id: sceneId }),
+  })
 
   try {
-    const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_case_cloud_current_revision`, {
-      method: "POST",
-      cache: "no-store",
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ p_scene_id: sceneId }),
-    })
+    // Nový resolver vrací kromě CURRENT revision také aktuální zakázku a jméno
+    // pacienta. Jméno se proto nikdy necachuje v manifestu a po přejmenování
+    // pacienta stačí viewer znovu otevřít / refreshnout.
+    const contextResponse = await rpcFetch("get_case_cloud_scene_context")
+    if (contextResponse.ok) {
+      const payload = await contextResponse.json()
+      const row = Array.isArray(payload) ? payload[0] : payload
+      const currentRevision = row?.current_revision
+      return {
+        sceneId,
+        manifestKey:
+          typeof currentRevision === "string" && currentRevision.trim()
+            ? currentRevision.trim()
+            : requestedKey,
+        resolved: typeof currentRevision === "string" && !!currentRevision.trim(),
+        labCaseId: typeof row?.lab_case_id === "string" ? row.lab_case_id : null,
+        patientName:
+          typeof row?.patient_name === "string" && row.patient_name.trim()
+            ? row.patient_name.trim()
+            : null,
+      }
+    }
 
+    // Kompatibilita při postupném deployi: pokud ještě není nahraný nový SQL
+    // resolver, zkusíme původní CURRENT-revision RPC.
+    const response = await rpcFetch("get_case_cloud_current_revision")
     if (!response.ok) {
-      console.warn(`[ARTHETIC Case Cloud] Revision resolver HTTP ${response.status}; používám kompatibilní fallback.`)
-      return { sceneId, manifestKey: requestedKey, resolved: false }
+      console.warn(`[ARTHETIC Case Cloud] Context resolver HTTP ${contextResponse.status}/${response.status}; používám kompatibilní fallback.`)
+      return fallback
     }
 
     const payload = await response.json()
     const row = Array.isArray(payload) ? payload[0] : payload
     const currentRevision = row?.current_revision
-
     if (typeof currentRevision === "string" && currentRevision.trim()) {
-      return { sceneId, manifestKey: currentRevision.trim(), resolved: true }
+      return { ...fallback, manifestKey: currentRevision.trim(), resolved: true }
     }
-
-    // Starší scéna ještě nemusí být zaregistrovaná v case_cloud_scenes.
-    // V tom případě zachováme starý přímý manifest / latest mirror.
-    return { sceneId, manifestKey: requestedKey, resolved: false }
+    return fallback
   } catch (error) {
-    console.warn("[ARTHETIC Case Cloud] Revision resolver failed; používám kompatibilní fallback.", error)
-    return { sceneId, manifestKey: requestedKey, resolved: false }
+    console.warn("[ARTHETIC Case Cloud] Scene context resolver failed; používám kompatibilní fallback.", error)
+    return fallback
   }
 }
 function inferExt(nameOrUrl) {
@@ -4076,6 +4105,11 @@ export default function ClientPage() {
   }, [])
 
   const [title, setTitle] = useState(null)
+  const [caseCloudContext, setCaseCloudContext] = useState({
+    sceneId: null,
+    labCaseId: null,
+    patientName: null,
+  })
   const [logoCfg, setLogoCfg] = useState({ url: DEFAULT_LOGO, opacity: 0.9, width: 160, pos: "bc" })
 
   const [files, setFiles] = useState([])
@@ -6067,6 +6101,11 @@ export default function ClientPage() {
           // kompatibilní: z jejich suffixu odvodíme base scene ID a pokud již má
           // záznam v DB, také je přesměrujeme na nejnovější revision.
           const resolvedScene = await resolveCaseCloudManifestKey(mId)
+          setCaseCloudContext({
+            sceneId: resolvedScene.sceneId || getBaseCaseCloudSceneId(mId),
+            labCaseId: resolvedScene.labCaseId || null,
+            patientName: resolvedScene.patientName || null,
+          })
           const manifestKey = resolvedScene.manifestKey || mId
           const requestBust = getParam("v") || `${Date.now()}`
           const manifestUrl = `${SUPABASE_URL}/storage/v1/object/public/${PUBLIC_BUCKET}/manifests/${encodeURIComponent(manifestKey)}.json?v=${encodeURIComponent(requestBust)}`
@@ -6382,30 +6421,53 @@ export default function ClientPage() {
   ) : (
     <>
       {files.map((f, i) => {
-        const isTexAvailable = !!hasTexMap[f.url];
+        const isTexAvailable = !!hasTexMap[f.url]
+        const isExpanded = openColorPickerUrl === f.url
+        const toggleExpanded = () =>
+          setOpenColorPickerUrl((previous) => previous === f.url ? null : f.url)
 
         return (
           <div key={`${f.url}-${i}`} className="control-row" style={{
             display: "grid", gridTemplateColumns: "32px minmax(0,1fr) 30px 30px 30px 32px", alignItems: "center", columnGap: 7, rowGap: 8,
-            margin: "7px 0", padding: "9px 10px", borderRadius: openColorPickerUrl === f.url ? 14 : 11, boxSizing: "border-box",
-            background: openColorPickerUrl === f.url ? "rgba(12,12,12,.96)" : "rgba(255,255,255,.025)",
-            border: openColorPickerUrl === f.url ? "1px solid rgba(255,255,255,.10)" : "1px solid rgba(255,255,255,.065)",
-            boxShadow: openColorPickerUrl === f.url ? "0 18px 46px rgba(0,0,0,.30)" : "none", position: "relative",
+            margin: "7px 0", padding: "9px 10px", borderRadius: isExpanded ? 14 : 11, boxSizing: "border-box",
+            background: isExpanded ? "rgba(12,12,12,.96)" : "rgba(255,255,255,.025)",
+            border: isExpanded ? "1px solid rgba(255,255,255,.10)" : "1px solid rgba(255,255,255,.065)",
+            boxShadow: isExpanded ? "0 18px 46px rgba(0,0,0,.30)" : "none", position: "relative",
             transition: "border-radius .32s ease, background .28s ease, border-color .28s ease, box-shadow .32s ease",
           }}>
-            <div className="row-label" style={{
-              gridColumn: "1 / -1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-              color: "#d7d7d7", fontSize: 10.5, fontWeight: 680, letterSpacing: "-.01em",
-            }} title={f.rawName || f.name}>{stripExt(f.name)}</div>
+            <div style={{ gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+              <div className="row-label" style={{
+                flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                color: "#d7d7d7", fontSize: 10.5, fontWeight: 680, letterSpacing: "-.01em",
+              }} title={f.rawName || f.name}>{stripExt(f.name)}</div>
+              <button
+                type="button"
+                onClick={toggleExpanded}
+                aria-label={`${f.name} advanced material settings`}
+                aria-expanded={isExpanded}
+                title="Barva, Roughness a Metalness"
+                style={{
+                  width: 24, height: 24, flex: "0 0 24px", padding: 0, display: "grid", placeItems: "center",
+                  borderRadius: 7, border: isExpanded ? "1px solid rgba(255,255,255,.18)" : "1px solid rgba(255,255,255,.075)",
+                  background: isExpanded ? "rgba(255,255,255,.06)" : "rgba(255,255,255,.02)",
+                  color: isExpanded ? "#ededed" : "#858585", cursor: "pointer",
+                  transition: "background .16s ease, border-color .16s ease, color .16s ease",
+                }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden style={{ transform: isExpanded ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .22s cubic-bezier(.2,.75,.25,1)" }}>
+                  <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            </div>
             
             <button
               type="button"
-              onClick={() => setOpenColorPickerUrl((previous) => previous === f.url ? null : f.url)}
+              onClick={toggleExpanded}
               aria-label={`${f.name} color`}
-              aria-expanded={openColorPickerUrl === f.url}
-              title="Změnit barvu modelu"
+              aria-expanded={isExpanded}
+              title="Barva a materiál modelu"
               style={{
-                width: 32, height: 24, border: openColorPickerUrl === f.url ? "1px solid rgba(255,255,255,.24)" : "1px solid rgba(255,255,255,.12)",
+                width: 32, height: 24, border: isExpanded ? "1px solid rgba(255,255,255,.24)" : "1px solid rgba(255,255,255,.12)",
                 borderRadius: 7, padding: 3, cursor: "pointer", background: "rgba(255,255,255,.025)", boxSizing: "border-box",
                 display: "grid", placeItems: "stretch", transition: "border-color .16s ease, background .16s ease, transform .16s ease",
               }}
@@ -6424,13 +6486,10 @@ export default function ClientPage() {
                   background: vertexColors[i] && isTexAvailable ? "rgba(34,197,94,.10)" : "rgba(255,255,255,.025)",
                   border: vertexColors[i] && isTexAvailable ? "1px solid rgba(74,222,128,.22)" : "1px solid rgba(255,255,255,.09)", borderRadius: 7, 
                   color: isTexAvailable ? (vertexColors[i] ? "#b7f7ca" : "#bdbdbd") : "rgba(255,255,255,0.22)", 
-                  cursor: isTexAvailable ? "pointer" : "not-allowed", 
-                  padding: 0,
+                  cursor: isTexAvailable ? "pointer" : "not-allowed", padding: 0,
                   textDecoration: isTexAvailable ? "none" : "line-through"
               }}
-            >
-              TEX
-            </button>
+            >TEX</button>
 
             <button 
               onClick={() => {
@@ -6445,9 +6504,7 @@ export default function ClientPage() {
                   border: wireframes[i] ? "1px solid rgba(74,222,128,.22)" : "1px solid rgba(255,255,255,.09)", borderRadius: 7, 
                   color: wireframes[i] ? "#b7f7ca" : "#bdbdbd", cursor: "pointer", padding: 0
               }}
-            >
-              WF
-            </button>
+            >WF</button>
 
             <button
               onClick={() => {
@@ -6464,9 +6521,7 @@ export default function ClientPage() {
                 borderRadius: 7, color: ghostModes[i] ? "#b7f7ca" : "#bdbdbd", cursor: "pointer", padding: 0,
                 transition: "background .16s ease, border-color .16s ease, color .16s ease, transform .16s ease",
               }}
-            >
-              GH
-            </button>
+            >GH</button>
 
             <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 32, height: 24, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: visibles[i] ? "rgba(255,255,255,.025)" : "rgba(255,255,255,.012)", border: "1px solid rgba(255,255,255,.09)", borderRadius: 7, cursor: "pointer", opacity: visibles[i] ? 1 : .56 }}>
               <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
@@ -6474,11 +6529,11 @@ export default function ClientPage() {
 
             <div style={{
               gridColumn: "1 / -1", display: "grid",
-              gridTemplateRows: openColorPickerUrl === f.url ? "1fr" : "0fr",
-              opacity: openColorPickerUrl === f.url ? 1 : 0,
-              transform: openColorPickerUrl === f.url ? "translateY(0) scale(1)" : "translateY(-7px) scale(.988)",
-              filter: openColorPickerUrl === f.url ? "blur(0)" : "blur(2.5px)",
-              pointerEvents: openColorPickerUrl === f.url ? "auto" : "none",
+              gridTemplateRows: isExpanded ? "1fr" : "0fr",
+              opacity: isExpanded ? 1 : 0,
+              transform: isExpanded ? "translateY(0) scale(1)" : "translateY(-7px) scale(.988)",
+              filter: isExpanded ? "blur(0)" : "blur(2.5px)",
+              pointerEvents: isExpanded ? "auto" : "none",
               overflow: "hidden",
               transition: "grid-template-rows .40s cubic-bezier(.2,.75,.25,1), opacity .22s .06s ease, transform .36s cubic-bezier(.2,.75,.25,1), filter .25s ease",
             }}>
@@ -6487,10 +6542,27 @@ export default function ClientPage() {
                   value={colors[i] ?? "#ffffff"}
                   onChange={(nextColor) => setColors((prev) => prev.map((current, idx) => idx === i ? nextColor : current))}
                 />
+                <div style={{
+                  display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12,
+                  marginTop: 10, padding: "11px 3px 2px", borderTop: "1px solid rgba(255,255,255,.07)",
+                }}>
+                  <label style={{ display: "block", minWidth: 0 }}>
+                    <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 7, marginBottom: 5, color: "#969696", fontSize: 9.5, fontWeight: 650 }}>
+                      <span>Roughness</span><span style={{ color: "#d7d7d7", fontVariantNumeric: "tabular-nums" }}>{Math.round((roughnesses[i] ?? 0.5) * 100)}%</span>
+                    </span>
+                    <input type="range" min={0} max={1} step={0.01} value={roughnesses[i] ?? 0.5} onChange={(e) => { const v = parseFloat(e.target.value); setRoughnesses((prev) => prev.map((x, idx) => idx === i ? v : x)) }} style={{ width: "100%", accentColor: "#a3a3a3" }} aria-label={`${f.name} roughness`} />
+                  </label>
+                  <label style={{ display: "block", minWidth: 0 }}>
+                    <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 7, marginBottom: 5, color: "#969696", fontSize: 9.5, fontWeight: 650 }}>
+                      <span>Metalness</span><span style={{ color: "#d7d7d7", fontVariantNumeric: "tabular-nums" }}>{Math.round((metalnesses[i] ?? 0.5) * 100)}%</span>
+                    </span>
+                    <input type="range" min={0} max={1} step={0.01} value={metalnesses[i] ?? 0.5} onChange={(e) => { const v = parseFloat(e.target.value); setMetalnesses((prev) => prev.map((x, idx) => idx === i ? v : x)) }} style={{ width: "100%", accentColor: "#a3a3a3" }} aria-label={`${f.name} metalness`} />
+                  </label>
+                </div>
               </div>
             </div>
           </div>
-        );
+        )
       })}
       {dicomControls}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginTop: 10 }}>
@@ -6539,7 +6611,30 @@ export default function ClientPage() {
       border: "1px solid rgba(255,255,255,.09)", borderRadius: 14, padding: 8, boxSizing: "border-box",
       boxShadow: "0 18px 50px rgba(0,0,0,.24)", maxHeight: "calc(100vh - 20px)", overflowY: "auto"
     }}>
-      {title && (<div title={title} style={{ marginBottom: 8, padding: "9px 10px", borderRadius: 10, border: "1px solid rgba(255,255,255,.065)", background: "rgba(255,255,255,.025)", color: "#d7d7d7", fontSize: 10.5, fontWeight: 680, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>)}
+      {caseCloudContext.patientName ? (
+        <div style={{ marginBottom: 8, padding: "10px 10px 9px", borderRadius: 11, border: "1px solid rgba(255,255,255,.075)", background: "rgba(255,255,255,.026)" }}>
+          <div style={{ color: "#737373", fontSize: 8.5, fontWeight: 760, letterSpacing: ".085em", textTransform: "uppercase", marginBottom: 4 }}>Jméno pacienta</div>
+          <div title={caseCloudContext.patientName} style={{ color: "#ededed", fontSize: 13, lineHeight: 1.25, fontWeight: 720, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", letterSpacing: "-.015em" }}>{caseCloudContext.patientName}</div>
+          {caseCloudContext.labCaseId && getParam("mode") !== "live" && (
+            <button
+              type="button"
+              onClick={() => window.open(`https://www.arthetic.cz/lab-case?caseId=${encodeURIComponent(caseCloudContext.labCaseId)}`, "_blank", "noopener,noreferrer")}
+              style={{
+                width: "100%", height: 30, marginTop: 9, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+                borderRadius: 8, border: "1px solid rgba(255,255,255,.075)", background: "rgba(255,255,255,.025)",
+                color: "#bdbdbd", padding: "0 9px", cursor: "pointer", fontSize: 9.5, fontWeight: 680,
+                transition: "background .16s ease, border-color .16s ease, color .16s ease",
+              }}
+              title="Otevřít aktuální zakázku v LabCaseDetail"
+            >
+              <span>Otevřít zakázku</span>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden><path d="M9 18l6-6-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </button>
+          )}
+        </div>
+      ) : title ? (
+        <div title={title} style={{ marginBottom: 8, padding: "9px 10px", borderRadius: 10, border: "1px solid rgba(255,255,255,.065)", background: "rgba(255,255,255,.025)", color: "#d7d7d7", fontSize: 10.5, fontWeight: 680, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</div>
+      ) : null}
       
       {isMobile ? (
         <>
