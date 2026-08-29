@@ -680,80 +680,339 @@ function cleanupPair(pair) {
   try { pair?.targetGeometry?.dispose?.() } catch {}
 }
 
+
+const OCCLUSION_COLORS = ["#7e22ce", "#ef4444", "#facc15", "#22c55e", "#ffffff"].map((value) => new THREE.Color(value))
+const COMPARISON_COLORS = ["#2563eb", "#22c55e", "#facc15", "#ef4444", "#a21caf"].map((value) => new THREE.Color(value))
+
+function writeColor(target, index, color) {
+  target[index * 3] = color.r
+  target[index * 3 + 1] = color.g
+  target[index * 3 + 2] = color.b
+}
+
+function occlusionColor(distance, maxDist, target) {
+  const [deep, penetration, contact, clearance, far] = OCCLUSION_COLORS
+  if (distance < -1) return target.copy(deep)
+  if (distance < 0) return target.lerpColors(deep, penetration, distance + 1)
+  if (distance < 0.25) return target.lerpColors(penetration, contact, distance / 0.25)
+  if (distance < 1) return target.lerpColors(contact, clearance, (distance - 0.25) / 0.75)
+  if (distance < maxDist) return target.lerpColors(clearance, far, (distance - 1) / Math.max(0.001, maxDist - 1))
+  return target.copy(far)
+}
+
+function comparisonColor(distance, tolerance, target) {
+  const [excellent, within, warning, mismatch, severe] = COMPARISON_COLORS
+  if (distance <= tolerance) return target.lerpColors(excellent, within, distance / tolerance)
+  if (distance <= tolerance * 2) return target.lerpColors(within, warning, (distance - tolerance) / tolerance)
+  if (distance <= tolerance * 4) return target.lerpColors(warning, mismatch, (distance - tolerance * 2) / (tolerance * 2))
+  return target.lerpColors(mismatch, severe, Math.min(1, (distance - tolerance * 4) / (tolerance * 4)))
+}
+
+function makeClosestSignedDistanceQuery(targetMesh) {
+  targetMesh.updateMatrixWorld(true)
+  if (!targetMesh.geometry.boundsTree) targetMesh.geometry.computeBoundsTree()
+
+  const inverseTarget = new THREE.Matrix4().copy(targetMesh.matrixWorld).invert()
+  const normalMatrix = new THREE.Matrix3().getNormalMatrix(targetMesh.matrixWorld)
+  const localPoint = new THREE.Vector3()
+  const closestWorld = new THREE.Vector3()
+  const deltaWorld = new THREE.Vector3()
+  const normalWorld = new THREE.Vector3()
+  const triangleA = new THREE.Vector3()
+  const triangleB = new THREE.Vector3()
+  const triangleC = new THREE.Vector3()
+  const result = { point: new THREE.Vector3(), distance: Infinity, faceIndex: -1 }
+  const output = { distance: 0, signedDistance: 0 }
+
+  return (worldPoint) => {
+    localPoint.copy(worldPoint).applyMatrix4(inverseTarget)
+    result.distance = Infinity
+    result.faceIndex = -1
+    targetMesh.geometry.boundsTree.closestPointToPoint(localPoint, result)
+    closestWorld.copy(result.point).applyMatrix4(targetMesh.matrixWorld)
+    deltaWorld.subVectors(worldPoint, closestWorld)
+    faceNormalLocal(targetMesh.geometry, result.faceIndex, normalWorld, triangleA, triangleB, triangleC)
+      .applyMatrix3(normalMatrix)
+      .normalize()
+    const distance = deltaWorld.length()
+    output.distance = distance
+    output.signedDistance = distance * (deltaWorld.dot(normalWorld) < 0 ? -1 : 1)
+    return output
+  }
+}
+
+function makeClosestDistanceQuery(targetMesh) {
+  targetMesh.updateMatrixWorld(true)
+  if (!targetMesh.geometry.boundsTree) targetMesh.geometry.computeBoundsTree()
+
+  const inverseTarget = new THREE.Matrix4().copy(targetMesh.matrixWorld).invert()
+  const localPoint = new THREE.Vector3()
+  const closestWorld = new THREE.Vector3()
+  const result = { point: new THREE.Vector3(), distance: Infinity, faceIndex: -1 }
+
+  return (worldPoint) => {
+    localPoint.copy(worldPoint).applyMatrix4(inverseTarget)
+    result.distance = Infinity
+    result.faceIndex = -1
+    targetMesh.geometry.boundsTree.closestPointToPoint(localPoint, result)
+    closestWorld.copy(result.point).applyMatrix4(targetMesh.matrixWorld)
+    return worldPoint.distanceTo(closestWorld)
+  }
+}
+
+function reconstructSurfacePair(payload) {
+  const geometryA = makePositionGeometry(payload.a.positions, payload.a.index, true)
+  const geometryB = makePositionGeometry(payload.b.positions, payload.b.index, true)
+  const meshA = new THREE.Mesh(geometryA)
+  const meshB = new THREE.Mesh(geometryB)
+  setObjectMatrix(meshA, payload.a.matrixWorld)
+  setObjectMatrix(meshB, payload.b.matrixWorld)
+  meshA.updateMatrixWorld(true)
+  meshB.updateMatrixWorld(true)
+  return { geometryA, geometryB, meshA, meshB }
+}
+
+function cleanupSurfacePair(pair) {
+  try { pair?.geometryA?.disposeBoundsTree?.() } catch {}
+  try { pair?.geometryB?.disposeBoundsTree?.() } catch {}
+  try { pair?.geometryA?.dispose?.() } catch {}
+  try { pair?.geometryB?.dispose?.() } catch {}
+}
+
+function emitSurfaceProgress(requestId, progress) {
+  self.postMessage({ type: "PROGRESS", requestId, progress })
+}
+
+function computeOcclusionWorker(pair, payload, requestId) {
+  const maxDist = Math.max(0.001, Number(payload.maxDist) || 2)
+  const invertSign = !!payload.invertSign
+  const positions = pair.meshA.geometry.getAttribute("position")
+  const colors = new Float32Array(positions.count * 3)
+  const distances = new Float32Array(positions.count)
+  const sourceWorld = new THREE.Vector3()
+  const color = new THREE.Color()
+  const sample = makeClosestSignedDistanceQuery(pair.meshB)
+  let lastProgressAt = -Infinity
+
+  emitSurfaceProgress(requestId, { percent: 8, phase: "distances", processed: 0, total: positions.count })
+  for (let i = 0; i < positions.count; i++) {
+    sourceWorld.fromBufferAttribute(positions, i).applyMatrix4(pair.meshA.matrixWorld)
+    const hit = sample(sourceWorld)
+    const signedDistance = hit.signedDistance * (invertSign ? -1 : 1)
+    distances[i] = signedDistance
+    writeColor(colors, i, occlusionColor(signedDistance, maxDist, color))
+
+    const now = performance.now()
+    if (now - lastProgressAt >= 22 || i === positions.count - 1) {
+      lastProgressAt = now
+      emitSurfaceProgress(requestId, {
+        percent: 8 + ((i + 1) / Math.max(1, positions.count)) * 90,
+        phase: "distances",
+        processed: i + 1,
+        total: positions.count,
+      })
+    }
+  }
+  emitSurfaceProgress(requestId, { percent: 100, phase: "done", processed: positions.count, total: positions.count })
+  return { colors, distances }
+}
+
+function computeComparisonPassWorker(sourceMesh, targetMesh, tolerance, requestId, percentStart, percentSpan, phase) {
+  const positions = sourceMesh.geometry.getAttribute("position")
+  const colors = new Float32Array(positions.count * 3)
+  const distances = new Float32Array(positions.count)
+  const values = []
+  const sourceWorld = new THREE.Vector3()
+  const color = new THREE.Color()
+  const sample = makeClosestDistanceQuery(targetMesh)
+  const stride = Math.max(1, Math.ceil(positions.count / 100000))
+  let sum = 0, sumSq = 0, max = 0, within = 0
+  let lastProgressAt = -Infinity
+
+  for (let i = 0; i < positions.count; i++) {
+    sourceWorld.fromBufferAttribute(positions, i).applyMatrix4(sourceMesh.matrixWorld)
+    const distance = sample(sourceWorld)
+    distances[i] = distance
+    sum += distance
+    sumSq += distance * distance
+    max = Math.max(max, distance)
+    if (distance <= tolerance) within++
+    if (i % stride === 0) values.push(distance)
+    writeColor(colors, i, comparisonColor(distance, tolerance, color))
+
+    const now = performance.now()
+    if (now - lastProgressAt >= 22 || i === positions.count - 1) {
+      lastProgressAt = now
+      emitSurfaceProgress(requestId, {
+        percent: percentStart + ((i + 1) / Math.max(1, positions.count)) * percentSpan,
+        phase,
+        processed: i + 1,
+        total: positions.count,
+      })
+    }
+  }
+
+  return { colors, distances, count: positions.count, sum, sumSq, max, within, values }
+}
+
+function computeComparisonWorker(pair, payload, requestId) {
+  const tolerance = Math.max(0.0001, Number(payload.tolerance) || 0.25)
+  emitSurfaceProgress(requestId, { percent: 5, phase: "A_TO_B" })
+  const a = computeComparisonPassWorker(pair.meshA, pair.meshB, tolerance, requestId, 5, 45, "A_TO_B")
+  emitSurfaceProgress(requestId, { percent: 51, phase: "B_TO_A" })
+  const b = computeComparisonPassWorker(pair.meshB, pair.meshA, tolerance, requestId, 51, 45, "B_TO_A")
+  emitSurfaceProgress(requestId, { percent: 97, phase: "metrics" })
+
+  const count = a.count + b.count
+  const values = [...a.values, ...b.values].sort((x, y) => x - y)
+  const percentile95 = values.length ? values[Math.min(values.length - 1, Math.floor(values.length * 0.95))] : 0
+  const stats = {
+    mean: (a.sum + b.sum) / Math.max(1, count),
+    rms: Math.sqrt((a.sumSq + b.sumSq) / Math.max(1, count)),
+    percentile95,
+    max: Math.max(a.max, b.max),
+    withinTolerance: ((a.within + b.within) / Math.max(1, count)) * 100,
+    samples: count,
+  }
+  emitSurfaceProgress(requestId, { percent: 100, phase: "done" })
+  return {
+    a: { colors: a.colors, distances: a.distances },
+    b: { colors: b.colors, distances: b.distances },
+    stats,
+  }
+}
+
 self.postMessage({ type: "READY" })
 
 self.onmessage = async (event) => {
   const message = event.data || {}
-  if (message.type !== "BEST_FIT") return
-
   const { requestId, payload } = message
-  let pair = null
-  const startedAt = performance.now()
+  if (!requestId) return
 
-  try {
-    pair = reconstructPair(payload)
-    const reconstructedAt = performance.now()
+  if (message.type === "BEST_FIT") {
+    let pair = null
+    const startedAt = performance.now()
 
-    // BVH stavíme explicitně před ICP, abychom mohli změřit jeho cenu.
-    if (!pair.targetGeometry.boundsTree) pair.targetGeometry.computeBoundsTree()
-    const bvhReadyAt = performance.now()
+    try {
+      pair = reconstructPair(payload)
+      const reconstructedAt = performance.now()
 
-    let lastProgressAt = -Infinity
-    let lastPercent = -Infinity
-    const result = await robustPointToPlaneICP({
-      sourceMesh: pair.sourceMesh,
-      sourceRoot: pair.sourceRoot,
-      targetMesh: pair.targetMesh,
-      targetRoot: pair.targetRoot,
-      initialMatrix: payload.initialMatrix,
-      targetDiagonalOverride: payload.targetDiagonal,
-      landmarkSeeded: !!payload.landmarkSeeded,
-      onProgress: (progress) => {
-        const now = performance.now()
-        const percent = Number.isFinite(progress?.percent) ? progress.percent : null
-        const important =
-          progress?.mode === "prepare" ||
-          progress?.mode === "validation" ||
-          (percent != null && (percent >= 99 || percent - lastPercent >= 0.5))
+      // BVH stavíme explicitně před ICP, abychom mohli změřit jeho cenu.
+      if (!pair.targetGeometry.boundsTree) pair.targetGeometry.computeBoundsTree()
+      const bvhReadyAt = performance.now()
 
-        if (important || now - lastProgressAt >= 16) {
-          lastProgressAt = now
-          if (percent != null) lastPercent = percent
-          self.postMessage({ type: "PROGRESS", requestId, progress })
-        }
-      },
-    })
+      let lastProgressAt = -Infinity
+      let lastPercent = -Infinity
+      const result = await robustPointToPlaneICP({
+        sourceMesh: pair.sourceMesh,
+        sourceRoot: pair.sourceRoot,
+        targetMesh: pair.targetMesh,
+        targetRoot: pair.targetRoot,
+        initialMatrix: payload.initialMatrix,
+        targetDiagonalOverride: payload.targetDiagonal,
+        landmarkSeeded: !!payload.landmarkSeeded,
+        onProgress: (progress) => {
+          const now = performance.now()
+          const percent = Number.isFinite(progress?.percent) ? progress.percent : null
+          const important =
+            progress?.mode === "prepare" ||
+            progress?.mode === "validation" ||
+            (percent != null && (percent >= 99 || percent - lastPercent >= 0.5))
 
-    const finishedAt = performance.now()
-    self.postMessage({
-      type: "RESULT",
-      requestId,
-      result,
-      timings: {
-        reconstructMs: reconstructedAt - startedAt,
-        bvhMs: bvhReadyAt - reconstructedAt,
-        icpMs: finishedAt - bvhReadyAt,
-        totalMs: finishedAt - startedAt,
-      },
-    })
-  } catch (error) {
-    const errorMessage = error?.message || "Best Fit Worker selhal."
-    // Očekávané geometrické/algoritmické odmítnutí nemá smysl počítat znovu
-    // přes legacy engine. Neočekávaná runtime/programátorská chyba Workeru ale
-    // musí spadnout do infrastructure fallbacku, aby uživatel o Best Fit nepřišel.
-    const expectedAlgorithmError =
-      errorMessage.includes("Příliš málo překrývající se geometrie") ||
-      errorMessage.includes("Chybí model pro Best Fit") ||
-      errorMessage.includes("Moving model nemá použitelnou geometrii")
+          if (important || now - lastProgressAt >= 16) {
+            lastProgressAt = now
+            if (percent != null) lastPercent = percent
+            self.postMessage({ type: "PROGRESS", requestId, progress })
+          }
+        },
+      })
 
-    self.postMessage({
-      type: "ERROR",
-      requestId,
-      kind: expectedAlgorithmError ? "algorithm" : "infrastructure",
-      message: errorMessage,
-      stack: error?.stack || "",
-    })
-  } finally {
-    cleanupPair(pair)
+      const finishedAt = performance.now()
+      self.postMessage({
+        type: "RESULT",
+        requestId,
+        result,
+        timings: {
+          reconstructMs: reconstructedAt - startedAt,
+          bvhMs: bvhReadyAt - reconstructedAt,
+          icpMs: finishedAt - bvhReadyAt,
+          totalMs: finishedAt - startedAt,
+        },
+      })
+    } catch (error) {
+      const errorMessage = error?.message || "Best Fit Worker selhal."
+      // Očekávané geometrické odmítnutí nepouštíme znovu přes legacy engine.
+      // Neočekávaná runtime chyba Workeru zůstává infrastructure chybou, aby
+      // ClientPage mohl bezpečně použít původní Best Fit fallback.
+      const expectedAlgorithmError =
+        errorMessage.includes("Příliš málo překrývající se geometrie") ||
+        errorMessage.includes("Chybí model pro Best Fit") ||
+        errorMessage.includes("Moving model nemá použitelnou geometrii")
+
+      self.postMessage({
+        type: "ERROR",
+        requestId,
+        kind: expectedAlgorithmError ? "algorithm" : "infrastructure",
+        message: errorMessage,
+        stack: error?.stack || "",
+      })
+    } finally {
+      cleanupPair(pair)
+    }
+    return
+  }
+
+  if (message.type === "OCCLUSION" || message.type === "COMPARISON") {
+    let pair = null
+    const startedAt = performance.now()
+    try {
+      pair = reconstructSurfacePair(payload)
+      const reconstructedAt = performance.now()
+
+      // Okluze potřebuje BVH pouze pro B. Porovnání používá oba směry.
+      if (!pair.geometryB.boundsTree) pair.geometryB.computeBoundsTree()
+      if (message.type === "COMPARISON" && !pair.geometryA.boundsTree) pair.geometryA.computeBoundsTree()
+      const bvhReadyAt = performance.now()
+
+      const result = message.type === "OCCLUSION"
+        ? computeOcclusionWorker(pair, payload, requestId)
+        : computeComparisonWorker(pair, payload, requestId)
+      const finishedAt = performance.now()
+
+      const transferables = []
+      if (message.type === "OCCLUSION") {
+        transferables.push(result.colors.buffer, result.distances.buffer)
+      } else {
+        transferables.push(
+          result.a.colors.buffer, result.a.distances.buffer,
+          result.b.colors.buffer, result.b.distances.buffer,
+        )
+      }
+
+      self.postMessage({
+        type: "RESULT",
+        requestId,
+        result,
+        timings: {
+          reconstructMs: reconstructedAt - startedAt,
+          bvhMs: bvhReadyAt - reconstructedAt,
+          analysisMs: finishedAt - bvhReadyAt,
+          totalMs: finishedAt - startedAt,
+        },
+      }, transferables)
+    } catch (error) {
+      // Surface analýzy mají v ClientPage ověřený legacy fallback. Neočekávanou
+      // chybu Workeru proto označíme jako infrastructure a uživatel o výpočet
+      // nepřijde ani při problému bundleru / Worker runtime.
+      self.postMessage({
+        type: "ERROR",
+        requestId,
+        kind: "infrastructure",
+        message: error?.message || (message.type === "OCCLUSION" ? "Okluze Worker selhal." : "Porovnání Worker selhal."),
+        stack: error?.stack || "",
+      })
+    } finally {
+      cleanupSurfacePair(pair)
+    }
   }
 }
