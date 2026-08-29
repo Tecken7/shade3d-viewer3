@@ -4709,9 +4709,9 @@ export default function ClientPage() {
     setSurfaceAnalysisCompletion({ kind, phase: "show", elapsed: completedElapsed })
     // Hlavní scéna: closing sekvence Porovnání/Okluze je záměrně svižnější
     // než BestFit / Odchylka uvnitř režimu Zarovnání.
-    await new Promise((resolve) => window.setTimeout(resolve, 1650))
+    await new Promise((resolve) => window.setTimeout(resolve, 1350))
     setSurfaceAnalysisCompletion((current) => current ? { ...current, phase: "fade" } : current)
-    await new Promise((resolve) => window.setTimeout(resolve, 360))
+    await new Promise((resolve) => window.setTimeout(resolve, 280))
   }, [])
 
   const [pinnedNotes, setPinnedNotes] = useState([])
@@ -5575,16 +5575,7 @@ export default function ClientPage() {
     if (direction !== "A_TO_B" && direction !== "B_TO_A") return
     setComparisonDirection(direction)
 
-    // Pokud už je porovnání spočítané, nový referenční model opravdu nastavíme
-    // na 50 % v hlavním opacity state. Posuvník tak přesně odpovídá scéně
-    // a uživatel může hodnotu okamžitě dál ručně měnit.
-    if (hasComputedComparison && comparisonSelection.length === 2) {
-      const referenceUrl = direction === "B_TO_A" ? comparisonSelection[0] : comparisonSelection[1]
-      const referenceIndex = files.findIndex((file) => file.url === referenceUrl)
-      if (referenceIndex >= 0) {
-        setOpacities((previous) => previous.map((value, index) => index === referenceIndex ? 0.5 : value))
-      }
-    }
+    // Směr porovnání mění pouze analyzovaný povrch. Opacity modelů necháváme beze změny.
 
     setPinnedNotes([])
     if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
@@ -5660,13 +5651,8 @@ export default function ClientPage() {
           stats,
         ))
 
-        // Reference není jen vizuálně přepsaná na 50 %. Hodnotu zapíšeme
-        // přímo do stejného state, který řídí opacity slider v levém panelu.
-        const referenceUrl = comparisonDirection === "B_TO_A" ? comparisonSelection[0] : comparisonSelection[1]
-        const referenceIndex = files.findIndex((file) => file.url === referenceUrl)
-        if (referenceIndex >= 0) {
-          setOpacities((previous) => previous.map((value, index) => index === referenceIndex ? 0.5 : value))
-        }
+        // Porovnání už opacity žádného modelu automaticky nemění.
+        // Reference tak zůstává ve své aktuální (výchozí 100%) opacitě.
 
         setHasComputedComparison(true)
         setShowComparison(true)
@@ -6157,11 +6143,7 @@ export default function ClientPage() {
 
             setComparisonStats(stats)
 
-            const referenceUrl = savedComparisonDirection === "B_TO_A" ? aUrl : bUrl
-            const referenceIndex = files.findIndex((file) => file.url === referenceUrl)
-            if (referenceIndex >= 0) {
-              setOpacities((previous) => previous.map((value, index) => index === referenceIndex ? 0.5 : value))
-            }
+            // Při obnovení uloženého porovnání opacity modelů neměníme.
 
             setHasComputedComparison(true)
             setShowComparison(pendingViewerState.comparison?.visible !== false)
@@ -7430,7 +7412,7 @@ export default function ClientPage() {
                     </div>
                     <Switch checked={showComparison} onChange={(checked) => { setShowComparison(checked); if (checked) setShowHeatmap(false) }} label="Zobrazit mapu odchylek" />
                     <div style={{ marginTop: 8, padding: "7px 8px", borderRadius: 8, background: "rgba(0,0,0,.18)", color: "#777", fontSize: 8.7, lineHeight: 1.45 }}>
-                      {comparisonDirection === "A_TO_B" ? "A" : "B"} zobrazuje heatmapu · {comparisonDirection === "A_TO_B" ? "B" : "A"} zůstává jako reference s 50% opacitou.
+                      {comparisonDirection === "A_TO_B" ? "A" : "B"} zobrazuje heatmapu · {comparisonDirection === "A_TO_B" ? "B" : "A"} zůstává jako reference v původní opacitě.
                     </div>
                     <div style={{ marginTop: 11, display: "grid", gridTemplateColumns: "1fr auto", gap: "5px 12px", color: "#8b8b8b", fontSize: 9 }}>
                       <span>Průměrná odchylka</span><b style={{ color: "#d4d4d4" }}>{comparisonStats.mean.toFixed(3)} mm</b>
@@ -7868,19 +7850,19 @@ export default function ClientPage() {
     if (surfaceAnalysisCompletion) {
       if (surfaceAnalysisCompletion.kind === "comparison") {
         return [
-          { id: "comparison-complete-1", stamp: "", text: "COMPARISON FINISHED", tone: "complete", typewriter: true, delay: 40 },
-          { id: "comparison-complete-2", stamp: "", text: "bidirectional surface map validated", tone: "data", typewriter: true, delay: 250 },
-          { id: "comparison-complete-3", stamp: "", text: "analysis result stored", tone: "normal", typewriter: true, delay: 520 },
-          { id: "comparison-complete-4", stamp: "", text: "ending comparison session", tone: "normal", typewriter: true, delay: 800 },
-          { id: "comparison-complete-5", stamp: "", text: "session closed", tone: "muted", typewriter: true, delay: 1080 },
+          { id: "comparison-complete-1", stamp: "", text: "COMPARISON FINISHED", tone: "complete", typewriter: true, delay: 30 },
+          { id: "comparison-complete-2", stamp: "", text: "bidirectional surface map validated", tone: "data", typewriter: true, delay: 180 },
+          { id: "comparison-complete-3", stamp: "", text: "analysis result stored", tone: "normal", typewriter: true, delay: 380 },
+          { id: "comparison-complete-4", stamp: "", text: "ending comparison session", tone: "normal", typewriter: true, delay: 590 },
+          { id: "comparison-complete-5", stamp: "", text: "session closed", tone: "muted", typewriter: true, delay: 800 },
         ]
       }
       return [
-        { id: "occlusion-complete-1", stamp: "", text: "OCCLUSION ANALYSIS FINISHED", tone: "complete", typewriter: true, delay: 40 },
-        { id: "occlusion-complete-2", stamp: "", text: "contact surface map validated", tone: "data", typewriter: true, delay: 250 },
-        { id: "occlusion-complete-3", stamp: "", text: "penetration / clearance result ready", tone: "normal", typewriter: true, delay: 520 },
-        { id: "occlusion-complete-4", stamp: "", text: "ending analysis session", tone: "normal", typewriter: true, delay: 800 },
-        { id: "occlusion-complete-5", stamp: "", text: "session closed", tone: "muted", typewriter: true, delay: 1080 },
+        { id: "occlusion-complete-1", stamp: "", text: "OCCLUSION ANALYSIS FINISHED", tone: "complete", typewriter: true, delay: 30 },
+        { id: "occlusion-complete-2", stamp: "", text: "contact surface map validated", tone: "data", typewriter: true, delay: 180 },
+        { id: "occlusion-complete-3", stamp: "", text: "penetration / clearance result ready", tone: "normal", typewriter: true, delay: 380 },
+        { id: "occlusion-complete-4", stamp: "", text: "ending analysis session", tone: "normal", typewriter: true, delay: 590 },
+        { id: "occlusion-complete-5", stamp: "", text: "session closed", tone: "muted", typewriter: true, delay: 800 },
       ]
     }
 
@@ -8698,7 +8680,7 @@ export default function ClientPage() {
             background: "rgba(0,0,0,.22)", backdropFilter: "blur(2px)", WebkitBackdropFilter: "blur(2px)",
             pointerEvents: "all",
             opacity: surfaceAnalysisCompletion?.phase === "fade" ? 0 : 1,
-            transition: "opacity .58s ease",
+            transition: "opacity .26s ease",
             fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
           }}>
             <div style={{
@@ -8708,7 +8690,7 @@ export default function ClientPage() {
               boxShadow: "0 28px 90px rgba(0,0,0,.56)", backdropFilter: "blur(22px)", WebkitBackdropFilter: "blur(22px)",
               color: "#f5f5f5",
               animation: surfaceAnalysisCompletion?.phase === "fade"
-                ? "artheticSurfaceCardOut .34s cubic-bezier(.4,0,.2,1) both"
+                ? "artheticSurfaceCardOut .26s cubic-bezier(.4,0,.2,1) both"
                 : "artheticSurfaceCardIn .22s ease-out both",
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
@@ -8786,7 +8768,7 @@ export default function ClientPage() {
                         {!surfaceAnalysisCompletion && <span style={{ color: "#3f3f3f", fontVariantNumeric: "tabular-nums" }}>{line.stamp}</span>}
                         {!surfaceAnalysisCompletion && <span style={{ color: line.tone === "accent" || line.tone === "complete" ? "#d8d8d8" : "#555" }}>{line.tone === "accent" || line.tone === "complete" ? "◆" : "›"}</span>}
                         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          <AlignmentTerminalTypedText text={line.text} enabled={!!line.typewriter} speed={10} delay={line.delay ?? 28} />
+                          <AlignmentTerminalTypedText text={line.text} enabled={!!line.typewriter} speed={8} delay={line.delay ?? 24} />
                           {isLast && !surfaceAnalysisCompletion && (
                             <i aria-hidden="true" style={{
                               display: "inline-block", width: 4, height: 8, marginLeft: 4, verticalAlign: "-1px",
