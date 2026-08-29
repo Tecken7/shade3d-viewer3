@@ -6017,7 +6017,14 @@ export default function ClientPage() {
         }
 
         if (mId) {
-          const m = await fetchJSON(`${SUPABASE_URL}/storage/v1/object/public/${PUBLIC_BUCKET}/manifests/${encodeURIComponent(mId)}.json`)
+          // IMPORTANT: Supabase public Storage is served through a CDN. Browser
+          // `cache: "no-store"` alone does not guarantee that an overwritten
+          // object at the same public URL is not returned from an edge cache.
+          // Always give the manifest request a unique cache key. If the outer
+          // share URL carries `?v=...`, reuse it; otherwise generate one locally.
+          const manifestRevision = getParam("v") || `${Date.now()}`
+          const manifestUrl = `${SUPABASE_URL}/storage/v1/object/public/${PUBLIC_BUCKET}/manifests/${encodeURIComponent(mId)}.json?v=${encodeURIComponent(manifestRevision)}`
+          const m = await fetchJSON(manifestUrl)
           const Fs = (m?.files || []).map((x, i) => ({
             url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
             c: x.c, o: typeof x.o === "number" ? clamp01(x.o) : 1,
