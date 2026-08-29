@@ -22,6 +22,7 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast
 /* ---------- Konst + konfigurace ---------- */
 const LIVE_MSG_TYPES = new Set(["SHADE3D_LIVE", "SHADE3D_LIVE_V6", "SHADE3D_LIVE_V5"])
 const SUPABASE_URL = "https://jqnkdjgmenerioodqcpa.supabase.co"
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpxbmtkamdtZW5lcmlvb2RxY3BhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTU4Njg1OTcsImV4cCI6MjA3MTQ0NDU5N30.QREluCZ2N1NLPRD_B788rbwOwLFyXKYi8Sm2oYeDDQk"
 const PUBLIC_BUCKET = "shade3d-viewer2"
 const DEFAULT_LOGO = "/Arthetic_logo.png"
 
@@ -36,6 +37,50 @@ async function fetchJSON(url) {
   const r = await fetch(url, { cache: "no-store" })
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   return r.json()
+}
+
+function getBaseCaseCloudSceneId(value) {
+  if (!value) return null
+  const match = String(value).match(/^(.*)--r\d{10,}$/)
+  return match ? match[1] : String(value)
+}
+
+async function resolveCaseCloudManifestKey(requestedKey) {
+  const sceneId = getBaseCaseCloudSceneId(requestedKey)
+  if (!sceneId) return { sceneId: null, manifestKey: requestedKey, resolved: false }
+
+  try {
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_case_cloud_current_revision`, {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ p_scene_id: sceneId }),
+    })
+
+    if (!response.ok) {
+      console.warn(`[ARTHETIC Case Cloud] Revision resolver HTTP ${response.status}; používám kompatibilní fallback.`)
+      return { sceneId, manifestKey: requestedKey, resolved: false }
+    }
+
+    const payload = await response.json()
+    const row = Array.isArray(payload) ? payload[0] : payload
+    const currentRevision = row?.current_revision
+
+    if (typeof currentRevision === "string" && currentRevision.trim()) {
+      return { sceneId, manifestKey: currentRevision.trim(), resolved: true }
+    }
+
+    // Starší scéna ještě nemusí být zaregistrovaná v case_cloud_scenes.
+    // V tom případě zachováme starý přímý manifest / latest mirror.
+    return { sceneId, manifestKey: requestedKey, resolved: false }
+  } catch (error) {
+    console.warn("[ARTHETIC Case Cloud] Revision resolver failed; používám kompatibilní fallback.", error)
+    return { sceneId, manifestKey: requestedKey, resolved: false }
+  }
 }
 function inferExt(nameOrUrl) {
   if (!nameOrUrl) return ""
@@ -6017,12 +6062,14 @@ export default function ClientPage() {
         }
 
         if (mId) {
-          // `m` je u nových Case Cloud scén přímo immutable manifest key
-          // (např. abc123--r1788012345678). Každé uložení proto používá jiný
-          // Storage object a čerstvá scéna není závislá na CDN invalidaci.
-          // Staré `m` bez revizního suffixu funguje dál přes původní latest manifest.
+          // Veřejný link používá permanentní scene ID. Databáze ukazuje na právě
+          // jednu aktuální immutable revizi. Staré přímé revision linky zůstávají
+          // kompatibilní: z jejich suffixu odvodíme base scene ID a pokud již má
+          // záznam v DB, také je přesměrujeme na nejnovější revision.
+          const resolvedScene = await resolveCaseCloudManifestKey(mId)
+          const manifestKey = resolvedScene.manifestKey || mId
           const requestBust = getParam("v") || `${Date.now()}`
-          const manifestUrl = `${SUPABASE_URL}/storage/v1/object/public/${PUBLIC_BUCKET}/manifests/${encodeURIComponent(mId)}.json?v=${encodeURIComponent(requestBust)}`
+          const manifestUrl = `${SUPABASE_URL}/storage/v1/object/public/${PUBLIC_BUCKET}/manifests/${encodeURIComponent(manifestKey)}.json?v=${encodeURIComponent(requestBust)}`
           const m = await fetchJSON(manifestUrl)
           const Fs = (m?.files || []).map((x, i) => ({
             url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
