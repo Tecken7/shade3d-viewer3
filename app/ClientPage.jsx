@@ -7750,7 +7750,9 @@ export default function ClientPage() {
         </div>
       </div>
 
-      <div style={{
+      <div
+        data-slice-window-anchor="true"
+        style={{
         width: dicomLayoutActive ? 190 : 270, boxSizing: "border-box", display: isMobile ? "none" : "block",
         background: "rgba(12,12,12,.72)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
         border: clippingEnabled ? "1px solid rgba(74,222,128,.20)" : "1px solid rgba(255,255,255,.10)",
@@ -7759,7 +7761,7 @@ export default function ClientPage() {
         fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
         transition: "background .16s ease, border-color .16s ease, color .16s ease",
       }}>
-        <div data-slice-window-anchor="true" style={{ display: "flex", alignItems: "center", justifyContent: dicomLayoutActive ? "space-between" : "center", gap: 7, position: "relative", minHeight: 22, fontSize: 12, fontWeight: 680, letterSpacing: "-.01em" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: dicomLayoutActive ? "space-between" : "center", gap: 7, position: "relative", minHeight: 22, fontSize: 12, fontWeight: 680, letterSpacing: "-.01em" }}>
           <Switch
             checked={clippingEnabled}
             onChange={(checked) => {
