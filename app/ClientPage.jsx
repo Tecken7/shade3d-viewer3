@@ -1940,6 +1940,23 @@ function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, ac
     if (!showInactivePointHint) hideInactivePointHint()
   }, [showInactivePointHint, hideInactivePointHint])
 
+  // Track the inactive-point badge from the window capture phase too. TrackballControls
+  // can capture the pointer during RMB camera drags, which otherwise starves the
+  // viewport's React onPointerMove handler until the button is released.
+  useEffect(() => {
+    if (!showInactivePointHint) return
+    const onWindowPointerMove = (event) => {
+      const viewport = viewportRef.current
+      if (!viewport) return
+      const rect = viewport.getBoundingClientRect()
+      const inside = event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom
+      if (inside) updateInactivePointHint(event)
+      else hideInactivePointHint()
+    }
+    window.addEventListener("pointermove", onWindowPointerMove, true)
+    return () => window.removeEventListener("pointermove", onWindowPointerMove, true)
+  }, [showInactivePointHint, updateInactivePointHint, hideInactivePointHint])
+
   useEffect(() => {
     setPreviewLoading(!!file)
     setLoadedNonce(0)
@@ -3519,22 +3536,34 @@ function ArtheticInlineColorPicker({ value, onChange }) {
   const [hexDraft, setHexDraft] = useState(initialHex.toUpperCase())
   const svRef = useRef(null)
   const hueRef = useRef(null)
+  const lastEmittedHexRef = useRef("")
 
   useEffect(() => {
     const normalized = normalizeColorHex(value)
-    setHsv(colorRgbToHsv(colorHexToRgb(normalized)))
+    // Do not collapse the hue UI endpoint 360° back to 0° when our own drag
+    // emits #ff0000. They are the same color, but 360° intentionally means
+    // "thumb parked at the right edge" while 0° means the left edge.
+    if (normalized !== lastEmittedHexRef.current) {
+      setHsv(colorRgbToHsv(colorHexToRgb(normalized)))
+    }
     setHexDraft(normalized.toUpperCase())
+    lastEmittedHexRef.current = ""
   }, [value])
 
   const emitHsv = useCallback((next) => {
+    // Keep 360 as a valid UI endpoint. Color conversion treats 360° exactly like
+    // 0° (red), but preserving 360 here keeps the hue thumb clamped to the right
+    // edge instead of wrapping it instantly back to the left while dragging.
+    const rawHue = Number(next.h)
     const normalized = {
-      h: ((Number(next.h) || 0) % 360 + 360) % 360,
+      h: Math.max(0, Math.min(360, Number.isFinite(rawHue) ? rawHue : 0)),
       s: Math.max(0, Math.min(1, Number(next.s) || 0)),
       v: Math.max(0, Math.min(1, Number(next.v) || 0)),
     }
     setHsv(normalized)
     const nextHex = colorRgbToHex(colorHsvToRgb(normalized))
     setHexDraft(nextHex.toUpperCase())
+    lastEmittedHexRef.current = normalizeColorHex(nextHex)
     onChange?.(nextHex)
   }, [onChange])
 
@@ -3589,10 +3618,16 @@ function ArtheticInlineColorPicker({ value, onChange }) {
         onPointerCancel={(event) => { try { event.currentTarget.releasePointerCapture?.(event.pointerId) } catch {} }}
         style={{
           position: "relative", height: 118, borderRadius: 9, overflow: "hidden", cursor: "crosshair", touchAction: "none",
-          background: `linear-gradient(to top, #000 0%, transparent 100%), linear-gradient(to right, #fff 0%, hsl(${hsv.h}, 100%, 50%) 100%)`,
+          background: "#0b0b0b",
           border: "1px solid rgba(255,255,255,.08)", boxShadow: "inset 0 0 0 1px rgba(0,0,0,.18)",
         }}
       >
+        {/* Neutral 1px gutter prevents saturated edge pixels from bleeding through
+            the anti-aliased rounded corners on the opposite side of the SV field. */}
+        <span style={{
+          position: "absolute", inset: 1, borderRadius: 8, pointerEvents: "none",
+          background: `linear-gradient(to top, #000 0%, transparent 100%), linear-gradient(to right, #fff 0%, hsl(${hsv.h}, 100%, 50%) 100%)`,
+        }} />
         <span style={{
           position: "absolute", left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%`, width: 13, height: 13,
           borderRadius: "50%", border: "2px solid white", boxShadow: "0 1px 5px rgba(0,0,0,.8)",
