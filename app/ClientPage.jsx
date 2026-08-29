@@ -752,6 +752,69 @@ function configureMaterialTransparency(material, opacity) {
   if ("forceSinglePass" in material) material.forceSinglePass = false
 }
 
+const GHOST_VERTEX_SHADER = `
+  varying vec3 vGhostNormalView;
+  varying vec3 vGhostViewDir;
+
+  void main() {
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    vGhostNormalView = normalize(normalMatrix * normal);
+    vGhostViewDir = normalize(-mvPosition.xyz);
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`
+
+const GHOST_FRAGMENT_SHADER = `
+  uniform vec3 uGhostFill;
+  uniform vec3 uGhostRim;
+  uniform float uGhostStrength;
+
+  varying vec3 vGhostNormalView;
+  varying vec3 vGhostViewDir;
+
+  void main() {
+    vec3 N = normalize(vGhostNormalView);
+    vec3 V = normalize(vGhostViewDir);
+    float facing = abs(dot(N, V));
+    float fresnel = pow(clamp(1.0 - facing, 0.0, 1.0), 1.45);
+    float rim = smoothstep(0.05, 0.92, fresnel);
+
+    // Téměř bílá transparentní skořepina + výraznější ARTHETIC zelená silueta.
+    // Backfaces jsou o trochu zelenější, aby byl čitelný i vnitřní tvar modelu.
+    float backBoost = gl_FrontFacing ? 0.0 : 0.12;
+    vec3 color = mix(uGhostFill, uGhostRim, clamp(rim + backBoost, 0.0, 1.0));
+    float alpha = (0.065 + 0.54 * pow(fresnel, 0.72) + backBoost * 0.16) * uGhostStrength;
+    alpha = clamp(alpha, 0.0, 0.74);
+
+    gl_FragColor = vec4(color, alpha);
+  }
+`
+
+function makeGhostMaterial(opacity = 1) {
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      uGhostFill: { value: new THREE.Color('#f6fffc') },
+      uGhostRim: { value: new THREE.Color('#4ad5a2') },
+      uGhostStrength: { value: clamp01(opacity) },
+    },
+    vertexShader: GHOST_VERTEX_SHADER,
+    fragmentShader: GHOST_FRAGMENT_SHADER,
+    transparent: true,
+    depthTest: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    blending: THREE.NormalBlending,
+    toneMapped: false,
+  })
+  material.userData._artheticGhost = true
+  if ('forceSinglePass' in material) material.forceSinglePass = false
+  return material
+}
+
+function isGhostMaterial(material) {
+  return !!material && !Array.isArray(material) && !!material.userData?._artheticGhost
+}
+
 function faceNormalLocal(geometry, faceIndex, target, a, b, c) {
   if (!Number.isFinite(faceIndex) || faceIndex < 0) return target.set(0, 0, 1)
   const pos = geometry.attributes.position
@@ -2400,6 +2463,7 @@ function AnyModel({
   useVertexColors = false,
   keepMaterials = false,
   wireframe = false,
+  ghost = false,
   analysisMode = null,
   renderOrder = 0,
   modelMatrix = null,
@@ -2556,6 +2620,28 @@ function AnyModel({
 
       const isOriginalTexActive = useVertexColors && child.userData._originalColors;
       const wantVertexColors = isHeatmapActive || isOriginalTexActive;
+      const ghostActive = !!ghost && !isHeatmapActive;
+
+      // Ghost je samostatný diagnostický render režim. Původní materiál si necháváme
+      // bokem, aby vypnutí Ghostu přesně navázalo na aktuální TEX/WF/barvu/opacity.
+      if (!ghostActive && isGhostMaterial(child.material)) {
+        const ghostMaterial = child.material
+        const restoreMaterial = child.userData._preGhostMaterial
+        if (restoreMaterial) child.material = restoreMaterial
+        child.userData._preGhostMaterial = null
+        ghostMaterial.dispose()
+      }
+
+      if (ghostActive) {
+        if (!isGhostMaterial(child.material)) {
+          child.userData._preGhostMaterial = child.material
+          child.material = makeGhostMaterial(opacity)
+        } else if (child.material.uniforms?.uGhostStrength) {
+          child.material.uniforms.uGhostStrength.value = clamp01(opacity)
+        }
+        child.material.needsUpdate = true
+        return
+      }
 
       if (keepMaterials) {
           const materials = Array.isArray(child.material) ? child.material : [child.material]
@@ -2573,11 +2659,15 @@ function AnyModel({
               ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") }) 
               : makeMat({ vertexColors: false, color: new THREE.Color(color) })
 
-          if (child.material && child.material !== newMat) child.material.dispose()
+          const oldMaterial = child.material
           child.material = newMat
+          if (oldMaterial && oldMaterial !== newMat) {
+            if (Array.isArray(oldMaterial)) oldMaterial.filter(Boolean).forEach((m) => m.dispose?.())
+            else oldMaterial.dispose?.()
+          }
       }
     })
-  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, analysisMode, renderOrder])
+  }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, ghost, analysisMode, renderOrder])
 
   useEffect(() => {
     if (!object3D || !onAlignmentSelect) return
@@ -3799,6 +3889,7 @@ export default function ClientPage() {
   const [metalnesses, setMetalnesses] = useState([])
   const [vertexColors, setVertexColors] = useState([])
   const [wireframes, setWireframes] = useState([])
+  const [ghostModes, setGhostModes] = useState([])
   const [fatal, setFatal] = useState(null)
 
   const [dicomSource, setDicomSource] = useState(null)
@@ -5041,6 +5132,12 @@ export default function ClientPage() {
           matrix: matrixArrayOrIdentity(modelTransforms[file.url]).slice(),
         })),
       },
+      display: {
+        models: files.map((file, index) => ({
+          file: file.rawName || file.name || file.url,
+          ghost: !!ghostModes[index],
+        })),
+      },
       pinnedNotes: pinnedNotes.map((note) => ({
         id: note.id,
         mode: note.mode,
@@ -5076,7 +5173,7 @@ export default function ClientPage() {
     }
   }, [
     activeAnalysisMode, files, heatmapSelection, showHeatmap, hasComputedHeatmap,
-    comparisonSelection, comparisonTolerance, comparisonDirection, showComparison, hasComputedComparison, comparisonSnapshot, modelTransforms, alignmentSelection,
+    comparisonSelection, comparisonTolerance, comparisonDirection, showComparison, hasComputedComparison, comparisonSnapshot, modelTransforms, alignmentSelection, ghostModes,
     pinnedNotes, clippingEnabled, activeSlice, sliceRigGroup, planeGroup, horizontalPlaneGroup, measureState, horizontalMeasureState,
     dicomSource, dicomSettings,
   ])
@@ -5368,6 +5465,18 @@ export default function ClientPage() {
     if (Object.keys(restoredTransforms).length) {
       setModelTransforms((previous) => ({ ...previous, ...restoredTransforms }))
       rootGroupRef.current?.updateMatrixWorld(true)
+    }
+
+    const savedDisplayModels = Array.isArray(pendingViewerState.display?.models)
+      ? pendingViewerState.display.models
+      : []
+    if (savedDisplayModels.length) {
+      setGhostModes(files.map((file) => {
+        const saved = savedDisplayModels.find((entry) =>
+          entry?.file === file.url || entry?.file === file.rawName || entry?.file === file.name || stripExt(entry?.file || '') === file.name
+        )
+        return !!saved?.ghost
+      }))
     }
 
     setHeatmapSelection(occlusionSelection)
@@ -5707,6 +5816,7 @@ export default function ClientPage() {
           setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
           setVertexColors(Fs.map(() => false))
           setWireframes(Fs.map((f) => !!f.wf))
+          setGhostModes(Fs.map((f) => !!f.gh))
           
           setTitle(titleStr ?? (getParam("title") ?? null))
           setLogoCfg({
@@ -5738,7 +5848,7 @@ export default function ClientPage() {
             v: typeof x.v === "boolean" ? x.v : true,
             r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf
+            vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf, gh: x.gh !== undefined ? !!x.gh : undefined
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera, m?.viewer_state)
           applyDicomSource(m?.dicom || null)
@@ -5755,7 +5865,7 @@ export default function ClientPage() {
             v: typeof x.v === "boolean" ? x.v : true,
             r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf
+            vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf, gh: x.gh !== undefined ? !!x.gh : undefined
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera, m?.viewer_state)
           applyDicomSource(m?.dicom || null)
@@ -5779,7 +5889,7 @@ export default function ClientPage() {
             v: typeof x.v === "boolean" ? x.v : true,
             r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
             m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-            vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf
+            vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf, gh: x.gh !== undefined ? !!x.gh : undefined
           }))
           applyFiles(Fs, getParam("title") ?? null, null, null, null)
           const li = parseFloat(getParam("li") || getParam("light") || "")
@@ -5835,7 +5945,7 @@ export default function ClientPage() {
           v: typeof x.v === "boolean" ? x.v : true,
           r: typeof x.r === "number" ? clamp01(x.r) : 0.5,
           m: typeof x.m === "number" ? clamp01(x.m) : 0.5,
-          vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf
+          vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf, gh: x.gh !== undefined ? !!x.gh : undefined
         }))
 
         const urlsChanged = filesChanged(files, newFiles)
@@ -5850,7 +5960,12 @@ export default function ClientPage() {
         
         // ÚPRAVA 6: Správné načítání textur a wireframe místo fixní hodnoty
         setVertexColors(newFiles.map((f) => !!hasTexMap[f.url] && f.vc !== false))
-        setWireframes(newFiles.map((f) => !!f.wf)) 
+        setWireframes(newFiles.map((f) => !!f.wf))
+        setGhostModes((previous) => newFiles.map((f) => {
+          if (typeof f.gh === "boolean") return f.gh
+          const oldIndex = files.findIndex((oldFile) => oldFile.url === f.url)
+          return oldIndex >= 0 ? !!previous[oldIndex] : false
+        }))
 
         // ÚPRAVA 7: Zachování kamery, pokud posíláme keepCamera: true
         if (urlsChanged && !p.keepCamera) { 
@@ -6042,7 +6157,7 @@ export default function ClientPage() {
 
         return (
           <div key={`${f.url}-${i}`} className="control-row" style={{
-            display: "grid", gridTemplateColumns: "32px minmax(0,1fr) 30px 30px 32px", alignItems: "center", columnGap: 7, rowGap: 8,
+            display: "grid", gridTemplateColumns: "32px minmax(0,1fr) 30px 30px 30px 32px", alignItems: "center", columnGap: 7, rowGap: 8,
             margin: "7px 0", padding: "9px 10px", borderRadius: openColorPickerUrl === f.url ? 14 : 11, boxSizing: "border-box",
             background: openColorPickerUrl === f.url ? "rgba(12,12,12,.96)" : "rgba(255,255,255,.025)",
             border: openColorPickerUrl === f.url ? "1px solid rgba(255,255,255,.10)" : "1px solid rgba(255,255,255,.065)",
@@ -6089,7 +6204,11 @@ export default function ClientPage() {
             </button>
 
             <button 
-              onClick={() => setWireframes(prev => prev.map((v, idx) => idx === i ? !v : v))}
+              onClick={() => {
+                const next = !wireframes[i]
+                setWireframes(prev => prev.map((v, idx) => idx === i ? next : v))
+                if (next) setGhostModes(prev => prev.map((v, idx) => idx === i ? false : v))
+              }}
               title="Přepnout drátěný model (Wireframe)"
               style={{
                   width: 30, height: 24, fontSize: 8.5, fontWeight: 720,
@@ -6099,6 +6218,25 @@ export default function ClientPage() {
               }}
             >
               WF
+            </button>
+
+            <button
+              onClick={() => {
+                const next = !ghostModes[i]
+                setGhostModes((prev) => prev.map((value, idx) => idx === i ? next : value))
+                if (next) setWireframes((prev) => prev.map((value, idx) => idx === i ? false : value))
+              }}
+              title={ghostModes[i] ? "Vypnout Ghost zobrazení" : "Ghost – transparentní diagnostická skořepina"}
+              aria-pressed={!!ghostModes[i]}
+              style={{
+                width: 30, height: 24, fontSize: 8.2, fontWeight: 760, letterSpacing: "-.02em",
+                background: ghostModes[i] ? "rgba(34,197,94,.10)" : "rgba(255,255,255,.025)",
+                border: ghostModes[i] ? "1px solid rgba(74,222,128,.22)" : "1px solid rgba(255,255,255,.09)",
+                borderRadius: 7, color: ghostModes[i] ? "#b7f7ca" : "#bdbdbd", cursor: "pointer", padding: 0,
+                transition: "background .16s ease, border-color .16s ease, color .16s ease, transform .16s ease",
+              }}
+            >
+              GH
             </button>
 
             <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 32, height: 24, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: visibles[i] ? "rgba(255,255,255,.025)" : "rgba(255,255,255,.012)", border: "1px solid rgba(255,255,255,.09)", borderRadius: 7, cursor: "pointer", opacity: visibles[i] ? 1 : .56 }}>
@@ -7515,6 +7653,10 @@ export default function ClientPage() {
                 autoSmooth={true}
                 smoothAngle={DEFAULT_SMOOTH_ANGLE}
                 wireframe={wireframes[i] || false}
+                ghost={!!ghostModes[i] && !(
+                  (showHeatmap && heatmapSelection.includes(f.url)) ||
+                  (showComparison && comparisonSelection.includes(f.url))
+                )}
                 roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.5)}
                 metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
                 useVertexColors={vertexColors[i]}
