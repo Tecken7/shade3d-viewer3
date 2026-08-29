@@ -941,10 +941,14 @@ function makeGhostSingleMaterial(sourceMaterial, {
   baseColor = '#ffffff',
   useTextureData = false,
   hasVertexColors = false,
+  forceVertexColors = false,
 } = {}) {
-  const sourceMap = getGhostSourceMap(sourceMaterial, useTextureData)
+  const sourceMap = getGhostSourceMap(sourceMaterial, useTextureData && !forceVertexColors)
   const useMap = !!sourceMap
-  const useColors = !!useTextureData && !!hasVertexColors
+  // Analysis heatmapa používá stejný geometry color atribut jako běžné vertex colors,
+  // ale musí fungovat i když uživatel nemá zapnuté TEX. forceVertexColors ji proto
+  // dovolí použít samostatně a současně potlačí původní texture mapu materiálu.
+  const useColors = !!hasVertexColors && (!!useTextureData || !!forceVertexColors)
   const useVisualData = useMap || useColors
 
   const defines = {}
@@ -994,6 +998,7 @@ function updateGhostMaterial(material, sourceMaterial, {
   baseColor = '#ffffff',
   useTextureData = false,
   hasVertexColors = false,
+  forceVertexColors = false,
 } = {}) {
   const ghosts = ghostMaterialList(material)
   const sources = Array.isArray(sourceMaterial) ? sourceMaterial.filter(Boolean) : (sourceMaterial ? [sourceMaterial] : [])
@@ -1002,9 +1007,9 @@ function updateGhostMaterial(material, sourceMaterial, {
   for (let i = 0; i < ghosts.length; i += 1) {
     const ghostMaterial = ghosts[i]
     const source = sources[i]
-    const sourceMap = getGhostSourceMap(source, useTextureData)
+    const sourceMap = getGhostSourceMap(source, useTextureData && !forceVertexColors)
     const useMap = !!sourceMap
-    const useColors = !!useTextureData && !!hasVertexColors
+    const useColors = !!hasVertexColors && (!!useTextureData || !!forceVertexColors)
     const expectedVariant = `${useMap ? 1 : 0}:${useColors ? 1 : 0}`
 
     if (
@@ -1018,7 +1023,7 @@ function updateGhostMaterial(material, sourceMaterial, {
   for (let i = 0; i < ghosts.length; i += 1) {
     const ghostMaterial = ghosts[i]
     const source = sources[i]
-    const sourceMap = getGhostSourceMap(source, useTextureData)
+    const sourceMap = getGhostSourceMap(source, useTextureData && !forceVertexColors)
 
     ghostMaterial.uniforms?.uGhostBase?.value?.set?.(baseColor || '#ffffff')
     if (ghostMaterial.uniforms?.uGhostStrength) ghostMaterial.uniforms.uGhostStrength.value = clamp01(opacity)
@@ -2836,7 +2841,7 @@ function AnyModel({
 
       const isOriginalTexActive = useVertexColors && child.userData._originalColors;
       const wantVertexColors = isHeatmapActive || isOriginalTexActive;
-      const ghostActive = !!ghost && !isHeatmapActive;
+      const ghostActive = !!ghost;
 
       // Ghost je samostatný diagnostický render režim. Původní materiál si necháváme
       // bokem, aby vypnutí Ghostu přesně navázalo na aktuální TEX/WF/barvu/opacity.
@@ -2854,8 +2859,13 @@ function AnyModel({
         const ghostOptions = {
           opacity,
           baseColor: color || '#ffffff',
-          useTextureData: !!useVertexColors,
-          hasVertexColors: !!child.userData._originalColors,
+          // Během Comparison/Occlusion má diagnostická mapa přednost před běžnou
+          // barvou/texturou. Ghost tak zůstává Ghostem, ale nepřijdeme o heatmapu.
+          useTextureData: !isHeatmapActive && !!useVertexColors,
+          hasVertexColors: isHeatmapActive
+            ? !!child.geometry.attributes.color
+            : !!child.userData._originalColors,
+          forceVertexColors: isHeatmapActive,
         }
 
         if (!isGhostMaterial(child.material)) {
@@ -4479,7 +4489,7 @@ export default function ClientPage() {
     }
     const update = () => setAlignmentElapsed(Math.max(0, (performance.now() - alignmentStartedAt) / 1000))
     update()
-    const timer = setInterval(update, 100)
+    const timer = setInterval(update, 250)
     return () => clearInterval(timer)
   }, [alignmentBusy, alignmentStartedAt])
 
@@ -7256,20 +7266,107 @@ export default function ClientPage() {
   const alignmentProgressUi = (() => {
     if (!alignmentBusy) return null
     const progress = alignmentProgress || {}
-    if (progress.mode === "metrics") return { label: "Kontrola výsledku", detail: "Počítám odchylky a metrologické hodnoty", percent: Number.isFinite(progress.percent) ? progress.percent : 94 }
-    if (progress.mode === "validation") return { label: "Kontrola výsledku", detail: "Ověřuji, že Best Fit skutečně zlepšil překryv", percent: Number.isFinite(progress.percent) ? progress.percent : 90 }
-    if (progress.mode === "prepare" || !progress.stage) return { label: "Příprava povrchů", detail: "Vzorkuji geometrii a kontroluji překryv", percent: Number.isFinite(progress.percent) ? progress.percent : 3 }
+    if (progress.mode === "metrics") return { code: "METROLOGY", label: "Kontrola výsledku", detail: "Počítám odchylky a metrologické hodnoty", percent: Number.isFinite(progress.percent) ? progress.percent : 94 }
+    if (progress.mode === "validation") return { code: "VALIDATE", label: "Kontrola výsledku", detail: "Ověřuji, že Best Fit skutečně zlepšil překryv", percent: Number.isFinite(progress.percent) ? progress.percent : 90 }
+    if (progress.mode === "prepare" || !progress.stage) return { code: "PREPARE", label: "Příprava povrchů", detail: "Vzorkuji geometrii a kontroluji překryv", percent: Number.isFinite(progress.percent) ? progress.percent : 3 }
     const stage = Math.max(1, Math.min(3, Number(progress.stage) || 1))
     const iterations = Math.max(1, Number(progress.iterations) || 1)
     const iteration = Math.max(0, Number(progress.iteration) || 0)
     const withinStage = Math.min(1, iteration / iterations)
     const percent = Number.isFinite(progress.percent) ? progress.percent : 10 + (((stage - 1) + withinStage) / 3) * 78
     const labels = {
-      1: ["Hrubý Best Fit", "Stabilizuji překryv obou povrchů"],
-      2: ["Střední Best Fit", "Zpřesňuji rigidní polohu modelu"],
-      3: ["Jemný Best Fit", "Point-to-plane finální zpřesnění"],
+      1: ["PASS_01", "Hrubý Best Fit", "Stabilizuji překryv obou povrchů"],
+      2: ["PASS_02", "Střední Best Fit", "Zpřesňuji rigidní polohu modelu"],
+      3: ["PASS_03", "Jemný Best Fit", "Point-to-plane finální zpřesnění"],
     }
-    return { label: labels[stage][0], detail: labels[stage][1], percent }
+    return { code: labels[stage][0], label: labels[stage][1], detail: labels[stage][2], percent }
+  })()
+
+  // Živý terminál v Best Fit loaderu. Nehraje si na skutečný shell log; kombinuje
+  // reálný stav enginu (pass / iteration / RMS / correspondences) s jemným heartbeat
+  // textem odvozeným od právě běžící fáze, aby bylo i během dlouhého výpočtu vidět,
+  // že aplikace aktivně pracuje.
+  const alignmentTerminalLines = (() => {
+    if (!alignmentBusy || !alignmentProgressUi) return []
+    const progress = alignmentProgress || {}
+    const stage = Math.max(0, Math.min(3, Number(progress.stage) || 0))
+    const iteration = Math.max(0, Number(progress.iteration) || 0)
+    const iterations = Math.max(1, Number(progress.iterations) || 1)
+    const rms = Number.isFinite(progress.rms) ? progress.rms : null
+    const pairs = Number.isFinite(progress.correspondences) ? Math.max(0, Math.round(progress.correspondences)) : null
+    const tickSeconds = 1.65
+    const tick = Math.max(0, Math.floor(alignmentElapsed / tickSeconds))
+
+    const activityByStage = {
+      0: [
+        "reading geometry buffers",
+        "building spatial search data",
+        "sampling overlapping surfaces",
+        "checking initial overlap",
+        "preparing correspondence search",
+      ],
+      1: [
+        "querying closest surface points",
+        "filtering distant correspondences",
+        "estimating rigid transform",
+        "re-evaluating overlap",
+        "stabilizing coarse solution",
+      ],
+      2: [
+        "refining correspondence set",
+        "rejecting residual outliers",
+        "solving rigid update",
+        "measuring surface residuals",
+        "checking convergence trend",
+      ],
+      3: [
+        "sampling target normals",
+        "building point-to-plane system",
+        "rejecting unstable residuals",
+        "solving final rigid update",
+        "verifying fine convergence",
+      ],
+    }
+    const validationActivity = [
+      "comparing candidate with seeded pose",
+      "verifying overlap improvement",
+      "checking transform safety",
+      "validating final registration",
+    ]
+    const metricsActivity = [
+      "sampling final surface distances",
+      "accumulating RMS statistics",
+      "computing percentile metrics",
+      "finalizing metrology result",
+    ]
+
+    const activity = progress.mode === "metrics"
+      ? metricsActivity
+      : progress.mode === "validation"
+        ? validationActivity
+        : activityByStage[stage] || activityByStage[0]
+
+    const lines = []
+    const stamp = (seconds) => String(Math.max(0, seconds).toFixed(1)).padStart(6, "0")
+    const push = (seconds, text, tone = "normal") => lines.push({ stamp: stamp(seconds), text, tone })
+
+    push(0, "ARTHETIC REGISTRATION ENGINE / BEST_FIT", "muted")
+    push(Math.min(alignmentElapsed, .2), `phase ${alignmentProgressUi.code} · engine active`, "accent")
+
+    // Poslední čtyři heartbeat záznamy se posouvají jako terminál. Díky tomu se
+    // něco děje i ve chvíli, kdy jeden náročný ICP krok několik sekund nehlásí progress.
+    const visibleHeartbeat = 4
+    const firstTick = Math.max(0, tick - visibleHeartbeat + 1)
+    for (let t = firstTick; t <= tick; t += 1) {
+      const message = activity[t % activity.length]
+      push(t * tickSeconds, message, t === tick ? "active" : "normal")
+    }
+
+    if (stage > 0) push(alignmentElapsed, `pass ${stage}/3 · iteration ${Math.min(iteration, iterations)}/${iterations}`, "data")
+    if (pairs != null && pairs > 0) push(alignmentElapsed, `${pairs.toLocaleString("cs-CZ")} surface pairs accepted`, "data")
+    if (rms != null) push(alignmentElapsed, `RMS ${rms.toFixed(4)} mm`, "data")
+
+    return lines.slice(-7)
   })()
 
   const alignmentButtonStyle = (variant = "secondary", disabled = false) => {
@@ -7369,6 +7466,34 @@ export default function ClientPage() {
         @keyframes artheticAlignAttention { 0%,100% { box-shadow:0 0 0 0 rgba(255,255,255,.04); border-color:rgba(255,255,255,.10); } 50% { box-shadow:0 0 0 5px rgba(255,255,255,.055), 0 0 22px rgba(255,255,255,.08); border-color:rgba(255,255,255,.24); } }
         @keyframes artheticAlignCardIn { from { opacity:0; transform:translate(-50%,-46%) scale(.97); } to { opacity:1; transform:translate(-50%,-50%) scale(1); } }
         @keyframes artheticAlignMenuIn { from { opacity:0; transform:translateY(-4px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
+        @keyframes artheticAlignEngineBlink { 0%,100% { opacity:.32; } 50% { opacity:1; } }
+        @keyframes artheticAlignTerminalScan { 0% { transform:translateY(-14px); opacity:0; } 12% { opacity:.18; } 88% { opacity:.08; } 100% { transform:translateY(126px); opacity:0; } }
+        @keyframes artheticAlignTerminalCursor { 0%,46% { opacity:1; } 47%,100% { opacity:.16; } }
+        @keyframes artheticAlignEngineSweep { 0% { transform:translateX(-110%); opacity:0; } 18% { opacity:.34; } 72% { opacity:.12; } 100% { transform:translateX(310%); opacity:0; } }
+        .artheticAlignTerminal {
+          position:relative;
+          overflow:hidden;
+          isolation:isolate;
+        }
+        .artheticAlignTerminal::before {
+          content:"";
+          position:absolute;
+          left:0; right:0; top:0;
+          height:1px;
+          background:linear-gradient(90deg, transparent, rgba(134,239,172,.72), transparent);
+          filter:blur(.2px);
+          pointer-events:none;
+          z-index:2;
+          animation:artheticAlignTerminalScan 3.2s linear infinite;
+        }
+        .artheticAlignTerminal::after {
+          content:"";
+          position:absolute;
+          inset:0;
+          background:repeating-linear-gradient(180deg, transparent 0, transparent 3px, rgba(255,255,255,.012) 4px);
+          pointer-events:none;
+          z-index:1;
+        }
         @property --artheticAlignBeamAngle {
           syntax: "<angle>";
           inherits: false;
@@ -7612,41 +7737,116 @@ export default function ClientPage() {
       {alignmentBusy && alignmentProgressUi && (
         <div style={{
           position: "absolute", top: 0, left: 0, right: 0, bottom: alignmentBottomHeight, zIndex: 31,
-          background: "rgba(0,0,0,.18)", backdropFilter: "blur(1.5px)", pointerEvents: "all",
+          background: "rgba(0,0,0,.22)", backdropFilter: "blur(2px)", pointerEvents: "all",
         }}>
           <div style={{
             position: "absolute", left: "50%", top: "50%", transform: "translate(-50%,-50%)",
-            width: 328, maxWidth: "calc(100vw - 40px)", padding: "20px 20px 18px", borderRadius: 16,
-            background: "rgba(12,12,12,.94)", border: "1px solid rgba(255,255,255,.09)",
-            boxShadow: "0 24px 70px rgba(0,0,0,.48)", backdropFilter: "blur(20px)",
+            width: 454, maxWidth: "calc(100vw - 36px)", padding: "17px 17px 15px", borderRadius: 17,
+            background: "rgba(11,11,11,.965)", border: "1px solid rgba(255,255,255,.10)",
+            boxShadow: "0 28px 90px rgba(0,0,0,.56)", backdropFilter: "blur(22px)",
             color: "#f5f5f5", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
             animation: "artheticAlignCardIn .22s ease-out both",
           }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
               <div style={{
-                width: 34, height: 34, borderRadius: "50%", boxSizing: "border-box",
-                border: "2px solid rgba(255,255,255,.10)", borderTopColor: "#f3f3f3",
-                animation: "artheticAlignSpin .85s linear infinite", flex: "0 0 auto",
-              }} />
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 790, letterSpacing: "-.01em" }}>{alignmentProgressUi.label}</div>
-                <div style={{ marginTop: 3, color: "#7f7f7f", fontSize: 10, fontWeight: 620 }}>{alignmentProgressUi.detail}</div>
+                position: "relative", width: 34, height: 34, borderRadius: 10, flex: "0 0 auto",
+                background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.085)",
+                display: "grid", placeItems: "center", overflow: "hidden",
+              }}>
+                <div style={{
+                  width: 18, height: 18, borderRadius: "50%", boxSizing: "border-box",
+                  border: "1.5px solid rgba(255,255,255,.10)", borderTopColor: "#e8e8e8",
+                  animation: "artheticAlignSpin .78s linear infinite",
+                }} />
+                <div style={{
+                  position: "absolute", left: -18, top: 0, width: 16, height: "100%",
+                  background: "linear-gradient(90deg, transparent, rgba(134,239,172,.14), transparent)",
+                  transform: "skewX(-14deg)", animation: "artheticAlignEngineSweep 2.6s ease-in-out infinite",
+                }} />
               </div>
-              <div style={{ marginLeft: "auto", color: "#8a8a8a", fontSize: 10, fontVariantNumeric: "tabular-nums", fontWeight: 700 }}>{alignmentElapsed.toFixed(1)} s</div>
+
+              <div style={{ minWidth: 0, flex: "1 1 auto" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                  <div style={{ fontSize: 13, fontWeight: 790, letterSpacing: "-.012em" }}>{alignmentProgressUi.label}</div>
+                  <span style={{
+                    height: 17, display: "inline-flex", alignItems: "center", gap: 5, padding: "0 6px", borderRadius: 999,
+                    background: "rgba(34,197,94,.065)", border: "1px solid rgba(74,222,128,.14)",
+                    color: "#9ad9ac", fontSize: 7.7, fontWeight: 760, letterSpacing: ".055em",
+                  }}>
+                    <i style={{ width: 4, height: 4, borderRadius: "50%", background: "#86efac", boxShadow: "0 0 8px rgba(134,239,172,.55)", animation: "artheticAlignEngineBlink 1.05s ease-in-out infinite" }} />
+                    ENGINE ACTIVE
+                  </span>
+                </div>
+                <div style={{ marginTop: 3, color: "#777", fontSize: 9.7, fontWeight: 620 }}>{alignmentProgressUi.detail}</div>
+              </div>
+
+              <div style={{ textAlign: "right", flex: "0 0 auto" }}>
+                <div style={{ color: "#b7b7b7", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: 10.5, fontVariantNumeric: "tabular-nums", fontWeight: 720 }}>{alignmentElapsed.toFixed(1)} s</div>
+                <div style={{ marginTop: 2, color: "#555", fontSize: 7.6, fontWeight: 720, letterSpacing: ".055em" }}>{alignmentProgressUi.code}</div>
+              </div>
             </div>
 
-            <div style={{ marginTop: 18, height: 5, borderRadius: 999, background: "rgba(255,255,255,.065)", overflow: "hidden" }}>
+            <div
+              className="artheticAlignTerminal"
+              style={{
+                marginTop: 14, height: 126, borderRadius: 11,
+                background: "linear-gradient(180deg, rgba(4,6,5,.97), rgba(6,7,6,.97))",
+                border: "1px solid rgba(255,255,255,.065)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.018)",
+                padding: "10px 11px", boxSizing: "border-box",
+                fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace",
+              }}
+            >
+              <div style={{ position: "relative", zIndex: 3, display: "flex", flexDirection: "column", justifyContent: "flex-end", height: "100%", gap: 3 }}>
+                {alignmentTerminalLines.map((line, index) => {
+                  const isLast = index === alignmentTerminalLines.length - 1
+                  const toneColor = line.tone === "accent"
+                    ? "#86efac"
+                    : line.tone === "data"
+                      ? "#c8c8c8"
+                      : line.tone === "muted"
+                        ? "#555"
+                        : line.tone === "active"
+                          ? "#aabbb0"
+                          : "#777"
+                  return (
+                    <div key={`${line.stamp}-${index}-${line.text}`} style={{
+                      display: "grid", gridTemplateColumns: "43px 8px 1fr", alignItems: "baseline", gap: 4,
+                      minHeight: 11, color: toneColor, fontSize: 8.2, lineHeight: 1.16, letterSpacing: ".005em",
+                      opacity: line.tone === "muted" ? .72 : 1,
+                    }}>
+                      <span style={{ color: "#3f4742", fontVariantNumeric: "tabular-nums" }}>{line.stamp}</span>
+                      <span style={{ color: line.tone === "accent" ? "#86efac" : "#536057" }}>{line.tone === "accent" ? "◆" : "›"}</span>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {line.text}{isLast && <i aria-hidden="true" style={{ display: "inline-block", width: 4, height: 8, marginLeft: 4, verticalAlign: "-1px", background: "#86efac", animation: "artheticAlignTerminalCursor .92s steps(1,end) infinite" }} />}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
+            <div style={{ marginTop: 13, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+              <div style={{ color: "#666", fontSize: 8.4, fontWeight: 620 }}>
+                Výpočet stále probíhá · stránku neobnovujte ani nezavírejte.
+              </div>
+              <div style={{ color: "#8a8a8a", fontSize: 9, fontVariantNumeric: "tabular-nums", fontWeight: 730, whiteSpace: "nowrap" }}>
+                {Math.round(alignmentProgressUi.percent)} %
+              </div>
+            </div>
+
+            <div style={{ marginTop: 7, height: 5, borderRadius: 999, background: "rgba(255,255,255,.06)", overflow: "hidden", position: "relative" }}>
               <div style={{
                 height: "100%", width: `${Math.max(2, Math.min(100, alignmentProgressUi.percent))}%`, borderRadius: 999,
-                background: "linear-gradient(90deg, rgba(255,255,255,.58), #ffffff)",
+                background: "linear-gradient(90deg, rgba(134,239,172,.42), rgba(255,255,255,.88))",
                 transition: "width .28s cubic-bezier(.22,.61,.36,1)",
               }} />
             </div>
 
-            <div style={{ marginTop: 11, display: "flex", alignItems: "center", gap: 8, color: "#686868", fontSize: 9, fontWeight: 650 }}>
-              <span>{Math.round(alignmentProgressUi.percent)} %</span>
-              {alignmentProgress?.rms != null && Number.isFinite(alignmentProgress.rms) && <><span>·</span><span>RMS {alignmentProgress.rms.toFixed(4)} mm</span></>}
-              {alignmentProgress?.stage > 0 && alignmentProgress?.stage <= 3 && <><span>·</span><span>Pass {alignmentProgress.stage} / 3</span></>}
+            <div style={{ marginTop: 9, display: "flex", alignItems: "center", gap: 8, color: "#626262", fontSize: 8.4, fontWeight: 650, minHeight: 11 }}>
+              {alignmentProgress?.rms != null && Number.isFinite(alignmentProgress.rms) && <><span>RMS {alignmentProgress.rms.toFixed(4)} mm</span></>}
+              {alignmentProgress?.rms != null && Number.isFinite(alignmentProgress.rms) && alignmentProgress?.stage > 0 && alignmentProgress?.stage <= 3 && <span>·</span>}
+              {alignmentProgress?.stage > 0 && alignmentProgress?.stage <= 3 && <span>Pass {alignmentProgress.stage} / 3</span>}
+              {Number.isFinite(alignmentProgress?.correspondences) && alignmentProgress.correspondences > 0 && <><span>·</span><span>{Math.round(alignmentProgress.correspondences).toLocaleString("cs-CZ")} párů</span></>}
             </div>
           </div>
         </div>
@@ -8013,10 +8213,7 @@ export default function ClientPage() {
                 autoSmooth={true}
                 smoothAngle={DEFAULT_SMOOTH_ANGLE}
                 wireframe={wireframes[i] || false}
-                ghost={!!ghostModes[i] && !(
-                  (showHeatmap && heatmapSelection.includes(f.url)) ||
-                  (showComparison && comparisonSelection.includes(f.url))
-                )}
+                ghost={!!ghostModes[i]}
                 roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.5)}
                 metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
                 useVertexColors={vertexColors[i]}
