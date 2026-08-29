@@ -3131,6 +3131,132 @@ function AnyModel({
   ) : null
 }
 
+
+/* ---------- Mobilní dotykové ovládání roviny řezu ---------- */
+function MobileSlicePlaneTouchController({
+  radius = 100,
+  enabled = false,
+  onChange,
+  onInteractionChange,
+}) {
+  const { camera, size } = useThree()
+  const pointersRef = useRef(new Map())
+  const gestureRef = useRef({
+    singleY: null,
+    twoCenter: null,
+  })
+  const cameraRightRef = useRef(new THREE.Vector3())
+  const cameraUpRef = useRef(new THREE.Vector3())
+
+  const resetGestureAnchor = useCallback(() => {
+    const points = [...pointersRef.current.values()]
+    if (points.length === 1) {
+      gestureRef.current.singleY = points[0].y
+      gestureRef.current.twoCenter = null
+    } else if (points.length >= 2) {
+      gestureRef.current.singleY = null
+      gestureRef.current.twoCenter = {
+        x: (points[0].x + points[1].x) * 0.5,
+        y: (points[0].y + points[1].y) * 0.5,
+      }
+    } else {
+      gestureRef.current.singleY = null
+      gestureRef.current.twoCenter = null
+    }
+  }, [])
+
+  const finishPointer = useCallback((event) => {
+    pointersRef.current.delete(event.pointerId)
+    try { event.target?.releasePointerCapture?.(event.pointerId) } catch {}
+    resetGestureAnchor()
+    if (pointersRef.current.size === 0) onInteractionChange?.(false)
+  }, [onInteractionChange, resetGestureAnchor])
+
+  if (!enabled) return null
+
+  return (
+    <mesh
+      position={[0, 0, 0.035]}
+      renderOrder={1200}
+      onPointerDown={(event) => {
+        event.stopPropagation()
+        event.nativeEvent?.preventDefault?.()
+        pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
+        try { event.target?.setPointerCapture?.(event.pointerId) } catch {}
+        onInteractionChange?.(true)
+        resetGestureAnchor()
+      }}
+      onPointerMove={(event) => {
+        if (!pointersRef.current.has(event.pointerId)) return
+        event.stopPropagation()
+        event.nativeEvent?.preventDefault?.()
+
+        pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
+        const points = [...pointersRef.current.values()].slice(0, 2)
+        const plane = event.object?.parent
+        if (!plane) return
+
+        if (points.length === 1) {
+          const previousY = gestureRef.current.singleY
+          const currentY = points[0].y
+          if (Number.isFinite(previousY)) {
+            const dy = currentY - previousY
+            // Pohyb po lokální normále roviny. Citlivost se škáluje podle velikosti
+            // řezu, takže je podobná na různých velikostech dentálních modelů.
+            const worldPerPixel = Math.max(0.012, radius / Math.max(950, size.height * 2.2))
+            plane.translateZ(-dy * worldPerPixel)
+            plane.updateMatrixWorld(true)
+            onChange?.()
+          }
+          gestureRef.current.singleY = currentY
+          gestureRef.current.twoCenter = null
+          return
+        }
+
+        if (points.length >= 2) {
+          const center = {
+            x: (points[0].x + points[1].x) * 0.5,
+            y: (points[0].y + points[1].y) * 0.5,
+          }
+          const previous = gestureRef.current.twoCenter
+          if (previous) {
+            const dx = center.x - previous.x
+            const dy = center.y - previous.y
+            const rotateSpeed = 0.0062
+
+            cameraRightRef.current.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize()
+            cameraUpRef.current.set(0, 1, 0).applyQuaternion(camera.quaternion).normalize()
+
+            // Dva prsty fungují jako přímé "naklánění" roviny podle obrazovky.
+            // Rotace kolem normály řezu nemění samotný řez, proto používáme jen
+            // screen-right a screen-up osy.
+            plane.rotateOnWorldAxis(cameraUpRef.current, dx * rotateSpeed)
+            plane.rotateOnWorldAxis(cameraRightRef.current, dy * rotateSpeed)
+            plane.updateMatrixWorld(true)
+            onChange?.()
+          }
+          gestureRef.current.twoCenter = center
+          gestureRef.current.singleY = null
+        }
+      }}
+      onPointerUp={finishPointer}
+      onPointerCancel={finishPointer}
+      onLostPointerCapture={finishPointer}
+    >
+      {/* Neviditelná touch plocha je menší než vizuální rovina, aby šlo kolem
+          jejího okraje dál pohodlně orbitovat kamerou. */}
+      <circleGeometry args={[radius * 0.72, 48]} />
+      <meshBasicMaterial
+        transparent
+        opacity={0}
+        depthTest={false}
+        depthWrite={false}
+        side={THREE.DoubleSide}
+      />
+    </mesh>
+  )
+}
+
 /* ---------- Headlight ---------- */
 function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
   const { camera } = useThree()
@@ -9222,6 +9348,32 @@ export default function ClientPage() {
 
       {mobileSliceSplitActive && (
         <div style={{
+          position: "absolute",
+          left: "50%",
+          bottom: `calc(${mobileSlicePaneHeight} + 18px)`,
+          transform: "translateX(-50%)",
+          zIndex: 4,
+          pointerEvents: "none",
+          padding: "6px 10px",
+          borderRadius: 999,
+          background: "rgba(12,12,12,.78)",
+          border: "1px solid rgba(255,255,255,.10)",
+          boxShadow: "0 8px 24px rgba(0,0,0,.28)",
+          backdropFilter: "blur(12px)",
+          WebkitBackdropFilter: "blur(12px)",
+          color: "#bdbdbd",
+          fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+          fontSize: 9.5,
+          fontWeight: 680,
+          whiteSpace: "nowrap",
+          letterSpacing: "-.01em",
+        }}>
+          Rovina řezu · 1 prst = posun · 2 prsty = natočení
+        </div>
+      )}
+
+      {mobileSliceSplitActive && (
+        <div style={{
           position: "absolute", left: 10, right: 10, bottom: 10, height: mobileSlicePaneHeight, zIndex: 2,
           borderRadius: 12, overflow: "hidden", background: "#141414",
           border: "1px solid rgba(255,255,255,.12)", boxShadow: "0 -12px 36px rgba(0,0,0,.34)",
@@ -9364,6 +9516,14 @@ export default function ClientPage() {
                 <circleGeometry args={[planeRadius, 64]} />
                 <meshBasicMaterial color="#b88f8f" transparent opacity={0.25} side={THREE.DoubleSide} depthWrite={false} />
               </mesh>
+              {mobileSliceSplitActive && (
+                <MobileSlicePlaneTouchController
+                  radius={planeRadius}
+                  enabled={mobileSliceSplitActive}
+                  onChange={syncActiveSliceFromGizmo}
+                  onInteractionChange={handleSliceOverlayInteraction}
+                />
+              )}
               {dicomSlice2D && <DicomSlicePlane3D slice={dicomSlice2D} />}
               <SliceOutline3D segments={sliceSegments} modelColors={colors} color="#eab308" />
               <Measurement3D measureState={measureState} boundingBox={sliceBBox} />
