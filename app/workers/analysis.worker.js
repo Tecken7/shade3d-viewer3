@@ -5,6 +5,7 @@ THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree
 
 const IDENTITY_MATRIX_ARRAY = new THREE.Matrix4().identity().toArray()
+const ALIGNMENT_CPU_SLICE_MS = 8
 
 // Ve Workeru nemusíme uvolňovat hlavní UI thread. Async body ale zachováváme,
 // aby matematika zůstala co nejblíže ověřené legacy implementaci.
@@ -736,11 +737,20 @@ self.onmessage = async (event) => {
       },
     })
   } catch (error) {
+    const errorMessage = error?.message || "Best Fit Worker selhal."
+    // Očekávané geometrické/algoritmické odmítnutí nemá smysl počítat znovu
+    // přes legacy engine. Neočekávaná runtime/programátorská chyba Workeru ale
+    // musí spadnout do infrastructure fallbacku, aby uživatel o Best Fit nepřišel.
+    const expectedAlgorithmError =
+      errorMessage.includes("Příliš málo překrývající se geometrie") ||
+      errorMessage.includes("Chybí model pro Best Fit") ||
+      errorMessage.includes("Moving model nemá použitelnou geometrii")
+
     self.postMessage({
       type: "ERROR",
       requestId,
-      kind: "algorithm",
-      message: error?.message || "Best Fit Worker selhal.",
+      kind: expectedAlgorithmError ? "algorithm" : "infrastructure",
+      message: errorMessage,
       stack: error?.stack || "",
     })
   } finally {
