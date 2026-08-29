@@ -4414,6 +4414,7 @@ export default function ClientPage() {
     if (dicomSource && dicomSettings.viewMode === "only2d") setClippingEnabled(true)
   }, [dicomSource, dicomSettings.viewMode])
 
+  const [mobileFunctionsOpen, setMobileFunctionsOpen] = useState(false)
   const [heatmapMenuOpen, setHeatmapMenuOpen] = useState(false)
   const [heatmapSelection, setHeatmapSelection] = useState([])
   const [isCalculatingHeatmap, setIsCalculatingHeatmap] = useState(false)
@@ -4438,6 +4439,10 @@ export default function ClientPage() {
   const [surfaceAnalysisElapsed, setSurfaceAnalysisElapsed] = useState(0)
   const surfaceAnalysisElapsedDisplayRef = useRef(null)
   const [surfaceAnalysisCompletion, setSurfaceAnalysisCompletion] = useState(null) // null | { kind: "comparison" | "occlusion", phase: "show" | "fade", elapsed }
+
+  useEffect(() => {
+    if (!isMobile) setMobileFunctionsOpen(false)
+  }, [isMobile])
 
   // -- ZAROVNÁNÍ / REGISTRACE MODELŮ --
   const [alignmentMode, setAlignmentMode] = useState(false)
@@ -6926,6 +6931,8 @@ export default function ClientPage() {
     if (dicomLayoutActive) setDidInitialFrame(false)
   }, [dicomLayoutActive])
 
+  const analysisEligibleFiles = files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url)))
+
   const sidebar = (
     <div className="sidebar" style={{
       position: "absolute", top: 10, left: 10, zIndex: 2, width: "clamp(270px, 27vw, 400px)", maxWidth: "calc(100vw - 20px)",
@@ -6962,17 +6969,18 @@ export default function ClientPage() {
         <div style={{ border: "1px solid rgba(255,255,255,.055)", borderRadius: 11, padding: 6, background: "rgba(255,255,255,.012)" }}>{slidersContent}</div>
       )}
 
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginTop: 10 }}>
-        <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: isMobile ? 6 : 12, marginTop: 10 }}>
+        <div style={{ minWidth: 0, flex: isMobile ? "1 1 auto" : "0 0 auto" }}>
           {caseCloudContext.labCaseId && getParam("mode") !== "live" && (
             <button
               type="button"
               onClick={() => window.open(`https://www.arthetic.cz/lab-case?caseId=${encodeURIComponent(caseCloudContext.labCaseId)}`, "_blank", "noopener,noreferrer")}
               style={{
                 background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.085)",
-                borderRadius: 8, color: "#bdbdbd", padding: "6px 10px", fontSize: 9.5, cursor: "pointer",
+                borderRadius: 8, color: "#bdbdbd", padding: isMobile ? "6px 7px" : "6px 10px", fontSize: isMobile ? 9 : 9.5, cursor: "pointer",
                 transition: "background .16s ease, color .16s ease, border-color .16s ease", fontWeight: 680,
-                fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", display: "inline-flex", alignItems: "center", gap: 6,
+                fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", display: "inline-flex", alignItems: "center", gap: isMobile ? 4 : 6,
+                width: isMobile ? "100%" : "auto", justifyContent: "center", whiteSpace: "nowrap", boxSizing: "border-box",
               }}
               title="Otevřít aktuální zakázku v LabCaseDetail"
             >
@@ -6983,13 +6991,33 @@ export default function ClientPage() {
             </button>
           )}
         </div>
+        {isMobile && (
+          <button
+            type="button"
+            onClick={() => { setHeatmapMenuOpen(false); setComparisonMenuOpen(false); setMobileFunctionsOpen(true) }}
+            disabled={analysisEligibleFiles.length < 2}
+            style={{
+              flex: "0 0 auto", minWidth: 66,
+              background: showHeatmap || showComparison || heatmapMenuOpen || comparisonMenuOpen ? "rgba(34,197,94,.075)" : "rgba(255,255,255,.035)",
+              border: showHeatmap || showComparison || heatmapMenuOpen || comparisonMenuOpen ? "1px solid rgba(74,222,128,.19)" : "1px solid rgba(255,255,255,.085)",
+              borderRadius: 8, color: analysisEligibleFiles.length < 2 ? "#5d5d5d" : showHeatmap || showComparison ? "#c8f8d5" : "#bdbdbd",
+              padding: "6px 7px", fontSize: 9, cursor: analysisEligibleFiles.length < 2 ? "not-allowed" : "pointer",
+              transition: "background .16s ease, color .16s ease, border-color .16s ease", fontWeight: 680,
+              fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
+            }}
+            title="Otevřít analytické funkce"
+          >
+            <span>Funkce</span>
+            {(showHeatmap || showComparison) && <span aria-hidden="true" style={{ width: 5, height: 5, borderRadius: "50%", background: "#86efac", boxShadow: "0 0 8px rgba(74,222,128,.38)" }} />}
+          </button>
+        )}
         <button
           onClick={() => setDidInitialFrame(false)}
           style={{
             background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.085)",
-            borderRadius: 8, color: "#bdbdbd", padding: "6px 10px", fontSize: 9.5, cursor: "pointer",
+            borderRadius: 8, color: "#bdbdbd", padding: isMobile ? "6px 7px" : "6px 10px", fontSize: isMobile ? 9 : 9.5, cursor: "pointer",
             transition: "background .16s ease, color .16s ease, border-color .16s ease", fontWeight: 680,
-            fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
+            fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", whiteSpace: "nowrap", flex: isMobile ? "0 0 auto" : "initial"
           }}
           title="Vrátí kameru do výchozí polohy"
         >
@@ -7005,7 +7033,6 @@ export default function ClientPage() {
     </div>
   )
 
-  const analysisEligibleFiles = files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url)))
   const occlusionModelsReady = heatmapSelection.length === 2
   const comparisonModelsReady = comparisonSelection.length === 2
   const comparisonAnalyzedUrl = comparisonDirection === "B_TO_A" ? comparisonSelection[1] : comparisonSelection[0]
@@ -7040,24 +7067,26 @@ export default function ClientPage() {
     fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: 9, fontWeight: 680, whiteSpace: "nowrap",
   })
 
-  const topBarRight = !isMobile && (
+  const topBarRight = (!isMobile || heatmapMenuOpen || comparisonMenuOpen) && (
     <div style={{
       position: "absolute",
-      top: 10,
-      right: dicomLayoutActive ? "auto" : 10,
-      left: dicomLayoutActive ? `calc((100vw - ${dicomPanelWidth} + clamp(260px, 28vw, 420px) + 20px) / 2)` : "auto",
-      transform: dicomLayoutActive ? "translateX(-50%)" : "none",
-      zIndex: 10,
+      top: isMobile ? "auto" : 10,
+      bottom: isMobile ? 10 : "auto",
+      right: isMobile ? 10 : (dicomLayoutActive ? "auto" : 10),
+      left: isMobile ? 10 : (dicomLayoutActive ? `calc((100vw - ${dicomPanelWidth} + clamp(260px, 28vw, 420px) + 20px) / 2)` : "auto"),
+      transform: isMobile ? "none" : (dicomLayoutActive ? "translateX(-50%)" : "none"),
+      zIndex: isMobile ? 460 : 10,
       display: "flex",
-      flexDirection: dicomLayoutActive ? "row" : "column",
-      alignItems: "flex-start",
-      gap: dicomLayoutActive ? 8 : 10,
+      flexDirection: isMobile ? "column" : (dicomLayoutActive ? "row" : "column"),
+      alignItems: isMobile ? "stretch" : "flex-start",
+      gap: isMobile ? 0 : (dicomLayoutActive ? 8 : 10),
       fontFamily: "sans-serif",
       color: "white",
+      width: isMobile ? "calc(100vw - 20px)" : "auto",
       maxWidth: "calc(100vw - 20px)",
     }}>
       
-      <div style={{ width: dicomLayoutActive ? 120 : 270 }}>
+      <div style={{ width: dicomLayoutActive ? 120 : 270, display: isMobile ? "none" : "block" }}>
         <button
           onClick={openAlignmentMode}
           disabled={files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url))).length < 2}
@@ -7097,8 +7126,8 @@ export default function ClientPage() {
       `}</style>
 
       <div style={{
-        width: dicomLayoutActive ? 120 : 270,
-        display: "flex",
+        width: isMobile ? "100%" : (dicomLayoutActive ? 120 : 270),
+        display: isMobile && !heatmapMenuOpen ? "none" : "flex",
         flexDirection: "column",
         alignItems: "flex-end",
         position: "relative",
@@ -7106,8 +7135,9 @@ export default function ClientPage() {
         overflow: "visible",
       }}>
         <div style={{
-          width: heatmapMenuOpen ? (dicomLayoutActive ? 320 : 310) : "100%",
+          width: isMobile ? "100%" : (heatmapMenuOpen ? (dicomLayoutActive ? 320 : 310) : "100%"),
           maxWidth: "calc(100vw - 20px)",
+          maxHeight: isMobile ? "calc(100vh - 24px)" : "none",
           boxSizing: "border-box",
           borderRadius: heatmapMenuOpen ? 15 : 11,
           border: heatmapMenuOpen ? "1px solid rgba(255,255,255,.095)" : "1px solid rgba(255,255,255,.10)",
@@ -7241,8 +7271,8 @@ export default function ClientPage() {
       </div>
 
       <div style={{
-        width: dicomLayoutActive ? 120 : 270,
-        display: "flex",
+        width: isMobile ? "100%" : (dicomLayoutActive ? 120 : 270),
+        display: isMobile && !comparisonMenuOpen ? "none" : "flex",
         flexDirection: "column",
         alignItems: "flex-end",
         position: "relative",
@@ -7250,8 +7280,9 @@ export default function ClientPage() {
         overflow: "visible",
       }}>
         <div style={{
-          width: comparisonMenuOpen ? (dicomLayoutActive ? 330 : 320) : "100%",
+          width: isMobile ? "100%" : (comparisonMenuOpen ? (dicomLayoutActive ? 330 : 320) : "100%"),
           maxWidth: "calc(100vw - 20px)",
+          maxHeight: isMobile ? "calc(100vh - 24px)" : "none",
           boxSizing: "border-box",
           borderRadius: comparisonMenuOpen ? 15 : 11,
           border: comparisonMenuOpen ? "1px solid rgba(255,255,255,.095)" : "1px solid rgba(255,255,255,.10)",
@@ -7355,7 +7386,7 @@ export default function ClientPage() {
                 <div style={{ marginTop: 13, padding: "9px 10px", borderRadius: 11, background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.065)" }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
                     <span style={{ color: "#8a8a8a", fontSize: 9.3, fontWeight: 650 }}>Mapa odchylek</span>
-                    <span style={{ color: "#707070", fontSize: 8.7 }}>Reference automaticky 50 %</span>
+                    <span style={{ color: "#707070", fontSize: 8.7 }}>Reference zůstává v původní opacitě</span>
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, padding: 3, borderRadius: 9, background: "rgba(0,0,0,.28)", border: "1px solid rgba(255,255,255,.055)" }}>
                     {[
@@ -8547,6 +8578,102 @@ export default function ClientPage() {
       {!alignmentMode && logoEl}
       {!hideSidebar && !alignmentMode && sidebar}
       {!alignmentMode && topBarRight}
+
+      {isMobile && mobileFunctionsOpen && !alignmentMode && (
+        <>
+          <div
+            onClick={() => setMobileFunctionsOpen(false)}
+            style={{
+              position: "absolute", inset: 0, zIndex: 448,
+              background: "rgba(0,0,0,.36)", backdropFilter: "blur(3px)", WebkitBackdropFilter: "blur(3px)",
+              animation: "artheticMobileFunctionsBackdropIn .18s ease-out both",
+            }}
+          />
+          <style>{`
+            @keyframes artheticMobileFunctionsBackdropIn { from { opacity:0; } to { opacity:1; } }
+            @keyframes artheticMobileFunctionsSheetIn { from { opacity:0; transform:translateY(18px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
+          `}</style>
+          <div style={{
+            position: "absolute", left: 10, right: 10, bottom: 10, zIndex: 449,
+            padding: "10px 10px 12px", borderRadius: 18,
+            background: "rgba(12,12,12,.97)", border: "1px solid rgba(255,255,255,.10)",
+            boxShadow: "0 28px 80px rgba(0,0,0,.58)", backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
+            color: "#ededed", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+            animation: "artheticMobileFunctionsSheetIn .25s cubic-bezier(.2,.75,.25,1) both",
+          }}>
+            <div style={{ width: 34, height: 4, borderRadius: 999, background: "rgba(255,255,255,.13)", margin: "0 auto 10px" }} />
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "2px 4px 10px" }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 780, letterSpacing: "-.015em" }}>Funkce</div>
+                <div style={{ marginTop: 3, color: "#686868", fontSize: 9.2, fontWeight: 610 }}>Analýza dvou 3D povrchů</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMobileFunctionsOpen(false)}
+                aria-label="Zavřít funkce"
+                style={{ width: 30, height: 30, padding: 0, display: "grid", placeItems: "center", borderRadius: 9, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.035)", color: "#aaa", cursor: "pointer" }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+              </button>
+            </div>
+
+            <div style={{ display: "grid", gap: 8 }}>
+              <button
+                type="button"
+                disabled={analysisEligibleFiles.length < 2}
+                onClick={() => { setMobileFunctionsOpen(false); setHeatmapMenuOpen(true); setComparisonMenuOpen(false) }}
+                style={{
+                  width: "100%", minHeight: 64, padding: "10px 12px", borderRadius: 13, textAlign: "left",
+                  display: "flex", alignItems: "center", gap: 11, boxSizing: "border-box",
+                  border: showHeatmap ? "1px solid rgba(74,222,128,.19)" : "1px solid rgba(255,255,255,.075)",
+                  background: showHeatmap ? "rgba(34,197,94,.065)" : "rgba(255,255,255,.026)",
+                  color: analysisEligibleFiles.length < 2 ? "#555" : "#e8e8e8", cursor: analysisEligibleFiles.length < 2 ? "not-allowed" : "pointer",
+                  fontFamily: "inherit",
+                }}
+              >
+                <span style={{ width: 34, height: 34, flex: "0 0 auto", display: "grid", placeItems: "center", borderRadius: 10, background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.07)" }}>
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 8.5c3.2-2.5 6.4-3.7 9.5-3.2 2.2.3 4.3 1.5 6.5 3.2"/><path d="M4 15.5c3.2 2.5 6.4 3.7 9.5 3.2 2.2-.3 4.3-1.5 6.5-3.2"/><path d="M7 11.7h10"/><path d="M9.2 9.8L7 12l2.2 2.2"/><path d="M14.8 9.8L17 12l-2.2 2.2"/></svg>
+                </span>
+                <span style={{ minWidth: 0, flex: "1 1 auto" }}>
+                  <span style={{ display: "block", fontSize: 11.5, fontWeight: 740 }}>Okluze</span>
+                  <span style={{ display: "block", marginTop: 3, color: "#6f6f6f", fontSize: 9, lineHeight: 1.35 }}>Průnik, kontakt a mezera mezi dvěma modely</span>
+                </span>
+                {showHeatmap && <span style={{ color: "#86efac", fontSize: 9, fontWeight: 720 }}>Aktivní</span>}
+              </button>
+
+              <button
+                type="button"
+                disabled={analysisEligibleFiles.length < 2}
+                onClick={() => { setMobileFunctionsOpen(false); setComparisonMenuOpen(true); setHeatmapMenuOpen(false) }}
+                style={{
+                  width: "100%", minHeight: 64, padding: "10px 12px", borderRadius: 13, textAlign: "left",
+                  display: "flex", alignItems: "center", gap: 11, boxSizing: "border-box",
+                  border: showComparison ? "1px solid rgba(74,222,128,.19)" : "1px solid rgba(255,255,255,.075)",
+                  background: showComparison ? "rgba(34,197,94,.065)" : "rgba(255,255,255,.026)",
+                  color: analysisEligibleFiles.length < 2 ? "#555" : "#e8e8e8", cursor: analysisEligibleFiles.length < 2 ? "not-allowed" : "pointer",
+                  fontFamily: "inherit",
+                }}
+              >
+                <span style={{ width: 34, height: 34, flex: "0 0 auto", display: "grid", placeItems: "center", borderRadius: 10, background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.07)" }}>
+                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 7h9"/><path d="M10.5 3.5L14 7l-3.5 3.5"/><path d="M19 17h-9"/><path d="M13.5 13.5L10 17l3.5 3.5"/></svg>
+                </span>
+                <span style={{ minWidth: 0, flex: "1 1 auto" }}>
+                  <span style={{ display: "block", fontSize: 11.5, fontWeight: 740 }}>Porovnání</span>
+                  <span style={{ display: "block", marginTop: 3, color: "#6f6f6f", fontSize: 9, lineHeight: 1.35 }}>Mapa odchylek mezi dvěma povrchy</span>
+                </span>
+                {showComparison && <span style={{ color: "#86efac", fontSize: 9, fontWeight: 720 }}>Aktivní</span>}
+              </button>
+            </div>
+
+            {analysisEligibleFiles.length < 2 && (
+              <div style={{ marginTop: 9, padding: "8px 9px", borderRadius: 10, background: "rgba(255,255,255,.022)", border: "1px solid rgba(255,255,255,.055)", color: "#626262", fontSize: 8.7, lineHeight: 1.4 }}>
+                Pro analýzu jsou potřeba alespoň dva STL, PLY nebo OBJ modely.
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
       {alignmentWorkspace}
 
       {dicomLayoutActive && (
