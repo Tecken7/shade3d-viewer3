@@ -4084,7 +4084,7 @@ function ArtheticInlineColorPicker({ value, onChange }) {
 }
 
 
-function AlignmentTerminalTypedText({ text, speed = 15, enabled = true }) {
+function AlignmentTerminalTypedText({ text, speed = 15, enabled = true, delay = 28 }) {
   const safeText = String(text || "")
   const [visibleLength, setVisibleLength] = useState(enabled ? 0 : safeText.length)
 
@@ -4112,13 +4112,13 @@ function AlignmentTerminalTypedText({ text, speed = 15, enabled = true }) {
       timer = window.setTimeout(typeNext, speed + pause)
     }
 
-    // Malé zpoždění působí přirozeněji než okamžité spuštění každého nového řádku.
-    timer = window.setTimeout(typeNext, 28)
+    // Delay dovoluje dokončovací sekvenci psát skutečně řádek po řádku.
+    timer = window.setTimeout(typeNext, Math.max(0, delay))
     return () => {
       cancelled = true
       if (timer != null) window.clearTimeout(timer)
     }
-  }, [safeText, speed, enabled])
+  }, [safeText, speed, enabled, delay])
 
   return <>{safeText.slice(0, visibleLength)}</>
 }
@@ -4341,6 +4341,7 @@ export default function ClientPage() {
   const [alignmentStartedAt, setAlignmentStartedAt] = useState(null)
   const [alignmentElapsed, setAlignmentElapsed] = useState(0)
   const alignmentElapsedDisplayRef = useRef(null)
+  const [alignmentCompletion, setAlignmentCompletion] = useState(null) // null | { phase: "show" | "fade", elapsed, improved }
   const [alignmentPreviewBusy, setAlignmentPreviewBusy] = useState({ A: false, B: false })
   const [alignmentWorkflowStage, setAlignmentWorkflowStage] = useState("points") // points | prealigned | bestfit
   const [alignmentStep, setAlignmentStep] = useState("models") // models | points | prealign | bestfit
@@ -4524,6 +4525,12 @@ export default function ClientPage() {
   }, [runSurfaceWorkerAnalysis])
 
   useEffect(() => {
+    if (alignmentCompletion) {
+      const frozen = Number.isFinite(alignmentCompletion.elapsed) ? alignmentCompletion.elapsed : alignmentElapsed
+      if (alignmentElapsedDisplayRef.current) alignmentElapsedDisplayRef.current.textContent = `${Math.max(0, frozen).toFixed(2)} s`
+      return undefined
+    }
+
     if (!alignmentBusy || !alignmentStartedAt) {
       if (!alignmentBusy) setAlignmentElapsed(0)
       if (alignmentElapsedDisplayRef.current) alignmentElapsedDisplayRef.current.textContent = "0.00 s"
@@ -4549,7 +4556,7 @@ export default function ClientPage() {
 
     raf = requestAnimationFrame(update)
     return () => cancelAnimationFrame(raf)
-  }, [alignmentBusy, alignmentStartedAt])
+  }, [alignmentBusy, alignmentStartedAt, alignmentCompletion])
 
   const [pinnedNotes, setPinnedNotes] = useState([])
   const [pendingViewerState, setPendingViewerState] = useState(null)
@@ -5117,8 +5124,10 @@ export default function ClientPage() {
       return
     }
 
+    const bestFitStartedAt = performance.now()
+    setAlignmentCompletion(null)
     setAlignmentBusy(true)
-    setAlignmentStartedAt(performance.now())
+    setAlignmentStartedAt(bestFitStartedAt)
     setAlignmentElapsed(0)
     setAlignmentProgress({ stage: 0, stages: 3, iteration: 0, iterations: 1, rms: null, correspondences: 0, mode: "prepare" })
     setAlignmentStats(null)
@@ -5137,6 +5146,7 @@ export default function ClientPage() {
     // Loader necháme vykreslit ještě před kopírováním geometrie / spuštěním výpočtu.
     await alignmentPaintYield()
 
+    let completedWithUiSequence = false
     try {
       const initialMatrix = sourceRoot.matrix?.toArray?.() || modelTransforms[bUrl]
       const landmarkSeeded = Math.min(alignmentPointsA.length, alignmentPointsB.length) >= 3
@@ -5206,10 +5216,26 @@ export default function ClientPage() {
           ? `Best Fit dokončen · RMS ${stats.rms.toFixed(3)} mm · 95 % ${stats.percentile95.toFixed(3)} mm`
           : "Best Fit dokončen.")
         : "Best Fit nenašel bezpečně lepší polohu. Předzarovnání bylo zachováno beze změny.")
+
+      // Výpočet už skončil, ale loader ještě krátce zůstane jako potvrzení úspěšného
+      // dokončení. Čas zmrazíme na skutečné délce Best Fitu a terminál přepneme do
+      // krátké shutdown sekvence, následované jemným fade-outem celé karty.
+      completedWithUiSequence = true
+      const completedElapsed = Math.max(0, (performance.now() - bestFitStartedAt) / 1000)
+      setAlignmentElapsed(completedElapsed)
+      setAlignmentStartedAt(null)
+      setAlignmentCompletion({ phase: "show", elapsed: completedElapsed, improved: !!result.improved })
+      await new Promise((resolve) => window.setTimeout(resolve, 2600))
+      setAlignmentCompletion((current) => current ? { ...current, phase: "fade" } : current)
+      await new Promise((resolve) => window.setTimeout(resolve, 620))
+      setAlignmentCompletion(null)
     } catch (error) {
       console.error("Alignment Best Fit error:", error)
       setAlignmentMessage(error?.message || "Best Fit se nepodařilo dokončit.")
     } finally {
+      // Při úspěchu se stav shodí až po dokončovací animaci výše. Při chybě
+      // loader zmizí standardně bez falešné success fajfky.
+      if (!completedWithUiSequence) setAlignmentCompletion(null)
       setAlignmentBusy(false)
       setAlignmentStartedAt(null)
       setAlignmentProgress(null)
@@ -7322,6 +7348,12 @@ export default function ClientPage() {
               : "Předzarovnání dokončeno · spusťte Best Fit"
 
   const alignmentProgressUi = (() => {
+    if (alignmentCompletion) return {
+      code: "COMPLETE",
+      label: "Zarovnání dokončeno",
+      detail: alignmentCompletion.improved ? "Finální poloha byla ověřena a uložena" : "Výpočet dokončen · bezpečná výchozí poloha zachována",
+      percent: 100,
+    }
     if (!alignmentBusy) return null
     const progress = alignmentProgress || {}
     if (progress.mode === "metrics") return { code: "METROLOGY", label: "Kontrola výsledku", detail: "Počítám odchylky a metrologické hodnoty", percent: Number.isFinite(progress.percent) ? progress.percent : 94 }
@@ -7345,7 +7377,20 @@ export default function ClientPage() {
   // textem odvozeným od právě běžící fáze, aby bylo i během dlouhého výpočtu vidět,
   // že aplikace aktivně pracuje.
   const alignmentTerminalLines = (() => {
-    if (!alignmentBusy || !alignmentProgressUi) return []
+    if ((!alignmentBusy && !alignmentCompletion) || !alignmentProgressUi) return []
+
+    if (alignmentCompletion) {
+      // Po dokončení smažeme pracovní log a vypíšeme čistou closing sekvenci.
+      // Delay je kumulativní, takže řádky působí jako skutečný terminál.
+      return [
+        { id: "complete-1", stamp: "", text: "ALIGNMENT FINISHED", tone: "complete", typewriter: true, delay: 70 },
+        { id: "complete-2", stamp: "", text: "final transform validated", tone: "data", typewriter: true, delay: 510 },
+        { id: "complete-3", stamp: "", text: "ending registration session", tone: "normal", typewriter: true, delay: 980 },
+        { id: "complete-4", stamp: "", text: "releasing analysis instance", tone: "normal", typewriter: true, delay: 1480 },
+        { id: "complete-5", stamp: "", text: "session closed", tone: "muted", typewriter: true, delay: 2040 },
+      ]
+    }
+
     const progress = alignmentProgress || {}
     const stage = Math.max(0, Math.min(3, Number(progress.stage) || 0))
     const iteration = Math.max(0, Number(progress.iteration) || 0)
@@ -7422,7 +7467,7 @@ export default function ClientPage() {
 
     const lines = []
     const stamp = (seconds) => String(Math.max(0, seconds).toFixed(1)).padStart(6, "0")
-    const push = (id, seconds, text, tone = "normal", typewriter = false) => lines.push({ id, stamp: stamp(seconds), text, tone, typewriter })
+    const push = (id, seconds, text, tone = "normal", typewriter = false, delay = 28) => lines.push({ id, stamp: stamp(seconds), text, tone, typewriter, delay })
 
     push("header", 0, "ARTHETIC REGISTRATION ENGINE / BEST_FIT", "muted", false)
     push(`phase-${alignmentProgressUi.code}`, Math.min(alignmentElapsed, .2), `phase ${alignmentProgressUi.code}`, "accent", true)
@@ -7539,9 +7584,11 @@ export default function ClientPage() {
         @keyframes artheticAlignPulse { 0%,100% { opacity:.55; transform:scale(.9); } 50% { opacity:1; transform:scale(1.12); } }
         @keyframes artheticAlignAttention { 0%,100% { box-shadow:0 0 0 0 rgba(255,255,255,.04); border-color:rgba(255,255,255,.10); } 50% { box-shadow:0 0 0 5px rgba(255,255,255,.055), 0 0 22px rgba(255,255,255,.08); border-color:rgba(255,255,255,.24); } }
         @keyframes artheticAlignCardIn { from { opacity:0; transform:translate(-50%,-46%) scale(.97); } to { opacity:1; transform:translate(-50%,-50%) scale(1); } }
+        @keyframes artheticAlignCardOut { from { opacity:1; transform:translate(-50%,-50%) scale(1); filter:blur(0); } to { opacity:0; transform:translate(-50%,-51%) scale(.985); filter:blur(3px); } }
         @keyframes artheticAlignMenuIn { from { opacity:0; transform:translateY(-4px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
         @keyframes artheticAlignTerminalCursor { 0%,46% { opacity:1; } 47%,100% { opacity:.16; } }
-        @keyframes artheticAlignEngineSweep { 0% { transform:translateX(-110%); opacity:0; } 18% { opacity:.34; } 72% { opacity:.12; } 100% { transform:translateX(310%); opacity:0; } }
+        @keyframes artheticAlignCheckPop { 0% { opacity:0; transform:scale(.55); } 55% { opacity:1; transform:scale(1.08); } 100% { opacity:1; transform:scale(1); } }
+        @keyframes artheticAlignCheckDraw { from { stroke-dashoffset:24; } to { stroke-dashoffset:0; } }
         .artheticAlignTerminal {
           position:relative;
           overflow:hidden;
@@ -7795,10 +7842,12 @@ export default function ClientPage() {
         </div>
       )}
 
-      {alignmentBusy && alignmentProgressUi && (
+      {(alignmentBusy || alignmentCompletion) && alignmentProgressUi && (
         <div style={{
           position: "absolute", top: 0, left: 0, right: 0, bottom: alignmentBottomHeight, zIndex: 31,
           background: "rgba(0,0,0,.22)", backdropFilter: "blur(2px)", pointerEvents: "all",
+          opacity: alignmentCompletion?.phase === "fade" ? 0 : 1,
+          transition: "opacity .58s ease",
         }}>
           <div style={{
             position: "absolute", left: "50%", top: "50%", transform: "translate(-50%,-50%)",
@@ -7806,7 +7855,9 @@ export default function ClientPage() {
             background: "rgba(11,11,11,.965)", border: "1px solid rgba(255,255,255,.10)",
             boxShadow: "0 28px 90px rgba(0,0,0,.56)", backdropFilter: "blur(22px)",
             color: "#f5f5f5", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
-            animation: "artheticAlignCardIn .22s ease-out both",
+            animation: alignmentCompletion?.phase === "fade"
+              ? "artheticAlignCardOut .58s cubic-bezier(.4,0,.2,1) both"
+              : "artheticAlignCardIn .22s ease-out both",
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
               <div style={{
@@ -7814,16 +7865,24 @@ export default function ClientPage() {
                 background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.085)",
                 display: "grid", placeItems: "center", overflow: "hidden",
               }}>
-                <div style={{
-                  width: 18, height: 18, borderRadius: "50%", boxSizing: "border-box",
-                  border: "1.5px solid rgba(255,255,255,.10)", borderTopColor: "#e8e8e8",
-                  animation: "artheticAlignSpin .78s linear infinite",
-                }} />
-                <div style={{
-                  position: "absolute", left: -18, top: 0, width: 16, height: "100%",
-                  background: "linear-gradient(90deg, transparent, rgba(255,255,255,.10), transparent)",
-                  transform: "skewX(-14deg)", animation: "artheticAlignEngineSweep 2.6s ease-in-out infinite",
-                }} />
+                {alignmentCompletion ? (
+                  <svg
+                    width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"
+                    style={{ animation: "artheticAlignCheckPop .34s cubic-bezier(.2,.9,.24,1.2) both" }}
+                  >
+                    <path
+                      d="M4.2 10.3 8.2 14.1 15.9 5.9"
+                      stroke="#f4f4f4" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
+                      style={{ strokeDasharray: 24, strokeDashoffset: 24, animation: "artheticAlignCheckDraw .48s .10s ease-out forwards" }}
+                    />
+                  </svg>
+                ) : (
+                  <div style={{
+                    width: 18, height: 18, borderRadius: "50%", boxSizing: "border-box",
+                    border: "1.5px solid rgba(255,255,255,.10)", borderTopColor: "#e8e8e8",
+                    animation: "artheticAlignSpin .78s linear infinite",
+                  }} />
+                )}
               </div>
 
               <div style={{ minWidth: 0, flex: "1 1 auto" }}>
@@ -7843,7 +7902,7 @@ export default function ClientPage() {
               className="artheticAlignTerminal"
               style={{
                 marginTop: 14, height: 126, borderRadius: 11,
-                background: "linear-gradient(180deg, rgba(4,6,5,.97), rgba(6,7,6,.97))",
+                background: "rgba(2,2,2,.985)",
                 border: "1px solid rgba(255,255,255,.065)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.018)",
                 padding: "10px 11px", boxSizing: "border-box",
                 fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace",
@@ -7852,26 +7911,26 @@ export default function ClientPage() {
               <div style={{ position: "relative", zIndex: 3, display: "flex", flexDirection: "column", justifyContent: "flex-end", height: "100%", gap: 3 }}>
                 {alignmentTerminalLines.map((line, index) => {
                   const isLast = index === alignmentTerminalLines.length - 1
-                  const toneColor = line.tone === "accent"
-                    ? "#86efac"
+                  const toneColor = line.tone === "accent" || line.tone === "complete"
+                    ? "#f1f1f1"
                     : line.tone === "data"
                       ? "#c8c8c8"
                       : line.tone === "muted"
                         ? "#555"
                         : line.tone === "active"
-                          ? "#aabbb0"
+                          ? "#a9a9a9"
                           : "#777"
                   return (
                     <div key={line.id || `${line.stamp}-${index}-${line.text}`} style={{
-                      display: "grid", gridTemplateColumns: "43px 8px 1fr", alignItems: "baseline", gap: 4,
+                      display: "grid", gridTemplateColumns: alignmentCompletion ? "1fr" : "43px 8px 1fr", alignItems: "baseline", gap: alignmentCompletion ? 0 : 4,
                       minHeight: 11, color: toneColor, fontSize: 8.2, lineHeight: 1.16, letterSpacing: ".005em",
                       opacity: line.tone === "muted" ? .72 : 1,
                     }}>
-                      <span style={{ color: "#3f4742", fontVariantNumeric: "tabular-nums" }}>{line.stamp}</span>
-                      <span style={{ color: line.tone === "accent" ? "#86efac" : "#536057" }}>{line.tone === "accent" ? "◆" : "›"}</span>
+                      {!alignmentCompletion && <span style={{ color: "#3f3f3f", fontVariantNumeric: "tabular-nums" }}>{line.stamp}</span>}
+                      {!alignmentCompletion && <span style={{ color: line.tone === "accent" || line.tone === "complete" ? "#d8d8d8" : "#555" }}>{line.tone === "accent" || line.tone === "complete" ? "◆" : "›"}</span>}
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        <AlignmentTerminalTypedText text={line.text} enabled={!!line.typewriter} speed={14} />
-                        {isLast && <i aria-hidden="true" style={{ display: "inline-block", width: 4, height: 8, marginLeft: 4, verticalAlign: "-1px", background: "#86efac", animation: "artheticAlignTerminalCursor .92s steps(1,end) infinite" }} />}
+                        <AlignmentTerminalTypedText text={line.text} enabled={!!line.typewriter} speed={14} delay={line.delay ?? 28} />
+                        {isLast && !alignmentCompletion && <i aria-hidden="true" style={{ display: "inline-block", width: 4, height: 8, marginLeft: 4, verticalAlign: "-1px", background: "#f2f2f2", animation: "artheticAlignTerminalCursor .92s steps(1,end) infinite" }} />}
                       </span>
                     </div>
                   )
@@ -7881,7 +7940,9 @@ export default function ClientPage() {
 
             <div style={{ marginTop: 13, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
               <div style={{ color: "#666", fontSize: 8.4, fontWeight: 620 }}>
-                Výpočet stále probíhá · stránku neobnovujte ani nezavírejte.
+                {alignmentCompletion
+                  ? "Registrace byla dokončena · uzavírám výpočetní relaci."
+                  : "Výpočet stále probíhá · stránku neobnovujte ani nezavírejte."}
               </div>
               <div style={{ color: "#8a8a8a", fontSize: 9, fontVariantNumeric: "tabular-nums", fontWeight: 730, whiteSpace: "nowrap" }}>
                 {Math.round(alignmentProgressUi.percent)} %
@@ -7897,10 +7958,11 @@ export default function ClientPage() {
             </div>
 
             <div style={{ marginTop: 9, display: "flex", alignItems: "center", gap: 8, color: "#626262", fontSize: 8.4, fontWeight: 650, minHeight: 11 }}>
-              {alignmentProgress?.rms != null && Number.isFinite(alignmentProgress.rms) && <><span>RMS {alignmentProgress.rms.toFixed(4)} mm</span></>}
-              {alignmentProgress?.rms != null && Number.isFinite(alignmentProgress.rms) && alignmentProgress?.stage > 0 && alignmentProgress?.stage <= 3 && <span>·</span>}
-              {alignmentProgress?.stage > 0 && alignmentProgress?.stage <= 3 && <span>Pass {alignmentProgress.stage} / 3</span>}
-              {Number.isFinite(alignmentProgress?.correspondences) && alignmentProgress.correspondences > 0 && <><span>·</span><span>{Math.round(alignmentProgress.correspondences).toLocaleString("cs-CZ")} párů</span></>}
+              {!alignmentCompletion && alignmentProgress?.rms != null && Number.isFinite(alignmentProgress.rms) && <><span>RMS {alignmentProgress.rms.toFixed(4)} mm</span></>}
+              {!alignmentCompletion && alignmentProgress?.rms != null && Number.isFinite(alignmentProgress.rms) && alignmentProgress?.stage > 0 && alignmentProgress?.stage <= 3 && <span>·</span>}
+              {!alignmentCompletion && alignmentProgress?.stage > 0 && alignmentProgress?.stage <= 3 && <span>Pass {alignmentProgress.stage} / 3</span>}
+              {!alignmentCompletion && Number.isFinite(alignmentProgress?.correspondences) && alignmentProgress.correspondences > 0 && <><span>·</span><span>{Math.round(alignmentProgress.correspondences).toLocaleString("cs-CZ")} párů</span></>}
+              {alignmentCompletion && <span>{alignmentCompletion.improved ? "Alignment stored successfully" : "Best Fit session completed safely"}</span>}
             </div>
           </div>
         </div>
