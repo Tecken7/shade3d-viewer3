@@ -6017,13 +6017,12 @@ export default function ClientPage() {
         }
 
         if (mId) {
-          // IMPORTANT: Supabase public Storage is served through a CDN. Browser
-          // `cache: "no-store"` alone does not guarantee that an overwritten
-          // object at the same public URL is not returned from an edge cache.
-          // Always give the manifest request a unique cache key. If the outer
-          // share URL carries `?v=...`, reuse it; otherwise generate one locally.
-          const manifestRevision = getParam("v") || `${Date.now()}`
-          const manifestUrl = `${SUPABASE_URL}/storage/v1/object/public/${PUBLIC_BUCKET}/manifests/${encodeURIComponent(mId)}.json?v=${encodeURIComponent(manifestRevision)}`
+          // `m` je u nových Case Cloud scén přímo immutable manifest key
+          // (např. abc123--r1788012345678). Každé uložení proto používá jiný
+          // Storage object a čerstvá scéna není závislá na CDN invalidaci.
+          // Staré `m` bez revizního suffixu funguje dál přes původní latest manifest.
+          const requestBust = getParam("v") || `${Date.now()}`
+          const manifestUrl = `${SUPABASE_URL}/storage/v1/object/public/${PUBLIC_BUCKET}/manifests/${encodeURIComponent(mId)}.json?v=${encodeURIComponent(requestBust)}`
           const m = await fetchJSON(manifestUrl)
           const Fs = (m?.files || []).map((x, i) => ({
             url: x.u, name: stripExt(x.n) || `Model ${i + 1}`, rawName: x.n,
