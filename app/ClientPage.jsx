@@ -5977,6 +5977,24 @@ export default function ClientPage() {
     }
   }, [activeAnalysisMode])
 
+  // Three.js/R3F přestane během pravého dragování kamery posílat hover
+  // onPointerMove z modelu, protože pointer převezmou TrackballControls.
+  // Samotný browserový pointermove ale běží dál. Držíme proto pozici už
+  // zobrazeného analysis tooltipu u kurzoru i během pan/orbit gesta, aniž
+  // bychom při každém pohybu spouštěli nový raycast nebo výpočet odchylky.
+  useEffect(() => {
+    if (!activeAnalysisMode) return
+
+    const followPointer = (event) => {
+      const tooltip = tooltipRef.current
+      if (!tooltip || tooltip.style.opacity !== "1") return
+      tooltip.style.transform = `translate(${event.clientX + 15}px, ${event.clientY + 15}px)`
+    }
+
+    window.addEventListener("pointermove", followPointer, true)
+    return () => window.removeEventListener("pointermove", followPointer, true)
+  }, [activeAnalysisMode])
+
   const handlePinNote = useCallback((dist, point) => {
     setPinnedNotes(prev => [...prev, { 
       id: Date.now() + Math.random(), 
