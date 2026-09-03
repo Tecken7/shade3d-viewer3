@@ -1037,6 +1037,7 @@ function TrimSurfaceOverlay({
   onCloseLoop,
 }) {
   const groupRef = useRef(null)
+  const firstPointClickAtRef = useRef(0)
   useEffect(() => {
     const group = groupRef.current
     if (!group) return
@@ -1070,14 +1071,30 @@ function TrimSurfaceOverlay({
             key={`${index}-${trimPointKey(point)}`}
             position={point}
             renderOrder={1510}
-            raycast={draggingPoint != null ? () => null : undefined}
             onPointerDown={(event) => {
               event.stopPropagation()
               event.nativeEvent?.preventDefault?.()
               onBeginPointDrag?.(index)
             }}
+            onClick={isFirst ? (event) => {
+              event.stopPropagation()
+              if (event.delta != null && event.delta > 5) {
+                firstPointClickAtRef.current = 0
+                return
+              }
+              const now = typeof performance !== "undefined" ? performance.now() : Date.now()
+              const previous = firstPointClickAtRef.current
+              firstPointClickAtRef.current = now
+              if (controlNodes.length >= 3 && previous > 0 && now - previous <= 420) {
+                firstPointClickAtRef.current = 0
+                onCloseLoop?.()
+              }
+            } : (event) => {
+              event.stopPropagation()
+            }}
             onDoubleClick={isFirst && controlNodes.length >= 3 ? (event) => {
               event.stopPropagation()
+              firstPointClickAtRef.current = 0
               onCloseLoop?.()
             } : undefined}
           >
@@ -4054,7 +4071,6 @@ function AnyModel({
         onAlignmentSelect(url)
       } : onTrimSurfaceClick ? (e) => {
         e.stopPropagation()
-        if (e.delta != null && e.delta > 4) return
         onTrimSurfaceClick(url, e)
       } : undefined}
       onPointerOver={onAlignmentSelect ? (e) => {
@@ -6480,6 +6496,38 @@ export default function ClientPage() {
     if (trimClosed) setTrimMessage("Hranice byla upravena. Najeďte na požadovanou část pro nový náhled a kliknutím ji potvrďte.")
   }, [trimContext, trimControlNodes, trimSegments, trimClosed])
 
+  const applyTrimComponent = useCallback((componentId) => {
+    if (!trimContext || !trimBoundaryPlan || componentId == null || !trimSelection || trimBusy) return
+    setTrimBusy(true)
+    setTrimMessage("Ořezávám geometrii skrz jednotlivé faces…")
+    window.setTimeout(() => {
+      try {
+        const backup = applyTrimRegionToObject(trimContext, trimBoundaryPlan, componentId)
+        const stack = trimHistoryByUrlRef.current[trimSelection] || []
+        trimHistoryByUrlRef.current[trimSelection] = [...stack, backup]
+        setTrimmedExportsByUrl((previous) => ({
+          ...previous,
+          [trimSelection]: {
+            createdAt: new Date().toISOString(),
+            pointCount: trimControlNodes.length,
+            saveRequested: false,
+          },
+        }))
+        invalidateComparisonResult()
+        setHasComputedHeatmap(false); setShowHeatmap(false)
+        setTrimStage("result")
+        setTrimKeepComponent(null)
+        setTrimHoverComponent(null)
+        setTrimMessage("Ořez je hotový. Hrana je vytvořená skrz faces modelu; výsledek můžete stáhnout, uložit do zakázky nebo vrátit.")
+      } catch (error) {
+        console.error("Trim apply error:", error)
+        setTrimMessage(error?.message || "Ořez se nepodařilo aplikovat.")
+      } finally {
+        setTrimBusy(false)
+      }
+    }, 30)
+  }, [trimContext, trimBoundaryPlan, trimSelection, trimBusy, trimControlNodes.length, invalidateComparisonResult])
+
   const handleTrimSurfaceClick = useCallback((url, event) => {
     if (!trimMode || !trimContext || url !== trimSelection || trimBusy || trimDraggingPoint != null) return
     const hit = resolveTrimHit(trimContext, modelObjectsRef.current[url], event)
@@ -6492,14 +6540,20 @@ export default function ClientPage() {
       setTrimMessage("Tato hranice zatím nerozdělila povrch na dvě oblasti. Upravte některý bod a zkuste to znovu.")
       return
     }
-    const component = resolveTrimComponentFromHit(trimContext, trimBoundaryPlan, hit)
-    if (component == null) return
-    const kept = trimBoundaryPlan.components[component]?.length || 0
+    // Pokud už hover náhled určil zelenou oblast, potvrď přesně tu samou.
+    // Tím kliknutí nemůže skončit na sousedním boundary face jen kvůli sub-face overlayi.
+    const component = trimHoverComponent != null
+      ? trimHoverComponent
+      : resolveTrimComponentFromHit(trimContext, trimBoundaryPlan, hit)
+    if (component == null) {
+      setTrimMessage("Oblast pod kurzorem se nepodařilo jednoznačně určit. Zkuste kliknout o kousek dál od hranice.")
+      return
+    }
     setTrimKeepComponent(component)
     setTrimHoverComponent(null)
     setTrimStage("region")
-    setTrimMessage(`Oblast potvrzena · přibližně ${kept.toLocaleString("cs-CZ")} původních faces zůstane. Body můžete stále posunout, nebo potvrďte Oříznout.`)
-  }, [trimMode, trimContext, trimSelection, trimBusy, trimDraggingPoint, trimClosed, trimBoundaryPlan, addTrimControlNode])
+    applyTrimComponent(component)
+  }, [trimMode, trimContext, trimSelection, trimBusy, trimDraggingPoint, trimClosed, trimBoundaryPlan, trimHoverComponent, addTrimControlNode, applyTrimComponent])
 
   const handleTrimSurfaceMove = useCallback((url, event) => {
     if (!trimMode || !trimContext || url !== trimSelection || trimBusy) return
@@ -6577,36 +6631,9 @@ export default function ClientPage() {
   }, [])
 
   const applyTrimResult = useCallback(() => {
-    if (!trimContext || !trimBoundaryPlan || trimKeepComponent == null || !trimSelection || trimBusy) return
-    setTrimBusy(true)
-    setTrimMessage("Ořezávám geometrii skrz jednotlivé faces…")
-    window.setTimeout(() => {
-      try {
-        const backup = applyTrimRegionToObject(trimContext, trimBoundaryPlan, trimKeepComponent)
-        const stack = trimHistoryByUrlRef.current[trimSelection] || []
-        trimHistoryByUrlRef.current[trimSelection] = [...stack, backup]
-        setTrimmedExportsByUrl((previous) => ({
-          ...previous,
-          [trimSelection]: {
-            createdAt: new Date().toISOString(),
-            pointCount: trimControlNodes.length,
-            saveRequested: false,
-          },
-        }))
-        invalidateComparisonResult()
-        setHasComputedHeatmap(false); setShowHeatmap(false)
-        setTrimStage("result")
-        setTrimKeepComponent(null)
-        setTrimHoverComponent(null)
-        setTrimMessage("Ořez je hotový. Hrana je vytvořená skrz faces modelu; výsledek můžete stáhnout, uložit do zakázky nebo vrátit.")
-      } catch (error) {
-        console.error("Trim apply error:", error)
-        setTrimMessage(error?.message || "Ořez se nepodařilo aplikovat.")
-      } finally {
-        setTrimBusy(false)
-      }
-    }, 30)
-  }, [trimContext, trimBoundaryPlan, trimKeepComponent, trimSelection, trimBusy, trimControlNodes.length, invalidateComparisonResult])
+    if (trimKeepComponent == null) return
+    applyTrimComponent(trimKeepComponent)
+  }, [trimKeepComponent, applyTrimComponent])
 
   const undoLastTrim = useCallback((url = trimSelection) => {
     if (!url) return
@@ -10044,8 +10071,8 @@ export default function ClientPage() {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
           <div style={{ minWidth: 0, color: "#8b8b8b", fontSize: 9.3, lineHeight: 1.45 }}>
             {trimStage === "boundary" && !trimClosed && <>LMB klik = nový bod · přetažení kuličky = oprava bodu · dvojklik na první žlutý bod = uzavřít.</>}
-            {trimStage === "boundary" && trimClosed && <>Smyčka je uzavřená. Body můžete dál přetahovat. Najeďte myší na jednu stranu pro náhled a kliknutím ji potvrďte.</>}
-            {trimStage === "region" && <>Zelená oblast zůstane, červená se odstraní. Řez vede skrz faces; body lze stále přetahovat a hranici jemně doladit.</>}
+            {trimStage === "boundary" && trimClosed && <>Smyčka je uzavřená. Body můžete dál přetahovat. Najeďte myší na jednu stranu pro náhled; kliknutím na zelenou oblast se Ořez rovnou provede.</>}
+            {trimStage === "region" && <>Potvrzuji vybranou oblast a provádím Ořez…</>}
             {trimStage === "result" && <>Ořez je aplikovaný na geometrii v této session. Výsledek lze stáhnout nebo interně uložit k zakázce.</>}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -10057,10 +10084,6 @@ export default function ClientPage() {
             )}
             {trimStage === "boundary" && !trimClosed && trimControlNodes.length >= 3 && (
               <button type="button" onClick={closeTrimLoop} style={{ height: 31, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(251,191,36,.18)", background: "rgba(245,158,11,.065)", color: "#fde68a", fontSize: 9, fontWeight: 710, cursor: "pointer" }}>Uzavřít hranici</button>
-            )}
-            {trimStage === "region" && trimKeepComponent != null && (
-              <button type="button" onClick={applyTrimResult} disabled={trimBusy} className={!trimBusy ? "artheticAnalysisReadyAction" : undefined}
-                style={{ height: 32, padding: "0 12px", borderRadius: 9, border: "1px solid rgba(74,222,128,.18)", background: "rgba(18,42,27,.97)", color: "#dffbea", fontSize: 9.5, fontWeight: 730, cursor: trimBusy ? "wait" : "pointer" }}><span>Oříznout</span></button>
             )}
             {trimStage === "result" && (
               <>
