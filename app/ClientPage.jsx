@@ -241,6 +241,9 @@ function makeTrimmedExportName(file, aligned = false) {
 
 const trimEdgeKey = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`
 const trimVertexKey = (v) => `${v.x.toFixed(5)}|${v.y.toFixed(5)}|${v.z.toFixed(5)}`
+const trimPointKey = (point) => `${point[0].toFixed(6)}|${point[1].toFixed(6)}|${point[2].toFixed(6)}`
+const trimVec = (point) => Array.isArray(point) ? new THREE.Vector3(point[0], point[1], point[2]) : point.clone()
+const trimArr = (point) => [point.x, point.y, point.z]
 
 function buildTrimMeshContext(sourceObject) {
   if (!sourceObject) throw new Error("Model není připravený pro Ořez.")
@@ -248,7 +251,6 @@ function buildTrimMeshContext(sourceObject) {
   const sourceInverse = sourceObject.matrixWorld.clone().invert()
   const nodes = []
   const nodeMap = new Map()
-  const adjacency = []
   const triangles = []
   const edgeTriangles = new Map()
   const triangleLookup = new Map()
@@ -262,18 +264,12 @@ function buildTrimMeshContext(sourceObject) {
     const id = nodes.length
     nodes.push(point.clone())
     nodeMap.set(key, id)
-    adjacency.push(new Map())
     bounds.expandByPoint(point)
     return id
   }
 
-  const addEdge = (a, b, triIndex) => {
+  const registerEdge = (a, b, triIndex) => {
     if (a === b) return
-    const weight = nodes[a].distanceTo(nodes[b])
-    const prevAB = adjacency[a].get(b)
-    if (prevAB === undefined || weight < prevAB) adjacency[a].set(b, weight)
-    const prevBA = adjacency[b].get(a)
-    if (prevBA === undefined || weight < prevBA) adjacency[b].set(a, weight)
     const key = trimEdgeKey(a, b)
     const list = edgeTriangles.get(key)
     if (list) list.push(triIndex)
@@ -339,27 +335,95 @@ function buildTrimMeshContext(sourceObject) {
       if (nodeIds[0] === nodeIds[1] || nodeIds[1] === nodeIds[2] || nodeIds[2] === nodeIds[0]) continue
       const triIndex = triangles.length
       const materialIndex = geometry.groups?.find?.((group) => offset >= group.start && offset < group.start + group.count)?.materialIndex || 0
-      triangles.push({ childUuid: child.uuid, faceIndex, nodeIds, corners, materialIndex })
+      const centroid = new THREE.Vector3()
+        .add(trimVec(corners[0].sourcePos))
+        .add(trimVec(corners[1].sourcePos))
+        .add(trimVec(corners[2].sourcePos))
+        .multiplyScalar(1 / 3)
+      const edgeKeys = [
+        trimEdgeKey(nodeIds[0], nodeIds[1]),
+        trimEdgeKey(nodeIds[1], nodeIds[2]),
+        trimEdgeKey(nodeIds[2], nodeIds[0]),
+      ]
+      triangles.push({ childUuid: child.uuid, faceIndex, nodeIds, corners, materialIndex, centroid, edgeKeys })
       triangleIndices.push(triIndex)
       triangleLookup.set(`${child.uuid}:${faceIndex}`, triIndex)
-      addEdge(nodeIds[0], nodeIds[1], triIndex)
-      addEdge(nodeIds[1], nodeIds[2], triIndex)
-      addEdge(nodeIds[2], nodeIds[0], triIndex)
+      registerEdge(nodeIds[0], nodeIds[1], triIndex)
+      registerEdge(nodeIds[1], nodeIds[2], triIndex)
+      registerEdge(nodeIds[2], nodeIds[0], triIndex)
     }
   })
 
   if (!triangles.length || !nodes.length) throw new Error("Model neobsahuje použitelnou triangulaci pro Ořez.")
+
+  const triangleNeighbors = Array.from({ length: triangles.length }, () => [])
+  const sharedEdgeByPair = new Map()
+  for (const [edgeKey, list] of edgeTriangles) {
+    if (!Array.isArray(list) || list.length < 2) continue
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = list[i], b = list[j]
+        if (!triangleNeighbors[a].includes(b)) triangleNeighbors[a].push(b)
+        if (!triangleNeighbors[b].includes(a)) triangleNeighbors[b].push(a)
+        sharedEdgeByPair.set(a < b ? `${a}:${b}` : `${b}:${a}`, edgeKey)
+      }
+    }
+  }
+
   const size = new THREE.Vector3()
   bounds.getSize(size)
   const diagonal = Math.max(1e-3, size.length())
-  return { sourceObject, nodes, nodeMap, adjacency, triangles, edgeTriangles, triangleLookup, childMeta, bounds, diagonal }
+  return {
+    sourceObject,
+    nodes,
+    nodeMap,
+    triangles,
+    edgeTriangles,
+    triangleLookup,
+    childMeta,
+    triangleNeighbors,
+    sharedEdgeByPair,
+    bounds,
+    diagonal,
+  }
 }
 
-function trimShortestPath(context, startNode, endNode) {
-  if (!context || startNode == null || endNode == null) return []
-  if (startNode === endNode) return [startNode]
-  const { nodes, adjacency } = context
-  const count = nodes.length
+function resolveTrimHit(context, sourceObject, event) {
+  if (!context || !sourceObject || !event?.object?.isMesh) return null
+  const faceIndex = Number.isInteger(event.faceIndex)
+    ? event.faceIndex
+    : (event.face && Number.isInteger(event.face.a) ? Math.floor(event.face.a / 3) : null)
+  if (!Number.isInteger(faceIndex)) return null
+  const triangleIndex = context.triangleLookup.get(`${event.object.uuid}:${faceIndex}`)
+  if (triangleIndex === undefined) return null
+  sourceObject.updateMatrixWorld(true)
+  const point = sourceObject.worldToLocal(event.point.clone())
+  return { point: [point.x, point.y, point.z], triangleIndex }
+}
+
+function trimSharedEdgeNodes(context, triA, triB) {
+  const pairKey = triA < triB ? `${triA}:${triB}` : `${triB}:${triA}`
+  const edgeKey = context.sharedEdgeByPair.get(pairKey)
+  if (!edgeKey) return null
+  const [a, b] = edgeKey.split(":").map(Number)
+  return Number.isInteger(a) && Number.isInteger(b) ? [a, b] : null
+}
+
+function trimTriangleSurfacePath(context, startHit, endHit) {
+  if (!context || !startHit || !endHit) return null
+  const startTriangle = startHit.triangleIndex
+  const endTriangle = endHit.triangleIndex
+  if (!Number.isInteger(startTriangle) || !Number.isInteger(endTriangle)) return null
+  const startPoint = trimVec(startHit.point)
+  const endPoint = trimVec(endHit.point)
+  if (startTriangle === endTriangle) {
+    return {
+      points: [trimArr(startPoint), trimArr(endPoint)],
+      pieces: [{ triangleIndex: startTriangle, a: trimArr(startPoint), b: trimArr(endPoint) }],
+    }
+  }
+
+  const count = context.triangles.length
   const distance = new Float64Array(count)
   distance.fill(Infinity)
   const previous = new Int32Array(count)
@@ -367,8 +431,8 @@ function trimShortestPath(context, startNode, endNode) {
   const closed = new Uint8Array(count)
   const heapNodes = []
   const heapScores = []
+  const heuristic = (triIndex) => context.triangles[triIndex].centroid.distanceTo(endPoint)
 
-  const heuristic = (node) => nodes[node].distanceTo(nodes[endNode])
   const push = (node, score) => {
     let index = heapNodes.length
     heapNodes.push(node); heapScores.push(score)
@@ -388,10 +452,10 @@ function trimShortestPath(context, startNode, endNode) {
     if (heapNodes.length) {
       let index = 0
       while (true) {
-        let left = index * 2 + 1
+        const left = index * 2 + 1
         if (left >= heapNodes.length) break
-        let right = left + 1
-        let child = right < heapNodes.length && heapScores[right] < heapScores[left] ? right : left
+        const right = left + 1
+        const child = right < heapNodes.length && heapScores[right] < heapScores[left] ? right : left
         if (heapScores[child] >= lastScore) break
         heapNodes[index] = heapNodes[child]; heapScores[index] = heapScores[child]
         index = child
@@ -401,17 +465,17 @@ function trimShortestPath(context, startNode, endNode) {
     return node
   }
 
-  distance[startNode] = 0
-  push(startNode, heuristic(startNode))
+  distance[startTriangle] = 0
+  push(startTriangle, heuristic(startTriangle))
   while (heapNodes.length) {
     const current = pop()
     if (current == null || closed[current]) continue
-    if (current === endNode) break
+    if (current === endTriangle) break
     closed[current] = 1
-    const neighbors = adjacency[current]
-    if (!neighbors) continue
-    for (const [next, weight] of neighbors) {
+    const currentCentroid = context.triangles[current].centroid
+    for (const next of context.triangleNeighbors[current] || []) {
       if (closed[next]) continue
+      const weight = currentCentroid.distanceTo(context.triangles[next].centroid)
       const candidate = distance[current] + weight
       if (candidate >= distance[next]) continue
       distance[next] = candidate
@@ -420,84 +484,368 @@ function trimShortestPath(context, startNode, endNode) {
     }
   }
 
-  if (!Number.isFinite(distance[endNode])) return []
-  const path = []
-  let cursor = endNode
+  if (!Number.isFinite(distance[endTriangle])) return null
+  const trianglePath = []
+  let cursor = endTriangle
   while (cursor !== -1) {
-    path.push(cursor)
-    if (cursor === startNode) break
+    trianglePath.push(cursor)
+    if (cursor === startTriangle) break
     cursor = previous[cursor]
   }
-  path.reverse()
-  return path[0] === startNode ? path : []
+  trianglePath.reverse()
+  if (trianglePath[0] !== startTriangle) return null
+
+  const portals = []
+  for (let i = 0; i < trianglePath.length - 1; i++) {
+    const edgeNodes = trimSharedEdgeNodes(context, trianglePath[i], trianglePath[i + 1])
+    if (!edgeNodes) return null
+    const a = context.nodes[edgeNodes[0]], b = context.nodes[edgeNodes[1]]
+    portals.push({ a: a.clone(), b: b.clone(), point: a.clone().add(b).multiplyScalar(0.5) })
+  }
+
+  // „Elastic band“ optimalizace přes portály. Na rozdíl od v9 nejde křivka po
+  // hranách polygonů, ale protíná jednotlivé faces a body na společných hranách
+  // si najdou lokálně nejkratší pozici.
+  const points = [startPoint, ...portals.map((portal) => portal.point.clone()), endPoint]
+  const optimizePortal = (portal, previousPoint, nextPoint) => {
+    let lo = 0, hi = 1
+    const evaluate = (t) => {
+      const p = portal.a.clone().lerp(portal.b, t)
+      return previousPoint.distanceTo(p) + p.distanceTo(nextPoint)
+    }
+    for (let iter = 0; iter < 18; iter++) {
+      const t1 = lo + (hi - lo) / 3
+      const t2 = hi - (hi - lo) / 3
+      if (evaluate(t1) <= evaluate(t2)) hi = t2
+      else lo = t1
+    }
+    return portal.a.clone().lerp(portal.b, (lo + hi) * 0.5)
+  }
+  for (let pass = 0; pass < 4; pass++) {
+    for (let i = 0; i < portals.length; i++) {
+      points[i + 1] = optimizePortal(portals[i], points[i], points[i + 2])
+    }
+  }
+
+  const pathPoints = points.map(trimArr)
+  const pieces = []
+  for (let i = 0; i < trianglePath.length; i++) {
+    pieces.push({ triangleIndex: trianglePath[i], a: pathPoints[i], b: pathPoints[i + 1] })
+  }
+  return { points: pathPoints, pieces }
 }
 
-function resolveTrimHit(context, sourceObject, event) {
-  if (!context || !sourceObject || !event?.object?.isMesh) return null
-  const faceIndex = Number.isInteger(event.faceIndex)
-    ? event.faceIndex
-    : (event.face && Number.isInteger(event.face.a) ? Math.floor(event.face.a / 3) : null)
-  if (!Number.isInteger(faceIndex)) return null
-  const triangleIndex = context.triangleLookup.get(`${event.object.uuid}:${faceIndex}`)
-  if (triangleIndex === undefined) return null
-  sourceObject.updateMatrixWorld(true)
-  const hit = sourceObject.worldToLocal(event.point.clone())
+function trimPointInPolygon2D(point, polygon) {
+  let inside = false
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const a = polygon[i], b = polygon[j]
+    const intersects = ((a.y > point.y) !== (b.y > point.y)) &&
+      (point.x < (b.x - a.x) * (point.y - a.y) / ((b.y - a.y) || 1e-12) + a.x)
+    if (intersects) inside = !inside
+  }
+  return inside
+}
+
+function trimTriangleProjection(triangle) {
+  const p0 = trimVec(triangle.corners[0].sourcePos)
+  const p1 = trimVec(triangle.corners[1].sourcePos)
+  const p2 = trimVec(triangle.corners[2].sourcePos)
+  const u = p1.clone().sub(p0).normalize()
+  const normal = p1.clone().sub(p0).cross(p2.clone().sub(p0)).normalize()
+  const v = normal.clone().cross(u).normalize()
+  const project = (point) => {
+    const rel = trimVec(point).sub(p0)
+    return new THREE.Vector2(rel.dot(u), rel.dot(v))
+  }
+  return { p0, p1, p2, u, v, normal, project }
+}
+
+function trimPerimeterInfo(triangle, point, diagonal = 1) {
+  const p = trimVec(point)
+  const corners = triangle.corners.map((corner) => trimVec(corner.sourcePos))
+  let best = null
+  for (let edge = 0; edge < 3; edge++) {
+    const a = corners[edge]
+    const b = corners[(edge + 1) % 3]
+    const ab = b.clone().sub(a)
+    const lengthSq = Math.max(1e-16, ab.lengthSq())
+    const t = THREE.MathUtils.clamp(p.clone().sub(a).dot(ab) / lengthSq, 0, 1)
+    const closest = a.clone().addScaledVector(ab, t)
+    const distance = closest.distanceTo(p)
+    if (!best || distance < best.distance) best = { edge, t, s: edge + t, distance, point: trimArr(closest) }
+  }
+  const tolerance = Math.max(1e-6, diagonal * 2e-5)
+  return best && best.distance <= tolerance ? best : best
+}
+
+function trimForwardPerimeterArc(triangle, fromInfo, toInfo) {
+  const corners = triangle.corners.map((corner) => corner.sourcePos)
+  const result = [fromInfo.point]
+  let fromS = fromInfo.s
+  let toS = toInfo.s
+  if (toS <= fromS + 1e-8) toS += 3
+  for (let integer = Math.floor(fromS) + 1; integer < toS - 1e-8; integer++) {
+    const cornerIndex = ((integer % 3) + 3) % 3
+    result.push(corners[cornerIndex])
+  }
+  result.push(toInfo.point)
+  return result
+}
+
+function trimRemoveDuplicatePoints(points, epsilon = 1e-8) {
+  const result = []
+  for (const point of points || []) {
+    if (!point) continue
+    const p = Array.isArray(point) ? point : trimArr(point)
+    const previous = result[result.length - 1]
+    if (previous && trimVec(previous).distanceToSquared(trimVec(p)) <= epsilon * epsilon) continue
+    result.push([p[0], p[1], p[2]])
+  }
+  if (result.length > 2 && trimVec(result[0]).distanceToSquared(trimVec(result[result.length - 1])) <= epsilon * epsilon) result.pop()
+  return result
+}
+
+function trimChainPiecesInTriangle(pieces) {
+  if (!pieces?.length) return null
+  const pointsByKey = new Map()
+  const graph = new Map()
+  const edges = []
+  const addPoint = (point) => {
+    const key = trimPointKey(point)
+    if (!pointsByKey.has(key)) pointsByKey.set(key, point)
+    if (!graph.has(key)) graph.set(key, [])
+    return key
+  }
+  for (const piece of pieces) {
+    if (!piece?.a || !piece?.b) continue
+    const a = addPoint(piece.a), b = addPoint(piece.b)
+    if (a === b) continue
+    const edgeIndex = edges.length
+    edges.push([a, b])
+    graph.get(a).push(edgeIndex)
+    graph.get(b).push(edgeIndex)
+  }
+  if (!edges.length) return null
+  const endpoints = Array.from(graph.entries()).filter(([, list]) => list.length === 1).map(([key]) => key)
+  if (endpoints.length < 2) return null
+  let current = endpoints[0]
+  const ordered = [pointsByKey.get(current)]
+  const used = new Set()
+  for (let guard = 0; guard < edges.length + 3; guard++) {
+    const nextEdge = (graph.get(current) || []).find((index) => !used.has(index))
+    if (nextEdge === undefined) break
+    used.add(nextEdge)
+    const [a, b] = edges[nextEdge]
+    current = a === current ? b : a
+    ordered.push(pointsByKey.get(current))
+  }
+  if (used.size !== edges.length) return null
+  return trimRemoveDuplicatePoints(ordered)
+}
+
+function buildTrimBoundarySplit(context, plan, triangleIndex, pieces) {
   const triangle = context.triangles[triangleIndex]
-  let nodeId = triangle.nodeIds[0]
-  let best = context.nodes[nodeId].distanceToSquared(hit)
-  for (let i = 1; i < 3; i++) {
-    const candidate = triangle.nodeIds[i]
-    const d = context.nodes[candidate].distanceToSquared(hit)
-    if (d < best) { best = d; nodeId = candidate }
-  }
-  return { nodeId, triangleIndex }
-}
+  const chain = trimChainPiecesInTriangle(pieces)
+  if (!triangle || !chain || chain.length < 2) return null
+  const startInfo = trimPerimeterInfo(triangle, chain[0], context.diagonal)
+  const endInfo = trimPerimeterInfo(triangle, chain[chain.length - 1], context.diagonal)
+  if (!startInfo || !endInfo) return null
 
-function buildTrimBoundaryEdges(segments) {
-  const boundary = new Set()
-  for (const path of segments || []) {
-    if (!path || path.length < 2) continue
-    for (let i = 0; i < path.length - 1; i++) boundary.add(trimEdgeKey(path[i], path[i + 1]))
-  }
-  return boundary
-}
+  const arcA = trimForwardPerimeterArc(triangle, endInfo, startInfo)
+  const arcB = trimForwardPerimeterArc(triangle, startInfo, endInfo)
+  const polygonA = trimRemoveDuplicatePoints([...chain, ...arcA.slice(1)])
+  const polygonB = trimRemoveDuplicatePoints([...chain].reverse().concat(arcB.slice(1)))
+  if (polygonA.length < 3 || polygonB.length < 3) return null
 
-function floodTrimRegion(context, startTriangle, boundaryEdges) {
-  if (!context || !Number.isInteger(startTriangle)) return null
-  const mask = new Uint8Array(context.triangles.length)
-  const queue = [startTriangle]
-  mask[startTriangle] = 1
-  for (let cursor = 0; cursor < queue.length; cursor++) {
-    const triIndex = queue[cursor]
-    const tri = context.triangles[triIndex]
-    const ids = tri.nodeIds
-    const edges = [[ids[0], ids[1]], [ids[1], ids[2]], [ids[2], ids[0]]]
-    for (const [a, b] of edges) {
-      const key = trimEdgeKey(a, b)
-      if (boundaryEdges.has(key)) continue
-      const neighbors = context.edgeTriangles.get(key) || []
-      for (const next of neighbors) {
-        if (!mask[next]) { mask[next] = 1; queue.push(next) }
+  const projection = trimTriangleProjection(triangle)
+  const polygonA2 = polygonA.map(projection.project)
+  const polygonB2 = polygonB.map(projection.project)
+  const votesA = new Map(), votesB = new Map()
+  const sideAComponents = new Set(), sideBComponents = new Set()
+
+  for (let edge = 0; edge < 3; edge++) {
+    const key = triangle.edgeKeys[edge]
+    const neighbors = (context.edgeTriangles.get(key) || []).filter((index) => index !== triangleIndex)
+    if (!neighbors.length) continue
+    const pa = trimVec(triangle.corners[edge].sourcePos)
+    const pb = trimVec(triangle.corners[(edge + 1) % 3].sourcePos)
+    const centroid = triangle.centroid
+    const inward = pa.clone().add(pb).multiplyScalar(0.5).lerp(centroid, 0.12)
+    const p2 = projection.project(inward)
+    const inA = trimPointInPolygon2D(p2, polygonA2)
+    const inB = trimPointInPolygon2D(p2, polygonB2)
+    for (const neighbor of neighbors) {
+      const component = plan.componentIds[neighbor]
+      if (component < 0) continue
+      if (inA && !inB) {
+        sideAComponents.add(component)
+        votesA.set(component, (votesA.get(component) || 0) + 1)
+      } else if (inB && !inA) {
+        sideBComponents.add(component)
+        votesB.set(component, (votesB.get(component) || 0) + 1)
       }
     }
   }
-  return mask
+
+  return {
+    triangleIndex,
+    chain,
+    polygonA,
+    polygonB,
+    polygonA2,
+    polygonB2,
+    projection,
+    sideAComponents,
+    sideBComponents,
+    votesA,
+    votesB,
+  }
 }
 
-function trimMaskCount(mask) {
-  if (!mask) return 0
-  let count = 0
-  for (let i = 0; i < mask.length; i++) if (mask[i]) count++
-  return count
+function buildTrimBoundaryPlan(context, segments) {
+  if (!context || !segments?.length) return null
+  const piecesByTriangle = new Map()
+  for (const segment of segments) {
+    for (const piece of segment?.pieces || []) {
+      if (!Number.isInteger(piece?.triangleIndex)) continue
+      const list = piecesByTriangle.get(piece.triangleIndex)
+      if (list) list.push(piece)
+      else piecesByTriangle.set(piece.triangleIndex, [piece])
+    }
+  }
+  const boundaryTriangles = new Set(piecesByTriangle.keys())
+  if (!boundaryTriangles.size) return null
+
+  const componentIds = new Int32Array(context.triangles.length)
+  componentIds.fill(-1)
+  for (const triIndex of boundaryTriangles) componentIds[triIndex] = -2
+  const components = []
+  for (let start = 0; start < context.triangles.length; start++) {
+    if (componentIds[start] !== -1) continue
+    const component = components.length
+    const queue = [start]
+    componentIds[start] = component
+    const triangles = []
+    for (let cursor = 0; cursor < queue.length; cursor++) {
+      const triIndex = queue[cursor]
+      triangles.push(triIndex)
+      for (const next of context.triangleNeighbors[triIndex] || []) {
+        if (componentIds[next] !== -1) continue
+        componentIds[next] = component
+        queue.push(next)
+      }
+    }
+    components.push(triangles)
+  }
+
+  const plan = { piecesByTriangle, boundaryTriangles, componentIds, components, splits: new Map() }
+  for (const [triIndex, pieces] of piecesByTriangle) {
+    const split = buildTrimBoundarySplit(context, plan, triIndex, pieces)
+    if (split) plan.splits.set(triIndex, split)
+  }
+  return plan
 }
 
-function createTrimPreviewGeometry(context, mask, keep = true) {
-  if (!context || !mask) return null
+function trimBoundarySideForComponent(split, componentId) {
+  if (!split || componentId == null || componentId < 0) return null
+  const a = split.sideAComponents.has(componentId)
+  const b = split.sideBComponents.has(componentId)
+  if (a && !b) return "a"
+  if (b && !a) return "b"
+  if (a && b) return (split.votesA.get(componentId) || 0) >= (split.votesB.get(componentId) || 0) ? "a" : "b"
+  if (split.sideAComponents.size && !split.sideBComponents.size) return "b"
+  if (split.sideBComponents.size && !split.sideAComponents.size) return "a"
+  return null
+}
+
+function resolveTrimComponentFromHit(context, plan, hit) {
+  if (!context || !plan || !hit || !Number.isInteger(hit.triangleIndex)) return null
+  const direct = plan.componentIds[hit.triangleIndex]
+  if (direct >= 0) return direct
+  const split = plan.splits.get(hit.triangleIndex)
+  if (!split) return null
+  const point2 = split.projection.project(hit.point)
+  const inA = trimPointInPolygon2D(point2, split.polygonA2)
+  const inB = trimPointInPolygon2D(point2, split.polygonB2)
+  const candidates = inA && !inB ? split.sideAComponents : inB && !inA ? split.sideBComponents : null
+  if (candidates?.size) return candidates.values().next().value
+  const all = new Set([...split.sideAComponents, ...split.sideBComponents])
+  if (all.size === 1) return all.values().next().value
+  return null
+}
+
+function interpolateTrimCorner(triangle, point) {
+  const p = trimVec(point)
+  const a = trimVec(triangle.corners[0].sourcePos)
+  const b = trimVec(triangle.corners[1].sourcePos)
+  const c = trimVec(triangle.corners[2].sourcePos)
+  const bary = new THREE.Vector3()
+  THREE.Triangle.getBarycoord(p, a, b, c, bary)
+  if (!Number.isFinite(bary.x)) bary.set(1, 0, 0)
+  bary.x = THREE.MathUtils.clamp(bary.x, -1e-5, 1 + 1e-5)
+  bary.y = THREE.MathUtils.clamp(bary.y, -1e-5, 1 + 1e-5)
+  bary.z = THREE.MathUtils.clamp(bary.z, -1e-5, 1 + 1e-5)
+  const sum = bary.x + bary.y + bary.z || 1
+  bary.multiplyScalar(1 / sum)
+  const weights = [bary.x, bary.y, bary.z]
+  const mix = (key, length) => {
+    if (!triangle.corners.every((corner) => Array.isArray(corner[key]))) return null
+    const out = new Array(length).fill(0)
+    for (let i = 0; i < 3; i++) for (let j = 0; j < length; j++) out[j] += triangle.corners[i][key][j] * weights[i]
+    return out
+  }
+  const localPos = mix("localPos", 3)
+  let localNormal = mix("localNormal", 3)
+  if (localNormal) {
+    const n = new THREE.Vector3(...localNormal).normalize()
+    localNormal = [n.x, n.y, n.z]
+  }
+  return {
+    sourcePos: [p.x, p.y, p.z],
+    localPos,
+    localNormal,
+    color: mix("color", 3),
+    uv: mix("uv", 2),
+  }
+}
+
+function triangulateTrimPolygon(triangle, polygon) {
+  const clean = trimRemoveDuplicatePoints(polygon, 1e-7)
+  if (clean.length < 3) return []
+  const projection = trimTriangleProjection(triangle)
+  const contour = clean.map(projection.project)
+  const faces = THREE.ShapeUtils.triangulateShape(contour, [])
+  const corners = clean.map((point) => interpolateTrimCorner(triangle, point))
+  return faces.map((face) => [corners[face[0]], corners[face[1]], corners[face[2]]])
+}
+
+function trimBoundaryPolygonForComponent(plan, triangleIndex, componentId, keep = true) {
+  const split = plan?.splits?.get(triangleIndex)
+  if (!split) return null
+  const side = trimBoundarySideForComponent(split, componentId)
+  if (!side) return null
+  const selected = side === "a" ? split.polygonA : split.polygonB
+  const other = side === "a" ? split.polygonB : split.polygonA
+  return keep ? selected : other
+}
+
+function createTrimRegionPreviewGeometry(context, plan, componentId, keep = true) {
+  if (!context || !plan || componentId == null) return null
   const positions = []
-  for (let i = 0; i < context.triangles.length; i++) {
-    if (!!mask[i] !== !!keep) continue
-    const tri = context.triangles[i]
-    for (const corner of tri.corners) positions.push(...corner.sourcePos)
+  for (let triIndex = 0; triIndex < context.triangles.length; triIndex++) {
+    const triangle = context.triangles[triIndex]
+    const component = plan.componentIds[triIndex]
+    if (component >= 0) {
+      if ((component === componentId) !== !!keep) continue
+      for (const corner of triangle.corners) positions.push(...corner.sourcePos)
+      continue
+    }
+    if (component !== -2) continue
+    const polygon = trimBoundaryPolygonForComponent(plan, triIndex, componentId, keep)
+    if (!polygon) continue
+    for (const tri of triangulateTrimPolygon(triangle, polygon)) {
+      for (const corner of tri) positions.push(...corner.sourcePos)
+    }
   }
   if (!positions.length) return null
   const geometry = new THREE.BufferGeometry()
@@ -506,7 +854,7 @@ function createTrimPreviewGeometry(context, mask, keep = true) {
   return geometry
 }
 
-function buildTrimmedGeometryForChild(context, childUuid, keepMask) {
+function buildTrimmedGeometryForChild(context, plan, componentId, childUuid) {
   const meta = context.childMeta.get(childUuid)
   if (!meta) return new THREE.BufferGeometry()
   const positions = []
@@ -516,16 +864,27 @@ function buildTrimmedGeometryForChild(context, childUuid, keepMask) {
   const materialIndices = []
   let hasNormal = true, hasColor = true, hasUv = true
 
-  for (const triIndex of meta.triangleIndices) {
-    if (!keepMask?.[triIndex]) continue
-    const tri = context.triangles[triIndex]
-    materialIndices.push(tri.materialIndex || 0)
-    for (const corner of tri.corners) {
+  const appendTriangle = (triangle, corners) => {
+    materialIndices.push(triangle.materialIndex || 0)
+    for (const corner of corners) {
       positions.push(...corner.localPos)
       if (corner.localNormal) normals.push(...corner.localNormal); else hasNormal = false
       if (corner.color) colors.push(...corner.color); else hasColor = false
       if (corner.uv) uvs.push(...corner.uv); else hasUv = false
     }
+  }
+
+  for (const triIndex of meta.triangleIndices) {
+    const triangle = context.triangles[triIndex]
+    const component = plan.componentIds[triIndex]
+    if (component >= 0) {
+      if (component === componentId) appendTriangle(triangle, triangle.corners)
+      continue
+    }
+    if (component !== -2) continue
+    const polygon = trimBoundaryPolygonForComponent(plan, triIndex, componentId, true)
+    if (!polygon) continue
+    for (const corners of triangulateTrimPolygon(triangle, polygon)) appendTriangle(triangle, corners)
   }
 
   const geometry = new THREE.BufferGeometry()
@@ -551,13 +910,13 @@ function buildTrimmedGeometryForChild(context, childUuid, keepMask) {
   return geometry
 }
 
-function applyTrimMaskToObject(context, keepMask) {
-  if (!context || !keepMask) throw new Error("Chybí vybraná oblast Ořezu.")
+function applyTrimRegionToObject(context, plan, componentId) {
+  if (!context || !plan || componentId == null) throw new Error("Chybí vybraná oblast Ořezu.")
   const backup = []
   for (const [childUuid, meta] of context.childMeta) {
     const mesh = meta.mesh
     if (!mesh?.isMesh) continue
-    const newGeometry = buildTrimmedGeometryForChild(context, childUuid, keepMask)
+    const newGeometry = buildTrimmedGeometryForChild(context, plan, componentId, childUuid)
     backup.push({
       mesh,
       geometry: mesh.geometry,
@@ -598,14 +957,14 @@ function restoreTrimBackup(backup) {
   }
 }
 
-function TrimRegionPreview({ context, keepMask }) {
+function TrimRegionPreview({ context, plan, componentId }) {
   const geometries = useMemo(() => {
-    if (!context || !keepMask) return { keep: null, drop: null }
+    if (!context || !plan || componentId == null) return { keep: null, drop: null }
     return {
-      keep: createTrimPreviewGeometry(context, keepMask, true),
-      drop: createTrimPreviewGeometry(context, keepMask, false),
+      keep: createTrimRegionPreviewGeometry(context, plan, componentId, true),
+      drop: createTrimRegionPreviewGeometry(context, plan, componentId, false),
     }
-  }, [context, keepMask])
+  }, [context, plan, componentId])
   useEffect(() => () => {
     geometries.keep?.dispose?.(); geometries.drop?.dispose?.()
   }, [geometries])
@@ -613,15 +972,55 @@ function TrimRegionPreview({ context, keepMask }) {
     <>
       {geometries.keep && (
         <mesh geometry={geometries.keep} renderOrder={1450} raycast={() => null}>
-          <meshBasicMaterial color="#4ade80" transparent opacity={0.20} side={THREE.DoubleSide} depthWrite={false} depthTest polygonOffset polygonOffsetFactor={-2} polygonOffsetUnits={-2} />
+          <meshBasicMaterial color="#4ade80" transparent opacity={0.17} side={THREE.DoubleSide} depthWrite={false} depthTest polygonOffset polygonOffsetFactor={-2} polygonOffsetUnits={-2} />
         </mesh>
       )}
       {geometries.drop && (
         <mesh geometry={geometries.drop} renderOrder={1449} raycast={() => null}>
-          <meshBasicMaterial color="#ef4444" transparent opacity={0.13} side={THREE.DoubleSide} depthWrite={false} depthTest polygonOffset polygonOffsetFactor={-1} polygonOffsetUnits={-1} />
+          <meshBasicMaterial color="#ef4444" transparent opacity={0.11} side={THREE.DoubleSide} depthWrite={false} depthTest polygonOffset polygonOffsetFactor={-1} polygonOffsetUnits={-1} />
         </mesh>
       )}
     </>
+  )
+}
+
+function makeTrimPolylineCurve(points) {
+  const vectors = []
+  for (const point of points || []) {
+    const vector = trimVec(point)
+    if (!vectors.length || vectors[vectors.length - 1].distanceToSquared(vector) > 1e-14) vectors.push(vector)
+  }
+  if (vectors.length < 2) return null
+  const cumulative = [0]
+  for (let i = 1; i < vectors.length; i++) cumulative.push(cumulative[i - 1] + vectors[i - 1].distanceTo(vectors[i]))
+  const total = cumulative[cumulative.length - 1] || 1
+  const curve = new THREE.Curve()
+  curve.getPoint = (t, target = new THREE.Vector3()) => {
+    const distance = THREE.MathUtils.clamp(t, 0, 1) * total
+    let index = 0
+    while (index < cumulative.length - 2 && cumulative[index + 1] < distance) index++
+    const start = cumulative[index]
+    const end = cumulative[index + 1]
+    const local = end > start ? (distance - start) / (end - start) : 0
+    return target.copy(vectors[index]).lerp(vectors[index + 1], local)
+  }
+  curve.getPointAt = curve.getPoint
+  return curve
+}
+
+function TrimBoundaryTube({ points, radius }) {
+  const geometry = useMemo(() => {
+    const curve = makeTrimPolylineCurve(points)
+    if (!curve) return null
+    const tubularSegments = Math.max(4, Math.min(900, (points.length - 1) * 3))
+    return new THREE.TubeGeometry(curve, tubularSegments, radius, 6, false)
+  }, [points, radius])
+  useEffect(() => () => geometry?.dispose?.(), [geometry])
+  if (!geometry) return null
+  return (
+    <mesh geometry={geometry} renderOrder={1500} raycast={() => null}>
+      <meshBasicMaterial color="#69a7d8" transparent opacity={0.72} depthTest depthWrite={false} polygonOffset polygonOffsetFactor={-2} polygonOffsetUnits={-2} />
+    </mesh>
   )
 }
 
@@ -630,8 +1029,9 @@ function TrimSurfaceOverlay({
   modelMatrix,
   controlNodes,
   segments,
-  previewPath,
-  keepMask,
+  boundaryPlan,
+  keepComponent,
+  hoverComponent,
   draggingPoint,
   onBeginPointDrag,
   onCloseLoop,
@@ -647,42 +1047,27 @@ function TrimSurfaceOverlay({
     group.updateMatrixWorld(true)
   }, [modelMatrix])
 
-  const lineGeometry = useMemo(() => {
-    if (!context) return null
-    const coords = []
-    const paths = [...(segments || [])]
-    if (previewPath?.length > 1) paths.push(previewPath)
-    for (const path of paths) {
-      for (let i = 0; i < path.length - 1; i++) {
-        const a = context.nodes[path[i]], b = context.nodes[path[i + 1]]
-        if (!a || !b) continue
-        coords.push(a.x, a.y, a.z, b.x, b.y, b.z)
-      }
-    }
-    const geometry = new THREE.BufferGeometry()
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(coords, 3))
-    return geometry
-  }, [context, segments, previewPath])
-  useEffect(() => () => lineGeometry?.dispose?.(), [lineGeometry])
-
   if (!context) return null
-  const radius = Math.max(0.12, Math.min(1.25, context.diagonal * 0.008))
+  const pointRadius = Math.max(0.10, Math.min(1.15, context.diagonal * 0.0067))
+  const lineRadius = Math.max(0.018, Math.min(0.18, context.diagonal * 0.00062))
+  const previewComponent = keepComponent ?? hoverComponent
+
   return (
     <group ref={groupRef} matrixAutoUpdate={false}>
-      {keepMask && <TrimRegionPreview context={context} keepMask={keepMask} />}
-      {lineGeometry && (
-        <lineSegments geometry={lineGeometry} renderOrder={1500} raycast={() => null}>
-          <lineBasicMaterial color="#f5f5f5" transparent opacity={0.98} depthTest={false} depthWrite={false} />
-        </lineSegments>
+      {boundaryPlan && previewComponent != null && (
+        <TrimRegionPreview context={context} plan={boundaryPlan} componentId={previewComponent} />
       )}
-      {(controlNodes || []).map((nodeId, index) => {
-        const point = context.nodes[nodeId]
+      {(segments || []).map((segment, index) => (
+        <TrimBoundaryTube key={`trim-line-${index}`} points={segment?.points || []} radius={lineRadius} />
+      ))}
+      {(controlNodes || []).map((control, index) => {
+        const point = control?.point
         if (!point) return null
         const isFirst = index === 0
         const active = draggingPoint === index
         return (
           <mesh
-            key={`${index}-${nodeId}`}
+            key={`${index}-${trimPointKey(point)}`}
             position={point}
             renderOrder={1510}
             raycast={draggingPoint != null ? () => null : undefined}
@@ -691,19 +1076,18 @@ function TrimSurfaceOverlay({
               event.nativeEvent?.preventDefault?.()
               onBeginPointDrag?.(index)
             }}
-            onClick={isFirst && controlNodes.length >= 3 ? (event) => {
+            onDoubleClick={isFirst && controlNodes.length >= 3 ? (event) => {
               event.stopPropagation()
-              if (event.delta != null && event.delta > 4) return
               onCloseLoop?.()
             } : undefined}
           >
-            <sphereGeometry args={[radius * (active ? 1.18 : 1), 18, 14]} />
+            <sphereGeometry args={[pointRadius * (active ? 1.16 : 1), 20, 16]} />
             <meshBasicMaterial
-              color={active ? "#86efac" : isFirst ? "#fbbf24" : "#f5f5f5"}
-              depthTest={false}
+              color={active ? "#8bc5ef" : isFirst ? "#fbbf24" : "#6fa8d6"}
+              depthTest
               depthWrite={false}
               transparent
-              opacity={0.98}
+              opacity={0.92}
             />
           </mesh>
         )
@@ -711,6 +1095,7 @@ function TrimSurfaceOverlay({
     </group>
   )
 }
+
 
 /* ---------- Ikony ---------- */
 const ICON_BASE = (() => {
@@ -3382,6 +3767,7 @@ function AnyModel({
   onAlignmentHover,
   onTrimSurfaceClick,
   onTrimSurfaceMove,
+  onTrimSurfaceOut,
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
@@ -3693,12 +4079,13 @@ function AnyModel({
           }
         }
       } : undefined}
-      onPointerOut={(analysisMode && onHoverDist) || onAlignmentSelect || onTrimSurfaceMove ? () => {
+      onPointerOut={(analysisMode && onHoverDist) || onAlignmentSelect || onTrimSurfaceMove || onTrimSurfaceOut ? () => {
         if (onAlignmentSelect) {
           setAlignmentHoverVisual(false)
           onAlignmentHover?.(url, false)
         }
         if (analysisMode && onHoverDist) onHoverDist(null)
+        if (onTrimSurfaceOut) onTrimSurfaceOut(url)
       } : undefined}
       onDoubleClick={analysisMode && onPinNote ? (e) => {
         e.stopPropagation();
@@ -5331,12 +5718,13 @@ export default function ClientPage() {
   const [trimStage, setTrimStage] = useState("model") // model | boundary | region | result
   const [trimSelection, setTrimSelection] = useState("")
   const [trimContext, setTrimContext] = useState(null)
+  // Control point je přesný bod uvnitř face, ne snapnutý vertex. Díky tomu může
+  // křivka v10 skutečně protínat jednotlivé trojúhelníky.
   const [trimControlNodes, setTrimControlNodes] = useState([])
   const [trimSegments, setTrimSegments] = useState([])
   const [trimClosed, setTrimClosed] = useState(false)
-  const [trimHoverNode, setTrimHoverNode] = useState(null)
-  const [trimPreviewPath, setTrimPreviewPath] = useState([])
-  const [trimKeepMask, setTrimKeepMask] = useState(null)
+  const [trimKeepComponent, setTrimKeepComponent] = useState(null)
+  const [trimHoverComponent, setTrimHoverComponent] = useState(null)
   const [trimDraggingPoint, setTrimDraggingPoint] = useState(null)
   const [trimBusy, setTrimBusy] = useState(false)
   const [trimMessage, setTrimMessage] = useState("")
@@ -5344,7 +5732,12 @@ export default function ClientPage() {
   const [trimExportBusyUrl, setTrimExportBusyUrl] = useState("")
   const trimHistoryByUrlRef = useRef({})
   const trimLastDragUpdateRef = useRef(0)
-  const trimPendingDragNodeRef = useRef(null)
+  const trimPendingDragHitRef = useRef(null)
+  const trimBoundaryPlan = useMemo(() => {
+    if (!trimClosed || !trimContext || !trimSegments.length) return null
+    try { return buildTrimBoundaryPlan(trimContext, trimSegments) }
+    catch (error) { console.warn("Trim boundary plan failed:", error); return null }
+  }, [trimClosed, trimContext, trimSegments])
 
   // Komunikace s interním Case Cloud editorem. Veřejný viewer může stejné
   // zprávy posílat, ale bez autorizovaného parentu se nic neuloží.
@@ -5725,9 +6118,9 @@ export default function ClientPage() {
     setTrimControlNodes([])
     setTrimSegments([])
     setTrimClosed(false)
-    setTrimHoverNode(null)
-    setTrimPreviewPath([])
-    setTrimKeepMask(null)
+    setTrimHoverComponent(null)
+    
+    setTrimKeepComponent(null)
     setTrimDraggingPoint(null)
     setTrimBusy(false)
     setTrimMessage("")
@@ -5963,9 +6356,8 @@ export default function ClientPage() {
     setTrimControlNodes([])
     setTrimSegments([])
     setTrimClosed(false)
-    setTrimHoverNode(null)
-    setTrimPreviewPath([])
-    setTrimKeepMask(null)
+    setTrimKeepComponent(null)
+    setTrimHoverComponent(null)
     setTrimDraggingPoint(null)
     setTrimBusy(false)
     setTrimMessage("")
@@ -6010,11 +6402,10 @@ export default function ClientPage() {
         setTrimControlNodes([])
         setTrimSegments([])
         setTrimClosed(false)
-        setTrimKeepMask(null)
-        setTrimHoverNode(null)
-        setTrimPreviewPath([])
+        setTrimKeepComponent(null)
+        setTrimHoverComponent(null)
         setTrimStage("boundary")
-        setTrimMessage("Klikáním umístěte body hranice. Již položenou kuličku můžete kdykoliv přetáhnout po povrchu.")
+        setTrimMessage("Klikáním umístěte body hranice. Kuličku můžete kdykoliv přetáhnout po povrchu; první žlutou kuličku dvojklikem uzavřete.")
       } catch (error) {
         console.error("Trim context error:", error)
         setTrimMessage(error?.message || "Povrch modelu se nepodařilo připravit pro Ořez.")
@@ -6028,66 +6419,65 @@ export default function ClientPage() {
     if (!trimContext || trimClosed || trimControlNodes.length < 3) return
     const last = trimControlNodes[trimControlNodes.length - 1]
     const first = trimControlNodes[0]
-    const closingPath = trimShortestPath(trimContext, last, first)
-    if (closingPath.length < 2) {
+    const closingPath = trimTriangleSurfacePath(trimContext, last, first)
+    if (!closingPath?.pieces?.length) {
       setTrimMessage("Poslední úsek hranice se nepodařilo propojit po povrchu.")
       return
     }
     setTrimSegments((previous) => [...previous, closingPath])
     setTrimClosed(true)
-    setTrimPreviewPath([])
-    setTrimHoverNode(null)
-    setTrimKeepMask(null)
+    setTrimKeepComponent(null)
+    setTrimHoverComponent(null)
     setTrimStage("boundary")
-    setTrimMessage("Hranice je uzavřená. Kuličky můžete dál posouvat. Klikněte na část modelu, kterou chcete zachovat.")
+    setTrimMessage("Hranice je uzavřená. Body můžete dál posouvat. Najeďte na část modelu pro náhled a kliknutím potvrďte oblast, kterou chcete zachovat.")
   }, [trimContext, trimClosed, trimControlNodes])
 
-  const addTrimControlNode = useCallback((nodeId) => {
-    if (!trimContext || trimClosed || nodeId == null) return
+  const addTrimControlNode = useCallback((hit) => {
+    if (!trimContext || trimClosed || !hit?.point || !Number.isInteger(hit.triangleIndex)) return
     const points = trimControlNodes
     if (!points.length) {
-      setTrimControlNodes([nodeId])
-      setTrimPreviewPath([])
+      setTrimControlNodes([hit])
       return
     }
-    const first = points[0]
     const last = points[points.length - 1]
-    if (nodeId === first && points.length >= 3) {
-      closeTrimLoop()
+    if (trimVec(last.point).distanceTo(trimVec(hit.point)) < trimContext.diagonal * 1e-5) return
+    const path = trimTriangleSurfacePath(trimContext, last, hit)
+    if (!path?.pieces?.length) {
+      setTrimMessage("Tento úsek se nepodařilo vést po povrchu modelu. Zkuste bod umístit o něco blíž.")
       return
     }
-    if (nodeId === last) return
-    const path = trimShortestPath(trimContext, last, nodeId)
-    if (path.length < 2) return
-    setTrimControlNodes([...points, nodeId])
+    setTrimControlNodes([...points, hit])
     setTrimSegments((previous) => [...previous, path])
-    setTrimPreviewPath([])
-  }, [trimContext, trimClosed, trimControlNodes, closeTrimLoop])
+  }, [trimContext, trimClosed, trimControlNodes])
 
-  const moveTrimControlNode = useCallback((index, nodeId) => {
-    if (!trimContext || index == null || nodeId == null || !trimControlNodes[index] || trimControlNodes[index] === nodeId) return
+  const moveTrimControlNode = useCallback((index, hit) => {
+    if (!trimContext || index == null || !hit?.point || !Number.isInteger(hit.triangleIndex) || !trimControlNodes[index]) return
+    if (trimVec(trimControlNodes[index].point).distanceToSquared(trimVec(hit.point)) < 1e-12) return
     const points = trimControlNodes.slice()
     const segments = trimSegments.slice()
-    points[index] = nodeId
+    points[index] = hit
+
     if (index > 0) {
-      const path = trimShortestPath(trimContext, points[index - 1], nodeId)
-      if (path.length >= 2) segments[index - 1] = path
+      const path = trimTriangleSurfacePath(trimContext, points[index - 1], hit)
+      if (path?.pieces?.length) segments[index - 1] = path
     } else if (trimClosed && points.length > 2) {
-      const path = trimShortestPath(trimContext, points[points.length - 1], nodeId)
-      if (path.length >= 2) segments[points.length - 1] = path
+      const path = trimTriangleSurfacePath(trimContext, points[points.length - 1], hit)
+      if (path?.pieces?.length) segments[points.length - 1] = path
     }
     if (index < points.length - 1) {
-      const path = trimShortestPath(trimContext, nodeId, points[index + 1])
-      if (path.length >= 2) segments[index] = path
+      const path = trimTriangleSurfacePath(trimContext, hit, points[index + 1])
+      if (path?.pieces?.length) segments[index] = path
     } else if (trimClosed && points.length > 2) {
-      const path = trimShortestPath(trimContext, nodeId, points[0])
-      if (path.length >= 2) segments[points.length - 1] = path
+      const path = trimTriangleSurfacePath(trimContext, hit, points[0])
+      if (path?.pieces?.length) segments[points.length - 1] = path
     }
+
     setTrimControlNodes(points)
     setTrimSegments(segments)
-    setTrimKeepMask(null)
+    setTrimKeepComponent(null)
+    setTrimHoverComponent(null)
     setTrimStage("boundary")
-    if (trimClosed) setTrimMessage("Hranice byla upravena. Klikněte znovu na část modelu, kterou chcete zachovat.")
+    if (trimClosed) setTrimMessage("Hranice byla upravena. Najeďte na požadovanou část pro nový náhled a kliknutím ji potvrďte.")
   }, [trimContext, trimControlNodes, trimSegments, trimClosed])
 
   const handleTrimSurfaceClick = useCallback((url, event) => {
@@ -6095,70 +6485,66 @@ export default function ClientPage() {
     const hit = resolveTrimHit(trimContext, modelObjectsRef.current[url], event)
     if (!hit) return
     if (!trimClosed) {
-      addTrimControlNode(hit.nodeId)
+      addTrimControlNode(hit)
       return
     }
-    const boundaryEdges = buildTrimBoundaryEdges(trimSegments)
-    const mask = floodTrimRegion(trimContext, hit.triangleIndex, boundaryEdges)
-    if (!mask) return
-    const kept = trimMaskCount(mask)
-    if (!kept || kept === trimContext.triangles.length) {
-      setTrimMessage("Tato hranice neoddělila dvě oblasti. Upravte některý bod a zkuste to znovu.")
-      setTrimKeepMask(null)
+    if (!trimBoundaryPlan || trimBoundaryPlan.components.length < 2) {
+      setTrimMessage("Tato hranice zatím nerozdělila povrch na dvě oblasti. Upravte některý bod a zkuste to znovu.")
       return
     }
-    setTrimKeepMask(mask)
+    const component = resolveTrimComponentFromHit(trimContext, trimBoundaryPlan, hit)
+    if (component == null) return
+    const kept = trimBoundaryPlan.components[component]?.length || 0
+    setTrimKeepComponent(component)
+    setTrimHoverComponent(null)
     setTrimStage("region")
-    setTrimMessage(`Vybraná oblast: ${kept.toLocaleString("cs-CZ")} trojúhelníků zůstane. Kuličky můžete stále posouvat, nebo potvrďte Oříznout.`)
-  }, [trimMode, trimContext, trimSelection, trimBusy, trimDraggingPoint, trimClosed, trimSegments, addTrimControlNode])
+    setTrimMessage(`Oblast potvrzena · přibližně ${kept.toLocaleString("cs-CZ")} původních faces zůstane. Body můžete stále posunout, nebo potvrďte Oříznout.`)
+  }, [trimMode, trimContext, trimSelection, trimBusy, trimDraggingPoint, trimClosed, trimBoundaryPlan, addTrimControlNode])
 
   const handleTrimSurfaceMove = useCallback((url, event) => {
     if (!trimMode || !trimContext || url !== trimSelection || trimBusy) return
     if (trimDraggingPoint == null && cameraInteractingRef.current) return
     const hit = resolveTrimHit(trimContext, modelObjectsRef.current[url], event)
     if (!hit) return
+
     if (trimDraggingPoint != null) {
       event.stopPropagation?.()
-      trimPendingDragNodeRef.current = hit.nodeId
+      trimPendingDragHitRef.current = hit
       const now = typeof performance !== "undefined" ? performance.now() : Date.now()
-      if (now - trimLastDragUpdateRef.current >= 70) {
+      if (now - trimLastDragUpdateRef.current >= 75) {
         trimLastDragUpdateRef.current = now
-        trimPendingDragNodeRef.current = null
-        moveTrimControlNode(trimDraggingPoint, hit.nodeId)
+        trimPendingDragHitRef.current = null
+        moveTrimControlNode(trimDraggingPoint, hit)
       }
       return
     }
-    if (!trimClosed && trimControlNodes.length && hit.nodeId !== trimHoverNode) setTrimHoverNode(hit.nodeId)
-  }, [trimMode, trimContext, trimSelection, trimBusy, trimDraggingPoint, trimClosed, trimControlNodes.length, trimHoverNode, moveTrimControlNode])
 
-  useEffect(() => {
-    if (!trimContext || trimClosed || !trimControlNodes.length || trimHoverNode == null) {
-      setTrimPreviewPath([])
-      return
+    if (trimClosed && trimBoundaryPlan && trimKeepComponent == null) {
+      const component = resolveTrimComponentFromHit(trimContext, trimBoundaryPlan, hit)
+      if (component !== trimHoverComponent) setTrimHoverComponent(component)
     }
-    const timer = window.setTimeout(() => {
-      const last = trimControlNodes[trimControlNodes.length - 1]
-      if (last === trimHoverNode) { setTrimPreviewPath([]); return }
-      setTrimPreviewPath(trimShortestPath(trimContext, last, trimHoverNode))
-    }, 55)
-    return () => window.clearTimeout(timer)
-  }, [trimContext, trimClosed, trimControlNodes, trimHoverNode])
+  }, [trimMode, trimContext, trimSelection, trimBusy, trimDraggingPoint, trimClosed, trimBoundaryPlan, trimKeepComponent, trimHoverComponent, moveTrimControlNode])
+
+  const handleTrimSurfaceOut = useCallback(() => {
+    if (trimKeepComponent == null && trimDraggingPoint == null) setTrimHoverComponent(null)
+  }, [trimKeepComponent, trimDraggingPoint])
 
   const beginTrimPointDrag = useCallback((index) => {
     if (!trimMode || trimBusy) return
     trimLastDragUpdateRef.current = 0
-    trimPendingDragNodeRef.current = null
+    trimPendingDragHitRef.current = null
     setTrimDraggingPoint(index)
-    setTrimKeepMask(null)
+    setTrimKeepComponent(null)
+    setTrimHoverComponent(null)
     if (trackballRef.current) trackballRef.current.enabled = false
   }, [trimMode, trimBusy])
 
   useEffect(() => {
     if (trimDraggingPoint == null) return
     const finish = () => {
-      const pendingNode = trimPendingDragNodeRef.current
-      trimPendingDragNodeRef.current = null
-      if (pendingNode != null) moveTrimControlNode(trimDraggingPoint, pendingNode)
+      const pendingHit = trimPendingDragHitRef.current
+      trimPendingDragHitRef.current = null
+      if (pendingHit) moveTrimControlNode(trimDraggingPoint, pendingHit)
       setTrimDraggingPoint(null)
       if (trackballRef.current) trackballRef.current.enabled = !sliceOverlayInteracting && !alignmentBusy
     }
@@ -6176,28 +6562,27 @@ export default function ClientPage() {
     if (trimClosed || trimControlNodes.length === 0) return
     setTrimControlNodes((previous) => previous.slice(0, -1))
     setTrimSegments((previous) => previous.slice(0, -1))
-    setTrimPreviewPath([])
-    setTrimKeepMask(null)
+    setTrimKeepComponent(null)
+    setTrimHoverComponent(null)
   }, [trimClosed, trimControlNodes.length])
 
   const resetTrimBoundary = useCallback(() => {
     setTrimControlNodes([])
     setTrimSegments([])
     setTrimClosed(false)
-    setTrimHoverNode(null)
-    setTrimPreviewPath([])
-    setTrimKeepMask(null)
+    setTrimKeepComponent(null)
+    setTrimHoverComponent(null)
     setTrimStage("boundary")
     setTrimMessage("Klikáním umístěte novou hranici Ořezu.")
   }, [])
 
   const applyTrimResult = useCallback(() => {
-    if (!trimContext || !trimKeepMask || !trimSelection || trimBusy) return
+    if (!trimContext || !trimBoundaryPlan || trimKeepComponent == null || !trimSelection || trimBusy) return
     setTrimBusy(true)
-    setTrimMessage("Ořezávám geometrii…")
+    setTrimMessage("Ořezávám geometrii skrz jednotlivé faces…")
     window.setTimeout(() => {
       try {
-        const backup = applyTrimMaskToObject(trimContext, trimKeepMask)
+        const backup = applyTrimRegionToObject(trimContext, trimBoundaryPlan, trimKeepComponent)
         const stack = trimHistoryByUrlRef.current[trimSelection] || []
         trimHistoryByUrlRef.current[trimSelection] = [...stack, backup]
         setTrimmedExportsByUrl((previous) => ({
@@ -6211,8 +6596,9 @@ export default function ClientPage() {
         invalidateComparisonResult()
         setHasComputedHeatmap(false); setShowHeatmap(false)
         setTrimStage("result")
-        setTrimKeepMask(null)
-        setTrimMessage("Ořez je hotový. Výsledek můžete stáhnout, uložit do zakázky nebo vrátit.")
+        setTrimKeepComponent(null)
+        setTrimHoverComponent(null)
+        setTrimMessage("Ořez je hotový. Hrana je vytvořená skrz faces modelu; výsledek můžete stáhnout, uložit do zakázky nebo vrátit.")
       } catch (error) {
         console.error("Trim apply error:", error)
         setTrimMessage(error?.message || "Ořez se nepodařilo aplikovat.")
@@ -6220,7 +6606,7 @@ export default function ClientPage() {
         setTrimBusy(false)
       }
     }, 30)
-  }, [trimContext, trimKeepMask, trimSelection, trimBusy, trimControlNodes.length, invalidateComparisonResult])
+  }, [trimContext, trimBoundaryPlan, trimKeepComponent, trimSelection, trimBusy, trimControlNodes.length, invalidateComparisonResult])
 
   const undoLastTrim = useCallback((url = trimSelection) => {
     if (!url) return
@@ -6243,7 +6629,7 @@ export default function ClientPage() {
         : previous)
     }
     setTrimContext(null)
-    setTrimControlNodes([]); setTrimSegments([]); setTrimClosed(false); setTrimKeepMask(null); setTrimPreviewPath([])
+    setTrimControlNodes([]); setTrimSegments([]); setTrimClosed(false); setTrimKeepComponent(null); setTrimHoverComponent(null)
     setTrimStage("model")
     setTrimSelection("")
     setTrimMessage("Poslední Ořez byl vrácen. Vyberte model pro další úpravu.")
@@ -9607,7 +9993,7 @@ export default function ClientPage() {
   const trimStepDone = {
     model: !!trimSelection,
     boundary: !!trimClosed,
-    region: !!trimKeepMask || trimStage === "result",
+    region: trimKeepComponent != null || trimStage === "result",
     result: trimStage === "result",
   }
   const trimWorkspace = trimMode && (
@@ -9622,7 +10008,7 @@ export default function ClientPage() {
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
         <div style={{ minWidth: 0, flex: "1 1 auto" }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-            <span style={{ fontSize: 13, fontWeight: 850 }}>ART</span><span style={{ fontSize: 13, fontWeight: 300 }}>HETIC</span>
+            <span style={{ display: "inline-flex", alignItems: "baseline", gap: 0, fontSize: 13 }}><span style={{ fontWeight: 850 }}>ART</span><span style={{ fontWeight: 300 }}>HETIC</span></span>
             <span style={{ color: "#d7d7d7", fontSize: 13, fontWeight: 340 }}>Ořez</span>
             {trimSelectedFile && <span style={{ marginLeft: 4, color: "#777", fontSize: 9.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stripExt(trimSelectedFile.rawName || trimSelectedFile.name)}</span>}
           </div>
@@ -9657,9 +10043,9 @@ export default function ClientPage() {
       {trimStage !== "model" && trimSelectedFile && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
           <div style={{ minWidth: 0, color: "#8b8b8b", fontSize: 9.3, lineHeight: 1.45 }}>
-            {trimStage === "boundary" && !trimClosed && <>LMB klik = nový bod · přetažení kuličky = oprava bodu · klik na první žlutý bod = uzavřít.</>}
-            {trimStage === "boundary" && trimClosed && <>Smyčka je uzavřená. Kuličky můžete dál přetahovat; potom klikněte na oblast, kterou chcete zachovat.</>}
-            {trimStage === "region" && <>Zelená oblast zůstane, červená se odstraní. Body lze stále přetahovat — po změně hranice vyberte oblast znovu.</>}
+            {trimStage === "boundary" && !trimClosed && <>LMB klik = nový bod · přetažení kuličky = oprava bodu · dvojklik na první žlutý bod = uzavřít.</>}
+            {trimStage === "boundary" && trimClosed && <>Smyčka je uzavřená. Body můžete dál přetahovat. Najeďte myší na jednu stranu pro náhled a kliknutím ji potvrďte.</>}
+            {trimStage === "region" && <>Zelená oblast zůstane, červená se odstraní. Řez vede skrz faces; body lze stále přetahovat a hranici jemně doladit.</>}
             {trimStage === "result" && <>Ořez je aplikovaný na geometrii v této session. Výsledek lze stáhnout nebo interně uložit k zakázce.</>}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -9672,7 +10058,7 @@ export default function ClientPage() {
             {trimStage === "boundary" && !trimClosed && trimControlNodes.length >= 3 && (
               <button type="button" onClick={closeTrimLoop} style={{ height: 31, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(251,191,36,.18)", background: "rgba(245,158,11,.065)", color: "#fde68a", fontSize: 9, fontWeight: 710, cursor: "pointer" }}>Uzavřít hranici</button>
             )}
-            {trimStage === "region" && trimKeepMask && (
+            {trimStage === "region" && trimKeepComponent != null && (
               <button type="button" onClick={applyTrimResult} disabled={trimBusy} className={!trimBusy ? "artheticAnalysisReadyAction" : undefined}
                 style={{ height: 32, padding: "0 12px", borderRadius: 9, border: "1px solid rgba(74,222,128,.18)", background: "rgba(18,42,27,.97)", color: "#dffbea", fontSize: 9.5, fontWeight: 730, cursor: trimBusy ? "wait" : "pointer" }}><span>Oříznout</span></button>
             )}
@@ -10855,6 +11241,7 @@ export default function ClientPage() {
                   : null}
                 onTrimSurfaceClick={trimMode && trimSelection === f.url && trimStage !== "result" ? handleTrimSurfaceClick : null}
                 onTrimSurfaceMove={trimMode && trimSelection === f.url && trimStage !== "result" ? handleTrimSurfaceMove : null}
+                onTrimSurfaceOut={trimMode && trimSelection === f.url && trimStage !== "result" ? handleTrimSurfaceOut : null}
               />
             ))}
           </Suspense>
@@ -10865,8 +11252,9 @@ export default function ClientPage() {
               modelMatrix={modelTransforms[trimSelection]}
               controlNodes={trimControlNodes}
               segments={trimSegments}
-              previewPath={trimPreviewPath}
-              keepMask={trimKeepMask}
+              boundaryPlan={trimBoundaryPlan}
+              keepComponent={trimKeepComponent}
+              hoverComponent={trimHoverComponent}
               draggingPoint={trimDraggingPoint}
               onBeginPointDrag={beginTrimPointDrag}
               onCloseLoop={closeTrimLoop}
