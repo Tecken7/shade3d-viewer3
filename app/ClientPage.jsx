@@ -1134,7 +1134,7 @@ function TrimBoundaryTube({ points, radius, closed = false }) {
         roughness={0.32}
         metalness={0.06}
         transparent
-        opacity={0.93}
+        opacity={0.80}
         depthTest
         depthWrite={false}
         polygonOffset
@@ -1232,12 +1232,20 @@ function TrimSurfaceOverlay({
             } : undefined}
           >
             <sphereGeometry args={[pointRadius * (active ? 1.16 : 1), 20, 16]} />
-            <meshBasicMaterial
-              color={active ? "#8bc5ef" : isFirst ? "#fbbf24" : "#6fa8d6"}
+            <meshPhysicalMaterial
+              color={active ? "#6fa9d1" : isFirst ? "#f3bd32" : "#4f82aa"}
+              roughness={isFirst ? 0.24 : 0.20}
+              metalness={isFirst ? 0.16 : 0.22}
+              clearcoat={0.72}
+              clearcoatRoughness={0.16}
+              ior={1.46}
+              iridescence={isFirst ? 0.22 : active ? 0.92 : 0.78}
+              iridescenceIOR={1.34}
+              iridescenceThicknessRange={[120, 460]}
               depthTest
               depthWrite={false}
               transparent
-              opacity={0.92}
+              opacity={isFirst ? 0.94 : 0.88}
             />
           </mesh>
         )
