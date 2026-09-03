@@ -4210,6 +4210,8 @@ function GizmoManager({ rotateRef, translateRef, secondaryTranslateRef, trackbal
 /* ---------- Hlavní komponenta ---------- */
 
 /* ---------- ARTHETIC Color Picker ---------- */
+const ARTHETIC_COLOR_PRESETS = ["#7F7F7F", "#AAA08E", "#DAD7D1", "#C68787", "#728E70", "#74849B"]
+
 function normalizeColorHex(value, fallback = "#ffffff") {
   const text = String(value || "").trim()
   const short = text.match(/^#?([0-9a-f]{3})$/i)
@@ -4337,13 +4339,6 @@ function ArtheticInlineColorPicker({ value, onChange }) {
     }
   }
 
-  const updateRgbChannel = (channel, rawValue) => {
-    const nextRgb = { ...rgbRounded, [channel]: Math.max(0, Math.min(255, Number(rawValue) || 0)) }
-    const nextHex = colorRgbToHex(nextRgb)
-    setHexDraft(nextHex.toUpperCase())
-    setHsv(colorRgbToHsv(nextRgb))
-    onChange?.(nextHex)
-  }
 
   return (
     <div style={{
@@ -4354,7 +4349,7 @@ function ArtheticInlineColorPicker({ value, onChange }) {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 9 }}>
         <div>
           <div style={{ color: "#d7d7d7", fontSize: 9.5, fontWeight: 720 }}>Barva modelu</div>
-          <div style={{ color: "#676767", fontSize: 8.4, marginTop: 1 }}>HEX / RGB</div>
+          <div style={{ color: "#676767", fontSize: 8.4, marginTop: 1 }}>HEX / PRESETY</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ color: "#8a8a8a", fontSize: 9, fontVariantNumeric: "tabular-nums" }}>{currentHex.toUpperCase()}</span>
@@ -4424,7 +4419,7 @@ function ArtheticInlineColorPicker({ value, onChange }) {
         }} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.35fr repeat(3, minmax(0,.72fr))", gap: 6, marginTop: 10 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(88px, 1fr) minmax(0, 1.72fr)", gap: 7, marginTop: 10, alignItems: "end" }}>
         <label style={{ minWidth: 0 }}>
           <span style={{ display: "block", color: "#666", fontSize: 8, fontWeight: 700, marginBottom: 4 }}>HEX</span>
           <input
@@ -4443,16 +4438,39 @@ function ArtheticInlineColorPicker({ value, onChange }) {
             style={{ width: "100%", height: 29, boxSizing: "border-box", borderRadius: 7, border: "1px solid rgba(255,255,255,.085)", background: "rgba(255,255,255,.035)", color: "#e5e5e5", padding: "0 8px", outline: "none", fontSize: 9, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", textTransform: "uppercase" }}
           />
         </label>
-        {[['r','R'],['g','G'],['b','B']].map(([channel,label]) => (
-          <label key={channel} style={{ minWidth: 0 }}>
-            <span style={{ display: "block", color: "#666", fontSize: 8, fontWeight: 700, marginBottom: 4 }}>{label}</span>
-            <input
-              type="number" min="0" max="255" value={rgbRounded[channel]}
-              onChange={(event) => updateRgbChannel(channel, event.target.value)}
-              style={{ width: "100%", height: 29, boxSizing: "border-box", borderRadius: 7, border: "1px solid rgba(255,255,255,.085)", background: "rgba(255,255,255,.035)", color: "#e5e5e5", padding: "0 5px", outline: "none", fontSize: 9, textAlign: "center", fontVariantNumeric: "tabular-nums" }}
-            />
-          </label>
-        ))}
+
+        <div style={{ minWidth: 0 }}>
+          <span style={{ display: "block", color: "#666", fontSize: 8, fontWeight: 700, marginBottom: 4 }}>PRESETY</span>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 4, height: 29, alignItems: "center" }}>
+            {ARTHETIC_COLOR_PRESETS.map((preset) => {
+              const normalizedPreset = normalizeColorHex(preset)
+              const isActive = normalizedPreset === normalizeColorHex(currentHex)
+              return (
+                <button
+                  key={preset}
+                  type="button"
+                  title={preset}
+                  aria-label={`Použít barvu ${preset}`}
+                  aria-pressed={isActive}
+                  onClick={() => {
+                    setHsv(colorRgbToHsv(colorHexToRgb(normalizedPreset)))
+                    setHexDraft(normalizedPreset.toUpperCase())
+                    lastEmittedHexRef.current = normalizedPreset
+                    onChange?.(normalizedPreset)
+                  }}
+                  style={{
+                    width: "100%", maxWidth: 23, minWidth: 0, aspectRatio: "1 / 1", justifySelf: "center", padding: 0,
+                    borderRadius: 6, border: isActive ? "2px solid rgba(255,255,255,.92)" : "1px solid rgba(255,255,255,.13)",
+                    background: preset, cursor: "pointer",
+                    boxShadow: isActive ? "0 0 0 2px rgba(255,255,255,.10), inset 0 0 0 1px rgba(0,0,0,.18)" : "inset 0 0 0 1px rgba(0,0,0,.16)",
+                    transform: isActive ? "scale(1.04)" : "scale(1)",
+                    transition: "transform .14s ease, border-color .14s ease, box-shadow .14s ease",
+                  }}
+                />
+              )
+            })}
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -7419,15 +7437,15 @@ export default function ClientPage() {
                 }}>
                   <label style={{ display: "block", minWidth: 0 }}>
                     <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 7, marginBottom: 5, color: "#969696", fontSize: 9.5, fontWeight: 650 }}>
-                      <span>Roughness</span><span style={{ color: "#d7d7d7", fontVariantNumeric: "tabular-nums" }}>{Math.round((roughnesses[i] ?? 0.5) * 100)}%</span>
+                      <span>Roughness</span><span style={{ color: "#d7d7d7", fontVariantNumeric: "tabular-nums" }}>{Math.round((roughnesses[i] ?? 0.25) * 100)}%</span>
                     </span>
-                    <input type="range" min={0} max={1} step={0.01} value={roughnesses[i] ?? 0.5} onChange={(e) => { const v = parseFloat(e.target.value); setRoughnesses((prev) => prev.map((x, idx) => idx === i ? v : x)) }} style={{ width: "100%", accentColor: "#a3a3a3" }} aria-label={`${f.name} roughness`} />
+                    <input type="range" min={0} max={1} step={0.01} value={roughnesses[i] ?? 0.25} onChange={(e) => { const v = parseFloat(e.target.value); setRoughnesses((prev) => prev.map((x, idx) => idx === i ? v : x)) }} style={{ width: "100%", accentColor: "#a3a3a3" }} aria-label={`${f.name} roughness`} />
                   </label>
                   <label style={{ display: "block", minWidth: 0 }}>
                     <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 7, marginBottom: 5, color: "#969696", fontSize: 9.5, fontWeight: 650 }}>
-                      <span>Metalness</span><span style={{ color: "#d7d7d7", fontVariantNumeric: "tabular-nums" }}>{Math.round((metalnesses[i] ?? 0.5) * 100)}%</span>
+                      <span>Metalness</span><span style={{ color: "#d7d7d7", fontVariantNumeric: "tabular-nums" }}>{Math.round((metalnesses[i] ?? 0.12) * 100)}%</span>
                     </span>
-                    <input type="range" min={0} max={1} step={0.01} value={metalnesses[i] ?? 0.5} onChange={(e) => { const v = parseFloat(e.target.value); setMetalnesses((prev) => prev.map((x, idx) => idx === i ? v : x)) }} style={{ width: "100%", accentColor: "#a3a3a3" }} aria-label={`${f.name} metalness`} />
+                    <input type="range" min={0} max={1} step={0.01} value={metalnesses[i] ?? 0.12} onChange={(e) => { const v = parseFloat(e.target.value); setMetalnesses((prev) => prev.map((x, idx) => idx === i ? v : x)) }} style={{ width: "100%", accentColor: "#a3a3a3" }} aria-label={`${f.name} metalness`} />
                   </label>
                 </div>
               </div>
@@ -9773,8 +9791,8 @@ export default function ClientPage() {
                 smoothAngle={DEFAULT_SMOOTH_ANGLE}
                 wireframe={wireframes[i] || false}
                 ghost={!!ghostModes[i]}
-                roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.5)}
-                metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.5)}
+                roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.25)}
+                metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.12)}
                 useVertexColors={vertexColors[i]}
                 keepMaterials={!!f.km}
                 renderOrder={i}
