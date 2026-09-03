@@ -7835,7 +7835,7 @@ export default function ClientPage() {
   }, [files, clearTrimWorkingState])
 
   const selectTrimModel = useCallback((url) => {
-    if (!trimMode || trimBusy || !url) return
+    if (trimBusy || !url) return
     const object = modelObjectsRef.current[url]
     if (!object) {
       setTrimMessage("Model ještě není načtený. Zkuste to za okamžik.")
@@ -7862,7 +7862,7 @@ export default function ClientPage() {
         setTrimBusy(false)
       }
     }, 30)
-  }, [trimMode, trimBusy])
+  }, [trimBusy])
 
   const closeTrimLoop = useCallback(() => {
     if (!trimContext || trimClosed || trimControlNodes.length < 3) return
@@ -8262,7 +8262,7 @@ export default function ClientPage() {
   }, [repairContext, repairHoles])
 
   const selectRepairModel = useCallback((url) => {
-    if (!repairMode || repairBusy || !url) return
+    if (repairBusy || !url) return
     const object = modelObjectsRef.current[url]
     if (!object) {
       setRepairMessage("Model ještě není načtený. Zkuste to za okamžik.")
@@ -8306,7 +8306,7 @@ export default function ClientPage() {
         setRepairBusy(false)
       }
     }, 20)
-  }, [repairMode, repairBusy, repairVariant])
+  }, [repairBusy, repairVariant])
 
   const changeRepairVariant = useCallback((variant) => {
     if (variant !== "auto" && variant !== "manual") return
@@ -8610,19 +8610,6 @@ export default function ClientPage() {
       setAlignmentMessage("Pro zarovnání jsou potřeba alespoň dva 3D modely.")
       return
     }
-
-    // Analytické režimy jsou vzájemně exkluzivní. Mesh Repair má vlastní
-    // pointer/painter vrstvu a Ořez vlastní click/drag guard; žádná z nich
-    // nesmí zůstat aktivní pod Alignment workspace.
-    setRepairMode(false)
-    setRepairPainting(false)
-    setRepairBrushCursor(null)
-    setRepairBusy(false)
-    setTrimMode(false)
-    setTrimDraggingPoint(null)
-    setTrimBusy(false)
-    trimPointerGestureRef.current = null
-    trimSuppressClickUntilRef.current = 0
     // Pracovní viewporty A/B se při vstupu záměrně otevřou prázdné.
     // Hlavní scéna zůstává beze změny a uživatel si oba modely vybere přímo dole.
     setAlignmentSelection(["", ""])
@@ -8958,7 +8945,6 @@ export default function ClientPage() {
   }, [getAlignmentPair, alignmentPointsA, alignmentPointsB, modelTransforms, applyModelTransform, refreshAlignmentMetrics])
 
   const handleAlignmentBestFit = useCallback(async () => {
-    if (alignmentBusy) return
     const { aUrl, bUrl } = getAlignmentPair()
     const sourceMesh = meshesRef.current[bUrl]
     const targetMesh = meshesRef.current[aUrl]
@@ -9100,7 +9086,7 @@ export default function ClientPage() {
       setAlignmentProgress(null)
       setAlignmentOperation(null)
     }
-  }, [alignmentBusy, getAlignmentPair, modelTransforms, alignmentPointsA.length, alignmentPointsB.length, applyModelTransform, refreshAlignmentMetrics, runAlignmentWorkerBestFit])
+  }, [getAlignmentPair, modelTransforms, alignmentPointsA.length, alignmentPointsB.length, applyModelTransform, refreshAlignmentMetrics, runAlignmentWorkerBestFit])
 
   const resetAlignmentTransform = useCallback(async () => {
     const { aUrl, bUrl } = getAlignmentPair()
@@ -11882,7 +11868,7 @@ export default function ClientPage() {
     if (step === "models") return true
     if (step === "points") return alignmentModelsSelected
     if (step === "prealign") return alignmentModelsSelected && alignmentPointsComplete
-    if (step === "bestfit") return alignmentModelsSelected && alignmentPointsComplete && !!alignmentPrealignMatrix
+    if (step === "bestfit") return alignmentModelsSelected && !!alignmentPrealignMatrix
     return false
   }
   const alignmentStepStyle = (step) => {
@@ -11936,7 +11922,12 @@ export default function ClientPage() {
         return
       }
       if (alignmentStep !== "bestfit") setAlignmentStep("bestfit")
-      await handleAlignmentBestFit()
+      try {
+        await handleAlignmentBestFit()
+      } catch (error) {
+        console.error("Best Fit click error:", error)
+        setAlignmentMessage(error?.message || "Best Fit se nepodařilo spustit.")
+      }
       return
     }
   }
@@ -12339,14 +12330,8 @@ export default function ClientPage() {
               <React.Fragment key={step}>
                 {index > 0 && <div style={{ width: 18, height: 1, background: "rgba(255,255,255,.08)", flex: "0 0 auto" }} />}
                 <button
-                  type="button"
                   className={alignmentStepNeedsAttention(step) ? "artheticAlignReadyAction" : undefined}
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={(event) => {
-                    event.preventDefault()
-                    event.stopPropagation()
-                    void handleAlignmentStepClick(step)
-                  }}
+                  onClick={() => handleAlignmentStepClick(step)}
                   disabled={!alignmentStepAvailable(step) || alignmentBusy}
                   style={alignmentStepStyle(step)}
                 >
