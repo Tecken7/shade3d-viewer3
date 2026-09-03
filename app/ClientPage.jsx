@@ -1392,35 +1392,53 @@ function repairSmoothCircularDirections(boundary, rawDirections, radius = 5) {
 function repairPrepareBoundaryGuides(boundary) {
   if (!boundary?.length) return boundary || []
   const count = boundary.length
+
+  // guideDirection vždy znamená "healthy side" – tedy směr z boundary do již
+  // existujícího zdravého meshe. Chybějící strana otvoru je přesně opačný směr.
+  // Používáme přímo centroid sousedních zdravých triangles, takže znaménko není
+  // závislé na orientaci boundary ani na windingu normál.
   const rawDirections = boundary.map((sample, index) => {
+    const normal = sample.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
+    if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1)
+    normal.normalize()
+
+    const healthyVector = sample.healthyHint?.clone?.().sub(sample.position) || new THREE.Vector3()
+    healthyVector.addScaledVector(normal, -healthyVector.dot(normal))
+    if (healthyVector.lengthSq() > 1e-12) return healthyVector.normalize()
+
+    // Fallback jen pro patologický boundary vertex bez použitelného healthy hint.
     const previous = boundary[(index - 1 + count) % count]?.position
     const next = boundary[(index + 1) % count]?.position
     const tangent = next?.clone?.().sub(previous || sample.position) || new THREE.Vector3(1, 0, 0)
     if (tangent.lengthSq() < 1e-12) tangent.set(1, 0, 0)
     tangent.normalize()
-
-    const normal = sample.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
-    if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1)
-    normal.normalize()
-
     let direction = normal.clone().cross(tangent)
     if (direction.lengthSq() < 1e-12) direction = tangent.clone().cross(normal)
-    if (direction.lengthSq() < 1e-12) direction.set(1, 0, 0)
-    direction.normalize()
-
-    const healthyVector = sample.healthyHint?.clone?.().sub(sample.position)
-    if (healthyVector?.lengthSq?.() > 1e-12 && direction.dot(healthyVector) < 0) direction.negate()
-    direction.addScaledVector(normal, -direction.dot(normal))
-    if (direction.lengthSq() < 1e-12 && healthyVector?.lengthSq?.() > 1e-12) {
-      direction.copy(healthyVector).addScaledVector(normal, -healthyVector.dot(normal))
-    }
     if (direction.lengthSq() < 1e-12) direction.set(1, 0, 0)
     return direction.normalize()
   })
 
   const smoothingRadius = Math.max(2, Math.min(8, Math.round(Math.sqrt(count) / 3)))
   const smoothed = repairSmoothCircularDirections(boundary, rawDirections, smoothingRadius)
-  return boundary.map((sample, index) => ({ ...sample, guideDirection: smoothed[index] }))
+
+  // Po vyhlazení znovu kontrolujeme znaménko vůči skutečné healthy straně.
+  // Vyhlazení přes hodně členitou hranici jinak může lokálně otočit směr o 180°.
+  return boundary.map((sample, index) => {
+    const normal = sample.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
+    if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1)
+    normal.normalize()
+
+    const direction = smoothed[index]?.clone?.() || rawDirections[index]?.clone?.() || new THREE.Vector3(1, 0, 0)
+    direction.addScaledVector(normal, -direction.dot(normal))
+    if (direction.lengthSq() < 1e-12) direction.copy(rawDirections[index] || new THREE.Vector3(1, 0, 0))
+    direction.normalize()
+
+    const healthyVector = sample.healthyHint?.clone?.().sub(sample.position) || new THREE.Vector3()
+    healthyVector.addScaledVector(normal, -healthyVector.dot(normal))
+    if (healthyVector.lengthSq() > 1e-12 && direction.dot(healthyVector) < 0) direction.negate()
+
+    return { ...sample, guideDirection: direction }
+  })
 }
 
 function repairBoundaryParameterization(boundary) {
@@ -1845,10 +1863,21 @@ function repairSampleBoundaryAtAngle(boundary, theta, angle) {
   const t = Math.max(0, Math.min(1, (localTarget - aTheta) / span))
   const a = boundary[aIndex]
   const b = boundary[bIndex]
+
+  const position = a.position?.clone?.().lerp(b.position || a.position, t) || new THREE.Vector3()
   const normal = a.normal?.clone?.().lerp(b.normal || a.normal, t)
   if (normal?.lengthSq?.() > 1e-12) normal.normalize()
+
+  const guideDirection = a.guideDirection?.clone?.().lerp(b.guideDirection || a.guideDirection, t)
+  if (guideDirection?.lengthSq?.() > 1e-12) {
+    if (normal?.lengthSq?.() > 1e-12) guideDirection.addScaledVector(normal, -guideDirection.dot(normal))
+    if (guideDirection.lengthSq() > 1e-12) guideDirection.normalize()
+  }
+
   return {
+    position,
     normal: normal || new THREE.Vector3(0, 0, 1),
+    guideDirection: guideDirection || new THREE.Vector3(1, 0, 0),
     color: repairLerpAttribute(a.color, b.color, t),
     uv: repairLerpAttribute(a.uv, b.uv, t),
   }
@@ -1898,6 +1927,15 @@ function buildRepairPatchData(context, hole) {
   const parameterization = repairBoundaryParameterization(boundary)
   if (!parameterization) return null
 
+  const edgeLengths = boundary.map((sample, index) =>
+    sample.position.distanceTo(boundary[(index + 1) % boundary.length].position)
+  )
+  const medianEdge = Math.max(1e-5, repairMedian(edgeLengths, disk.robustRadius * 0.02))
+  const collarDistance = Math.max(
+    disk.robustRadius * 0.022,
+    Math.min(disk.robustRadius * 0.070, medianEdge * 2.65)
+  )
+
   const makeCorner = (position, normal, color, uv) => ({
     sourcePos: trimArr(position),
     sourceNormal: normal ? trimArr(normal) : null,
@@ -1905,81 +1943,193 @@ function buildRepairPatchData(context, hole) {
     uv,
   })
 
-  // Outer ring = původní boundary, beze změny jediného vertexu.
-  const rings = [boundary.map((sample) => makeCorner(sample.position, sample.normal, sample.color, sample.uv))]
-  const ringCount = Math.max(6, Math.min(9, Math.round(Math.sqrt(boundary.length) / 3.0)))
+  // Ring 0 = původní boundary. Ani jeden původní vertex se neposouvá.
+  const rings = [boundary.map((sample) =>
+    makeCorner(sample.position, sample.normal, sample.color, sample.uv)
+  )]
 
-  // Biharmonický disk stále poskytuje dobrou topologickou parametrizaci, ale jeho body
-  // teď projektujeme na implicitní MLS povrch odhadnutý ze zdravého prstence meshe.
-  // Díky tomu střed otvoru neleží v aritmetickém středu boundary (často uvnitř zubu),
-  // ale na extrapolovaném pokračování okolního povrchu.
-  for (let ring = 1; ring <= ringCount; ring++) {
+  // Ring 1 = explicitní "missing-side collar".
+  //
+  // guideDirection míří do EXISTUJÍCÍHO zdravého meshe, proto jej odečítáme.
+  // Tohle je zásadní rozdíl proti v11.2/v11.3: první nový prstenec už není výsledkem
+  // globální Fourier/MLS aproximace a nemůže se lokálně vydat dovnitř zubu.
+  const collarRing = boundary.map((sample) => {
+    const healthyDirection = sample.guideDirection?.clone?.() || new THREE.Vector3()
+    if (healthyDirection.lengthSq() < 1e-12) healthyDirection.set(1, 0, 0)
+    healthyDirection.normalize()
+    const position = sample.position.clone().addScaledVector(healthyDirection, -collarDistance)
+    return makeCorner(position, sample.normal, sample.color, sample.uv)
+  })
+  rings.push(collarRing)
+
+  const ringCount = Math.max(7, Math.min(10, Math.round(Math.sqrt(boundary.length) / 2.7)))
+  let barrierCorrections = 0
+  let maximumBarrierShift = 0
+
+  // Další prstence mohou stále využít curvature-aware disk + MLS, ale dostávají
+  // tvrdou lokální half-space bariéru. Ve směru guideDirection (healthy side)
+  // nesmí žádný bod překročit boundary zpět do zdravé/vnitřní části modelu.
+  for (let ring = 2; ring <= ringCount; ring++) {
     const r = 1 - ring / (ringCount + 1)
+    const inward = 1 - r
     const count = Math.max(20, Math.min(boundary.length, Math.round(boundary.length * Math.max(r, 0.12))))
     const currentRing = []
+
     for (let index = 0; index < count; index++) {
       const angle = (index / count) * Math.PI * 2
       const sample = repairSampleBoundaryAtAngle(boundary, parameterization.theta, angle)
-      const evaluated = disk.evaluate(r, angle, sample?.normal || avgNormal)
-      const maxShift = disk.robustRadius * 0.78 * Math.pow(Math.max(0, 1 - r), 0.62)
+      if (!sample) continue
+
+      const evaluated = disk.evaluate(r, angle, sample.normal || avgNormal)
+      const maxShift = disk.robustRadius * 0.72 * Math.pow(Math.max(0, inward), 0.62)
       const projected = healthySupport.length
-        ? repairProjectToHealthyMLS(evaluated.position, healthySupport, mlsSigma, maxShift, sample?.normal || evaluated.normal || avgNormal)
+        ? repairProjectToHealthyMLS(
+            evaluated.position,
+            healthySupport,
+            mlsSigma,
+            maxShift,
+            sample.normal || evaluated.normal || avgNormal
+          )
         : { position: evaluated.position, normal: evaluated.normal }
-      const boundaryColor = sample?.color || avgColor
-      const boundaryUv = sample?.uv || avgUv
+
+      const position = projected.position.clone()
+      const healthyDirection = sample.guideDirection?.clone?.() || new THREE.Vector3()
+      if (healthyDirection.lengthSq() > 1e-12) {
+        healthyDirection.normalize()
+
+        // S rostoucí vzdáleností od boundary vyžadujeme malý, ale jednoznačný
+        // posun na chybějící stranu. Není to "nafouknutí" podle normály – je to
+        // čistě topologický směr přes otvor.
+        const requiredMissing = collarDistance * Math.min(3.25, 0.80 + inward * 3.8)
+        const healthyProjection = position.clone().sub(sample.position).dot(healthyDirection)
+        const maximumAllowedProjection = -requiredMissing
+
+        if (healthyProjection > maximumAllowedProjection) {
+          const correction = healthyProjection - maximumAllowedProjection
+          position.addScaledVector(healthyDirection, -correction)
+          barrierCorrections++
+          maximumBarrierShift = Math.max(maximumBarrierShift, correction)
+        }
+      }
+
+      // Vnější část patche navíc jemně přimíchává explicitní collar trajektorii.
+      // Zamezí to tomu, aby MLS okamžitě po prvním prstenci ohnulo plochu zpět.
+      if (r > 0.50 && sample.guideDirection?.lengthSq?.() > 1e-12) {
+        const healthyDirection = sample.guideDirection.clone().normalize()
+        const missingTravel = collarDistance + disk.robustRadius * 0.23 * Math.pow(inward, 1.15)
+        const guided = sample.position.clone().addScaledVector(healthyDirection, -missingTravel)
+        const guideWeight = Math.max(0, Math.min(0.48, (r - 0.50) / 0.50 * 0.48))
+        position.lerp(guided, guideWeight)
+      }
+
+      const boundaryColor = sample.color || avgColor
+      const boundaryUv = sample.uv || avgUv
       const color = boundaryColor && avgColor
         ? boundaryColor.map((value, channel) => value * r + avgColor[channel] * (1 - r))
         : (boundaryColor || avgColor)
       const uv = boundaryUv && avgUv
         ? boundaryUv.map((value, channel) => value * r + avgUv[channel] * (1 - r))
         : (boundaryUv || avgUv)
-      currentRing.push(makeCorner(projected.position, projected.normal || evaluated.normal || avgNormal, color, uv))
+
+      currentRing.push(
+        makeCorner(position, projected.normal || evaluated.normal || sample.normal || avgNormal, color, uv)
+      )
     }
-    rings.push(currentRing)
+
+    if (currentRing.length >= 3) rings.push(currentRing)
   }
 
-  const rawCenter = disk.evaluate(0, 0, avgNormal)
-  const projectedCenter = healthySupport.length
-    ? repairProjectToHealthyMLS(rawCenter.position, healthySupport, mlsSigma, disk.robustRadius * 0.90, avgNormal)
-    : { position: rawCenter.position, normal: rawCenter.normal || avgNormal }
-  const centerCorner = makeCorner(projectedCenter.position, projectedCenter.normal || avgNormal, avgColor, avgUv)
   const triangles = []
+  for (let ring = 0; ring < rings.length - 1; ring++) {
+    repairConnectClosedRings(triangles, rings[ring], rings[ring + 1])
+  }
 
-  for (let ring = 0; ring < rings.length - 1; ring++) repairConnectClosedRings(triangles, rings[ring], rings[ring + 1])
-
-  // Poslední fan už nemá stovky extrémně úzkých trojúhelníků. Počet vertexů se
-  // s obvodem prstenců postupně zmenšuje, takže centrální triangulace je výrazně
-  // pravidelnější a nevytváří viditelné paprsky.
+  // Střed už nepočítáme nezávislou MLS projekcí. Ta byla na Rogers_scanbody.ply
+  // schopná znovu spadnout mezi protilehlé části zubu. Střed vychází přímo z
+  // posledního již barrier-constrained prstence.
   const last = rings[rings.length - 1]
+  const centerPosition = new THREE.Vector3()
+  const centerNormal = new THREE.Vector3()
+  let centerColor = null
+  let centerUv = null
+
+  last.forEach((corner) => {
+    centerPosition.add(trimVec(corner.sourcePos))
+    if (corner.sourceNormal) centerNormal.add(trimVec(corner.sourceNormal))
+  })
+  centerPosition.multiplyScalar(1 / Math.max(1, last.length))
+  if (centerNormal.lengthSq() < 1e-12) centerNormal.copy(avgNormal)
+  centerNormal.normalize()
+
+  if (avgColor) centerColor = avgColor.slice()
+  if (avgUv) centerUv = avgUv.slice()
+  const centerCorner = makeCorner(centerPosition, centerNormal, centerColor, centerUv)
+
   for (let index = 0; index < last.length; index++) {
     const next = (index + 1) % last.length
     triangles.push([last[index], last[next], centerCorner])
   }
 
+  // Přepočítáme normály nového patche z jeho skutečné geometrie a následně je
+  // orientujeme podle okolních boundary normál. Preview tak neukazuje falešné
+  // odlesky způsobené pouze interpolovanými vstupními normálami.
+  const normalSums = new Map()
+  const addNormal = (corner, normal) => {
+    const current = normalSums.get(corner) || new THREE.Vector3()
+    current.add(normal)
+    normalSums.set(corner, current)
+  }
+
   let orientationScore = 0
-  const stride = Math.max(1, Math.floor(triangles.length / 180))
-  for (let index = 0; index < triangles.length; index += stride) {
-    const triangle = triangles[index]
+  for (const triangle of triangles) {
     const a = trimVec(triangle[0].sourcePos)
     const b = trimVec(triangle[1].sourcePos)
     const c = trimVec(triangle[2].sourcePos)
     const faceNormal = b.clone().sub(a).cross(c.clone().sub(a))
     if (faceNormal.lengthSq() < 1e-12) continue
     faceNormal.normalize()
+
     const expected = new THREE.Vector3()
-    triangle.forEach((corner) => { if (corner.sourceNormal) expected.add(trimVec(corner.sourceNormal)) })
+    triangle.forEach((corner) => {
+      if (corner.sourceNormal) expected.add(trimVec(corner.sourceNormal))
+    })
     if (expected.lengthSq() < 1e-12) expected.copy(avgNormal)
     expected.normalize()
     orientationScore += Math.sign(faceNormal.dot(expected))
+
+    addNormal(triangle[0], faceNormal)
+    addNormal(triangle[1], faceNormal)
+    addNormal(triangle[2], faceNormal)
   }
+
   if (orientationScore < 0) {
     for (let index = 0; index < triangles.length; index++) {
       const [a, b, c] = triangles[index]
       triangles[index] = [a, c, b]
     }
+    // Winding se otočil, takže normály spočítáme znovu.
+    normalSums.clear()
+    for (const triangle of triangles) {
+      const a = trimVec(triangle[0].sourcePos)
+      const b = trimVec(triangle[1].sourcePos)
+      const c = trimVec(triangle[2].sourcePos)
+      const faceNormal = b.clone().sub(a).cross(c.clone().sub(a))
+      if (faceNormal.lengthSq() < 1e-12) continue
+      faceNormal.normalize()
+      addNormal(triangle[0], faceNormal)
+      addNormal(triangle[1], faceNormal)
+      addNormal(triangle[2], faceNormal)
+    }
   }
 
-  const centerCorrection = projectedCenter.position.distanceTo(rawCenter.position)
+  normalSums.forEach((normal, corner) => {
+    if (normal.lengthSq() < 1e-12) return
+    normal.normalize()
+    const expected = corner.sourceNormal ? trimVec(corner.sourceNormal) : avgNormal
+    if (expected?.lengthSq?.() > 1e-12 && normal.dot(expected) < 0) normal.negate()
+    corner.sourceNormal = trimArr(normal)
+  })
+
   return {
     holeId: hole.id,
     childUuid: hole.childUuid,
@@ -1987,13 +2137,15 @@ function buildRepairPatchData(context, hole) {
     triangles,
     boundaryPoints: points.map(trimArr),
     reconstruction: {
-      method: "biharmonic-healthy-mls",
+      method: "topology-missing-side-collar",
       modes: disk.modeCount,
       guideStrength: 0.62,
       robustRadius: disk.robustRadius,
       supportSamples: healthySupport.length,
       mlsSigma,
-      centerCorrection,
+      collarDistance,
+      barrierCorrections,
+      maximumBarrierShift,
     },
   }
 }
