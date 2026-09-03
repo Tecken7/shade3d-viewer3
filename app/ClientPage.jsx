@@ -1883,6 +1883,370 @@ function repairSampleBoundaryAtAngle(boundary, theta, angle) {
   }
 }
 
+
+function repairCircumcircle2D(a, b, c) {
+  const ax = a.x, ay = a.y
+  const bx = b.x, by = b.y
+  const cx = c.x, cy = c.y
+  const d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+  if (Math.abs(d) < 1e-13) return null
+  const aa = ax * ax + ay * ay
+  const bb = bx * bx + by * by
+  const cc = cx * cx + cy * cy
+  const ux = (aa * (by - cy) + bb * (cy - ay) + cc * (ay - by)) / d
+  const uy = (aa * (cx - bx) + bb * (ax - cx) + cc * (bx - ax)) / d
+  const dx = ux - ax
+  const dy = uy - ay
+  return { x: ux, y: uy, r2: dx * dx + dy * dy }
+}
+
+function repairOrientTriangle2D(points, a, b, c) {
+  const pa = points[a], pb = points[b], pc = points[c]
+  const cross = (pb.x - pa.x) * (pc.y - pa.y) - (pb.y - pa.y) * (pc.x - pa.x)
+  return cross >= 0 ? [a, b, c] : [a, c, b]
+}
+
+function repairDelaunay2D(inputPoints) {
+  const count = inputPoints?.length || 0
+  if (count < 3) return []
+
+  const points = inputPoints.map((point) => ({ x: Number(point.x) || 0, y: Number(point.y) || 0 }))
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  points.forEach((point) => {
+    minX = Math.min(minX, point.x); minY = Math.min(minY, point.y)
+    maxX = Math.max(maxX, point.x); maxY = Math.max(maxY, point.y)
+  })
+  const dx = maxX - minX
+  const dy = maxY - minY
+  const span = Math.max(dx, dy, 1)
+  const midX = (minX + maxX) * 0.5
+  const midY = (minY + maxY) * 0.5
+
+  const superA = points.length
+  points.push({ x: midX - span * 24, y: midY - span * 18 })
+  const superB = points.length
+  points.push({ x: midX, y: midY + span * 28 })
+  const superC = points.length
+  points.push({ x: midX + span * 24, y: midY - span * 18 })
+
+  const makeTriangle = (a, b, c) => {
+    const oriented = repairOrientTriangle2D(points, a, b, c)
+    const circle = repairCircumcircle2D(points[oriented[0]], points[oriented[1]], points[oriented[2]])
+    if (!circle) return null
+    return { a: oriented[0], b: oriented[1], c: oriented[2], ...circle }
+  }
+
+  let triangles = [makeTriangle(superA, superB, superC)].filter(Boolean)
+
+  // Deterministické pořadí. Boundary body jsou na téměř kruhovém convex hull,
+  // interior jde od středu ven. Malý radiální jitter boundary se přidává už při
+  // generování bodů a řeší co-circular degeneraci bez změny výsledné geometrie.
+  const insertionOrder = Array.from({ length: count }, (_, index) => index)
+    .sort((ia, ib) => {
+      const a = inputPoints[ia], b = inputPoints[ib]
+      const ra = a.x * a.x + a.y * a.y
+      const rb = b.x * b.x + b.y * b.y
+      if (Math.abs(ra - rb) > 1e-12) return ra - rb
+      return ia - ib
+    })
+
+  for (const pointIndex of insertionOrder) {
+    const point = points[pointIndex]
+    const bad = []
+    for (let index = 0; index < triangles.length; index++) {
+      const triangle = triangles[index]
+      const ddx = point.x - triangle.x
+      const ddy = point.y - triangle.y
+      const distance2 = ddx * ddx + ddy * ddy
+      if (distance2 <= triangle.r2 * (1 + 2e-10) + 1e-12) bad.push(index)
+    }
+    if (!bad.length) continue
+
+    const edgeMap = new Map()
+    const addEdge = (a, b) => {
+      const lo = Math.min(a, b)
+      const hi = Math.max(a, b)
+      const key = `${lo}:${hi}`
+      const current = edgeMap.get(key)
+      if (current) current.count++
+      else edgeMap.set(key, { a, b, count: 1 })
+    }
+
+    const badSet = new Set(bad)
+    bad.forEach((index) => {
+      const triangle = triangles[index]
+      addEdge(triangle.a, triangle.b)
+      addEdge(triangle.b, triangle.c)
+      addEdge(triangle.c, triangle.a)
+    })
+
+    triangles = triangles.filter((_, index) => !badSet.has(index))
+    edgeMap.forEach((edge) => {
+      if (edge.count !== 1) return
+      const triangle = makeTriangle(edge.a, edge.b, pointIndex)
+      if (triangle) triangles.push(triangle)
+    })
+  }
+
+  return triangles
+    .filter((triangle) =>
+      triangle.a < count && triangle.b < count && triangle.c < count
+    )
+    .map((triangle) => repairOrientTriangle2D(points, triangle.a, triangle.b, triangle.c))
+}
+
+function repairGenerateParametricDisk(boundary, parameterization, robustRadius, medianEdge) {
+  const count = boundary?.length || 0
+  if (count < 3 || !parameterization?.theta?.length) return null
+
+  const targetPhysicalEdge = Math.max(
+    medianEdge * 1.22,
+    Math.min(medianEdge * 1.55, robustRadius / 30)
+  )
+  let spacing = Math.max(0.024, Math.min(0.105, targetPhysicalEdge / Math.max(robustRadius, 1e-5)))
+
+  const usableRadius = 0.955
+  const cellArea = Math.sqrt(3) * 0.5 * spacing * spacing
+  const estimatedInterior = Math.PI * usableRadius * usableRadius / Math.max(cellArea, 1e-8)
+  const maxInterior = 1850
+  if (estimatedInterior > maxInterior) {
+    spacing *= Math.sqrt(estimatedInterior / maxInterior)
+  }
+
+  const points = []
+  const boundaryCount = count
+
+  for (let index = 0; index < count; index++) {
+    const angle = parameterization.theta[index]
+    // Všechny body zůstávají body convex hull. Jitter je o dva řády menší
+    // než sagitta mezi sousedními boundary vertexy a slouží jen Delaunay numerice.
+    const radius = 1 + Math.sin((index + 1) * 12.9898) * 1e-7
+    points.push({
+      x: Math.cos(angle) * radius,
+      y: Math.sin(angle) * radius,
+      r: 1,
+      angle,
+      boundaryIndex: index,
+      fixed: true,
+    })
+  }
+
+  const rowHeight = spacing * Math.sqrt(3) * 0.5
+  let row = 0
+  for (let y = -usableRadius; y <= usableRadius + 1e-9; y += rowHeight, row++) {
+    const offset = row % 2 ? spacing * 0.5 : 0
+    for (let x = -usableRadius + offset; x <= usableRadius + 1e-9; x += spacing) {
+      const r2 = x * x + y * y
+      if (r2 >= usableRadius * usableRadius) continue
+      const r = Math.sqrt(r2)
+      const angle = Math.atan2(y, x) < 0 ? Math.atan2(y, x) + Math.PI * 2 : Math.atan2(y, x)
+      points.push({ x, y, r, angle, boundaryIndex: -1, fixed: false })
+    }
+  }
+
+  // Garantovaný střed pomáhá pravidelnému Delaunay meshi, pokud ho hex grid
+  // náhodou těsně mine.
+  let hasCenter = false
+  for (let index = boundaryCount; index < points.length; index++) {
+    if (points[index].r < spacing * 0.25) { hasCenter = true; break }
+  }
+  if (!hasCenter) points.push({ x: 0, y: 0, r: 0, angle: 0, boundaryIndex: -1, fixed: false })
+
+  const triangles = repairDelaunay2D(points)
+  if (!triangles.length) return null
+
+  // Delaunay na convex kružnici musí obsahovat všechny původní boundary edges.
+  // Kdyby numerická degenerace nějakou vynechala, necháme starší stabilní
+  // harmonic implementaci fungovat jako fallback místo vytvoření T-junctionu.
+  const edgeSet = new Set()
+  triangles.forEach(([a, b, c]) => {
+    ;[[a,b],[b,c],[c,a]].forEach(([u,v]) => edgeSet.add(`${Math.min(u,v)}:${Math.max(u,v)}`))
+  })
+  for (let index = 0; index < boundaryCount; index++) {
+    const next = (index + 1) % boundaryCount
+    if (!edgeSet.has(`${Math.min(index,next)}:${Math.max(index,next)}`)) return null
+  }
+
+  return {
+    points,
+    triangles,
+    boundaryCount,
+    spacing,
+    targetPhysicalEdge,
+  }
+}
+
+function repairBuildAdjacency(pointCount, triangles) {
+  const adjacency = Array.from({ length: pointCount }, () => new Map())
+  const add = (a, b, weight) => {
+    if (a === b) return
+    adjacency[a].set(b, Math.max(adjacency[a].get(b) || 0, weight))
+    adjacency[b].set(a, Math.max(adjacency[b].get(a) || 0, weight))
+  }
+  triangles.forEach(([a, b, c]) => {
+    add(a, b, 1); add(b, c, 1); add(c, a, 1)
+  })
+  return adjacency
+}
+
+function repairFairParametricPatch({
+  nodes,
+  triangles,
+  boundaryCount,
+  iterations = 210,
+  relaxation = 0.68,
+  guideScale = 1,
+}) {
+  const adjacency = repairBuildAdjacency(nodes.length, triangles)
+  let positions = nodes.map((node) => node.position.clone())
+  const next = positions.map((position) => position.clone())
+
+  // Uniform Laplacian na téměř rovnostranné Delaunay síti je záměrně
+  // konzervativní. Boundary je přesná Dirichletova podmínka.
+  for (let iteration = 0; iteration < iterations; iteration++) {
+    for (let index = 0; index < nodes.length; index++) {
+      if (index < boundaryCount || nodes[index].fixed) {
+        next[index].copy(nodes[index].position)
+        continue
+      }
+
+      const neighbors = adjacency[index]
+      if (!neighbors?.size) {
+        next[index].copy(positions[index])
+        continue
+      }
+
+      const average = new THREE.Vector3()
+      let weightSum = 0
+      neighbors.forEach((weight, neighborIndex) => {
+        // Parametrický Delaunay je téměř pravidelný. Slabé inverse-length
+        // vážení tlumí ojedinělou delší diagonálu bez přitažení do jednoho bodu.
+        const dx = nodes[index].param.x - nodes[neighborIndex].param.x
+        const dy = nodes[index].param.y - nodes[neighborIndex].param.y
+        const paramLength = Math.max(0.018, Math.hypot(dx, dy))
+        const w = weight / paramLength
+        average.addScaledVector(positions[neighborIndex], w)
+        weightSum += w
+      })
+      if (weightSum > 0) average.multiplyScalar(1 / weightSum)
+
+      const guideWeight = Math.max(0, Math.min(0.14, (nodes[index].guideWeight || 0) * guideScale))
+      if (guideWeight > 0 && nodes[index].guideTarget?.isVector3) {
+        average.lerp(nodes[index].guideTarget, guideWeight)
+      }
+
+      next[index].copy(positions[index]).lerp(average, relaxation)
+    }
+
+    for (let index = boundaryCount; index < positions.length; index++) {
+      positions[index].copy(next[index])
+    }
+  }
+
+  return positions
+}
+
+function repairPatchFoldScore(positions, triangles, expectedNormal) {
+  const faceNormals = []
+  let degenerate = 0
+  triangles.forEach(([a, b, c]) => {
+    const normal = positions[b].clone().sub(positions[a]).cross(
+      positions[c].clone().sub(positions[a])
+    )
+    if (normal.lengthSq() < 1e-12) {
+      faceNormals.push(new THREE.Vector3())
+      degenerate++
+      return
+    }
+    normal.normalize()
+    faceNormals.push(normal)
+  })
+
+  const edgeFaces = new Map()
+  const add = (a, b, faceIndex) => {
+    const key = `${Math.min(a,b)}:${Math.max(a,b)}`
+    const list = edgeFaces.get(key) || []
+    list.push(faceIndex)
+    edgeFaces.set(key, list)
+  }
+  triangles.forEach(([a,b,c], faceIndex) => {
+    add(a,b,faceIndex); add(b,c,faceIndex); add(c,a,faceIndex)
+  })
+
+  let strongFolds = 0
+  let softFolds = 0
+  let pairs = 0
+  edgeFaces.forEach((faces) => {
+    if (faces.length !== 2) return
+    const a = faceNormals[faces[0]], b = faceNormals[faces[1]]
+    if (a.lengthSq() < 1e-12 || b.lengthSq() < 1e-12) return
+    const dot = a.dot(b)
+    pairs++
+    if (dot < -0.15) strongFolds++
+    else if (dot < 0.20) softFolds++
+  })
+
+  let orientation = 0
+  if (expectedNormal?.lengthSq?.() > 1e-12) {
+    faceNormals.forEach((normal) => {
+      if (normal.lengthSq() > 1e-12) orientation += Math.sign(normal.dot(expectedNormal))
+    })
+  }
+
+  return {
+    strongFolds,
+    softFolds,
+    degenerate,
+    pairs,
+    orientation,
+    score: strongFolds * 20 + softFolds * 2 + degenerate * 50,
+  }
+}
+
+function repairAssignPatchNormals(nodes, triangles, positions, expectedNormal) {
+  const sums = Array.from({ length: nodes.length }, () => new THREE.Vector3())
+  let orientation = 0
+
+  triangles.forEach(([a, b, c]) => {
+    const normal = positions[b].clone().sub(positions[a]).cross(
+      positions[c].clone().sub(positions[a])
+    )
+    if (normal.lengthSq() < 1e-12) return
+    normal.normalize()
+    orientation += expectedNormal?.lengthSq?.() > 1e-12 ? Math.sign(normal.dot(expectedNormal)) : 1
+    sums[a].add(normal); sums[b].add(normal); sums[c].add(normal)
+  })
+
+  const reverse = orientation < 0
+  if (reverse) {
+    triangles.forEach((triangle) => {
+      const tmp = triangle[1]; triangle[1] = triangle[2]; triangle[2] = tmp
+    })
+    sums.forEach((sum) => sum.set(0,0,0))
+    triangles.forEach(([a, b, c]) => {
+      const normal = positions[b].clone().sub(positions[a]).cross(
+        positions[c].clone().sub(positions[a])
+      )
+      if (normal.lengthSq() < 1e-12) return
+      normal.normalize()
+      sums[a].add(normal); sums[b].add(normal); sums[c].add(normal)
+    })
+  }
+
+  return sums.map((sum, index) => {
+    if (sum.lengthSq() < 1e-12) {
+      const fallback = nodes[index].normal?.clone?.() || expectedNormal?.clone?.() || new THREE.Vector3(0,0,1)
+      if (fallback.lengthSq() < 1e-12) fallback.set(0,0,1)
+      return fallback.normalize()
+    }
+    sum.normalize()
+    const expected = nodes[index].normal || expectedNormal
+    if (expected?.lengthSq?.() > 1e-12 && sum.dot(expected) < 0) sum.negate()
+    return sum
+  })
+}
+
+
 function repairConnectClosedRings(triangles, outer, inner) {
   const outerCount = outer?.length || 0
   const innerCount = inner?.length || 0
@@ -1912,7 +2276,7 @@ function repairConnectClosedRings(triangles, outer, inner) {
   }
 }
 
-function buildRepairPatchData(context, hole) {
+function buildRepairPatchDataHarmonicFallback(context, hole) {
   if (!context || !hole?.boundary?.length) return null
 
   const boundary = repairPrepareBoundaryGuides(hole.boundary)
@@ -2235,6 +2599,236 @@ function buildRepairPatchData(context, hole) {
       robustRadius,
       medianEdge,
       triangleCount: triangles.length,
+    },
+  }
+}
+
+
+function buildRepairPatchData(context, hole) {
+  if (!context || !hole?.boundary?.length) return null
+
+  const boundary = repairPrepareBoundaryGuides(hole.boundary)
+  const parameterization = repairBoundaryParameterization(boundary)
+  if (!parameterization) return null
+
+  const boundaryPositions = boundary.map((sample) => sample.position.clone())
+  const avgColor = repairAverage(boundary.map((sample) => sample.color), 3, null)
+  const avgUv = repairAverage(boundary.map((sample) => sample.uv), 2, null)
+
+  // Normála pro tvar patche nepoužívá jen normalizovaný součet. Délka
+  // nenormalizovaného průměru říká, jak moc jsou okolní normals koherentní.
+  const rawAverageNormal = new THREE.Vector3()
+  boundary.forEach((sample) => {
+    if (sample.normal?.isVector3) rawAverageNormal.add(sample.normal)
+  })
+  const normalCoherence = Math.max(0, Math.min(1, rawAverageNormal.length() / Math.max(1, boundary.length)))
+  const avgNormal = rawAverageNormal.lengthSq() > 1e-12
+    ? rawAverageNormal.clone().normalize()
+    : repairAverageBoundaryNormal(boundary)
+
+  const boundaryCenter = new THREE.Vector3()
+  boundaryPositions.forEach((position) => boundaryCenter.add(position))
+  boundaryCenter.multiplyScalar(1 / boundaryPositions.length)
+
+  const radialDistances = boundaryPositions.map((position) => position.distanceTo(boundaryCenter))
+  const robustRadius = Math.max(
+    1e-5,
+    repairMedian(radialDistances, Math.max(...radialDistances, 1e-5))
+  )
+
+  const edgeLengths = boundaryPositions.map((position, index) =>
+    position.distanceTo(boundaryPositions[(index + 1) % boundaryPositions.length])
+  )
+  const medianEdge = Math.max(
+    1e-5,
+    repairMedian(edgeLengths, robustRadius * 0.02)
+  )
+
+  const disk = repairGenerateParametricDisk(
+    boundary,
+    parameterization,
+    robustRadius,
+    medianEdge
+  )
+
+  // Pokud Delaunay narazí na numericky patologickou boundary, nevracíme
+  // rozbitou síť. Starší harmonic fallback je v takovém případě bezpečnější.
+  if (!disk?.triangles?.length) {
+    console.warn("Mesh Repair: constrained Delaunay fallback – boundary nebyla numericky stabilní.")
+    return buildRepairPatchDataHarmonicFallback(context, hole)
+  }
+
+  // Hlavní "cap" je mírně vypouklý podle konzistence okolních surface normals.
+  // To je zásadní proti starším verzím: chybějící bukální plocha se už netlačí
+  // do geometrického středu otvoru. U hodně nesourodých normals je bulge téměř nulový.
+  const bulgeStrength = robustRadius * 0.19 * Math.pow(normalCoherence, 1.15)
+  const centerSeed = boundaryCenter.clone().addScaledVector(avgNormal, bulgeStrength)
+
+  const nodes = disk.points.map((param, index) => {
+    if (index < disk.boundaryCount) {
+      const sample = boundary[index]
+      return {
+        fixed: true,
+        param,
+        position: sample.position.clone(),
+        normal: sample.normal?.clone?.() || avgNormal.clone(),
+        color: sample.color ? sample.color.slice() : avgColor ? avgColor.slice() : null,
+        uv: sample.uv ? sample.uv.slice() : avgUv ? avgUv.slice() : null,
+        guideTarget: null,
+        guideWeight: 0,
+      }
+    }
+
+    const sample = repairSampleBoundaryAtAngle(
+      boundary,
+      parameterization.theta,
+      param.angle
+    )
+    const radius = Math.max(0, Math.min(1, param.r))
+    const inward = 1 - radius
+    const centerBlend = Math.pow(inward, 0.93)
+
+    const position = sample.position.clone().lerp(centerSeed, centerBlend)
+
+    // Hermite-like pokračování hned za boundary: healthy-side tangent známe
+    // z reálného sousedního trianglu a otočíme jej do missing side.
+    const missingDirection = sample.guideDirection?.clone?.().negate() || new THREE.Vector3()
+    if (missingDirection.lengthSq() > 1e-12) missingDirection.normalize()
+
+    const tangentTravel = Math.min(
+      robustRadius * 0.14,
+      medianEdge * 3.4,
+      robustRadius * inward * 0.75
+    )
+
+    const normalBulge = bulgeStrength * Math.sin(Math.PI * Math.min(1, inward)) * 0.70
+    const guideTarget = sample.position.clone().lerp(centerSeed, centerBlend)
+    if (missingDirection.lengthSq() > 1e-12 && inward < 0.42) {
+      guideTarget.addScaledVector(
+        missingDirection,
+        tangentTravel * Math.pow(Math.max(0, 1 - inward / 0.42), 1.35)
+      )
+    }
+    guideTarget.addScaledVector(
+      avgNormal,
+      normalBulge * Math.pow(Math.max(0, 1 - radius), 0.72)
+    )
+
+    const radiusFactor = radius
+    const boundaryColor = sample.color || avgColor
+    const boundaryUv = sample.uv || avgUv
+    const color = boundaryColor && avgColor
+      ? boundaryColor.map((value, channel) =>
+          value * radiusFactor + avgColor[channel] * (1 - radiusFactor)
+        )
+      : (boundaryColor ? boundaryColor.slice() : avgColor ? avgColor.slice() : null)
+    const uv = boundaryUv && avgUv
+      ? boundaryUv.map((value, channel) =>
+          value * radiusFactor + avgUv[channel] * (1 - radiusFactor)
+        )
+      : (boundaryUv ? boundaryUv.slice() : avgUv ? avgUv.slice() : null)
+
+    // Guide je nejsilnější jen v prvních ~30 % od okraje. Uprostřed už
+    // rozhoduje čisté fairing minimum a nevzniká žádná "hvězdice".
+    const guideWeight = inward < 0.34
+      ? 0.095 * Math.pow(Math.max(0, 1 - inward / 0.34), 1.5)
+      : 0.018 * Math.pow(Math.max(0, radius), 2)
+
+    return {
+      fixed: false,
+      param,
+      position,
+      normal: sample.normal?.clone?.() || avgNormal.clone(),
+      color,
+      uv,
+      guideTarget,
+      guideWeight,
+    }
+  })
+
+  // Zkusíme nejprve plnou curvature guide. Kdyby na extrémně členité díře
+  // vytvořila fold, automaticky ji zeslabujeme. Uživateli nikdy nenabídneme
+  // variantu, která má horší topologickou stabilitu jen proto, že vypadá
+  // anatomicky odvážněji.
+  const guideScales = [1, 0.62, 0.34, 0.12, 0]
+  let bestPositions = null
+  let bestQuality = null
+  let selectedGuideScale = 0
+
+  for (const guideScale of guideScales) {
+    const positions = repairFairParametricPatch({
+      nodes,
+      triangles: disk.triangles,
+      boundaryCount: disk.boundaryCount,
+      iterations: 230,
+      relaxation: 0.68,
+      guideScale,
+    })
+    const quality = repairPatchFoldScore(
+      positions,
+      disk.triangles,
+      avgNormal
+    )
+
+    if (!bestQuality || quality.score < bestQuality.score) {
+      bestQuality = quality
+      bestPositions = positions
+      selectedGuideScale = guideScale
+    }
+
+    const foldRatio = quality.pairs > 0 ? quality.strongFolds / quality.pairs : 0
+    if (quality.degenerate === 0 && foldRatio < 0.0025) {
+      bestQuality = quality
+      bestPositions = positions
+      selectedGuideScale = guideScale
+      break
+    }
+  }
+
+  if (!bestPositions) return buildRepairPatchDataHarmonicFallback(context, hole)
+
+  const trianglesIndex = disk.triangles.map((triangle) => triangle.slice())
+  const nodeNormals = repairAssignPatchNormals(
+    nodes,
+    trianglesIndex,
+    bestPositions,
+    avgNormal
+  )
+
+  const corners = nodes.map((node, index) => ({
+    sourcePos: trimArr(bestPositions[index]),
+    sourceNormal: trimArr(nodeNormals[index]),
+    color: node.color ? node.color.slice() : null,
+    uv: node.uv ? node.uv.slice() : null,
+  }))
+
+  const triangles = trianglesIndex.map(([a, b, c]) => [
+    corners[a],
+    corners[b],
+    corners[c],
+  ])
+
+  return {
+    holeId: hole.id,
+    childUuid: hole.childUuid,
+    materialIndex: hole.materialIndex || 0,
+    triangles,
+    boundaryPoints: boundaryPositions.map(trimArr),
+    reconstruction: {
+      method: "constrained-delaunay-curvature-fairing-v1",
+      pointCount: nodes.length,
+      boundaryCount: disk.boundaryCount,
+      triangleCount: triangles.length,
+      targetPhysicalEdge: disk.targetPhysicalEdge,
+      paramSpacing: disk.spacing,
+      medianEdge,
+      robustRadius,
+      normalCoherence,
+      bulgeStrength,
+      selectedGuideScale,
+      strongFolds: bestQuality?.strongFolds || 0,
+      softFolds: bestQuality?.softFolds || 0,
+      degenerate: bestQuality?.degenerate || 0,
     },
   }
 }
