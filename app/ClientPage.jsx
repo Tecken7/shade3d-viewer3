@@ -1703,6 +1703,186 @@ function findRepairBoundaryLoops(context) {
   return loops.sort((a,b) => a.area - b.area)
 }
 
+function repairAverageBoundaryNormal(boundary) {
+  const normal = new THREE.Vector3()
+  ;(boundary || []).forEach((sample) => {
+    if (sample?.normal?.isVector3) normal.add(sample.normal)
+  })
+  if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1)
+  return normal.normalize()
+}
+
+function repairTriangleSurfaceSample(context, triangleIndex, expectedNormal) {
+  const triangle = context?.triangles?.[triangleIndex]
+  if (!triangle) return null
+  const position = triangle.centroid?.clone?.() || new THREE.Vector3()
+  const normal = new THREE.Vector3()
+  triangle.corners.forEach((corner) => {
+    if (corner?.sourceNormal) normal.add(trimVec(corner.sourceNormal))
+  })
+  if (normal.lengthSq() < 1e-12) {
+    const a = trimVec(triangle.corners[0].sourcePos)
+    const b = trimVec(triangle.corners[1].sourcePos)
+    const c = trimVec(triangle.corners[2].sourcePos)
+    normal.copy(b.clone().sub(a).cross(c.clone().sub(a)))
+  }
+  if (normal.lengthSq() < 1e-12) normal.copy(expectedNormal || new THREE.Vector3(0, 0, 1))
+  normal.normalize()
+  if (expectedNormal?.lengthSq?.() > 1e-12 && normal.dot(expectedNormal) < 0) normal.negate()
+  return { position, normal }
+}
+
+function repairCollectHealthySupport(context, hole, expectedNormal) {
+  if (!context || !hole?.triangleIndices?.length) return []
+  const maxDepth = Math.max(6, Math.min(11, Math.round(Math.sqrt(hole.boundary?.length || 64) / 2.2)))
+  const queue = hole.triangleIndices.map((triangleIndex) => ({ triangleIndex, depth: 0 }))
+  const visited = new Set(hole.triangleIndices)
+  const samples = []
+
+  for (let cursor = 0; cursor < queue.length && samples.length < 5000; cursor++) {
+    const { triangleIndex, depth } = queue[cursor]
+    const triangle = context.triangles[triangleIndex]
+    if (!triangle || triangle.childUuid !== hole.childUuid) continue
+    const sample = repairTriangleSurfaceSample(context, triangleIndex, expectedNormal)
+    if (sample) samples.push({ ...sample, depth })
+    if (depth >= maxDepth) continue
+    for (const neighbor of context.triangleNeighbors[triangleIndex] || []) {
+      if (visited.has(neighbor)) continue
+      const neighborTriangle = context.triangles[neighbor]
+      if (!neighborTriangle || neighborTriangle.childUuid !== hole.childUuid) continue
+      visited.add(neighbor)
+      queue.push({ triangleIndex: neighbor, depth: depth + 1 })
+    }
+  }
+
+  // Pro MLS nepotřebujeme tisíce skoro totožných centroidů. Rovnoměrný downsample
+  // udržuje výpočet lehký i na velmi hustých intraorálních scanech.
+  if (samples.length <= 1600) return samples
+  const reduced = []
+  const stride = samples.length / 1600
+  for (let index = 0; index < 1600; index++) reduced.push(samples[Math.min(samples.length - 1, Math.floor(index * stride))])
+  return reduced
+}
+
+function repairEvaluateHealthyMLS(point, support, sigma, expectedNormal = null) {
+  if (!point?.isVector3 || !support?.length) return null
+  const sigmaSafe = Math.max(1e-4, sigma)
+  const invTwoSigma2 = 1 / (2 * sigmaSafe * sigmaSafe)
+  let weightSum = 0
+  let signedSum = 0
+  const normal = new THREE.Vector3()
+
+  for (const sample of support) {
+    const delta = point.clone().sub(sample.position)
+    const distanceSq = delta.lengthSq()
+    if (distanceSq > sigmaSafe * sigmaSafe * 12.25) continue
+    const depthWeight = 1 / (1 + (sample.depth || 0) * 0.055)
+    const weight = Math.exp(-distanceSq * invTwoSigma2) * depthWeight
+    if (!(weight > 1e-8)) continue
+    signedSum += delta.dot(sample.normal) * weight
+    normal.addScaledVector(sample.normal, weight)
+    weightSum += weight
+  }
+
+  if (!(weightSum > 1e-7)) return null
+  const signed = signedSum / weightSum
+  if (normal.lengthSq() < 1e-12) normal.copy(expectedNormal || new THREE.Vector3(0, 0, 1))
+  normal.normalize()
+  if (expectedNormal?.lengthSq?.() > 1e-12 && normal.dot(expectedNormal) < 0) normal.negate()
+  return { signed, normal, weightSum }
+}
+
+function repairProjectToHealthyMLS(seedPosition, support, sigma, maxShift, expectedNormal = null) {
+  const origin = seedPosition.clone()
+  const position = seedPosition.clone()
+  let normal = expectedNormal?.clone?.() || new THREE.Vector3(0, 0, 1)
+  if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1)
+  normal.normalize()
+  const shiftLimit = Math.max(0, maxShift || 0)
+  const stepLimit = Math.max(sigma * 0.30, 1e-4)
+
+  for (let iteration = 0; iteration < 8; iteration++) {
+    const field = repairEvaluateHealthyMLS(position, support, sigma, normal)
+    if (!field) break
+    normal.copy(field.normal)
+    if (Math.abs(field.signed) < 2e-4) break
+    const step = Math.max(-stepLimit, Math.min(stepLimit, field.signed))
+    position.addScaledVector(normal, -step)
+    if (shiftLimit > 0) {
+      const offset = position.clone().sub(origin)
+      if (offset.length() > shiftLimit) position.copy(origin).add(offset.setLength(shiftLimit))
+    }
+  }
+  return { position, normal }
+}
+
+function repairLerpAttribute(a, b, t) {
+  if (!a && !b) return null
+  if (!a) return b ? b.slice() : null
+  if (!b) return a ? a.slice() : null
+  const length = Math.min(a.length, b.length)
+  return Array.from({ length }, (_, index) => a[index] * (1 - t) + b[index] * t)
+}
+
+function repairSampleBoundaryAtAngle(boundary, theta, angle) {
+  if (!boundary?.length || !theta?.length) return null
+  const tau = Math.PI * 2
+  let target = angle % tau
+  if (target < 0) target += tau
+  let lo = 0
+  let hi = theta.length - 1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (theta[mid] <= target) lo = mid + 1
+    else hi = mid - 1
+  }
+  const aIndex = Math.max(0, hi)
+  const bIndex = (aIndex + 1) % boundary.length
+  const aTheta = theta[aIndex]
+  const bTheta = bIndex === 0 ? tau : theta[bIndex]
+  const localTarget = target < aTheta ? target + tau : target
+  const span = Math.max(1e-7, bTheta - aTheta)
+  const t = Math.max(0, Math.min(1, (localTarget - aTheta) / span))
+  const a = boundary[aIndex]
+  const b = boundary[bIndex]
+  const normal = a.normal?.clone?.().lerp(b.normal || a.normal, t)
+  if (normal?.lengthSq?.() > 1e-12) normal.normalize()
+  return {
+    normal: normal || new THREE.Vector3(0, 0, 1),
+    color: repairLerpAttribute(a.color, b.color, t),
+    uv: repairLerpAttribute(a.uv, b.uv, t),
+  }
+}
+
+function repairConnectClosedRings(triangles, outer, inner) {
+  const outerCount = outer?.length || 0
+  const innerCount = inner?.length || 0
+  if (outerCount < 3 || innerCount < 3) return
+  let outerIndex = 0
+  let innerIndex = 0
+  while (outerIndex < outerCount || innerIndex < innerCount) {
+    const nextOuter = outerIndex < outerCount ? (outerIndex + 1) / outerCount : Infinity
+    const nextInner = innerIndex < innerCount ? (innerIndex + 1) / innerCount : Infinity
+    const o0 = outer[outerIndex % outerCount]
+    const i0 = inner[innerIndex % innerCount]
+    if (Math.abs(nextOuter - nextInner) < 1e-10) {
+      const o1 = outer[(outerIndex + 1) % outerCount]
+      const i1 = inner[(innerIndex + 1) % innerCount]
+      triangles.push([o0, o1, i1], [o0, i1, i0])
+      outerIndex++
+      innerIndex++
+    } else if (nextOuter < nextInner) {
+      const o1 = outer[(outerIndex + 1) % outerCount]
+      triangles.push([o0, o1, i0])
+      outerIndex++
+    } else {
+      const i1 = inner[(innerIndex + 1) % innerCount]
+      triangles.push([o0, i1, i0])
+      innerIndex++
+    }
+  }
+}
+
 function buildRepairPatchData(context, hole) {
   if (!context || !hole?.boundary?.length) return null
   const boundary = repairPrepareBoundaryGuides(hole.boundary)
@@ -1712,12 +1892,12 @@ function buildRepairPatchData(context, hole) {
 
   const avgColor = repairAverage(boundary.map((sample) => sample.color), 3, null)
   const avgUv = repairAverage(boundary.map((sample) => sample.uv), 2, null)
-  const avgNormal = new THREE.Vector3()
-  boundary.forEach((sample) => { if (sample.normal?.isVector3) avgNormal.add(sample.normal) })
-  if (avgNormal.lengthSq() < 1e-12) avgNormal.set(0, 0, 1)
-  avgNormal.normalize()
+  const avgNormal = repairAverageBoundaryNormal(boundary)
+  const healthySupport = repairCollectHealthySupport(context, hole, avgNormal)
+  const mlsSigma = Math.max(context.diagonal * 0.0065, disk.robustRadius * 0.84)
+  const parameterization = repairBoundaryParameterization(boundary)
+  if (!parameterization) return null
 
-  const ringCount = Math.max(4, Math.min(7, Math.round(Math.sqrt(boundary.length) / 3.4)))
   const makeCorner = (position, normal, color, uv) => ({
     sourcePos: trimArr(position),
     sourceNormal: normal ? trimArr(normal) : null,
@@ -1725,62 +1905,72 @@ function buildRepairPatchData(context, hole) {
     uv,
   })
 
-  // Vnější prstenec musí zůstat přesně na původní boundary.
-  // Vnitřek je nezávislý parametrický disk, takže se ani silně konkávní / neplanární
-  // otvor nemusí "smršťovat" k jedinému 3D středu.
-  const rings = [
-    boundary.map((sample) => makeCorner(sample.position, sample.normal, sample.color, sample.uv)),
-  ]
+  // Outer ring = původní boundary, beze změny jediného vertexu.
+  const rings = [boundary.map((sample) => makeCorner(sample.position, sample.normal, sample.color, sample.uv))]
+  const ringCount = Math.max(6, Math.min(9, Math.round(Math.sqrt(boundary.length) / 3.0)))
 
+  // Biharmonický disk stále poskytuje dobrou topologickou parametrizaci, ale jeho body
+  // teď projektujeme na implicitní MLS povrch odhadnutý ze zdravého prstence meshe.
+  // Díky tomu střed otvoru neleží v aritmetickém středu boundary (často uvnitř zubu),
+  // ale na extrapolovaném pokračování okolního povrchu.
   for (let ring = 1; ring <= ringCount; ring++) {
-    const t = ring / (ringCount + 1)
-    const r = 1 - t
-    rings.push(boundary.map((sample, index) => {
-      const evaluated = disk.evaluate(r, disk.theta[index], sample.normal)
-      const color = sample.color && avgColor
-        ? sample.color.map((value, channel) => value * r + avgColor[channel] * (1 - r))
-        : (sample.color || avgColor)
-      const uv = sample.uv && avgUv
-        ? sample.uv.map((value, channel) => value * r + avgUv[channel] * (1 - r))
-        : (sample.uv || avgUv)
-      return makeCorner(evaluated.position, evaluated.normal, color, uv)
-    }))
+    const r = 1 - ring / (ringCount + 1)
+    const count = Math.max(20, Math.min(boundary.length, Math.round(boundary.length * Math.max(r, 0.12))))
+    const currentRing = []
+    for (let index = 0; index < count; index++) {
+      const angle = (index / count) * Math.PI * 2
+      const sample = repairSampleBoundaryAtAngle(boundary, parameterization.theta, angle)
+      const evaluated = disk.evaluate(r, angle, sample?.normal || avgNormal)
+      const maxShift = disk.robustRadius * 0.78 * Math.pow(Math.max(0, 1 - r), 0.62)
+      const projected = healthySupport.length
+        ? repairProjectToHealthyMLS(evaluated.position, healthySupport, mlsSigma, maxShift, sample?.normal || evaluated.normal || avgNormal)
+        : { position: evaluated.position, normal: evaluated.normal }
+      const boundaryColor = sample?.color || avgColor
+      const boundaryUv = sample?.uv || avgUv
+      const color = boundaryColor && avgColor
+        ? boundaryColor.map((value, channel) => value * r + avgColor[channel] * (1 - r))
+        : (boundaryColor || avgColor)
+      const uv = boundaryUv && avgUv
+        ? boundaryUv.map((value, channel) => value * r + avgUv[channel] * (1 - r))
+        : (boundaryUv || avgUv)
+      currentRing.push(makeCorner(projected.position, projected.normal || evaluated.normal || avgNormal, color, uv))
+    }
+    rings.push(currentRing)
   }
 
-  const centerEvaluation = disk.evaluate(0, 0, avgNormal)
-  const centerCorner = makeCorner(centerEvaluation.position, avgNormal, avgColor, avgUv)
+  const rawCenter = disk.evaluate(0, 0, avgNormal)
+  const projectedCenter = healthySupport.length
+    ? repairProjectToHealthyMLS(rawCenter.position, healthySupport, mlsSigma, disk.robustRadius * 0.90, avgNormal)
+    : { position: rawCenter.position, normal: rawCenter.normal || avgNormal }
+  const centerCorner = makeCorner(projectedCenter.position, projectedCenter.normal || avgNormal, avgColor, avgUv)
   const triangles = []
 
-  for (let ring = 0; ring < rings.length - 1; ring++) {
-    const outer = rings[ring]
-    const inner = rings[ring + 1]
-    for (let index = 0; index < outer.length; index++) {
-      const next = (index + 1) % outer.length
-      triangles.push([outer[index], outer[next], inner[next]])
-      triangles.push([outer[index], inner[next], inner[index]])
-    }
-  }
+  for (let ring = 0; ring < rings.length - 1; ring++) repairConnectClosedRings(triangles, rings[ring], rings[ring + 1])
 
+  // Poslední fan už nemá stovky extrémně úzkých trojúhelníků. Počet vertexů se
+  // s obvodem prstenců postupně zmenšuje, takže centrální triangulace je výrazně
+  // pravidelnější a nevytváří viditelné paprsky.
   const last = rings[rings.length - 1]
   for (let index = 0; index < last.length; index++) {
     const next = (index + 1) % last.length
     triangles.push([last[index], last[next], centerCorner])
   }
 
-  // Winding se řídí původními normálami okraje, ne náhodnou orientací parametrického disku.
   let orientationScore = 0
-  const firstInner = rings[1]
-  const stride = Math.max(1, Math.floor(boundary.length / 48))
-  for (let index = 0; index < boundary.length; index += stride) {
-    const next = (index + 1) % boundary.length
-    const a = trimVec(rings[0][index].sourcePos)
-    const b = trimVec(rings[0][next].sourcePos)
-    const c = trimVec(firstInner[next].sourcePos)
+  const stride = Math.max(1, Math.floor(triangles.length / 180))
+  for (let index = 0; index < triangles.length; index += stride) {
+    const triangle = triangles[index]
+    const a = trimVec(triangle[0].sourcePos)
+    const b = trimVec(triangle[1].sourcePos)
+    const c = trimVec(triangle[2].sourcePos)
     const faceNormal = b.clone().sub(a).cross(c.clone().sub(a))
     if (faceNormal.lengthSq() < 1e-12) continue
     faceNormal.normalize()
-    const expected = boundary[index].normal?.clone?.().add(boundary[next].normal || new THREE.Vector3())
-    if (expected?.lengthSq?.() > 1e-12) orientationScore += Math.sign(faceNormal.dot(expected.normalize()))
+    const expected = new THREE.Vector3()
+    triangle.forEach((corner) => { if (corner.sourceNormal) expected.add(trimVec(corner.sourceNormal)) })
+    if (expected.lengthSq() < 1e-12) expected.copy(avgNormal)
+    expected.normalize()
+    orientationScore += Math.sign(faceNormal.dot(expected))
   }
   if (orientationScore < 0) {
     for (let index = 0; index < triangles.length; index++) {
@@ -1789,6 +1979,7 @@ function buildRepairPatchData(context, hole) {
     }
   }
 
+  const centerCorrection = projectedCenter.position.distanceTo(rawCenter.position)
   return {
     holeId: hole.id,
     childUuid: hole.childUuid,
@@ -1796,10 +1987,13 @@ function buildRepairPatchData(context, hole) {
     triangles,
     boundaryPoints: points.map(trimArr),
     reconstruction: {
-      method: "biharmonic-disk",
+      method: "biharmonic-healthy-mls",
       modes: disk.modeCount,
       guideStrength: 0.62,
       robustRadius: disk.robustRadius,
+      supportSamples: healthySupport.length,
+      mlsSigma,
+      centerCorrection,
     },
   }
 }
