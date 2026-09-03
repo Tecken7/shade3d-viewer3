@@ -3254,7 +3254,18 @@ function AlignmentMarker({ point, index, radius = 0.8, muted = false }) {
     <group position={point}>
       <mesh renderOrder={1000}>
         <sphereGeometry args={[radius, 20, 14]} />
-        <meshBasicMaterial color={color} transparent opacity={muted ? 0.62 : 1} depthTest={false} depthWrite={false} />
+        <meshPhysicalMaterial
+          color={color}
+          roughness={0.20}
+          metalness={0.22}
+          clearcoat={0.58}
+          clearcoatRoughness={0.18}
+          ior={1.46}
+          transparent
+          opacity={muted ? 0.62 : 0.94}
+          depthTest={false}
+          depthWrite={false}
+        />
       </mesh>
       <Html center style={{ pointerEvents: "none" }} zIndexRange={[1000, 0]}>
         <div style={{
@@ -3272,7 +3283,52 @@ function AlignmentMarker({ point, index, radius = 0.8, muted = false }) {
 function AlignmentPreviewModel({ file, sourceObject, color, points, active, muted = false, onPickPoint, onLoaded }) {
   const [object3D, setObject3D] = useState(null)
   const rootRef = useRef(null)
+  const pickGestureRef = useRef(null)
+  const suppressPickUntilRef = useRef(0)
   const ext = useMemo(() => inferExt(file?.rawName || file?.name || file?.url), [file])
+
+  // Stejná ochrana jako v Ořezu: R3F může po dokončení orbit/pan gesta
+  // ještě emitnout click na mesh pod kurzorem. Alignment bod ale smí vzniknout
+  // jen při skutečném krátkém levém kliknutí bez dragování kamery.
+  useEffect(() => {
+    if (!active || typeof window === "undefined") return
+    const onPointerDown = (event) => {
+      pickGestureRef.current = {
+        pointerId: event.pointerId,
+        button: event.button,
+        x: event.clientX,
+        y: event.clientY,
+        moved: false,
+      }
+    }
+    const onPointerMove = (event) => {
+      const gesture = pickGestureRef.current
+      if (!gesture || gesture.pointerId !== event.pointerId || gesture.moved) return
+      const dx = event.clientX - gesture.x
+      const dy = event.clientY - gesture.y
+      if (dx * dx + dy * dy > 16) gesture.moved = true
+    }
+    const finishPointer = (event) => {
+      const gesture = pickGestureRef.current
+      if (!gesture || (event?.pointerId != null && gesture.pointerId !== event.pointerId)) return
+      if (gesture.button !== 0 || gesture.moved) {
+        const now = typeof performance !== "undefined" ? performance.now() : Date.now()
+        suppressPickUntilRef.current = now + 180
+      }
+      pickGestureRef.current = null
+    }
+    window.addEventListener("pointerdown", onPointerDown, true)
+    window.addEventListener("pointermove", onPointerMove, true)
+    window.addEventListener("pointerup", finishPointer, true)
+    window.addEventListener("pointercancel", finishPointer, true)
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true)
+      window.removeEventListener("pointermove", onPointerMove, true)
+      window.removeEventListener("pointerup", finishPointer, true)
+      window.removeEventListener("pointercancel", finishPointer, true)
+      pickGestureRef.current = null
+    }
+  }, [active])
 
   useEffect(() => {
     if (!file?.url) { setObject3D(null); return }
@@ -3351,6 +3407,10 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, active, mute
         object={object3D}
         onClick={active ? (event) => {
           event.stopPropagation()
+          const now = typeof performance !== "undefined" ? performance.now() : Date.now()
+          const nativeButton = event.nativeEvent?.button
+          if ((nativeButton != null && nativeButton !== 0) || now < suppressPickUntilRef.current) return
+          if (event.delta != null && event.delta > 5) return
           const local = localPointFromEvent(event)
           if (local) onPickPoint?.([local.x, local.y, local.z])
         } : undefined}
