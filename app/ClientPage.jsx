@@ -3241,6 +3241,486 @@ function repairSafeSegmentedGrowthDeformV118({
   return { positions, topology, acceptedTotal, barrierCorrections, backtrackedMoves }
 }
 
+
+/* ---------- Mesh Repair v11.9: directional surface bridges ---------- */
+
+function repairCircularDistanceV119(a, b, count) {
+  const direct = Math.abs(a - b)
+  return Math.min(direct, count - direct)
+}
+
+function repairMissingDirectionV119(boundary, index) {
+  const sample = boundary[index]
+  const normal = sample?.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
+  if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1)
+  normal.normalize()
+
+  let direction = sample?.guideDirection?.clone?.().negate() || new THREE.Vector3()
+  direction.addScaledVector(normal, -direction.dot(normal))
+  if (direction.lengthSq() < 1e-12) {
+    const previous = boundary[(index - 1 + boundary.length) % boundary.length]?.position
+    const next = boundary[(index + 1) % boundary.length]?.position
+    const tangent = next?.clone?.().sub(previous || sample.position) || new THREE.Vector3(1, 0, 0)
+    if (tangent.lengthSq() < 1e-12) tangent.set(1, 0, 0)
+    tangent.normalize()
+    direction = normal.clone().cross(tangent)
+  }
+  if (direction.lengthSq() < 1e-12) direction.set(1, 0, 0)
+  return direction.normalize()
+}
+
+function repairBoundaryTangentV119(boundary, index) {
+  const count = boundary.length
+  const previous = boundary[(index - 1 + count) % count]?.position
+  const next = boundary[(index + 1) % count]?.position
+  const sample = boundary[index]
+  let tangent = next?.clone?.().sub(previous || sample.position) || new THREE.Vector3(1, 0, 0)
+  const normal = sample?.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
+  if (normal.lengthSq() > 1e-12) {
+    normal.normalize()
+    tangent.addScaledVector(normal, -tangent.dot(normal))
+  }
+  if (tangent.lengthSq() < 1e-12) tangent.set(1, 0, 0)
+  return tangent.normalize()
+}
+
+function repairPairScoreV119(boundary, index, candidateIndex, robustRadius, medianEdge) {
+  const count = boundary.length
+  const minArcSeparation = Math.max(7, Math.round(count * 0.075))
+  if (repairCircularDistanceV119(index, candidateIndex, count) < minArcSeparation) return null
+
+  const start = boundary[index]
+  const end = boundary[candidateIndex]
+  const delta = end.position.clone().sub(start.position)
+  const distance = delta.length()
+  if (!(distance > medianEdge * 4.5)) return null
+  if (distance > robustRadius * 3.2) return null
+  const direction = delta.clone().multiplyScalar(1 / distance)
+
+  const missingStart = repairMissingDirectionV119(boundary, index)
+  const missingEnd = repairMissingDirectionV119(boundary, candidateIndex)
+  const alignStart = direction.dot(missingStart)
+  const alignEnd = direction.clone().negate().dot(missingEnd)
+  if (alignStart < 0.12 || alignEnd < 0.10) return null
+
+  const normalStart = start.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
+  const normalEnd = end.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
+  if (normalStart.lengthSq() > 1e-12) normalStart.normalize()
+  if (normalEnd.lengthSq() > 1e-12) normalEnd.normalize()
+  const normalDot = normalStart.dot(normalEnd)
+
+  const tangent = repairBoundaryTangentV119(boundary, index)
+  const lateral = Math.abs(delta.dot(tangent)) / Math.max(distance, 1e-6)
+  const normalOffset = Math.abs(delta.dot(normalStart)) / Math.max(distance, 1e-6)
+
+  // Preferujeme první rozumný protější zásah ve směru "chybějícího povrchu",
+  // ne nejvzdálenější bod celé boundary.
+  const forward = delta.dot(missingStart)
+  const forwardRatio = forward / Math.max(distance, 1e-6)
+
+  const score =
+    (1 - alignStart) * 2.8 +
+    (1 - alignEnd) * 2.6 +
+    lateral * 0.62 +
+    normalOffset * 0.30 +
+    Math.max(0, 0.05 - normalDot) * 0.30 +
+    Math.max(0, 0.40 - forwardRatio) * 1.4 +
+    (distance / Math.max(robustRadius * 2.2, medianEdge * 12)) * 0.14
+
+  return { score, distance, alignStart, alignEnd }
+}
+
+function repairBuildDirectionalPairsV119(boundary, robustRadius, medianEdge) {
+  const count = boundary.length
+  const pairs = new Array(count).fill(-1)
+  const pairScores = new Array(count).fill(Infinity)
+
+  for (let index = 0; index < count; index++) {
+    for (let candidate = 0; candidate < count; candidate++) {
+      if (candidate === index) continue
+      const evaluated = repairPairScoreV119(
+        boundary,
+        index,
+        candidate,
+        robustRadius,
+        medianEdge
+      )
+      if (!evaluated || evaluated.score >= pairScores[index]) continue
+      pairs[index] = candidate
+      pairScores[index] = evaluated.score
+    }
+  }
+
+  // Vyhladíme partner field po obvodu. Bez toho může geometricky velmi členitá
+  // boundary přeskakovat mezi dvěma podobnými protějšími kandidáty.
+  for (let pass = 0; pass < 5; pass++) {
+    const nextPairs = pairs.slice()
+    for (let index = 0; index < count; index++) {
+      if (pairs[index] < 0) continue
+      const neighborTargets = []
+      for (let offset = -3; offset <= 3; offset++) {
+        if (!offset) continue
+        const neighbor = (index + offset + count) % count
+        if (pairs[neighbor] < 0) continue
+        let target = pairs[neighbor]
+        const reference = pairs[index]
+        while (target - reference > count / 2) target -= count
+        while (target - reference < -count / 2) target += count
+        neighborTargets.push(target)
+      }
+      if (!neighborTargets.length) continue
+
+      neighborTargets.sort((a, b) => a - b)
+      const medianTarget = neighborTargets[Math.floor(neighborTargets.length / 2)]
+      let bestCandidate = pairs[index]
+      let bestCost = Infinity
+      const searchRadius = Math.max(6, Math.round(count * 0.035))
+
+      for (let delta = -searchRadius; delta <= searchRadius; delta++) {
+        const raw = Math.round(medianTarget + delta)
+        const candidate = ((raw % count) + count) % count
+        const evaluated = repairPairScoreV119(
+          boundary,
+          index,
+          candidate,
+          robustRadius,
+          medianEdge
+        )
+        if (!evaluated) continue
+
+        let candidateUnwrapped = candidate
+        while (candidateUnwrapped - medianTarget > count / 2) candidateUnwrapped -= count
+        while (candidateUnwrapped - medianTarget < -count / 2) candidateUnwrapped += count
+        const continuityPenalty =
+          Math.abs(candidateUnwrapped - medianTarget) /
+          Math.max(1, searchRadius)
+
+        const totalCost = evaluated.score + continuityPenalty * 0.32
+        if (totalCost < bestCost) {
+          bestCost = totalCost
+          bestCandidate = candidate
+        }
+      }
+      nextPairs[index] = bestCandidate
+    }
+    for (let index = 0; index < count; index++) pairs[index] = nextPairs[index]
+  }
+
+  // Pokud bod nemá validního partnera, využijeme nejbližšího souseda, který jej má.
+  for (let index = 0; index < count; index++) {
+    if (pairs[index] >= 0) continue
+    for (let radius = 1; radius < Math.min(count / 2, 40); radius++) {
+      const a = (index - radius + count) % count
+      const b = (index + radius) % count
+      if (pairs[a] >= 0) {
+        pairs[index] = pairs[a]
+        break
+      }
+      if (pairs[b] >= 0) {
+        pairs[index] = pairs[b]
+        break
+      }
+    }
+  }
+
+  return { pairs, pairScores }
+}
+
+function repairShortContinuationDirectionV119({
+  boundary,
+  index,
+  localFit,
+  medianEdge,
+  robustRadius,
+}) {
+  const origin = boundary[index].position
+  const missing = repairMissingDirectionV119(boundary, index)
+  if (!localFit) return missing
+
+  const step = Math.max(medianEdge * 2.5, robustRadius * 0.035)
+  const seed = origin.clone().addScaledVector(missing, step)
+  const predicted = repairPredictContinuationPoint(
+    localFit,
+    seed,
+    step,
+    robustRadius
+  )
+  if (!predicted?.isVector3) return missing
+
+  const direction = predicted.clone().sub(origin)
+  if (direction.lengthSq() < 1e-12) return missing
+  direction.normalize()
+  // Lokální curvature fit smí směr jen zpřesnit, nikdy jej otočit zpět do zdravé strany.
+  if (direction.dot(missing) < 0.30) return missing
+  return direction
+}
+
+function repairHermitePointV119(p0, p1, m0, m1, t) {
+  const tt = t * t
+  const ttt = tt * t
+  const h00 = 2 * ttt - 3 * tt + 1
+  const h10 = ttt - 2 * tt + t
+  const h01 = -2 * ttt + 3 * tt
+  const h11 = ttt - tt
+  return p0.clone()
+    .multiplyScalar(h00)
+    .addScaledVector(m0, h10)
+    .addScaledVector(p1, h01)
+    .addScaledVector(m1, h11)
+}
+
+function repairBridgePredictionV119({
+  boundary,
+  localFits,
+  pairMap,
+  anchorIndex,
+  seed,
+  growthDistance,
+  medianEdge,
+  robustRadius,
+}) {
+  const pairIndex = pairMap?.[anchorIndex]
+  if (!Number.isInteger(pairIndex) || pairIndex < 0 || pairIndex === anchorIndex) return null
+
+  const start = boundary[anchorIndex]
+  const end = boundary[pairIndex]
+  const chord = end.position.clone().sub(start.position)
+  const chordLength = chord.length()
+  if (!(chordLength > medianEdge * 4)) return null
+
+  const chordDirection = chord.clone().multiplyScalar(1 / chordLength)
+
+  const startDirection = repairShortContinuationDirectionV119({
+    boundary,
+    index: anchorIndex,
+    localFit: localFits?.[anchorIndex],
+    medianEdge,
+    robustRadius,
+  })
+  const endLeavingDirection = repairShortContinuationDirectionV119({
+    boundary,
+    index: pairIndex,
+    localFit: localFits?.[pairIndex],
+    medianEdge,
+    robustRadius,
+  })
+
+  // Hermite derivative na konci musí mířit VE SMĚRU průchodu k end pointu,
+  // tedy opačně než "leaving into hole" direction z koncové boundary.
+  const tangentScale = Math.max(
+    medianEdge * 4,
+    Math.min(chordLength * 0.46, robustRadius * 0.95)
+  )
+  const m0 = startDirection.clone().multiplyScalar(tangentScale)
+  const m1 = endLeavingDirection.clone().multiplyScalar(-tangentScale)
+
+  const seedOffset = seed.clone().sub(start.position)
+  const projectedT = Math.max(
+    0,
+    Math.min(1, seedOffset.dot(chordDirection) / Math.max(chordLength, 1e-6))
+  )
+  const endDistance = seed.distanceTo(end.position)
+  const distanceT = growthDistance /
+    Math.max(growthDistance + endDistance, 1e-6)
+
+  // Initial cap nám dává slušnou topologickou informaci, ale je geometricky
+  // inward. Proto z něj bereme jen parametr t po trajektorii, ne 3D polohu.
+  const t = Math.max(
+    0.015,
+    Math.min(0.985, projectedT * 0.58 + distanceT * 0.42)
+  )
+
+  let position = repairHermitePointV119(
+    start.position,
+    end.position,
+    m0,
+    m1,
+    t
+  )
+
+  // Velmi jemná stabilizace směrem k chordu zabrání přestřelení u extrémně
+  // ostrých lokálních curvature fits, ale tvar stále zůstává řízen tangenty.
+  const chordPoint = start.position.clone().lerp(end.position, t)
+  position.lerp(chordPoint, 0.08)
+
+  const normal = start.normal?.clone?.().lerp(
+    end.normal || start.normal,
+    t
+  ) || new THREE.Vector3(0, 0, 1)
+  if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1)
+  normal.normalize()
+
+  return {
+    position,
+    normal,
+    color: repairLerpAttribute(start.color, end.color, t),
+    uv: repairLerpAttribute(start.uv, end.uv, t),
+    anchorIndex,
+    pairIndex,
+    t,
+  }
+}
+
+function repairSmoothBridgePredictionsV119({
+  boundary,
+  localFits,
+  pairMap,
+  anchorIndex,
+  seed,
+  growthDistance,
+  medianEdge,
+  robustRadius,
+}) {
+  const count = boundary.length
+  const mainPair = pairMap?.[anchorIndex]
+  if (!Number.isInteger(mainPair) || mainPair < 0) return null
+
+  const predictions = []
+  for (let offset = -2; offset <= 2; offset++) {
+    const index = (anchorIndex + offset + count) % count
+    const pair = pairMap?.[index]
+    if (!Number.isInteger(pair) || pair < 0) continue
+    if (repairCircularDistanceV119(pair, mainPair, count) > Math.max(10, count * 0.075)) continue
+
+    const prediction = repairBridgePredictionV119({
+      boundary,
+      localFits,
+      pairMap,
+      anchorIndex: index,
+      seed,
+      growthDistance,
+      medianEdge,
+      robustRadius,
+    })
+    if (!prediction) continue
+    const weight = 1 / (1 + Math.abs(offset) * 0.8)
+    predictions.push({ prediction, weight })
+  }
+  if (!predictions.length) return null
+
+  const position = new THREE.Vector3()
+  const normal = new THREE.Vector3()
+  let weightSum = 0
+  let color = null
+  let uv = null
+  let tSum = 0
+
+  predictions.forEach(({ prediction, weight }) => {
+    position.addScaledVector(prediction.position, weight)
+    normal.addScaledVector(prediction.normal, weight)
+    if (prediction.color) {
+      if (!color) color = new Array(prediction.color.length).fill(0)
+      prediction.color.forEach((value, channel) => { color[channel] += value * weight })
+    }
+    if (prediction.uv) {
+      if (!uv) uv = new Array(prediction.uv.length).fill(0)
+      prediction.uv.forEach((value, channel) => { uv[channel] += value * weight })
+    }
+    tSum += prediction.t * weight
+    weightSum += weight
+  })
+
+  if (!(weightSum > 0)) return null
+  position.multiplyScalar(1 / weightSum)
+  if (normal.lengthSq() < 1e-12) normal.copy(boundary[anchorIndex].normal || new THREE.Vector3(0, 0, 1))
+  normal.normalize()
+  if (color) color = color.map((value) => value / weightSum)
+  if (uv) uv = uv.map((value) => value / weightSum)
+
+  return {
+    position,
+    normal,
+    color,
+    uv,
+    anchorIndex,
+    pairIndex: mainPair,
+    t: tSum / weightSum,
+  }
+}
+
+function repairSafeBridgeDeformV119({
+  vertices,
+  triangles,
+  boundaryCount,
+  predictions,
+  growthMap,
+  passes = 28,
+  alpha = 0.18,
+}) {
+  const topology = growthMap || repairComputeGrowthMapV118(vertices, triangles, boundaryCount)
+  const positions = vertices.map((vertex) => vertex.position.clone())
+
+  const initialFaceNormals = triangles.map(([a, b, c]) => {
+    const normal = positions[b].clone().sub(positions[a]).cross(
+      positions[c].clone().sub(positions[a])
+    )
+    if (normal.lengthSq() < 1e-12) return new THREE.Vector3()
+    return normal.normalize()
+  })
+
+  const order = []
+  for (let index = boundaryCount; index < vertices.length; index++) order.push(index)
+  order.sort((a, b) => (topology.distances[a] || 0) - (topology.distances[b] || 0))
+
+  const currentFaceNormal = (faceIndex) => {
+    const [a, b, c] = triangles[faceIndex]
+    const normal = positions[b].clone().sub(positions[a]).cross(
+      positions[c].clone().sub(positions[a])
+    )
+    if (normal.lengthSq() < 1e-12) return null
+    return normal.normalize()
+  }
+
+  const validAt = (vertexIndex) => {
+    const localNormals = new Map()
+    for (const faceIndex of topology.incidentFaces[vertexIndex] || []) {
+      const normal = currentFaceNormal(faceIndex)
+      if (!normal) return false
+      const initial = initialFaceNormals[faceIndex]
+      if (initial.lengthSq() > 1e-12 && normal.dot(initial) < 0.08) return false
+      localNormals.set(faceIndex, normal)
+    }
+
+    for (const [faceIndex, normal] of localNormals) {
+      for (const neighborFace of topology.faceNeighbors[faceIndex] || []) {
+        const neighborNormal = localNormals.get(neighborFace) || currentFaceNormal(neighborFace)
+        if (!neighborNormal || normal.dot(neighborNormal) < 0.025) return false
+      }
+    }
+    return true
+  }
+
+  let acceptedTotal = 0
+  let backtrackedMoves = 0
+
+  for (let pass = 0; pass < passes; pass++) {
+    let acceptedThisPass = 0
+    for (const vertexIndex of order) {
+      const prediction = predictions[vertexIndex]
+      if (!prediction?.position?.isVector3) continue
+
+      const current = positions[vertexIndex].clone()
+      let accepted = false
+      for (const scale of [1, 0.5, 0.25, 0.125, 0.0625]) {
+        positions[vertexIndex]
+          .copy(current)
+          .lerp(prediction.position, alpha * scale)
+        if (!validAt(vertexIndex)) continue
+        accepted = true
+        acceptedThisPass++
+        acceptedTotal++
+        if (scale < 1) backtrackedMoves++
+        break
+      }
+      if (!accepted) positions[vertexIndex].copy(current)
+    }
+
+    if (!acceptedThisPass) break
+  }
+
+  return { positions, topology, acceptedTotal, backtrackedMoves }
+}
+
 function buildRepairPatchData(context, hole) {
   if (!context || !hole?.boundary?.length) return null
 
@@ -3257,33 +3737,41 @@ function buildRepairPatchData(context, hole) {
   const boundaryCenter = new THREE.Vector3()
   boundaryPositions.forEach((position) => boundaryCenter.add(position))
   boundaryCenter.multiplyScalar(1 / boundaryPositions.length)
-  const radialDistances = boundaryPositions.map((position) => position.distanceTo(boundaryCenter))
+  const radialDistances = boundaryPositions.map((position) =>
+    position.distanceTo(boundaryCenter)
+  )
   const robustRadius = Math.max(
     1e-5,
     repairMedian(radialDistances, Math.max(...radialDistances, 1e-5))
   )
 
-  // 1) Stejná stabilní 3D advancing-front triangulace jako v11.7.
+  // Topologie zůstává stejná stabilní 3D advancing-front síť jako ve v11.7/11.8.
+  // Tentokrát ji ale nepoužíváme jako geometrický "cap" – jen jako connectivity.
   const coarseTriangles = repairAdvancingFrontTriangulation(boundary)
   if (!coarseTriangles?.length) {
-    console.warn('Mesh Repair: advancing-front triangulace selhala, používám harmonic fallback.')
+    console.warn("Mesh Repair: directional bridge topology selhala, používám harmonic fallback.")
     return buildRepairPatchDataLegacyHarmonic(context, hole)
   }
 
   const targetEdge = Math.max(
-    medianEdge * 2.25,
-    Math.min(medianEdge * 3.0, robustRadius * 0.098)
+    medianEdge * 2.18,
+    Math.min(medianEdge * 2.90, robustRadius * 0.094)
   )
-  const refined = repairRefineTriangulation(boundary, coarseTriangles, targetEdge)
+  const refined = repairRefineTriangulation(
+    boundary,
+    coarseTriangles,
+    targetEdge
+  )
   if (!refined?.triangles?.length || refined.vertices.length < boundary.length) return null
 
-  // 2) Boundary rozdělíme podle lokálního směru pokračování povrchu.
+  // Zdravé okolí používáme jen pro KRÁTKÝ odhad tangenty/curvature těsně za
+  // hranou. Samotný tvar přes celý otvor už zdravý cloud neurčuje.
   const segmentation = repairBoundarySegmentsV118(boundary)
   const avgNormal = repairAverageBoundaryNormal(boundary)
   const support = repairCollectHealthySupport(context, hole, avgNormal)
   const fitRadius = Math.max(
-    medianEdge * 11,
-    Math.min(robustRadius * 0.72, context.diagonal * 0.043)
+    medianEdge * 9.5,
+    Math.min(robustRadius * 0.58, context.diagonal * 0.036)
   )
   const localFits = boundary.map((_, index) =>
     repairFitLocalContinuationV118(
@@ -3295,43 +3783,58 @@ function buildRepairPatchData(context, hole) {
     )
   )
 
-  // 3) Nový vertex dostane boundary anchor přes TOPOLOGII repair meshe, ne
-  // podle 3D nearest-neighbor. Pro hluboké dentální otvory je to zásadní.
+  // Hlavní změna v11.9:
+  // každý boundary bod hledá protější bod ve směru, kterým by zdravý povrch
+  // přirozeně pokračoval přes díru. Výsledkem je hladké pole A -> B "rayů".
+  const pairing = repairBuildDirectionalPairsV119(
+    boundary,
+    robustRadius,
+    medianEdge
+  )
+
   const growthMap = repairComputeGrowthMapV118(
     refined.vertices,
     refined.triangles,
     refined.boundaryCount
   )
-  const predictionData = new Array(refined.vertices.length).fill(null)
 
-  for (let vertexIndex = refined.boundaryCount; vertexIndex < refined.vertices.length; vertexIndex++) {
+  const predictions = new Array(refined.vertices.length).fill(null)
+  let pairedVertices = 0
+
+  for (
+    let vertexIndex = refined.boundaryCount;
+    vertexIndex < refined.vertices.length;
+    vertexIndex++
+  ) {
     const anchorIndex = growthMap.anchors[vertexIndex]
     const growthDistance = growthMap.distances[vertexIndex]
     if (!Number.isInteger(anchorIndex) || !Number.isFinite(growthDistance)) continue
-    const prediction = repairPredictionFromSegmentV118({
+
+    const prediction = repairSmoothBridgePredictionsV119({
       boundary,
       localFits,
-      segmentIds: segmentation.segmentIds,
+      pairMap: pairing.pairs,
       anchorIndex,
       seed: refined.vertices[vertexIndex].position,
       growthDistance,
-      robustRadius,
       medianEdge,
+      robustRadius,
     })
-    if (prediction) predictionData[vertexIndex] = prediction
+    if (!prediction) continue
+    predictions[vertexIndex] = prediction
+    pairedVertices++
   }
 
-  // 4) Growth postupuje od boundary dovnitř. Každý krok má backtracking a
-  // fold/dihedral kontrolu; tím se palatinální oblast nemá propadnout dovnitř
-  // jen proto, že protilehlá část otvoru je v prostoru blízko.
-  const deformation = repairSafeSegmentedGrowthDeformV118({
+  // Geometrie se postupně přitahuje na directional surface trajectories.
+  // Každý krok má fold/dihedral kontrolu + backtracking.
+  const deformation = repairSafeBridgeDeformV119({
     vertices: refined.vertices,
     triangles: refined.triangles,
     boundaryCount: refined.boundaryCount,
-    predictionData,
+    predictions,
     growthMap,
-    passes: 26,
-    alpha: 0.16,
+    passes: 28,
+    alpha: 0.18,
   })
 
   const trianglesIndex = refined.triangles.map((triangle) => triangle.slice())
@@ -3341,13 +3844,34 @@ function buildRepairPatchData(context, hole) {
     deformation.positions
   )
 
-  const corners = refined.vertices.map((vertex, index) => ({
-    sourcePos: trimArr(deformation.positions[index]),
-    sourceNormal: trimArr(finalNormals.normals[index]),
-    color: vertex.color ? vertex.color.slice() : null,
-    uv: vertex.uv ? vertex.uv.slice() : null,
-  }))
-  const triangles = trianglesIndex.map(([a, b, c]) => [corners[a], corners[b], corners[c]])
+  const corners = refined.vertices.map((vertex, index) => {
+    const prediction = predictions[index]
+    return {
+      sourcePos: trimArr(deformation.positions[index]),
+      sourceNormal: trimArr(finalNormals.normals[index]),
+      color:
+        index < refined.boundaryCount
+          ? (vertex.color ? vertex.color.slice() : null)
+          : (prediction?.color || (vertex.color ? vertex.color.slice() : null)),
+      uv:
+        index < refined.boundaryCount
+          ? (vertex.uv ? vertex.uv.slice() : null)
+          : (prediction?.uv || (vertex.uv ? vertex.uv.slice() : null)),
+    }
+  })
+
+  const triangles = trianglesIndex.map(([a, b, c]) => [
+    corners[a],
+    corners[b],
+    corners[c],
+  ])
+
+  const validPairs = pairing.pairs.filter(
+    (pair, index) =>
+      Number.isInteger(pair) &&
+      pair >= 0 &&
+      pair !== index
+  ).length
 
   return {
     holeId: hole.id,
@@ -3356,9 +3880,10 @@ function buildRepairPatchData(context, hole) {
     triangles,
     boundaryPoints: boundaryPositions.map(trimArr),
     reconstruction: {
-      method: 'segmented-topological-growth-v1',
-      segmentCount: segmentation.segments.length,
-      coarseTriangles: coarseTriangles.length,
+      method: "directional-surface-bridges-v1",
+      boundaryVertices: boundary.length,
+      validPairs,
+      pairedVertices,
       vertexCount: refined.vertices.length,
       triangleCount: triangles.length,
       medianEdge,
@@ -3366,9 +3891,7 @@ function buildRepairPatchData(context, hole) {
       robustRadius,
       supportSamples: support.length,
       fitRadius,
-      fittedBoundarySamples: localFits.filter(Boolean).length,
-      acceptedGrowthMoves: deformation.acceptedTotal,
-      barrierCorrections: deformation.barrierCorrections,
+      acceptedBridgeMoves: deformation.acceptedTotal,
       backtrackedMoves: deformation.backtrackedMoves,
       reversedFaces: finalNormals.reversedFaces,
     },
