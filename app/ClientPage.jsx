@@ -401,6 +401,110 @@ function resolveTrimHit(context, sourceObject, event) {
   return { point: [point.x, point.y, point.z], triangleIndex }
 }
 
+
+function projectTrimPointToSurface(context, point, maxDistance = Infinity) {
+  if (!context || !point) return null
+  const sourcePoint = trimVec(point)
+  let best = null
+
+  for (const [childUuid, meta] of context.childMeta || []) {
+    const mesh = meta?.mesh
+    const geometry = mesh?.geometry
+    if (!mesh?.isMesh || !geometry?.getAttribute?.("position")) continue
+    try {
+      if (!geometry.boundsTree) geometry.computeBoundsTree?.(ALIGNMENT_BVH_OPTIONS)
+    } catch {}
+    const boundsTree = geometry.boundsTree
+    if (!boundsTree?.closestPointToPoint) continue
+
+    const localPoint = sourcePoint.clone().applyMatrix4(meta.sourceToChild)
+    const result = { point: new THREE.Vector3(), distance: Infinity, faceIndex: -1 }
+    const hit = boundsTree.closestPointToPoint(localPoint, result, 0, Infinity)
+    if (!hit || !Number.isInteger(result.faceIndex)) continue
+
+    const triangleIndex = context.triangleLookup.get(`${childUuid}:${result.faceIndex}`)
+    if (triangleIndex === undefined) continue
+    const sourceClosest = result.point.clone().applyMatrix4(meta.childToSource)
+    const distance = sourceClosest.distanceTo(sourcePoint)
+    if (Number.isFinite(maxDistance) && distance > maxDistance) continue
+    if (!best || distance < best.distance) {
+      best = {
+        point: trimArr(sourceClosest),
+        triangleIndex,
+        distance,
+      }
+    }
+  }
+
+  if (best || !Number.isFinite(maxDistance)) return best
+  // Bezpečný fallback pro velmi hlubokou konkávitu: pokud omezené hledání nic
+  // nenajde, povol absolutně nejbližší bod. Nikdy ale nenecháme spline ve vzduchu.
+  return projectTrimPointToSurface(context, point, Infinity)
+}
+
+function buildTrimSurfaceSplineSamples(context, controlNodes, closed = false, samplesPerSpan = 10) {
+  if (!context || !Array.isArray(controlNodes) || controlNodes.length < 2) return []
+  const controls = controlNodes.map((node) => trimVec(node.point))
+  const spanCount = closed ? controls.length : controls.length - 1
+  if (spanCount <= 0) return []
+
+  const curve = controls.length === 2 && !closed
+    ? new THREE.LineCurve3(controls[0], controls[1])
+    : new THREE.CatmullRomCurve3(controls, !!closed, "centripetal", 0.28)
+  const perSpan = Math.max(2, Math.min(18, Math.round(samplesPerSpan)))
+  const result = []
+  const maxProjectionDistance = Math.max(context.diagonal * 0.06, 0.8)
+
+  const append = (hit) => {
+    if (!hit?.point || !Number.isInteger(hit.triangleIndex)) return
+    const previous = result[result.length - 1]
+    if (previous && trimVec(previous.point).distanceToSquared(trimVec(hit.point)) <= 1e-14) return
+    result.push(hit)
+  }
+
+  for (let span = 0; span < spanCount; span++) {
+    for (let step = 0; step < perSpan; step++) {
+      if (step === 0) {
+        // Křivka musí přesně projít uživatelem umístěnou kuličkou.
+        append({
+          point: [...controlNodes[span].point],
+          triangleIndex: controlNodes[span].triangleIndex,
+          distance: 0,
+        })
+        continue
+      }
+      const t = (span + step / perSpan) / spanCount
+      const sample = curve.getPoint(THREE.MathUtils.clamp(t, 0, 1))
+      append(projectTrimPointToSurface(context, sample, maxProjectionDistance))
+    }
+  }
+
+  if (!closed) {
+    const last = controlNodes[controlNodes.length - 1]
+    append({ point: [...last.point], triangleIndex: last.triangleIndex, distance: 0 })
+  }
+  return result
+}
+
+function buildTrimSurfaceSplineSegments(context, controlNodes, closed = false, samplesPerSpan = 4) {
+  const samples = buildTrimSurfaceSplineSamples(context, controlNodes, closed, samplesPerSpan)
+  if (samples.length < 2) return []
+  const segments = []
+  const count = closed ? samples.length : samples.length - 1
+  for (let i = 0; i < count; i++) {
+    const a = samples[i]
+    const b = samples[(i + 1) % samples.length]
+    if (!a || !b || trimVec(a.point).distanceToSquared(trimVec(b.point)) <= 1e-14) continue
+    const path = trimTriangleSurfacePath(context, a, b)
+    if (!path?.pieces?.length) continue
+    // visualPoints jsou hladké, na povrch promítnuté spline body. Samotné pieces
+    // jsou sub-face cesta použitá pro skutečné rozdělení triangulace.
+    path.visualPoints = [a.point, b.point]
+    segments.push(path)
+  }
+  return segments
+}
+
 function trimSharedEdgeNodes(context, triA, triB) {
   const pairKey = triA < triB ? `${triA}:${triB}` : `${triB}:${triA}`
   const edgeKey = context.sharedEdgeByPair.get(pairKey)
@@ -1009,33 +1113,33 @@ function makeTrimPolylineCurve(points, closed = false) {
   if (closed && vectors.length > 2 && vectors[0].distanceToSquared(vectors[vectors.length - 1]) <= 1e-12) vectors.pop()
   if (vectors.length < 2) return null
   if (vectors.length === 2) return new THREE.LineCurve3(vectors[0], vectors[1])
-
-  // Centripetal Catmull-Rom dává hranici přirozený „ease“ přes kontrolní body:
-  // křivka stále prochází potvrzenými surface body, ale tangent se zprůměruje a
-  // ostré 90° zlomy už vizuálně nepůsobí jako zalomená polyline.
-  return new THREE.CatmullRomCurve3(vectors, closed, "centripetal", 0.35)
+  // Body už jsou hustě promítnuté z hladké surface-spline. Jemný druhý Catmull-Rom
+  // pouze odstraní mikrolomy vzniklé projekcí na sousední triangly.
+  return new THREE.CatmullRomCurve3(vectors, !!closed, "centripetal", 0.24)
 }
 
 function TrimBoundaryTube({ points, radius, closed = false }) {
   const geometry = useMemo(() => {
     const curve = makeTrimPolylineCurve(points, closed)
     if (!curve) return null
-    const tubularSegments = Math.max(18, Math.min(1400, Math.max(points.length * 4, closed ? 72 : 32)))
-    return new THREE.TubeGeometry(curve, tubularSegments, radius, 10, closed)
+    const tubularSegments = Math.max(28, Math.min(1800, Math.max(points.length * 5, closed ? 120 : 48)))
+    return new THREE.TubeGeometry(curve, tubularSegments, radius, 12, !!closed)
   }, [points, radius, closed])
   useEffect(() => () => geometry?.dispose?.(), [geometry])
   if (!geometry) return null
   return (
     <mesh geometry={geometry} renderOrder={1500} raycast={() => null}>
-      <meshBasicMaterial
-        color="#6fa8d6"
+      <meshStandardMaterial
+        color="#72acd6"
+        roughness={0.32}
+        metalness={0.06}
         transparent
-        opacity={0.88}
+        opacity={0.93}
         depthTest
         depthWrite={false}
         polygonOffset
-        polygonOffsetFactor={-2.5}
-        polygonOffsetUnits={-2.5}
+        polygonOffsetFactor={-2.2}
+        polygonOffsetUnits={-2.2}
       />
     </mesh>
   )
@@ -1066,13 +1170,17 @@ function TrimSurfaceOverlay({
     group.updateMatrixWorld(true)
   }, [modelMatrix])
 
+  const visualBoundaryPoints = useMemo(() => {
+    if (!context || !Array.isArray(controlNodes) || controlNodes.length < 2) return []
+    return buildTrimSurfaceSplineSamples(context, controlNodes, !!closed, closed ? 12 : 10).map((hit) => hit.point)
+  }, [context, controlNodes, closed])
+
   if (!context) return null
   const pointRadius = Math.max(0.10, Math.min(1.15, context.diagonal * 0.0067))
   // Fyzická 3D tloušťka, ne 1px screen-space čára. U běžného dentálního scanu
   // vychází průměr přibližně 0.20–0.30 mm, ale stále se škáluje podle modelu.
   const lineRadius = Math.max(0.035, Math.min(0.32, context.diagonal * 0.00145))
   const previewComponent = keepComponent ?? hoverComponent
-  const visualBoundaryPoints = collectTrimBoundaryPoints(segments, !!closed)
 
   return (
     <group ref={groupRef} matrixAutoUpdate={false}>
@@ -6503,23 +6611,27 @@ export default function ClientPage() {
 
   const closeTrimLoop = useCallback(() => {
     if (!trimContext || trimClosed || trimControlNodes.length < 3) return
-    const last = trimControlNodes[trimControlNodes.length - 1]
-    const first = trimControlNodes[0]
-    const closingPath = trimTriangleSurfacePath(trimContext, last, first)
-    if (!closingPath?.pieces?.length) {
-      setTrimMessage("Poslední úsek hranice se nepodařilo propojit po povrchu.")
-      return
+    try {
+      // Celou smyčku přegenerujeme jako jednu hladkou surface-spline. Tím nevzniká
+      // zvláštní fallback closing segment u žlutého bodu a výsledný cut má stejný
+      // plynulý tangent po obou stranách startu.
+      const smoothSegments = buildTrimSurfaceSplineSegments(trimContext, trimControlNodes, true, 4)
+      if (!smoothSegments.length) {
+        setTrimMessage("Uzavřenou hladkou hranici se nepodařilo promítnout na povrch.")
+        return
+      }
+      setTrimSegments(smoothSegments)
+      setTrimClosed(true)
+      setTrimKeepComponent(null)
+      setTrimHoverComponent(null)
+      setTrimStage("boundary")
+      trimSuppressClickUntilRef.current = (typeof performance !== "undefined" ? performance.now() : Date.now()) + 180
+      setTrackballResetNonce((value) => value + 1)
+      setTrimMessage("Hranice je uzavřená. Body můžete dál posouvat. Najeďte na část modelu pro náhled a kliknutím potvrďte oblast, kterou chcete zachovat.")
+    } catch (error) {
+      console.error("Trim smooth close error:", error)
+      setTrimMessage(error?.message || "Hladkou hranici Ořezu se nepodařilo uzavřít.")
     }
-    setTrimSegments((previous) => [...previous, closingPath])
-    setTrimClosed(true)
-    setTrimKeepComponent(null)
-    setTrimHoverComponent(null)
-    setTrimStage("boundary")
-    trimSuppressClickUntilRef.current = (typeof performance !== "undefined" ? performance.now() : Date.now()) + 180
-    // Dvojklik na start bod dříve mohl nechat TrackballControls v interním
-    // ROTATE stavu. Remount controls zachová kameru i target, ale vyčistí pointer state.
-    setTrackballResetNonce((value) => value + 1)
-    setTrimMessage("Hranice je uzavřená. Body můžete dál posouvat. Najeďte na část modelu pro náhled a kliknutím potvrďte oblast, kterou chcete zachovat.")
   }, [trimContext, trimClosed, trimControlNodes])
 
   const addTrimControlNode = useCallback((hit) => {
@@ -6544,30 +6656,33 @@ export default function ClientPage() {
     if (!trimContext || index == null || !hit?.point || !Number.isInteger(hit.triangleIndex) || !trimControlNodes[index]) return
     if (trimVec(trimControlNodes[index].point).distanceToSquared(trimVec(hit.point)) < 1e-12) return
     const points = trimControlNodes.slice()
-    const segments = trimSegments.slice()
     points[index] = hit
 
+    // U uzavřené surface-spline při samotném dragování měníme pouze control point.
+    // Je to rychlé a vizuální spline se přepočítává přes BVH okamžitě. Nákladnější
+    // sub-face boundary se přegeneruje jednou až při pointerup.
+    if (trimClosed) {
+      setTrimControlNodes(points)
+      setTrimKeepComponent(null)
+      setTrimHoverComponent(null)
+      setTrimStage("boundary")
+      return
+    }
+
+    const segments = trimSegments.slice()
     if (index > 0) {
       const path = trimTriangleSurfacePath(trimContext, points[index - 1], hit)
       if (path?.pieces?.length) segments[index - 1] = path
-    } else if (trimClosed && points.length > 2) {
-      const path = trimTriangleSurfacePath(trimContext, points[points.length - 1], hit)
-      if (path?.pieces?.length) segments[points.length - 1] = path
     }
     if (index < points.length - 1) {
       const path = trimTriangleSurfacePath(trimContext, hit, points[index + 1])
       if (path?.pieces?.length) segments[index] = path
-    } else if (trimClosed && points.length > 2) {
-      const path = trimTriangleSurfacePath(trimContext, hit, points[0])
-      if (path?.pieces?.length) segments[points.length - 1] = path
     }
-
     setTrimControlNodes(points)
     setTrimSegments(segments)
     setTrimKeepComponent(null)
     setTrimHoverComponent(null)
     setTrimStage("boundary")
-    if (trimClosed) setTrimMessage("Hranice byla upravena. Najeďte na požadovanou část pro nový náhled a kliknutím ji potvrďte.")
   }, [trimContext, trimControlNodes, trimSegments, trimClosed])
 
   const applyTrimComponent = useCallback((componentId) => {
@@ -6680,11 +6795,31 @@ export default function ClientPage() {
     const finish = () => {
       const pendingHit = trimPendingDragHitRef.current
       trimPendingDragHitRef.current = null
-      if (pendingHit) moveTrimControlNode(trimDraggingPoint, pendingHit)
+      let finalPoints = trimControlNodes
+      if (pendingHit && trimControlNodes[trimDraggingPoint]) {
+        finalPoints = trimControlNodes.slice()
+        finalPoints[trimDraggingPoint] = pendingHit
+        setTrimControlNodes(finalPoints)
+      }
+
+      if (trimClosed && trimContext && finalPoints.length >= 3) {
+        try {
+          const smoothSegments = buildTrimSurfaceSplineSegments(trimContext, finalPoints, true, 4)
+          if (smoothSegments.length) setTrimSegments(smoothSegments)
+          setTrimMessage("Hranice byla upravena. Najeďte na požadovanou část pro nový náhled a kliknutím ji potvrďte.")
+        } catch (error) {
+          console.warn("Trim smooth drag finalize failed:", error)
+          setTrimMessage("Bod byl přesunut, ale hranici se nepodařilo kompletně přepočítat. Zkuste bod posunout o kousek blíž.")
+        }
+      } else if (pendingHit) {
+        // U otevřené hranice zachováme původní lokální přepočet sousedních segmentů.
+        moveTrimControlNode(trimDraggingPoint, pendingHit)
+      }
+
       setTrimDraggingPoint(null)
+      setTrimKeepComponent(null)
+      setTrimHoverComponent(null)
       trimSuppressClickUntilRef.current = (typeof performance !== "undefined" ? performance.now() : Date.now()) + 160
-      // Recreate controls instead of merely enabled=true. Tím se odstraní jakýkoliv
-      // stale LEFT/ROTATE pointer state po přetažení kuličky.
       setTrackballResetNonce((value) => value + 1)
     }
     window.addEventListener("pointerup", finish, true)
@@ -6695,7 +6830,7 @@ export default function ClientPage() {
       window.removeEventListener("pointercancel", finish, true)
       window.removeEventListener("blur", finish, true)
     }
-  }, [trimDraggingPoint, moveTrimControlNode])
+  }, [trimDraggingPoint, moveTrimControlNode, trimClosed, trimContext, trimControlNodes])
 
   const removeLastTrimPoint = useCallback(() => {
     if (trimClosed || trimControlNodes.length === 0) return
