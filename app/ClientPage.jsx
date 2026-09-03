@@ -230,6 +230,488 @@ async function alignedObjectToBlob(object, ext) {
   throw new Error(`Export formátu .${ext || "?"} zatím není podporovaný.`)
 }
 
+
+/* ---------- Ořez modelu po povrchu ---------- */
+function makeTrimmedExportName(file, aligned = false) {
+  const raw = file?.rawName || file?.name || "trimmed-model.stl"
+  const ext = inferExt(raw) || inferExt(file?.url) || "stl"
+  const base = stripExt(String(raw).split("/").pop() || "model")
+  return `${base}${aligned ? "_aligned" : ""}_trimmed.${ext}`
+}
+
+const trimEdgeKey = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`
+const trimVertexKey = (v) => `${v.x.toFixed(5)}|${v.y.toFixed(5)}|${v.z.toFixed(5)}`
+
+function buildTrimMeshContext(sourceObject) {
+  if (!sourceObject) throw new Error("Model není připravený pro Ořez.")
+  sourceObject.updateMatrixWorld(true)
+  const sourceInverse = sourceObject.matrixWorld.clone().invert()
+  const nodes = []
+  const nodeMap = new Map()
+  const adjacency = []
+  const triangles = []
+  const edgeTriangles = new Map()
+  const triangleLookup = new Map()
+  const childMeta = new Map()
+  const bounds = new THREE.Box3()
+
+  const ensureNode = (point) => {
+    const key = trimVertexKey(point)
+    const existing = nodeMap.get(key)
+    if (existing !== undefined) return existing
+    const id = nodes.length
+    nodes.push(point.clone())
+    nodeMap.set(key, id)
+    adjacency.push(new Map())
+    bounds.expandByPoint(point)
+    return id
+  }
+
+  const addEdge = (a, b, triIndex) => {
+    if (a === b) return
+    const weight = nodes[a].distanceTo(nodes[b])
+    const prevAB = adjacency[a].get(b)
+    if (prevAB === undefined || weight < prevAB) adjacency[a].set(b, weight)
+    const prevBA = adjacency[b].get(a)
+    if (prevBA === undefined || weight < prevBA) adjacency[b].set(a, weight)
+    const key = trimEdgeKey(a, b)
+    const list = edgeTriangles.get(key)
+    if (list) list.push(triIndex)
+    else edgeTriangles.set(key, [triIndex])
+  }
+
+  sourceObject.traverse((child) => {
+    if (!child?.isMesh || !child.geometry?.getAttribute?.("position")) return
+    child.updateMatrixWorld(true)
+    const geometry = child.geometry
+    const position = geometry.getAttribute("position")
+    const normal = geometry.getAttribute("normal")
+    const originalColor = child.userData?._originalColors || geometry.getAttribute("color")
+    const uv = geometry.getAttribute("uv")
+    const index = geometry.index
+    const childToSource = sourceInverse.clone().multiply(child.matrixWorld)
+    const sourceToChild = childToSource.clone().invert()
+    const normalMatrix = new THREE.Matrix3().getNormalMatrix(childToSource)
+    const faceCount = Math.floor((index ? index.count : position.count) / 3)
+    const triangleIndices = []
+
+    childMeta.set(child.uuid, {
+      mesh: child,
+      childToSource,
+      sourceToChild,
+      triangleIndices,
+      hasNormal: !!normal,
+      hasColor: !!originalColor,
+      hasUv: !!uv,
+    })
+
+    const readCorner = (vertexIndex) => {
+      const localPos = new THREE.Vector3().fromBufferAttribute(position, vertexIndex)
+      const sourcePos = localPos.clone().applyMatrix4(childToSource)
+      const nodeId = ensureNode(sourcePos)
+      let localNormal = null
+      if (normal) localNormal = [normal.getX(vertexIndex), normal.getY(vertexIndex), normal.getZ(vertexIndex)]
+      let sourceNormal = null
+      if (localNormal) {
+        const n = new THREE.Vector3(localNormal[0], localNormal[1], localNormal[2]).applyMatrix3(normalMatrix).normalize()
+        sourceNormal = [n.x, n.y, n.z]
+      }
+      const color = originalColor ? [originalColor.getX(vertexIndex), originalColor.getY(vertexIndex), originalColor.getZ(vertexIndex)] : null
+      const tex = uv ? [uv.getX(vertexIndex), uv.getY(vertexIndex)] : null
+      return {
+        nodeId,
+        sourcePos: [sourcePos.x, sourcePos.y, sourcePos.z],
+        localPos: [localPos.x, localPos.y, localPos.z],
+        localNormal,
+        sourceNormal,
+        color,
+        uv: tex,
+      }
+    }
+
+    for (let faceIndex = 0; faceIndex < faceCount; faceIndex++) {
+      const offset = faceIndex * 3
+      const ia = index ? index.getX(offset) : offset
+      const ib = index ? index.getX(offset + 1) : offset + 1
+      const ic = index ? index.getX(offset + 2) : offset + 2
+      const corners = [readCorner(ia), readCorner(ib), readCorner(ic)]
+      const nodeIds = corners.map((corner) => corner.nodeId)
+      if (nodeIds[0] === nodeIds[1] || nodeIds[1] === nodeIds[2] || nodeIds[2] === nodeIds[0]) continue
+      const triIndex = triangles.length
+      const materialIndex = geometry.groups?.find?.((group) => offset >= group.start && offset < group.start + group.count)?.materialIndex || 0
+      triangles.push({ childUuid: child.uuid, faceIndex, nodeIds, corners, materialIndex })
+      triangleIndices.push(triIndex)
+      triangleLookup.set(`${child.uuid}:${faceIndex}`, triIndex)
+      addEdge(nodeIds[0], nodeIds[1], triIndex)
+      addEdge(nodeIds[1], nodeIds[2], triIndex)
+      addEdge(nodeIds[2], nodeIds[0], triIndex)
+    }
+  })
+
+  if (!triangles.length || !nodes.length) throw new Error("Model neobsahuje použitelnou triangulaci pro Ořez.")
+  const size = new THREE.Vector3()
+  bounds.getSize(size)
+  const diagonal = Math.max(1e-3, size.length())
+  return { sourceObject, nodes, nodeMap, adjacency, triangles, edgeTriangles, triangleLookup, childMeta, bounds, diagonal }
+}
+
+function trimShortestPath(context, startNode, endNode) {
+  if (!context || startNode == null || endNode == null) return []
+  if (startNode === endNode) return [startNode]
+  const { nodes, adjacency } = context
+  const count = nodes.length
+  const distance = new Float64Array(count)
+  distance.fill(Infinity)
+  const previous = new Int32Array(count)
+  previous.fill(-1)
+  const closed = new Uint8Array(count)
+  const heapNodes = []
+  const heapScores = []
+
+  const heuristic = (node) => nodes[node].distanceTo(nodes[endNode])
+  const push = (node, score) => {
+    let index = heapNodes.length
+    heapNodes.push(node); heapScores.push(score)
+    while (index > 0) {
+      const parent = (index - 1) >> 1
+      if (heapScores[parent] <= score) break
+      heapNodes[index] = heapNodes[parent]; heapScores[index] = heapScores[parent]
+      index = parent
+    }
+    heapNodes[index] = node; heapScores[index] = score
+  }
+  const pop = () => {
+    if (!heapNodes.length) return null
+    const node = heapNodes[0]
+    const lastNode = heapNodes.pop()
+    const lastScore = heapScores.pop()
+    if (heapNodes.length) {
+      let index = 0
+      while (true) {
+        let left = index * 2 + 1
+        if (left >= heapNodes.length) break
+        let right = left + 1
+        let child = right < heapNodes.length && heapScores[right] < heapScores[left] ? right : left
+        if (heapScores[child] >= lastScore) break
+        heapNodes[index] = heapNodes[child]; heapScores[index] = heapScores[child]
+        index = child
+      }
+      heapNodes[index] = lastNode; heapScores[index] = lastScore
+    }
+    return node
+  }
+
+  distance[startNode] = 0
+  push(startNode, heuristic(startNode))
+  while (heapNodes.length) {
+    const current = pop()
+    if (current == null || closed[current]) continue
+    if (current === endNode) break
+    closed[current] = 1
+    const neighbors = adjacency[current]
+    if (!neighbors) continue
+    for (const [next, weight] of neighbors) {
+      if (closed[next]) continue
+      const candidate = distance[current] + weight
+      if (candidate >= distance[next]) continue
+      distance[next] = candidate
+      previous[next] = current
+      push(next, candidate + heuristic(next))
+    }
+  }
+
+  if (!Number.isFinite(distance[endNode])) return []
+  const path = []
+  let cursor = endNode
+  while (cursor !== -1) {
+    path.push(cursor)
+    if (cursor === startNode) break
+    cursor = previous[cursor]
+  }
+  path.reverse()
+  return path[0] === startNode ? path : []
+}
+
+function resolveTrimHit(context, sourceObject, event) {
+  if (!context || !sourceObject || !event?.object?.isMesh) return null
+  const faceIndex = Number.isInteger(event.faceIndex)
+    ? event.faceIndex
+    : (event.face && Number.isInteger(event.face.a) ? Math.floor(event.face.a / 3) : null)
+  if (!Number.isInteger(faceIndex)) return null
+  const triangleIndex = context.triangleLookup.get(`${event.object.uuid}:${faceIndex}`)
+  if (triangleIndex === undefined) return null
+  sourceObject.updateMatrixWorld(true)
+  const hit = sourceObject.worldToLocal(event.point.clone())
+  const triangle = context.triangles[triangleIndex]
+  let nodeId = triangle.nodeIds[0]
+  let best = context.nodes[nodeId].distanceToSquared(hit)
+  for (let i = 1; i < 3; i++) {
+    const candidate = triangle.nodeIds[i]
+    const d = context.nodes[candidate].distanceToSquared(hit)
+    if (d < best) { best = d; nodeId = candidate }
+  }
+  return { nodeId, triangleIndex }
+}
+
+function buildTrimBoundaryEdges(segments) {
+  const boundary = new Set()
+  for (const path of segments || []) {
+    if (!path || path.length < 2) continue
+    for (let i = 0; i < path.length - 1; i++) boundary.add(trimEdgeKey(path[i], path[i + 1]))
+  }
+  return boundary
+}
+
+function floodTrimRegion(context, startTriangle, boundaryEdges) {
+  if (!context || !Number.isInteger(startTriangle)) return null
+  const mask = new Uint8Array(context.triangles.length)
+  const queue = [startTriangle]
+  mask[startTriangle] = 1
+  for (let cursor = 0; cursor < queue.length; cursor++) {
+    const triIndex = queue[cursor]
+    const tri = context.triangles[triIndex]
+    const ids = tri.nodeIds
+    const edges = [[ids[0], ids[1]], [ids[1], ids[2]], [ids[2], ids[0]]]
+    for (const [a, b] of edges) {
+      const key = trimEdgeKey(a, b)
+      if (boundaryEdges.has(key)) continue
+      const neighbors = context.edgeTriangles.get(key) || []
+      for (const next of neighbors) {
+        if (!mask[next]) { mask[next] = 1; queue.push(next) }
+      }
+    }
+  }
+  return mask
+}
+
+function trimMaskCount(mask) {
+  if (!mask) return 0
+  let count = 0
+  for (let i = 0; i < mask.length; i++) if (mask[i]) count++
+  return count
+}
+
+function createTrimPreviewGeometry(context, mask, keep = true) {
+  if (!context || !mask) return null
+  const positions = []
+  for (let i = 0; i < context.triangles.length; i++) {
+    if (!!mask[i] !== !!keep) continue
+    const tri = context.triangles[i]
+    for (const corner of tri.corners) positions.push(...corner.sourcePos)
+  }
+  if (!positions.length) return null
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3))
+  geometry.computeBoundingBox(); geometry.computeBoundingSphere()
+  return geometry
+}
+
+function buildTrimmedGeometryForChild(context, childUuid, keepMask) {
+  const meta = context.childMeta.get(childUuid)
+  if (!meta) return new THREE.BufferGeometry()
+  const positions = []
+  const normals = []
+  const colors = []
+  const uvs = []
+  const materialIndices = []
+  let hasNormal = true, hasColor = true, hasUv = true
+
+  for (const triIndex of meta.triangleIndices) {
+    if (!keepMask?.[triIndex]) continue
+    const tri = context.triangles[triIndex]
+    materialIndices.push(tri.materialIndex || 0)
+    for (const corner of tri.corners) {
+      positions.push(...corner.localPos)
+      if (corner.localNormal) normals.push(...corner.localNormal); else hasNormal = false
+      if (corner.color) colors.push(...corner.color); else hasColor = false
+      if (corner.uv) uvs.push(...corner.uv); else hasUv = false
+    }
+  }
+
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3))
+  if (hasNormal && normals.length === positions.length) geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3))
+  else if (positions.length) geometry.computeVertexNormals()
+  if (hasColor && colors.length === positions.length) geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3))
+  if (hasUv && uvs.length * 3 === positions.length * 2) geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2))
+
+  if (materialIndices.length) {
+    let groupStart = 0
+    let current = materialIndices[0]
+    for (let i = 1; i <= materialIndices.length; i++) {
+      if (i === materialIndices.length || materialIndices[i] !== current) {
+        geometry.addGroup(groupStart * 3, (i - groupStart) * 3, current)
+        groupStart = i
+        current = materialIndices[i]
+      }
+    }
+  }
+  geometry.computeBoundingBox(); geometry.computeBoundingSphere()
+  try { if (positions.length) geometry.computeBoundsTree?.(ALIGNMENT_BVH_OPTIONS) } catch {}
+  return geometry
+}
+
+function applyTrimMaskToObject(context, keepMask) {
+  if (!context || !keepMask) throw new Error("Chybí vybraná oblast Ořezu.")
+  const backup = []
+  for (const [childUuid, meta] of context.childMeta) {
+    const mesh = meta.mesh
+    if (!mesh?.isMesh) continue
+    const newGeometry = buildTrimmedGeometryForChild(context, childUuid, keepMask)
+    backup.push({
+      mesh,
+      geometry: mesh.geometry,
+      visible: mesh.visible,
+      originalColors: mesh.userData?._originalColors,
+      baseGeom: mesh.userData?._baseGeom,
+      derivedGeom: mesh.userData?._derivedGeom,
+    })
+    mesh.geometry = newGeometry
+    mesh.visible = !!newGeometry.getAttribute("position")?.count
+    mesh.userData._baseGeom = newGeometry
+    mesh.userData._derivedGeom = newGeometry
+    mesh.userData._originalColors = newGeometry.getAttribute("color")?.clone?.() || null
+    delete mesh.userData._comparisonColors
+    delete mesh.userData._comparisonDistances
+    delete mesh.userData._occlusionColors
+    delete mesh.userData._occlusionDistances
+  }
+  context.sourceObject.updateMatrixWorld(true)
+  return backup
+}
+
+function restoreTrimBackup(backup) {
+  if (!Array.isArray(backup)) return
+  for (const item of backup) {
+    const mesh = item.mesh
+    if (!mesh?.isMesh) continue
+    const current = mesh.geometry
+    mesh.geometry = item.geometry
+    mesh.visible = item.visible
+    mesh.userData._originalColors = item.originalColors
+    mesh.userData._baseGeom = item.baseGeom
+    mesh.userData._derivedGeom = item.derivedGeom
+    if (current && current !== item.geometry) {
+      try { current.disposeBoundsTree?.() } catch {}
+      current.dispose?.()
+    }
+  }
+}
+
+function TrimRegionPreview({ context, keepMask }) {
+  const geometries = useMemo(() => {
+    if (!context || !keepMask) return { keep: null, drop: null }
+    return {
+      keep: createTrimPreviewGeometry(context, keepMask, true),
+      drop: createTrimPreviewGeometry(context, keepMask, false),
+    }
+  }, [context, keepMask])
+  useEffect(() => () => {
+    geometries.keep?.dispose?.(); geometries.drop?.dispose?.()
+  }, [geometries])
+  return (
+    <>
+      {geometries.keep && (
+        <mesh geometry={geometries.keep} renderOrder={1450} raycast={() => null}>
+          <meshBasicMaterial color="#4ade80" transparent opacity={0.20} side={THREE.DoubleSide} depthWrite={false} depthTest polygonOffset polygonOffsetFactor={-2} polygonOffsetUnits={-2} />
+        </mesh>
+      )}
+      {geometries.drop && (
+        <mesh geometry={geometries.drop} renderOrder={1449} raycast={() => null}>
+          <meshBasicMaterial color="#ef4444" transparent opacity={0.13} side={THREE.DoubleSide} depthWrite={false} depthTest polygonOffset polygonOffsetFactor={-1} polygonOffsetUnits={-1} />
+        </mesh>
+      )}
+    </>
+  )
+}
+
+function TrimSurfaceOverlay({
+  context,
+  modelMatrix,
+  controlNodes,
+  segments,
+  previewPath,
+  keepMask,
+  draggingPoint,
+  onBeginPointDrag,
+  onCloseLoop,
+}) {
+  const groupRef = useRef(null)
+  useEffect(() => {
+    const group = groupRef.current
+    if (!group) return
+    group.matrixAutoUpdate = false
+    if (Array.isArray(modelMatrix) && modelMatrix.length === 16) group.matrix.fromArray(modelMatrix)
+    else group.matrix.identity()
+    group.matrixWorldNeedsUpdate = true
+    group.updateMatrixWorld(true)
+  }, [modelMatrix])
+
+  const lineGeometry = useMemo(() => {
+    if (!context) return null
+    const coords = []
+    const paths = [...(segments || [])]
+    if (previewPath?.length > 1) paths.push(previewPath)
+    for (const path of paths) {
+      for (let i = 0; i < path.length - 1; i++) {
+        const a = context.nodes[path[i]], b = context.nodes[path[i + 1]]
+        if (!a || !b) continue
+        coords.push(a.x, a.y, a.z, b.x, b.y, b.z)
+      }
+    }
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(coords, 3))
+    return geometry
+  }, [context, segments, previewPath])
+  useEffect(() => () => lineGeometry?.dispose?.(), [lineGeometry])
+
+  if (!context) return null
+  const radius = Math.max(0.12, Math.min(1.25, context.diagonal * 0.008))
+  return (
+    <group ref={groupRef} matrixAutoUpdate={false}>
+      {keepMask && <TrimRegionPreview context={context} keepMask={keepMask} />}
+      {lineGeometry && (
+        <lineSegments geometry={lineGeometry} renderOrder={1500} raycast={() => null}>
+          <lineBasicMaterial color="#f5f5f5" transparent opacity={0.98} depthTest={false} depthWrite={false} />
+        </lineSegments>
+      )}
+      {(controlNodes || []).map((nodeId, index) => {
+        const point = context.nodes[nodeId]
+        if (!point) return null
+        const isFirst = index === 0
+        const active = draggingPoint === index
+        return (
+          <mesh
+            key={`${index}-${nodeId}`}
+            position={point}
+            renderOrder={1510}
+            raycast={draggingPoint != null ? () => null : undefined}
+            onPointerDown={(event) => {
+              event.stopPropagation()
+              event.nativeEvent?.preventDefault?.()
+              onBeginPointDrag?.(index)
+            }}
+            onClick={isFirst && controlNodes.length >= 3 ? (event) => {
+              event.stopPropagation()
+              if (event.delta != null && event.delta > 4) return
+              onCloseLoop?.()
+            } : undefined}
+          >
+            <sphereGeometry args={[radius * (active ? 1.18 : 1), 18, 14]} />
+            <meshBasicMaterial
+              color={active ? "#86efac" : isFirst ? "#fbbf24" : "#f5f5f5"}
+              depthTest={false}
+              depthWrite={false}
+              transparent
+              opacity={0.98}
+            />
+          </mesh>
+        )
+      })}
+    </group>
+  )
+}
+
 /* ---------- Ikony ---------- */
 const ICON_BASE = (() => {
   const q = getParam("iconBase")
@@ -2898,6 +3380,8 @@ function AnyModel({
   onPinNote,
   onAlignmentSelect,
   onAlignmentHover,
+  onTrimSurfaceClick,
+  onTrimSurfaceMove,
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
@@ -3182,13 +3666,18 @@ function AnyModel({
       onClick={onAlignmentSelect ? (e) => {
         e.stopPropagation()
         onAlignmentSelect(url)
+      } : onTrimSurfaceClick ? (e) => {
+        e.stopPropagation()
+        if (e.delta != null && e.delta > 4) return
+        onTrimSurfaceClick(url, e)
       } : undefined}
       onPointerOver={onAlignmentSelect ? (e) => {
         e.stopPropagation()
         setAlignmentHoverVisual(true)
         onAlignmentHover?.(url, true)
       } : undefined}
-      onPointerMove={analysisMode && onHoverDist ? (e) => {
+      onPointerMove={onTrimSurfaceMove || (analysisMode && onHoverDist) ? (e) => {
+        if (onTrimSurfaceMove) onTrimSurfaceMove(url, e)
         if (analysisMode && onHoverDist) {
           e.stopPropagation(); 
           const distAttr = e.object.geometry.getAttribute('_analysisDist');
@@ -3204,7 +3693,7 @@ function AnyModel({
           }
         }
       } : undefined}
-      onPointerOut={(analysisMode && onHoverDist) || onAlignmentSelect ? () => {
+      onPointerOut={(analysisMode && onHoverDist) || onAlignmentSelect || onTrimSurfaceMove ? () => {
         if (onAlignmentSelect) {
           setAlignmentHoverVisual(false)
           onAlignmentHover?.(url, false)
@@ -4829,13 +5318,33 @@ export default function ClientPage() {
   // interní editor je může explicitně uložit jako nový Attachment do zakázky.
   const [alignedExportsByUrl, setAlignedExportsByUrl] = useState({})
   const [alignedExportBusyUrl, setAlignedExportBusyUrl] = useState("")
-  const [editorCapabilities, setEditorCapabilities] = useState({ canSaveAlignedToCase: false })
+  const [editorCapabilities, setEditorCapabilities] = useState({ canSaveAlignedToCase: false, canSaveTrimmedToCase: false })
   const alignmentPointerHintRef = useRef(null)
   const alignmentSceneHoveredUrlRef = useRef("")
   const alignmentWorkerRef = useRef(null)
   const alignmentWorkerRequestsRef = useRef(new Map())
   const alignmentWorkerRequestIdRef = useRef(0)
   const alignmentWorkerFailedRef = useRef(false)
+
+  // -- OŘEZ MODELU --
+  const [trimMode, setTrimMode] = useState(false)
+  const [trimStage, setTrimStage] = useState("model") // model | boundary | region | result
+  const [trimSelection, setTrimSelection] = useState("")
+  const [trimContext, setTrimContext] = useState(null)
+  const [trimControlNodes, setTrimControlNodes] = useState([])
+  const [trimSegments, setTrimSegments] = useState([])
+  const [trimClosed, setTrimClosed] = useState(false)
+  const [trimHoverNode, setTrimHoverNode] = useState(null)
+  const [trimPreviewPath, setTrimPreviewPath] = useState([])
+  const [trimKeepMask, setTrimKeepMask] = useState(null)
+  const [trimDraggingPoint, setTrimDraggingPoint] = useState(null)
+  const [trimBusy, setTrimBusy] = useState(false)
+  const [trimMessage, setTrimMessage] = useState("")
+  const [trimmedExportsByUrl, setTrimmedExportsByUrl] = useState({})
+  const [trimExportBusyUrl, setTrimExportBusyUrl] = useState("")
+  const trimHistoryByUrlRef = useRef({})
+  const trimLastDragUpdateRef = useRef(0)
+  const trimPendingDragNodeRef = useRef(null)
 
   // Komunikace s interním Case Cloud editorem. Veřejný viewer může stejné
   // zprávy posílat, ale bez autorizovaného parentu se nic neuloží.
@@ -4845,7 +5354,7 @@ export default function ClientPage() {
       if (event.source !== window.parent) return
       if (event.data?.type !== "ARTHETIC_EDITOR_CAPABILITIES") return
       const payload = event.data?.payload || {}
-      setEditorCapabilities({ canSaveAlignedToCase: !!payload.canSaveAlignedToCase })
+      setEditorCapabilities({ canSaveAlignedToCase: !!payload.canSaveAlignedToCase, canSaveTrimmedToCase: !!payload.canSaveTrimmedToCase })
     }
     window.addEventListener("message", onMessage)
     if (window.parent && window.parent !== window) {
@@ -4861,6 +5370,14 @@ export default function ClientPage() {
       payload: { active: !!alignmentMode && alignmentTransition !== "exiting" },
     }, "*")
   }, [alignmentMode, alignmentTransition])
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.parent || window.parent === window) return
+    window.parent.postMessage({
+      type: "ARTHETIC_TRIM_MODE",
+      payload: { active: !!trimMode },
+    }, "*")
+  }, [trimMode])
 
   useEffect(() => {
     if (!USE_ALIGNMENT_WORKER || typeof Worker === "undefined") return undefined
@@ -5201,6 +5718,22 @@ export default function ClientPage() {
     setModelTransforms({})
     setAlignedExportsByUrl({})
     setAlignedExportBusyUrl("")
+    setTrimMode(false)
+    setTrimStage("model")
+    setTrimSelection("")
+    setTrimContext(null)
+    setTrimControlNodes([])
+    setTrimSegments([])
+    setTrimClosed(false)
+    setTrimHoverNode(null)
+    setTrimPreviewPath([])
+    setTrimKeepMask(null)
+    setTrimDraggingPoint(null)
+    setTrimBusy(false)
+    setTrimMessage("")
+    setTrimmedExportsByUrl({})
+    setTrimExportBusyUrl("")
+    trimHistoryByUrlRef.current = {}
     meshesRef.current = {}
     modelObjectsRef.current = {}
   }, [analysisFilesKey])
@@ -5421,6 +5954,367 @@ export default function ClientPage() {
       setAlignmentMessage(error?.message || "Zarovnaný model se nepodařilo připravit k uložení.")
     }
   }, [createAlignedExport, editorCapabilities.canSaveAlignedToCase])
+
+
+  const clearTrimWorkingState = useCallback(() => {
+    setTrimStage("model")
+    setTrimSelection("")
+    setTrimContext(null)
+    setTrimControlNodes([])
+    setTrimSegments([])
+    setTrimClosed(false)
+    setTrimHoverNode(null)
+    setTrimPreviewPath([])
+    setTrimKeepMask(null)
+    setTrimDraggingPoint(null)
+    setTrimBusy(false)
+    setTrimMessage("")
+    if (trackballRef.current) trackballRef.current.enabled = !sliceOverlayInteracting && !alignmentBusy
+  }, [sliceOverlayInteracting, alignmentBusy])
+
+  const closeTrimMode = useCallback(() => {
+    clearTrimWorkingState()
+    setTrimMode(false)
+  }, [clearTrimWorkingState])
+
+  const openTrimMode = useCallback(() => {
+    const eligible = files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url)))
+    if (!eligible.length) {
+      setTrimMessage("Pro Ořez je potřeba alespoň jeden STL, PLY nebo OBJ model.")
+      return
+    }
+    setHeatmapMenuOpen(false)
+    setComparisonMenuOpen(false)
+    setShowHeatmap(false)
+    setShowComparison(false)
+    setIsAutoRotating(false)
+    clearTrimWorkingState()
+    setTrimMode(true)
+    setTrimMessage("Vyberte model, který chcete oříznout.")
+  }, [files, clearTrimWorkingState])
+
+  const selectTrimModel = useCallback((url) => {
+    if (!trimMode || trimBusy || !url) return
+    const object = modelObjectsRef.current[url]
+    if (!object) {
+      setTrimMessage("Model ještě není načtený. Zkuste to za okamžik.")
+      return
+    }
+    setTrimBusy(true)
+    setTrimMessage("Připravuji povrchovou síť pro Ořez…")
+    window.setTimeout(() => {
+      try {
+        const context = buildTrimMeshContext(object)
+        setTrimSelection(url)
+        setTrimContext(context)
+        setTrimControlNodes([])
+        setTrimSegments([])
+        setTrimClosed(false)
+        setTrimKeepMask(null)
+        setTrimHoverNode(null)
+        setTrimPreviewPath([])
+        setTrimStage("boundary")
+        setTrimMessage("Klikáním umístěte body hranice. Již položenou kuličku můžete kdykoliv přetáhnout po povrchu.")
+      } catch (error) {
+        console.error("Trim context error:", error)
+        setTrimMessage(error?.message || "Povrch modelu se nepodařilo připravit pro Ořez.")
+      } finally {
+        setTrimBusy(false)
+      }
+    }, 30)
+  }, [trimMode, trimBusy])
+
+  const closeTrimLoop = useCallback(() => {
+    if (!trimContext || trimClosed || trimControlNodes.length < 3) return
+    const last = trimControlNodes[trimControlNodes.length - 1]
+    const first = trimControlNodes[0]
+    const closingPath = trimShortestPath(trimContext, last, first)
+    if (closingPath.length < 2) {
+      setTrimMessage("Poslední úsek hranice se nepodařilo propojit po povrchu.")
+      return
+    }
+    setTrimSegments((previous) => [...previous, closingPath])
+    setTrimClosed(true)
+    setTrimPreviewPath([])
+    setTrimHoverNode(null)
+    setTrimKeepMask(null)
+    setTrimStage("boundary")
+    setTrimMessage("Hranice je uzavřená. Kuličky můžete dál posouvat. Klikněte na část modelu, kterou chcete zachovat.")
+  }, [trimContext, trimClosed, trimControlNodes])
+
+  const addTrimControlNode = useCallback((nodeId) => {
+    if (!trimContext || trimClosed || nodeId == null) return
+    const points = trimControlNodes
+    if (!points.length) {
+      setTrimControlNodes([nodeId])
+      setTrimPreviewPath([])
+      return
+    }
+    const first = points[0]
+    const last = points[points.length - 1]
+    if (nodeId === first && points.length >= 3) {
+      closeTrimLoop()
+      return
+    }
+    if (nodeId === last) return
+    const path = trimShortestPath(trimContext, last, nodeId)
+    if (path.length < 2) return
+    setTrimControlNodes([...points, nodeId])
+    setTrimSegments((previous) => [...previous, path])
+    setTrimPreviewPath([])
+  }, [trimContext, trimClosed, trimControlNodes, closeTrimLoop])
+
+  const moveTrimControlNode = useCallback((index, nodeId) => {
+    if (!trimContext || index == null || nodeId == null || !trimControlNodes[index] || trimControlNodes[index] === nodeId) return
+    const points = trimControlNodes.slice()
+    const segments = trimSegments.slice()
+    points[index] = nodeId
+    if (index > 0) {
+      const path = trimShortestPath(trimContext, points[index - 1], nodeId)
+      if (path.length >= 2) segments[index - 1] = path
+    } else if (trimClosed && points.length > 2) {
+      const path = trimShortestPath(trimContext, points[points.length - 1], nodeId)
+      if (path.length >= 2) segments[points.length - 1] = path
+    }
+    if (index < points.length - 1) {
+      const path = trimShortestPath(trimContext, nodeId, points[index + 1])
+      if (path.length >= 2) segments[index] = path
+    } else if (trimClosed && points.length > 2) {
+      const path = trimShortestPath(trimContext, nodeId, points[0])
+      if (path.length >= 2) segments[points.length - 1] = path
+    }
+    setTrimControlNodes(points)
+    setTrimSegments(segments)
+    setTrimKeepMask(null)
+    setTrimStage("boundary")
+    if (trimClosed) setTrimMessage("Hranice byla upravena. Klikněte znovu na část modelu, kterou chcete zachovat.")
+  }, [trimContext, trimControlNodes, trimSegments, trimClosed])
+
+  const handleTrimSurfaceClick = useCallback((url, event) => {
+    if (!trimMode || !trimContext || url !== trimSelection || trimBusy || trimDraggingPoint != null) return
+    const hit = resolveTrimHit(trimContext, modelObjectsRef.current[url], event)
+    if (!hit) return
+    if (!trimClosed) {
+      addTrimControlNode(hit.nodeId)
+      return
+    }
+    const boundaryEdges = buildTrimBoundaryEdges(trimSegments)
+    const mask = floodTrimRegion(trimContext, hit.triangleIndex, boundaryEdges)
+    if (!mask) return
+    const kept = trimMaskCount(mask)
+    if (!kept || kept === trimContext.triangles.length) {
+      setTrimMessage("Tato hranice neoddělila dvě oblasti. Upravte některý bod a zkuste to znovu.")
+      setTrimKeepMask(null)
+      return
+    }
+    setTrimKeepMask(mask)
+    setTrimStage("region")
+    setTrimMessage(`Vybraná oblast: ${kept.toLocaleString("cs-CZ")} trojúhelníků zůstane. Kuličky můžete stále posouvat, nebo potvrďte Oříznout.`)
+  }, [trimMode, trimContext, trimSelection, trimBusy, trimDraggingPoint, trimClosed, trimSegments, addTrimControlNode])
+
+  const handleTrimSurfaceMove = useCallback((url, event) => {
+    if (!trimMode || !trimContext || url !== trimSelection || trimBusy) return
+    if (trimDraggingPoint == null && cameraInteractingRef.current) return
+    const hit = resolveTrimHit(trimContext, modelObjectsRef.current[url], event)
+    if (!hit) return
+    if (trimDraggingPoint != null) {
+      event.stopPropagation?.()
+      trimPendingDragNodeRef.current = hit.nodeId
+      const now = typeof performance !== "undefined" ? performance.now() : Date.now()
+      if (now - trimLastDragUpdateRef.current >= 70) {
+        trimLastDragUpdateRef.current = now
+        trimPendingDragNodeRef.current = null
+        moveTrimControlNode(trimDraggingPoint, hit.nodeId)
+      }
+      return
+    }
+    if (!trimClosed && trimControlNodes.length && hit.nodeId !== trimHoverNode) setTrimHoverNode(hit.nodeId)
+  }, [trimMode, trimContext, trimSelection, trimBusy, trimDraggingPoint, trimClosed, trimControlNodes.length, trimHoverNode, moveTrimControlNode])
+
+  useEffect(() => {
+    if (!trimContext || trimClosed || !trimControlNodes.length || trimHoverNode == null) {
+      setTrimPreviewPath([])
+      return
+    }
+    const timer = window.setTimeout(() => {
+      const last = trimControlNodes[trimControlNodes.length - 1]
+      if (last === trimHoverNode) { setTrimPreviewPath([]); return }
+      setTrimPreviewPath(trimShortestPath(trimContext, last, trimHoverNode))
+    }, 55)
+    return () => window.clearTimeout(timer)
+  }, [trimContext, trimClosed, trimControlNodes, trimHoverNode])
+
+  const beginTrimPointDrag = useCallback((index) => {
+    if (!trimMode || trimBusy) return
+    trimLastDragUpdateRef.current = 0
+    trimPendingDragNodeRef.current = null
+    setTrimDraggingPoint(index)
+    setTrimKeepMask(null)
+    if (trackballRef.current) trackballRef.current.enabled = false
+  }, [trimMode, trimBusy])
+
+  useEffect(() => {
+    if (trimDraggingPoint == null) return
+    const finish = () => {
+      const pendingNode = trimPendingDragNodeRef.current
+      trimPendingDragNodeRef.current = null
+      if (pendingNode != null) moveTrimControlNode(trimDraggingPoint, pendingNode)
+      setTrimDraggingPoint(null)
+      if (trackballRef.current) trackballRef.current.enabled = !sliceOverlayInteracting && !alignmentBusy
+    }
+    window.addEventListener("pointerup", finish)
+    window.addEventListener("pointercancel", finish)
+    window.addEventListener("blur", finish)
+    return () => {
+      window.removeEventListener("pointerup", finish)
+      window.removeEventListener("pointercancel", finish)
+      window.removeEventListener("blur", finish)
+    }
+  }, [trimDraggingPoint, sliceOverlayInteracting, alignmentBusy, moveTrimControlNode])
+
+  const removeLastTrimPoint = useCallback(() => {
+    if (trimClosed || trimControlNodes.length === 0) return
+    setTrimControlNodes((previous) => previous.slice(0, -1))
+    setTrimSegments((previous) => previous.slice(0, -1))
+    setTrimPreviewPath([])
+    setTrimKeepMask(null)
+  }, [trimClosed, trimControlNodes.length])
+
+  const resetTrimBoundary = useCallback(() => {
+    setTrimControlNodes([])
+    setTrimSegments([])
+    setTrimClosed(false)
+    setTrimHoverNode(null)
+    setTrimPreviewPath([])
+    setTrimKeepMask(null)
+    setTrimStage("boundary")
+    setTrimMessage("Klikáním umístěte novou hranici Ořezu.")
+  }, [])
+
+  const applyTrimResult = useCallback(() => {
+    if (!trimContext || !trimKeepMask || !trimSelection || trimBusy) return
+    setTrimBusy(true)
+    setTrimMessage("Ořezávám geometrii…")
+    window.setTimeout(() => {
+      try {
+        const backup = applyTrimMaskToObject(trimContext, trimKeepMask)
+        const stack = trimHistoryByUrlRef.current[trimSelection] || []
+        trimHistoryByUrlRef.current[trimSelection] = [...stack, backup]
+        setTrimmedExportsByUrl((previous) => ({
+          ...previous,
+          [trimSelection]: {
+            createdAt: new Date().toISOString(),
+            pointCount: trimControlNodes.length,
+            saveRequested: false,
+          },
+        }))
+        invalidateComparisonResult()
+        setHasComputedHeatmap(false); setShowHeatmap(false)
+        setTrimStage("result")
+        setTrimKeepMask(null)
+        setTrimMessage("Ořez je hotový. Výsledek můžete stáhnout, uložit do zakázky nebo vrátit.")
+      } catch (error) {
+        console.error("Trim apply error:", error)
+        setTrimMessage(error?.message || "Ořez se nepodařilo aplikovat.")
+      } finally {
+        setTrimBusy(false)
+      }
+    }, 30)
+  }, [trimContext, trimKeepMask, trimSelection, trimBusy, trimControlNodes.length, invalidateComparisonResult])
+
+  const undoLastTrim = useCallback((url = trimSelection) => {
+    if (!url) return
+    const stack = trimHistoryByUrlRef.current[url] || []
+    const backup = stack[stack.length - 1]
+    if (!backup) {
+      setTrimMessage("Pro tento model není v aktuální session žádný Ořez k vrácení.")
+      return
+    }
+    restoreTrimBackup(backup)
+    const nextStack = stack.slice(0, -1)
+    trimHistoryByUrlRef.current[url] = nextStack
+    if (!nextStack.length) {
+      setTrimmedExportsByUrl((previous) => {
+        const next = { ...previous }; delete next[url]; return next
+      })
+    } else {
+      setTrimmedExportsByUrl((previous) => previous[url]
+        ? { ...previous, [url]: { ...previous[url], saveRequested: false } }
+        : previous)
+    }
+    setTrimContext(null)
+    setTrimControlNodes([]); setTrimSegments([]); setTrimClosed(false); setTrimKeepMask(null); setTrimPreviewPath([])
+    setTrimStage("model")
+    setTrimSelection("")
+    setTrimMessage("Poslední Ořez byl vrácen. Vyberte model pro další úpravu.")
+  }, [trimSelection])
+
+  const createTrimmedExport = useCallback(async (url) => {
+    const info = trimmedExportsByUrl[url]
+    const file = files.find((item) => item.url === url)
+    const sourceObject = modelObjectsRef.current[url]
+    if (!info || !file || !sourceObject || !rootGroupRef.current) throw new Error("Pro tento model zatím není dokončený Ořez.")
+    const ext = inferExt(file.rawName || file.name || file.url)
+    if (!["stl", "ply", "obj"].includes(ext)) throw new Error(`Export .${ext || "?"} není podporovaný.`)
+    setTrimExportBusyUrl(url)
+    let exportObject = null
+    try {
+      exportObject = buildBakedAlignedExportObject(sourceObject, rootGroupRef.current)
+      const blob = await alignedObjectToBlob(exportObject, ext)
+      return {
+        blob,
+        ext,
+        mimeType: alignedExportMime(ext),
+        name: makeTrimmedExportName(file, !!alignedExportsByUrl[url]),
+        derivedFrom: file.rawName || file.name || makeTrimmedExportName(file),
+        pointCount: Number(info.pointCount) || null,
+      }
+    } finally {
+      disposeAlignedExportObject(exportObject)
+      setTrimExportBusyUrl("")
+    }
+  }, [trimmedExportsByUrl, files, alignedExportsByUrl])
+
+  const downloadTrimmedModel = useCallback(async (url) => {
+    try {
+      const result = await createTrimmedExport(url)
+      const objectUrl = URL.createObjectURL(result.blob)
+      const anchor = document.createElement("a")
+      anchor.href = objectUrl; anchor.download = result.name
+      document.body.appendChild(anchor); anchor.click(); anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1500)
+    } catch (error) {
+      console.error("Trim export download error:", error)
+      setTrimMessage(error?.message || "Ořezaný model se nepodařilo exportovat.")
+    }
+  }, [createTrimmedExport])
+
+  const saveTrimmedModelToCase = useCallback(async (url) => {
+    if (!editorCapabilities.canSaveTrimmedToCase || !window.parent || window.parent === window) return
+    try {
+      const result = await createTrimmedExport(url)
+      const buffer = await result.blob.arrayBuffer()
+      window.parent.postMessage({
+        type: "ARTHETIC_SAVE_TRIMMED_MODEL",
+        payload: {
+          name: result.name,
+          ext: result.ext,
+          mimeType: result.mimeType,
+          buffer,
+          derivedFrom: result.derivedFrom,
+          trimPointCount: result.pointCount,
+          createdAt: new Date().toISOString(),
+        },
+      }, "*", [buffer])
+      setTrimmedExportsByUrl((previous) => previous[url]
+        ? { ...previous, [url]: { ...previous[url], saveRequested: true } }
+        : previous)
+      setTrimMessage("Ořezaný model byl předán k uložení do zakázky.")
+    } catch (error) {
+      console.error("Trim export save error:", error)
+      setTrimMessage(error?.message || "Ořezaný model se nepodařilo připravit k uložení.")
+    }
+  }, [createTrimmedExport, editorCapabilities.canSaveTrimmedToCase])
 
   const getAlignmentPair = useCallback(() => {
     if (alignmentSelection.length !== 2) return { aUrl: null, bUrl: null, fileA: null, fileB: null }
@@ -7260,6 +8154,7 @@ export default function ClientPage() {
         const isTexAvailable = !!hasTexMap[f.url]
         const alignedInfo = alignedExportsByUrl[f.url] || null
         const alignedReferenceFile = alignedInfo ? files.find((item) => item.url === alignedInfo.referenceUrl) : null
+        const trimmedInfo = trimmedExportsByUrl[f.url] || null
         const isExpanded = openColorPickerUrl === f.url
         const toggleExpanded = () =>
           setOpenColorPickerUrl((previous) => previous === f.url ? null : f.url)
@@ -7410,6 +8305,34 @@ export default function ClientPage() {
                       style={{ height: 25, padding: "0 8px", borderRadius: 7, border: "1px solid rgba(74,222,128,.16)", background: "rgba(34,197,94,.065)", color: alignedInfo.saveRequested ? "#7b9c84" : "#b7f7ca", fontSize: 8.3, fontWeight: 700, cursor: alignedInfo.saveRequested ? "default" : "pointer" }}
                     >
                       {alignedInfo.saveRequested ? "Předáno" : "Uložit do zakázky"}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+
+            {trimmedInfo && (
+              <div style={{
+                gridColumn: "1 / -1", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+                marginTop: 1, padding: "7px 8px", borderRadius: 8,
+                background: "rgba(245,158,11,.045)", border: "1px solid rgba(251,191,36,.13)",
+              }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ color: "#fde68a", fontSize: 8.6, fontWeight: 760, letterSpacing: ".02em" }}>TRIMMED · OŘEZÁNO</div>
+                  <div style={{ marginTop: 2, color: "#707070", fontSize: 8.2 }}>
+                    {trimmedInfo.pointCount ? `${trimmedInfo.pointCount} řídicích bodů` : "upravená geometrie"}
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 5, flex: "0 0 auto" }}>
+                  <button type="button" onClick={() => downloadTrimmedModel(f.url)} disabled={trimExportBusyUrl === f.url}
+                    style={{ height: 25, padding: "0 8px", borderRadius: 7, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#d5d5d5", fontSize: 8.3, fontWeight: 680, cursor: trimExportBusyUrl === f.url ? "wait" : "pointer" }}>
+                    {trimExportBusyUrl === f.url ? "Připravuji…" : "Stáhnout"}
+                  </button>
+                  {editorCapabilities.canSaveTrimmedToCase && (
+                    <button type="button" onClick={() => saveTrimmedModelToCase(f.url)} disabled={trimExportBusyUrl === f.url || !!trimmedInfo.saveRequested}
+                      style={{ height: 25, padding: "0 8px", borderRadius: 7, border: "1px solid rgba(251,191,36,.17)", background: "rgba(245,158,11,.06)", color: trimmedInfo.saveRequested ? "#978764" : "#fde68a", fontSize: 8.3, fontWeight: 700, cursor: trimmedInfo.saveRequested ? "default" : "pointer" }}>
+                      {trimmedInfo.saveRequested ? "Předáno" : "Uložit do zakázky"}
                     </button>
                   )}
                 </div>
@@ -7679,6 +8602,22 @@ export default function ClientPage() {
             <circle cx="8" cy="8" r="3"/><circle cx="16" cy="16" r="3"/><path d="M10.5 10.5l3 3"/><path d="M14 5h5v5"/><path d="M10 19H5v-5"/>
           </svg>
           Zarovnání
+        </button>
+      </div>
+
+      <div style={{ width: dicomLayoutActive ? 120 : 270, display: isMobile ? "none" : "block" }}>
+        <button
+          onClick={openTrimMode}
+          disabled={analysisEligibleFiles.length < 1}
+          style={{ ...viewerToolbarButtonStyle(analysisEligibleFiles.length < 1), opacity: analysisEligibleFiles.length < 1 ? 0.45 : 1 }}
+          title="Ořezat jeden 3D scan pomocí uzavřené křivky vedené po povrchu"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M5 6.5c3.5-2 10.5-2 14 0M5 17.5c3.5 2 10.5 2 14 0"/>
+            <path d="M7 5l-2 1.5L7 8M17 16l2 1.5-2 1.5"/>
+            <path d="M8.5 10.5l7 3M15.5 10.5l-7 3"/>
+          </svg>
+          Ořez
         </button>
       </div>
 
@@ -8663,6 +9602,104 @@ export default function ClientPage() {
     }
   }
 
+
+  const trimSelectedFile = trimSelection ? files.find((file) => file.url === trimSelection) : null
+  const trimStepDone = {
+    model: !!trimSelection,
+    boundary: !!trimClosed,
+    region: !!trimKeepMask || trimStage === "result",
+    result: trimStage === "result",
+  }
+  const trimWorkspace = trimMode && (
+    <div style={{
+      position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)", zIndex: 72,
+      width: "min(760px, calc(100vw - 32px))", boxSizing: "border-box", padding: "11px 12px",
+      borderRadius: 15, background: "rgba(11,11,11,.955)", border: "1px solid rgba(255,255,255,.10)",
+      boxShadow: "0 22px 70px rgba(0,0,0,.46)", backdropFilter: "blur(22px)", WebkitBackdropFilter: "blur(22px)",
+      color: "#f3f3f3", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+      animation: "artheticAlignMenuIn .24s ease-out both",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+        <div style={{ minWidth: 0, flex: "1 1 auto" }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+            <span style={{ fontSize: 13, fontWeight: 850 }}>ART</span><span style={{ fontSize: 13, fontWeight: 300 }}>HETIC</span>
+            <span style={{ color: "#d7d7d7", fontSize: 13, fontWeight: 340 }}>Ořez</span>
+            {trimSelectedFile && <span style={{ marginLeft: 4, color: "#777", fontSize: 9.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stripExt(trimSelectedFile.rawName || trimSelectedFile.name)}</span>}
+          </div>
+          <div style={{ marginTop: 7, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+            {[
+              ["model", "Model"], ["boundary", "Hranice"], ["region", "Oblast"], ["result", "Výsledek"],
+            ].map(([key, label], index) => {
+              const done = trimStepDone[key]
+              const active = (key === "model" && trimStage === "model") || (key === "boundary" && trimStage === "boundary") || (key === "region" && trimStage === "region") || (key === "result" && trimStage === "result")
+              return <React.Fragment key={key}>
+                <div style={analysisStepChipStyle(active, done)}>{done && <span style={{ color: "#86efac" }}>✓</span>}<span>{label}</span></div>
+                {index < 3 && <div style={{ width: 12, height: 1, background: "rgba(255,255,255,.07)" }} />}
+              </React.Fragment>
+            })}
+          </div>
+        </div>
+        <button type="button" onClick={closeTrimMode} disabled={trimBusy}
+          style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#c8c8c8", cursor: trimBusy ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}>
+          Hotovo / Zavřít
+        </button>
+      </div>
+
+      <div style={{ height: 1, margin: "10px 0", background: "rgba(255,255,255,.065)" }} />
+
+      {trimStage === "model" && (
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(220px,1fr) auto", gap: 10, alignItems: "center" }}>
+          <AlignmentModelDropdown badge="T" value={trimSelection || ""} files={analysisEligibleFiles} otherValue="" onChange={selectTrimModel} />
+          <span style={{ color: "#777", fontSize: 9.2 }}>Vyberte v menu nebo klikněte přímo na model ve scéně.</span>
+        </div>
+      )}
+
+      {trimStage !== "model" && trimSelectedFile && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ minWidth: 0, color: "#8b8b8b", fontSize: 9.3, lineHeight: 1.45 }}>
+            {trimStage === "boundary" && !trimClosed && <>LMB klik = nový bod · přetažení kuličky = oprava bodu · klik na první žlutý bod = uzavřít.</>}
+            {trimStage === "boundary" && trimClosed && <>Smyčka je uzavřená. Kuličky můžete dál přetahovat; potom klikněte na oblast, kterou chcete zachovat.</>}
+            {trimStage === "region" && <>Zelená oblast zůstane, červená se odstraní. Body lze stále přetahovat — po změně hranice vyberte oblast znovu.</>}
+            {trimStage === "result" && <>Ořez je aplikovaný na geometrii v této session. Výsledek lze stáhnout nebo interně uložit k zakázce.</>}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            {trimStage === "boundary" && !trimClosed && trimControlNodes.length > 0 && (
+              <button type="button" onClick={removeLastTrimPoint} style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 9, fontWeight: 680, cursor: "pointer" }}>Smazat poslední</button>
+            )}
+            {(trimStage === "boundary" || trimStage === "region") && (
+              <button type="button" onClick={resetTrimBoundary} style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 9, fontWeight: 680, cursor: "pointer" }}>Reset hranice</button>
+            )}
+            {trimStage === "boundary" && !trimClosed && trimControlNodes.length >= 3 && (
+              <button type="button" onClick={closeTrimLoop} style={{ height: 31, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(251,191,36,.18)", background: "rgba(245,158,11,.065)", color: "#fde68a", fontSize: 9, fontWeight: 710, cursor: "pointer" }}>Uzavřít hranici</button>
+            )}
+            {trimStage === "region" && trimKeepMask && (
+              <button type="button" onClick={applyTrimResult} disabled={trimBusy} className={!trimBusy ? "artheticAnalysisReadyAction" : undefined}
+                style={{ height: 32, padding: "0 12px", borderRadius: 9, border: "1px solid rgba(74,222,128,.18)", background: "rgba(18,42,27,.97)", color: "#dffbea", fontSize: 9.5, fontWeight: 730, cursor: trimBusy ? "wait" : "pointer" }}><span>Oříznout</span></button>
+            )}
+            {trimStage === "result" && (
+              <>
+                <button type="button" onClick={() => undoLastTrim(trimSelection)} style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 9, fontWeight: 680, cursor: "pointer" }}>Vrátit ořez</button>
+                <button type="button" onClick={() => downloadTrimmedModel(trimSelection)} disabled={trimExportBusyUrl === trimSelection}
+                  style={{ height: 31, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,.10)", background: "rgba(255,255,255,.04)", color: "#e1e1e1", fontSize: 9, fontWeight: 700, cursor: trimExportBusyUrl === trimSelection ? "wait" : "pointer" }}>{trimExportBusyUrl === trimSelection ? "Připravuji…" : "Stáhnout"}</button>
+                {editorCapabilities.canSaveTrimmedToCase && (
+                  <button type="button" onClick={() => saveTrimmedModelToCase(trimSelection)} disabled={trimExportBusyUrl === trimSelection || !!trimmedExportsByUrl[trimSelection]?.saveRequested}
+                    style={{ height: 31, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(251,191,36,.17)", background: "rgba(245,158,11,.06)", color: trimmedExportsByUrl[trimSelection]?.saveRequested ? "#978764" : "#fde68a", fontSize: 9, fontWeight: 710, cursor: trimmedExportsByUrl[trimSelection]?.saveRequested ? "default" : "pointer" }}>{trimmedExportsByUrl[trimSelection]?.saveRequested ? "Předáno" : "Uložit do zakázky"}</button>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {(trimMessage || trimBusy) && (
+        <div style={{ marginTop: 9, padding: "7px 9px", borderRadius: 9, background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.055)", color: trimBusy ? "#cfcfcf" : "#787878", fontSize: 8.8, lineHeight: 1.45 }}>
+          {trimBusy && <span style={{ display: "inline-block", width: 9, height: 9, marginRight: 7, border: "1.5px solid rgba(255,255,255,.18)", borderTopColor: "#d7d7d7", borderRadius: "50%", animation: "artheticAnalysisSpin .8s linear infinite", verticalAlign: "-1px" }} />}
+          {trimMessage}
+        </div>
+      )}
+    </div>
+  )
+
   const alignmentWorkspace = alignmentMode && (
     <>
       <style>{`
@@ -9165,9 +10202,9 @@ export default function ClientPage() {
   return (
     <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black", overflow: "hidden" }}>
       <PreloadIcons />
-      {!alignmentMode && !mobileSliceSplitActive && logoEl}
-      {!hideSidebar && !alignmentMode && sidebar}
-      {!alignmentMode && topBarRight}
+      {!alignmentMode && !trimMode && !mobileSliceSplitActive && logoEl}
+      {!hideSidebar && !alignmentMode && !trimMode && sidebar}
+      {!alignmentMode && !trimMode && topBarRight}
 
       {isMobile && mobileFunctionsOpen && !alignmentMode && (
         <>
@@ -9342,6 +10379,7 @@ export default function ClientPage() {
         </>
       )}
 
+      {trimWorkspace}
       {alignmentWorkspace}
 
       {dicomLayoutActive && (
@@ -9767,9 +10805,9 @@ export default function ClientPage() {
         <directionalLight position={[0, -5, -5]} intensity={0.7 * sceneIntensity} />
 
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
-        <AlignmentFastRaycast enabled={alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy} />
+        <AlignmentFastRaycast enabled={(alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy) || (trimMode && !!trimSelection)} />
 
-        <AutoRotateScene enabled={!alignmentMode && isAutoRotating} target={cameraTarget} speedFactor={spinSpeed} />
+        <AutoRotateScene enabled={!alignmentMode && !trimMode && isAutoRotating} target={cameraTarget} speedFactor={spinSpeed} />
 
         <group ref={rootGroupRef}>
           <Suspense fallback={null}>
@@ -9780,9 +10818,11 @@ export default function ClientPage() {
                 url={f.url}
                 color={colors[i] ?? "#ffffff"}
                 opacity={opacities[i] ?? 1}
-                visible={alignmentMode && alignmentModelsSelected
-                  ? (f.url === alignmentPair.aUrl || f.url === alignmentPair.bUrl)
-                  : (visibles[i] ?? true)}
+                visible={trimMode && trimSelection
+                  ? f.url === trimSelection
+                  : alignmentMode && alignmentModelsSelected
+                    ? (f.url === alignmentPair.aUrl || f.url === alignmentPair.bUrl)
+                    : (visibles[i] ?? true)}
                 onLoaded={handleModelLoaded}
                 onMeshReady={handleMeshReady}
                 onObjectReady={handleObjectReady}
@@ -9807,13 +10847,31 @@ export default function ClientPage() {
                 onPinNote={handlePinNote}
                 onAlignmentSelect={alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy && (!alignmentHasA || f.url !== alignmentPair.aUrl)
                   ? selectAlignmentModelFromScene
-                  : null}
+                  : trimMode && trimStage === "model" && !trimBusy
+                    ? selectTrimModel
+                    : null}
                 onAlignmentHover={alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy
                   ? handleAlignmentSceneHover
                   : null}
+                onTrimSurfaceClick={trimMode && trimSelection === f.url && trimStage !== "result" ? handleTrimSurfaceClick : null}
+                onTrimSurfaceMove={trimMode && trimSelection === f.url && trimStage !== "result" ? handleTrimSurfaceMove : null}
               />
             ))}
           </Suspense>
+
+          {trimMode && trimContext && trimSelection && trimStage !== "result" && (
+            <TrimSurfaceOverlay
+              context={trimContext}
+              modelMatrix={modelTransforms[trimSelection]}
+              controlNodes={trimControlNodes}
+              segments={trimSegments}
+              previewPath={trimPreviewPath}
+              keepMask={trimKeepMask}
+              draggingPoint={trimDraggingPoint}
+              onBeginPointDrag={beginTrimPointDrag}
+              onCloseLoop={closeTrimLoop}
+            />
+          )}
           
           {activeAnalysisMode && pinnedNotes.filter((note) => note.mode === activeAnalysisMode).map(note => (
             <Html key={note.id} position={note.pos} zIndexRange={[100, 0]}>
@@ -9854,7 +10912,7 @@ export default function ClientPage() {
           ))}
         </group>
 
-        {!alignmentMode && dicomVolume && dicomSettings.viewMode !== "only2d" && (
+        {!alignmentMode && !trimMode && dicomVolume && dicomSettings.viewMode !== "only2d" && (
           <DicomVolume
             volume={dicomVolume}
             settings={dicomSettings}
@@ -9862,7 +10920,7 @@ export default function ClientPage() {
           />
         )}
 
-        {!alignmentMode && clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && (
+        {!alignmentMode && !trimMode && clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && (
           <group ref={setSliceRigGroup}>
             <group ref={setPlaneGroup} visible={!dicomLayoutActive || activeSlice === "vertical"}>
               <mesh>
@@ -9896,7 +10954,7 @@ export default function ClientPage() {
           </group>
         )}
 
-        {!alignmentMode && clippingEnabled && !isMobile && activePlaneGroup && (
+        {!alignmentMode && !trimMode && clippingEnabled && !isMobile && activePlaneGroup && (
           <>
             <TransformControls
               ref={transformRotateRef}
@@ -9956,7 +11014,7 @@ export default function ClientPage() {
           />
         )}
 
-        <TouchTrackballControls ref={trackballRef} target={cameraTarget} enabled={!sliceOverlayInteracting && !alignmentBusy} onInteractionChange={handleCameraInteraction} />
+        <TouchTrackballControls ref={trackballRef} target={cameraTarget} enabled={!sliceOverlayInteracting && !alignmentBusy && trimDraggingPoint == null && !trimBusy} onInteractionChange={handleCameraInteraction} />
         <RightButtonPan setTarget={setCameraTarget} trackballRef={trackballRef} />
       </Canvas>
 
