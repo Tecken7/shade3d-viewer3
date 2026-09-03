@@ -4318,6 +4318,24 @@ function ArtheticInlineColorPicker({ value, onChange }) {
   const rgb = colorHsvToRgb(hsv)
   const rgbRounded = { r: Math.round(rgb.r), g: Math.round(rgb.g), b: Math.round(rgb.b) }
   const currentHex = colorRgbToHex(rgbRounded)
+  const canUseEyeDropper =
+    typeof window !== "undefined" && typeof window.EyeDropper === "function"
+
+  const pickScreenColor = async () => {
+    if (!canUseEyeDropper) return
+    try {
+      const eyeDropper = new window.EyeDropper()
+      const result = await eyeDropper.open()
+      if (!result?.sRGBHex) return
+      const nextHex = normalizeColorHex(result.sRGBHex)
+      setHsv(colorRgbToHsv(colorHexToRgb(nextHex)))
+      setHexDraft(nextHex.toUpperCase())
+      lastEmittedHexRef.current = nextHex
+      onChange?.(nextHex)
+    } catch (error) {
+      if (error?.name !== "AbortError") console.warn("[ARTHETIC] EyeDropper failed", error)
+    }
+  }
 
   const updateRgbChannel = (channel, rawValue) => {
     const nextRgb = { ...rgbRounded, [channel]: Math.max(0, Math.min(255, Number(rawValue) || 0)) }
@@ -4338,7 +4356,28 @@ function ArtheticInlineColorPicker({ value, onChange }) {
           <div style={{ color: "#d7d7d7", fontSize: 9.5, fontWeight: 720 }}>Barva modelu</div>
           <div style={{ color: "#676767", fontSize: 8.4, marginTop: 1 }}>HEX / RGB</div>
         </div>
-        <span style={{ color: "#8a8a8a", fontSize: 9, fontVariantNumeric: "tabular-nums" }}>{currentHex.toUpperCase()}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ color: "#8a8a8a", fontSize: 9, fontVariantNumeric: "tabular-nums" }}>{currentHex.toUpperCase()}</span>
+          <button
+            type="button"
+            onClick={pickScreenColor}
+            disabled={!canUseEyeDropper}
+            title={canUseEyeDropper ? "Kapátko – vybrat barvu z obrazovky" : "Kapátko není v tomto prohlížeči podporované"}
+            aria-label="Vybrat barvu kapátkem"
+            style={{
+              width: 25, height: 25, padding: 0, display: "grid", placeItems: "center",
+              borderRadius: 7, border: "1px solid rgba(255,255,255,.09)",
+              background: "rgba(255,255,255,.035)", color: canUseEyeDropper ? "#cfcfcf" : "#555",
+              cursor: canUseEyeDropper ? "pointer" : "not-allowed", opacity: canUseEyeDropper ? 1 : .45,
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="m19 3 2 2-9.6 9.6-3.1.7.7-3.1L19 3Z" />
+              <path d="m14 6 4 4" />
+              <path d="M6.5 14.5 3 18v3h3l3.5-3.5" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       <div
