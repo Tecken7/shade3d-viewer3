@@ -1356,6 +1356,193 @@ function repairLoopBasis(points, normals) {
   return { center, n, u, v, radius: Math.max(radius, 1e-5) }
 }
 
+
+function repairMedian(values, fallback = 0) {
+  const sorted = (values || []).filter((value) => Number.isFinite(value)).slice().sort((a, b) => a - b)
+  if (!sorted.length) return fallback
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) * 0.5
+}
+
+function repairSmoothCircularDirections(boundary, rawDirections, radius = 5) {
+  if (!boundary?.length || !rawDirections?.length) return rawDirections || []
+  const count = boundary.length
+  return rawDirections.map((direction, index) => {
+    const sum = new THREE.Vector3()
+    let weightSum = 0
+    for (let offset = -radius; offset <= radius; offset++) {
+      const wrapped = (index + offset + count) % count
+      const weight = radius + 1 - Math.abs(offset)
+      const candidate = rawDirections[wrapped]
+      if (!candidate?.isVector3 || candidate.lengthSq() < 1e-12) continue
+      sum.addScaledVector(candidate, weight)
+      weightSum += weight
+    }
+    if (weightSum > 0) sum.multiplyScalar(1 / weightSum)
+    const normal = boundary[index]?.normal?.clone?.()
+    if (normal?.lengthSq?.() > 1e-12) {
+      normal.normalize()
+      sum.addScaledVector(normal, -sum.dot(normal))
+    }
+    if (sum.lengthSq() < 1e-12) return direction?.clone?.() || new THREE.Vector3(1, 0, 0)
+    return sum.normalize()
+  })
+}
+
+function repairPrepareBoundaryGuides(boundary) {
+  if (!boundary?.length) return boundary || []
+  const count = boundary.length
+  const rawDirections = boundary.map((sample, index) => {
+    const previous = boundary[(index - 1 + count) % count]?.position
+    const next = boundary[(index + 1) % count]?.position
+    const tangent = next?.clone?.().sub(previous || sample.position) || new THREE.Vector3(1, 0, 0)
+    if (tangent.lengthSq() < 1e-12) tangent.set(1, 0, 0)
+    tangent.normalize()
+
+    const normal = sample.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
+    if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1)
+    normal.normalize()
+
+    let direction = normal.clone().cross(tangent)
+    if (direction.lengthSq() < 1e-12) direction = tangent.clone().cross(normal)
+    if (direction.lengthSq() < 1e-12) direction.set(1, 0, 0)
+    direction.normalize()
+
+    const healthyVector = sample.healthyHint?.clone?.().sub(sample.position)
+    if (healthyVector?.lengthSq?.() > 1e-12 && direction.dot(healthyVector) < 0) direction.negate()
+    direction.addScaledVector(normal, -direction.dot(normal))
+    if (direction.lengthSq() < 1e-12 && healthyVector?.lengthSq?.() > 1e-12) {
+      direction.copy(healthyVector).addScaledVector(normal, -healthyVector.dot(normal))
+    }
+    if (direction.lengthSq() < 1e-12) direction.set(1, 0, 0)
+    return direction.normalize()
+  })
+
+  const smoothingRadius = Math.max(2, Math.min(8, Math.round(Math.sqrt(count) / 3)))
+  const smoothed = repairSmoothCircularDirections(boundary, rawDirections, smoothingRadius)
+  return boundary.map((sample, index) => ({ ...sample, guideDirection: smoothed[index] }))
+}
+
+function repairBoundaryParameterization(boundary) {
+  const count = boundary?.length || 0
+  if (count < 3) return null
+  const segmentLengths = new Array(count).fill(0)
+  let perimeter = 0
+  for (let index = 0; index < count; index++) {
+    const next = (index + 1) % count
+    const length = boundary[index].position.distanceTo(boundary[next].position)
+    segmentLengths[index] = Math.max(length, 1e-7)
+    perimeter += segmentLengths[index]
+  }
+  if (!(perimeter > 1e-7)) return null
+  const theta = new Array(count).fill(0)
+  let cumulative = 0
+  for (let index = 0; index < count; index++) {
+    theta[index] = (cumulative / perimeter) * Math.PI * 2
+    cumulative += segmentLengths[index]
+  }
+  const weights = segmentLengths.map((length, index) => {
+    const previous = segmentLengths[(index - 1 + count) % count]
+    return Math.max(1e-7, (previous + length) * 0.5)
+  })
+  return { theta, weights, perimeter }
+}
+
+function repairFourierVectorCoefficients(values, theta, weights, modeCount) {
+  const count = Math.min(values?.length || 0, theta?.length || 0, weights?.length || 0)
+  if (!count) return null
+  const sumWeight = weights.slice(0, count).reduce((sum, value) => sum + value, 0) || 1
+  const cosine = Array.from({ length: modeCount + 1 }, () => new THREE.Vector3())
+  const sine = Array.from({ length: modeCount + 1 }, () => new THREE.Vector3())
+  for (let index = 0; index < count; index++) {
+    cosine[0].addScaledVector(values[index], weights[index] / sumWeight)
+  }
+  for (let mode = 1; mode <= modeCount; mode++) {
+    const c = new THREE.Vector3()
+    const s = new THREE.Vector3()
+    for (let index = 0; index < count; index++) {
+      const scale = 2 * weights[index] / sumWeight
+      c.addScaledVector(values[index], Math.cos(mode * theta[index]) * scale)
+      s.addScaledVector(values[index], Math.sin(mode * theta[index]) * scale)
+    }
+    cosine[mode] = c
+    sine[mode] = s
+  }
+  return { cosine, sine, modeCount }
+}
+
+function repairMakeBiharmonicDisk(boundary, guideStrength = 0.62) {
+  const parameterization = repairBoundaryParameterization(boundary)
+  if (!parameterization) return null
+  const { theta, weights } = parameterization
+  const count = boundary.length
+  const center = new THREE.Vector3()
+  boundary.forEach((sample) => center.add(sample.position))
+  center.multiplyScalar(1 / count)
+  const distances = boundary.map((sample) => sample.position.distanceTo(center))
+  const robustRadius = Math.max(1e-5, repairMedian(distances, Math.max(...distances, 1e-5)))
+  const modeCount = Math.max(8, Math.min(28, Math.round(Math.sqrt(count) * 1.2)))
+
+  const positions = boundary.map((sample) => sample.position.clone())
+  const derivative = boundary.map((sample) => {
+    const direction = sample.guideDirection?.clone?.() || new THREE.Vector3()
+    if (direction.lengthSq() < 1e-12) return direction
+    return direction.normalize().multiplyScalar(robustRadius * guideStrength)
+  })
+  const positionCoeff = repairFourierVectorCoefficients(positions, theta, weights, modeCount)
+  const derivativeCoeff = repairFourierVectorCoefficients(derivative, theta, weights, modeCount)
+  if (!positionCoeff || !derivativeCoeff) return null
+
+  const evaluate = (radiusValue, angle, expectedNormal = null) => {
+    const r = Math.max(0, Math.min(1, radiusValue))
+    const p0 = positionCoeff.cosine[0]
+    const d0 = derivativeCoeff.cosine[0]
+    const b0 = d0.clone().multiplyScalar(0.5)
+    const a0 = p0.clone().sub(b0)
+    const position = a0.addScaledVector(b0, r * r)
+    const radial = d0.clone().multiplyScalar(r)
+    const angular = new THREE.Vector3()
+
+    for (let mode = 1; mode <= modeCount; mode++) {
+      const pCos = positionCoeff.cosine[mode]
+      const pSin = positionCoeff.sine[mode]
+      const dCos = derivativeCoeff.cosine[mode]
+      const dSin = derivativeCoeff.sine[mode]
+      const bCos = dCos.clone().addScaledVector(pCos, -mode).multiplyScalar(0.5)
+      const aCos = pCos.clone().sub(bCos)
+      const bSin = dSin.clone().addScaledVector(pSin, -mode).multiplyScalar(0.5)
+      const aSin = pSin.clone().sub(bSin)
+
+      const rk = Math.pow(r, mode)
+      const rk2 = Math.pow(r, mode + 2)
+      const radialCosValue = aCos.clone().multiplyScalar(rk).addScaledVector(bCos, rk2)
+      const radialSinValue = aSin.clone().multiplyScalar(rk).addScaledVector(bSin, rk2)
+
+      const cos = Math.cos(mode * angle)
+      const sin = Math.sin(mode * angle)
+      position.addScaledVector(radialCosValue, cos).addScaledVector(radialSinValue, sin)
+
+      const rkMinus = mode === 1 ? 1 : Math.pow(r, mode - 1)
+      const rkPlus = Math.pow(r, mode + 1)
+      const radialCosDerivative = aCos.clone().multiplyScalar(mode * rkMinus).addScaledVector(bCos, (mode + 2) * rkPlus)
+      const radialSinDerivative = aSin.clone().multiplyScalar(mode * rkMinus).addScaledVector(bSin, (mode + 2) * rkPlus)
+      radial.addScaledVector(radialCosDerivative, cos).addScaledVector(radialSinDerivative, sin)
+
+      angular.addScaledVector(radialCosValue, -mode * sin)
+      angular.addScaledVector(radialSinValue, mode * cos)
+    }
+
+    let normal = angular.clone().cross(radial)
+    if (normal.lengthSq() < 1e-12) normal = expectedNormal?.clone?.() || new THREE.Vector3(0, 0, 1)
+    if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1)
+    normal.normalize()
+    if (expectedNormal?.lengthSq?.() > 1e-12 && normal.dot(expectedNormal) < 0) normal.negate()
+    return { position, normal }
+  }
+
+  return { theta, robustRadius, modeCount, evaluate }
+}
+
 function findRepairBoundaryLoops(context) {
   if (!context) return []
   const boundaryEdges = []
@@ -1376,6 +1563,7 @@ function findRepairBoundaryLoops(context) {
         normal: corner.sourceNormal ? trimVec(corner.sourceNormal) : faceNormal.clone(),
         color: corner.color,
         uv: corner.uv,
+        centroid: triangle.centroid.clone(),
       })
       nodeSamples.set(corner.nodeId, list)
     })
@@ -1396,9 +1584,19 @@ function findRepairBoundaryLoops(context) {
     const normalValues = samples.map((sample) => sample.normal ? trimArr(sample.normal) : null)
     const nArr = repairAverage(normalValues, 3, [0,0,1])
     const normal = new THREE.Vector3(...nArr).normalize()
+    const healthyHint = new THREE.Vector3()
+    let healthyCount = 0
+    samples.forEach((sample) => {
+      if (!sample.centroid?.isVector3) return
+      healthyHint.add(sample.centroid)
+      healthyCount++
+    })
+    if (healthyCount) healthyHint.multiplyScalar(1 / healthyCount)
+    else healthyHint.copy(context.nodes[nodeId])
     return {
       position: context.nodes[nodeId].clone(),
       normal,
+      healthyHint,
       color: repairAverage(samples.map((sample) => sample.color), 3, null),
       uv: repairAverage(samples.map((sample) => sample.uv), 2, null),
     }
@@ -1423,7 +1621,10 @@ function findRepairBoundaryLoops(context) {
     }
     const componentNodes = new Set()
     componentEdges.forEach((edge) => { componentNodes.add(edge.a); componentNodes.add(edge.b) })
-    const closed = [...componentNodes].every((nodeId) => (adjacency.get(nodeId) || []).filter((entry) => componentEdges.includes(entry.edge)).length === 2)
+    const componentEdgeKeys = new Set(componentEdges.map((edge) => edge.key))
+    const closed = [...componentNodes].every((nodeId) =>
+      (adjacency.get(nodeId) || []).filter((entry) => componentEdgeKeys.has(entry.edge.key)).length === 2
+    )
     if (!closed || componentNodes.size < 3) continue
 
     const edgeMap = new Map(componentEdges.map((edge) => [edge.key, edge]))
@@ -1447,6 +1648,7 @@ function findRepairBoundaryLoops(context) {
     if (current !== start || ordered.length < 3) continue
     const childUuids = new Set(orderedEdges.map((edge) => context.triangles[edge.triangleIndex]?.childUuid).filter(Boolean))
     if (childUuids.size !== 1) continue
+
     let boundary = ordered.map((nodeId) => ({ nodeId, ...sampleNode(nodeId) }))
     let points = boundary.map((sample) => sample.position)
     let normals = boundary.map((sample) => sample.normal)
@@ -1467,8 +1669,14 @@ function findRepairBoundaryLoops(context) {
       basis = repairLoopBasis(points, normals)
       signedArea = -signedArea
     }
+    boundary = repairPrepareBoundaryGuides(boundary)
+    points = boundary.map((sample) => sample.position)
+
     let perimeter = 0
     for (let i = 0; i < points.length; i++) perimeter += points[i].distanceTo(points[(i+1)%points.length])
+
+    // Pro klasifikaci velikosti necháváme původní projekční metriku,
+    // samotná rekonstrukce už na projekci do jedné roviny vůbec nezávisí.
     const area = Math.abs(signedArea) * 0.5
     const equivalentRadius = Math.sqrt(Math.max(0, area) / Math.PI)
     const triangleIndices = [...new Set(orderedEdges.map((edge) => edge.triangleIndex))]
@@ -1497,54 +1705,103 @@ function findRepairBoundaryLoops(context) {
 
 function buildRepairPatchData(context, hole) {
   if (!context || !hole?.boundary?.length) return null
-  const boundary = hole.boundary
+  const boundary = repairPrepareBoundaryGuides(hole.boundary)
   const points = boundary.map((sample) => sample.position.clone())
-  const normals = boundary.map((sample) => sample.normal?.clone?.() || null)
-  const basis = repairLoopBasis(points, normals)
-  const fit = repairFitSurface(boundary, basis)
-  const radius = basis.radius
+  const disk = repairMakeBiharmonicDisk(boundary, 0.62)
+  if (!disk) return null
+
   const avgColor = repairAverage(boundary.map((sample) => sample.color), 3, null)
   const avgUv = repairAverage(boundary.map((sample) => sample.uv), 2, null)
-  const ringCount = Math.max(2, Math.min(5, Math.ceil(Math.sqrt(boundary.length) / 5)))
-  const makeCorner = (position, normal, color, uv) => ({ sourcePos: trimArr(position), sourceNormal: normal ? trimArr(normal) : null, color, uv })
-  const rings = [boundary.map((sample) => makeCorner(sample.position, sample.normal, sample.color, sample.uv))]
+  const avgNormal = new THREE.Vector3()
+  boundary.forEach((sample) => { if (sample.normal?.isVector3) avgNormal.add(sample.normal) })
+  if (avgNormal.lengthSq() < 1e-12) avgNormal.set(0, 0, 1)
+  avgNormal.normalize()
+
+  const ringCount = Math.max(4, Math.min(7, Math.round(Math.sqrt(boundary.length) / 3.4)))
+  const makeCorner = (position, normal, color, uv) => ({
+    sourcePos: trimArr(position),
+    sourceNormal: normal ? trimArr(normal) : null,
+    color,
+    uv,
+  })
+
+  // Vnější prstenec musí zůstat přesně na původní boundary.
+  // Vnitřek je nezávislý parametrický disk, takže se ani silně konkávní / neplanární
+  // otvor nemusí "smršťovat" k jedinému 3D středu.
+  const rings = [
+    boundary.map((sample) => makeCorner(sample.position, sample.normal, sample.color, sample.uv)),
+  ]
+
   for (let ring = 1; ring <= ringCount; ring++) {
     const t = ring / (ringCount + 1)
-    rings.push(boundary.map((sample) => {
-      const q = sample.position.clone().sub(basis.center)
-      const X0 = q.dot(basis.u) / radius
-      const Y0 = q.dot(basis.v) / radius
-      const X = X0 * (1 - t)
-      const Y = Y0 * (1 - t)
-      const Z = fit.evalSurface(X, Y)
-      const position = basis.center.clone()
-        .addScaledVector(basis.u, X * radius)
-        .addScaledVector(basis.v, Y * radius)
-        .addScaledVector(basis.n, Z * radius)
-      const normal = fit.normalAt(X, Y)
-      const color = sample.color && avgColor ? sample.color.map((value, i) => value*(1-t) + avgColor[i]*t) : (sample.color || avgColor)
-      const uv = sample.uv && avgUv ? sample.uv.map((value, i) => value*(1-t) + avgUv[i]*t) : (sample.uv || avgUv)
-      return makeCorner(position, normal, color, uv)
+    const r = 1 - t
+    rings.push(boundary.map((sample, index) => {
+      const evaluated = disk.evaluate(r, disk.theta[index], sample.normal)
+      const color = sample.color && avgColor
+        ? sample.color.map((value, channel) => value * r + avgColor[channel] * (1 - r))
+        : (sample.color || avgColor)
+      const uv = sample.uv && avgUv
+        ? sample.uv.map((value, channel) => value * r + avgUv[channel] * (1 - r))
+        : (sample.uv || avgUv)
+      return makeCorner(evaluated.position, evaluated.normal, color, uv)
     }))
   }
-  const centerZ = fit.evalSurface(0, 0)
-  const centerPos = basis.center.clone().addScaledVector(basis.n, centerZ * radius)
-  const centerCorner = makeCorner(centerPos, fit.normalAt(0,0), avgColor, avgUv)
+
+  const centerEvaluation = disk.evaluate(0, 0, avgNormal)
+  const centerCorner = makeCorner(centerEvaluation.position, avgNormal, avgColor, avgUv)
   const triangles = []
+
   for (let ring = 0; ring < rings.length - 1; ring++) {
-    const outer = rings[ring], inner = rings[ring+1]
-    for (let i = 0; i < outer.length; i++) {
-      const j = (i + 1) % outer.length
-      triangles.push([outer[i], outer[j], inner[j]])
-      triangles.push([outer[i], inner[j], inner[i]])
+    const outer = rings[ring]
+    const inner = rings[ring + 1]
+    for (let index = 0; index < outer.length; index++) {
+      const next = (index + 1) % outer.length
+      triangles.push([outer[index], outer[next], inner[next]])
+      triangles.push([outer[index], inner[next], inner[index]])
     }
   }
+
   const last = rings[rings.length - 1]
-  for (let i = 0; i < last.length; i++) {
-    const j = (i + 1) % last.length
-    triangles.push([last[i], last[j], centerCorner])
+  for (let index = 0; index < last.length; index++) {
+    const next = (index + 1) % last.length
+    triangles.push([last[index], last[next], centerCorner])
   }
-  return { holeId: hole.id, childUuid: hole.childUuid, materialIndex: hole.materialIndex || 0, triangles, boundaryPoints: points.map(trimArr) }
+
+  // Winding se řídí původními normálami okraje, ne náhodnou orientací parametrického disku.
+  let orientationScore = 0
+  const firstInner = rings[1]
+  const stride = Math.max(1, Math.floor(boundary.length / 48))
+  for (let index = 0; index < boundary.length; index += stride) {
+    const next = (index + 1) % boundary.length
+    const a = trimVec(rings[0][index].sourcePos)
+    const b = trimVec(rings[0][next].sourcePos)
+    const c = trimVec(firstInner[next].sourcePos)
+    const faceNormal = b.clone().sub(a).cross(c.clone().sub(a))
+    if (faceNormal.lengthSq() < 1e-12) continue
+    faceNormal.normalize()
+    const expected = boundary[index].normal?.clone?.().add(boundary[next].normal || new THREE.Vector3())
+    if (expected?.lengthSq?.() > 1e-12) orientationScore += Math.sign(faceNormal.dot(expected.normalize()))
+  }
+  if (orientationScore < 0) {
+    for (let index = 0; index < triangles.length; index++) {
+      const [a, b, c] = triangles[index]
+      triangles[index] = [a, c, b]
+    }
+  }
+
+  return {
+    holeId: hole.id,
+    childUuid: hole.childUuid,
+    materialIndex: hole.materialIndex || 0,
+    triangles,
+    boundaryPoints: points.map(trimArr),
+    reconstruction: {
+      method: "biharmonic-disk",
+      modes: disk.modeCount,
+      guideStrength: 0.62,
+      robustRadius: disk.robustRadius,
+    },
+  }
 }
 
 function createRepairPatchPreviewGeometry(patchData) {
