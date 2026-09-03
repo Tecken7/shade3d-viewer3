@@ -8,6 +8,9 @@ import { TrackballControls } from "three/examples/jsm/controls/TrackballControls
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader"
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader"
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader"
+import { STLExporter } from "three/examples/jsm/exporters/STLExporter"
+import { PLYExporter } from "three/examples/jsm/exporters/PLYExporter"
+import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter"
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, SAH } from "three-mesh-bvh"
 import { Unzip, UnzipInflate } from "fflate"
 import * as dicomParser from "dicom-parser"
@@ -128,6 +131,103 @@ function filesChanged(prev, next) {
   if (prev.length !== next.length) return true
   for (let i = 0; i < prev.length; i++) if (prev[i].url !== next[i].url) return true
   return false
+}
+
+
+/* ---------- Export zarovnaného modelu ---------- */
+function makeAlignedExportName(file) {
+  const raw = file?.rawName || file?.name || "aligned-model.stl"
+  const ext = inferExt(raw) || inferExt(file?.url) || "stl"
+  const base = stripExt(String(raw).split("/").pop() || "model")
+  return `${base}_aligned.${ext}`
+}
+
+function alignedExportMime(ext) {
+  if (ext === "obj") return "text/plain;charset=utf-8"
+  if (ext === "ply") return "application/octet-stream"
+  if (ext === "stl") return "application/octet-stream"
+  return "application/octet-stream"
+}
+
+// Vytvoří exportní objekt v lokálním prostoru rootGroup scény. Tím se zapéká
+// Alignment transformace Moving B, ale NE interní AutoCenter posun celého vieweru.
+function buildBakedAlignedExportObject(sourceObject, viewerRoot) {
+  if (!sourceObject || !viewerRoot) throw new Error("Model není připravený k exportu.")
+  viewerRoot.updateMatrixWorld(true)
+  sourceObject.updateMatrixWorld(true)
+
+  const rootInverse = viewerRoot.matrixWorld.clone().invert()
+  const exportRoot = new THREE.Group()
+  exportRoot.name = `${sourceObject.name || "model"}_aligned_export`
+
+  sourceObject.traverse((child) => {
+    if (!child?.isMesh || !child.geometry) return
+    child.updateMatrixWorld(true)
+    const localToViewerRoot = rootInverse.clone().multiply(child.matrixWorld)
+    const geometry = child.geometry.clone()
+    // Analysis heatmapa používá dočasně atribut `color`. Do exportu ale musí jít
+    // původní TEX / vertex colors, nikoli barvy Odchylky nebo Okluze.
+    if (child.userData?._originalColors) {
+      geometry.setAttribute("color", child.userData._originalColors.clone())
+    } else if (
+      child.geometry?.getAttribute?.("_analysisDist") ||
+      child.userData?._comparisonColors ||
+      child.userData?._occlusionColors
+    ) {
+      geometry.deleteAttribute("color")
+    }
+    geometry.deleteAttribute("_analysisDist")
+    geometry.applyMatrix4(localToViewerRoot)
+    geometry.computeBoundingBox?.()
+    geometry.computeBoundingSphere?.()
+
+    let material = child.material
+    if (Array.isArray(material)) material = material.map((item) => item?.clone?.() || item)
+    else material = material?.clone?.() || material
+
+    const mesh = new THREE.Mesh(geometry, material)
+    mesh.name = child.name || sourceObject.name || "mesh"
+    mesh.matrixAutoUpdate = true
+    exportRoot.add(mesh)
+  })
+
+  if (exportRoot.children.length === 0) throw new Error("Model neobsahuje exportovatelnou geometrii.")
+  exportRoot.updateMatrixWorld(true)
+  return exportRoot
+}
+
+function disposeAlignedExportObject(object) {
+  object?.traverse?.((child) => {
+    if (!child?.isMesh) return
+    child.geometry?.dispose?.()
+    const materials = Array.isArray(child.material) ? child.material : [child.material]
+    materials.filter(Boolean).forEach((material) => material.dispose?.())
+  })
+}
+
+async function alignedObjectToBlob(object, ext) {
+  if (ext === "stl") {
+    const result = new STLExporter().parse(object, { binary: true })
+    return new Blob([result], { type: alignedExportMime(ext) })
+  }
+  if (ext === "ply") {
+    return await new Promise((resolve, reject) => {
+      try {
+        new PLYExporter().parse(
+          object,
+          (result) => resolve(new Blob([result], { type: alignedExportMime(ext) })),
+          { binary: true }
+        )
+      } catch (error) {
+        reject(error)
+      }
+    })
+  }
+  if (ext === "obj") {
+    const result = new OBJExporter().parse(object)
+    return new Blob([result], { type: alignedExportMime(ext) })
+  }
+  throw new Error(`Export formátu .${ext || "?"} zatím není podporovaný.`)
 }
 
 /* ---------- Ikony ---------- */
@@ -4668,12 +4768,42 @@ export default function ClientPage() {
   const [alignmentStep, setAlignmentStep] = useState("models") // models | points | prealign | bestfit
   const [alignmentPrealignMatrix, setAlignmentPrealignMatrix] = useState(null)
   const [modelTransforms, setModelTransforms] = useState({})
+  // Session výsledky Best Fitu. U veřejného odkazu existují jen do zavření stránky;
+  // interní editor je může explicitně uložit jako nový Attachment do zakázky.
+  const [alignedExportsByUrl, setAlignedExportsByUrl] = useState({})
+  const [alignedExportBusyUrl, setAlignedExportBusyUrl] = useState("")
+  const [editorCapabilities, setEditorCapabilities] = useState({ canSaveAlignedToCase: false })
   const alignmentPointerHintRef = useRef(null)
   const alignmentSceneHoveredUrlRef = useRef("")
   const alignmentWorkerRef = useRef(null)
   const alignmentWorkerRequestsRef = useRef(new Map())
   const alignmentWorkerRequestIdRef = useRef(0)
   const alignmentWorkerFailedRef = useRef(false)
+
+  // Komunikace s interním Case Cloud editorem. Veřejný viewer může stejné
+  // zprávy posílat, ale bez autorizovaného parentu se nic neuloží.
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined
+    const onMessage = (event) => {
+      if (event.source !== window.parent) return
+      if (event.data?.type !== "ARTHETIC_EDITOR_CAPABILITIES") return
+      const payload = event.data?.payload || {}
+      setEditorCapabilities({ canSaveAlignedToCase: !!payload.canSaveAlignedToCase })
+    }
+    window.addEventListener("message", onMessage)
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage({ type: "ARTHETIC_VIEWER_READY_FOR_EDITOR_CAPABILITIES" }, "*")
+    }
+    return () => window.removeEventListener("message", onMessage)
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.parent || window.parent === window) return
+    window.parent.postMessage({
+      type: "ARTHETIC_ALIGNMENT_MODE",
+      payload: { active: !!alignmentMode && alignmentTransition !== "exiting" },
+    }, "*")
+  }, [alignmentMode, alignmentTransition])
 
   useEffect(() => {
     if (!USE_ALIGNMENT_WORKER || typeof Worker === "undefined") return undefined
@@ -5012,6 +5142,8 @@ export default function ClientPage() {
     setAlignmentStep("models")
     setAlignmentPrealignMatrix(null)
     setModelTransforms({})
+    setAlignedExportsByUrl({})
+    setAlignedExportBusyUrl("")
     meshesRef.current = {}
     modelObjectsRef.current = {}
   }, [analysisFilesKey])
@@ -5130,6 +5262,13 @@ export default function ClientPage() {
 
   const applyModelTransform = useCallback((url, matrixValue) => {
     const array = matrixArrayOrIdentity(matrixValue).slice()
+    // Jakákoli další změna polohy modelu zneplatní předchozí export Best Fitu.
+    setAlignedExportsByUrl((previous) => {
+      if (!previous[url]) return previous
+      const next = { ...previous }
+      delete next[url]
+      return next
+    })
     // Jakákoli změna polohy modelu zneplatní dříve spočítanou deviation mapu.
     // Nikdy tak nezůstane heatmapa/metrika svázaná se starou transformací.
     invalidateComparisonResult()
@@ -5144,6 +5283,87 @@ export default function ClientPage() {
     rootGroupRef.current?.updateMatrixWorld(true)
     // Alignment transform nesmí měnit kameru ani znovu spouštět AutoFrame.
   }, [invalidateComparisonResult])
+
+  const createAlignedExport = useCallback(async (url) => {
+    const info = alignedExportsByUrl[url]
+    const file = files.find((item) => item.url === url)
+    const sourceObject = modelObjectsRef.current[url]
+    if (!info || !file || !sourceObject || !rootGroupRef.current) {
+      throw new Error("Pro tento model zatím není dokončený Best Fit.")
+    }
+
+    const ext = inferExt(file.rawName || file.name || file.url)
+    if (!["stl", "ply", "obj"].includes(ext)) throw new Error(`Export .${ext || "?"} není podporovaný.`)
+
+    setAlignedExportBusyUrl(url)
+    let exportObject = null
+    try {
+      exportObject = buildBakedAlignedExportObject(sourceObject, rootGroupRef.current)
+      const blob = await alignedObjectToBlob(exportObject, ext)
+      const referenceFile = files.find((item) => item.url === info.referenceUrl)
+      return {
+        blob,
+        ext,
+        mimeType: alignedExportMime(ext),
+        name: makeAlignedExportName(file),
+        derivedFrom: file.rawName || file.name || makeAlignedExportName(file),
+        alignmentReference: referenceFile?.rawName || referenceFile?.name || "Reference A",
+        alignmentMatrix: matrixArrayOrIdentity(info.matrix).slice(),
+        alignmentRms: Number.isFinite(info.rms) ? info.rms : null,
+        alignmentP95: Number.isFinite(info.p95) ? info.p95 : null,
+      }
+    } finally {
+      disposeAlignedExportObject(exportObject)
+      setAlignedExportBusyUrl("")
+    }
+  }, [alignedExportsByUrl, files])
+
+  const downloadAlignedModel = useCallback(async (url) => {
+    try {
+      const result = await createAlignedExport(url)
+      const objectUrl = URL.createObjectURL(result.blob)
+      const anchor = document.createElement("a")
+      anchor.href = objectUrl
+      anchor.download = result.name
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1500)
+    } catch (error) {
+      console.error("Aligned export download error:", error)
+      setAlignmentMessage(error?.message || "Zarovnaný model se nepodařilo exportovat.")
+    }
+  }, [createAlignedExport])
+
+  const saveAlignedModelToCase = useCallback(async (url) => {
+    if (!editorCapabilities.canSaveAlignedToCase || !window.parent || window.parent === window) return
+    try {
+      const result = await createAlignedExport(url)
+      const buffer = await result.blob.arrayBuffer()
+      window.parent.postMessage({
+        type: "ARTHETIC_SAVE_ALIGNED_MODEL",
+        payload: {
+          name: result.name,
+          ext: result.ext,
+          mimeType: result.mimeType,
+          buffer,
+          derivedFrom: result.derivedFrom,
+          alignmentReference: result.alignmentReference,
+          alignmentMatrix: result.alignmentMatrix,
+          alignmentRms: result.alignmentRms,
+          alignmentP95: result.alignmentP95,
+          createdAt: new Date().toISOString(),
+        },
+      }, "*", [buffer])
+      setAlignedExportsByUrl((previous) => previous[url]
+        ? { ...previous, [url]: { ...previous[url], saveRequested: true } }
+        : previous)
+      setAlignmentMessage("Zarovnaný model byl předán k uložení do zakázky.")
+    } catch (error) {
+      console.error("Aligned export save error:", error)
+      setAlignmentMessage(error?.message || "Zarovnaný model se nepodařilo připravit k uložení.")
+    }
+  }, [createAlignedExport, editorCapabilities.canSaveAlignedToCase])
 
   const getAlignmentPair = useCallback(() => {
     if (alignmentSelection.length !== 2) return { aUrl: null, bUrl: null, fileA: null, fileB: null }
@@ -5595,6 +5815,18 @@ export default function ClientPage() {
         setAlignmentProgress({ mode: "metrics", stage: 4, stages: 4, iteration: fraction, iterations: 1, rms: result.rms, correspondences: result.correspondences, percent: 94 + Math.min(1, fraction) * 5.5 })
       })
       setAlignmentProgress({ mode: "metrics", stage: 4, stages: 4, iteration: 1, iterations: 1, rms: stats?.rms ?? result.rms, correspondences: result.correspondences, percent: 100 })
+      const exportMatrix = modelObjectsRef.current[bUrl]?.matrix?.toArray?.() || result.matrix
+      setAlignedExportsByUrl((previous) => ({
+        ...previous,
+        [bUrl]: {
+          referenceUrl: aUrl,
+          matrix: matrixArrayOrIdentity(exportMatrix).slice(),
+          rms: stats?.rms ?? result.rms ?? null,
+          p95: stats?.percentile95 ?? null,
+          createdAt: Date.now(),
+          saveRequested: false,
+        },
+      }))
       setAlignmentWorkflowStage("bestfit")
       setAlignmentMessage(result.improved
         ? (stats
@@ -6969,6 +7201,8 @@ export default function ClientPage() {
     <>
       {files.map((f, i) => {
         const isTexAvailable = !!hasTexMap[f.url]
+        const alignedInfo = alignedExportsByUrl[f.url] || null
+        const alignedReferenceFile = alignedInfo ? files.find((item) => item.url === alignedInfo.referenceUrl) : null
         const isExpanded = openColorPickerUrl === f.url
         const toggleExpanded = () =>
           setOpenColorPickerUrl((previous) => previous === f.url ? null : f.url)
@@ -7089,6 +7323,41 @@ export default function ClientPage() {
             <button className={`toggle icon-btn ${visibles[i] ? "is-on" : "is-off"}`} onClick={() => setVisibles((prev) => prev.map((v, idx) => (idx === i ? !v : v)))} aria-label={visibles[i] ? `Hide ${f.name}` : `Show ${f.name}`} title={visibles[i] ? "Skrýt" : "Zobrazit"} style={{ width: 32, height: 24, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: visibles[i] ? "rgba(255,255,255,.025)" : "rgba(255,255,255,.012)", border: "1px solid rgba(255,255,255,.09)", borderRadius: 7, cursor: "pointer", opacity: visibles[i] ? 1 : .56 }}>
               <img src={(visibles[i] ?? true) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
             </button>
+
+            {alignedInfo && (
+              <div style={{
+                gridColumn: "1 / -1", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+                marginTop: 1, padding: "7px 8px", borderRadius: 8,
+                background: "rgba(34,197,94,.045)", border: "1px solid rgba(74,222,128,.12)",
+              }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ color: "#b7f7ca", fontSize: 8.6, fontWeight: 760, letterSpacing: ".02em" }}>BEST FIT · ZAROVNÁNO</div>
+                  <div style={{ marginTop: 2, color: "#707070", fontSize: 8.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    vůči {stripExt(alignedReferenceFile?.rawName || alignedReferenceFile?.name || "Reference A")}
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 5, flex: "0 0 auto" }}>
+                  <button
+                    type="button"
+                    onClick={() => downloadAlignedModel(f.url)}
+                    disabled={alignedExportBusyUrl === f.url}
+                    style={{ height: 25, padding: "0 8px", borderRadius: 7, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#d5d5d5", fontSize: 8.3, fontWeight: 680, cursor: alignedExportBusyUrl === f.url ? "wait" : "pointer" }}
+                  >
+                    {alignedExportBusyUrl === f.url ? "Připravuji…" : "Stáhnout"}
+                  </button>
+                  {editorCapabilities.canSaveAlignedToCase && (
+                    <button
+                      type="button"
+                      onClick={() => saveAlignedModelToCase(f.url)}
+                      disabled={alignedExportBusyUrl === f.url || !!alignedInfo.saveRequested}
+                      style={{ height: 25, padding: "0 8px", borderRadius: 7, border: "1px solid rgba(74,222,128,.16)", background: "rgba(34,197,94,.065)", color: alignedInfo.saveRequested ? "#7b9c84" : "#b7f7ca", fontSize: 8.3, fontWeight: 700, cursor: alignedInfo.saveRequested ? "default" : "pointer" }}
+                    >
+                      {alignedInfo.saveRequested ? "Předáno" : "Uložit do zakázky"}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
 
             <div style={{
               gridColumn: "1 / -1", display: "grid",
@@ -8553,9 +8822,16 @@ export default function ClientPage() {
               <>
                 <div style={{ width: 18, height: 1, background: "rgba(255,255,255,.08)", flex: "0 0 auto" }} />
                 {[
-                  { label: "Odchylka", onClick: showAlignmentDeviation, disabled: !alignmentStats, delay: ".08s" },
-                  { label: "Reset polohy", onClick: resetAlignmentTransform, disabled: false, delay: ".23s" },
-                  { label: "Hotovo", onClick: closeAlignmentMode, disabled: false, delay: ".38s" },
+                  { label: "Odchylka", onClick: showAlignmentDeviation, disabled: !alignmentStats, delay: ".06s" },
+                  { label: alignedExportBusyUrl === alignmentPair.bUrl ? "Připravuji…" : "Stáhnout B", onClick: () => downloadAlignedModel(alignmentPair.bUrl), disabled: !alignedExportsByUrl[alignmentPair.bUrl] || alignedExportBusyUrl === alignmentPair.bUrl, delay: ".14s" },
+                  ...(editorCapabilities.canSaveAlignedToCase ? [{
+                    label: alignedExportsByUrl[alignmentPair.bUrl]?.saveRequested ? "B předáno" : "Uložit B",
+                    onClick: () => saveAlignedModelToCase(alignmentPair.bUrl),
+                    disabled: !alignedExportsByUrl[alignmentPair.bUrl] || alignedExportBusyUrl === alignmentPair.bUrl || !!alignedExportsByUrl[alignmentPair.bUrl]?.saveRequested,
+                    delay: ".21s",
+                  }] : []),
+                  { label: "Reset polohy", onClick: resetAlignmentTransform, disabled: false, delay: ".29s" },
+                  { label: "Hotovo", onClick: closeAlignmentMode, disabled: false, delay: ".37s" },
                 ].map((action) => (
                   <button
                     key={action.label}
