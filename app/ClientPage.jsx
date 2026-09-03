@@ -984,42 +984,59 @@ function TrimRegionPreview({ context, plan, componentId }) {
   )
 }
 
-function makeTrimPolylineCurve(points) {
+function collectTrimBoundaryPoints(segments, closed = false) {
+  const result = []
+  for (const segment of segments || []) {
+    for (const point of segment?.points || []) {
+      const vector = trimVec(point)
+      if (!result.length || trimVec(result[result.length - 1]).distanceToSquared(vector) > 1e-14) {
+        result.push(trimArr(vector))
+      }
+    }
+  }
+  if (closed && result.length > 2 && trimVec(result[0]).distanceToSquared(trimVec(result[result.length - 1])) <= 1e-12) {
+    result.pop()
+  }
+  return result
+}
+
+function makeTrimPolylineCurve(points, closed = false) {
   const vectors = []
   for (const point of points || []) {
     const vector = trimVec(point)
     if (!vectors.length || vectors[vectors.length - 1].distanceToSquared(vector) > 1e-14) vectors.push(vector)
   }
+  if (closed && vectors.length > 2 && vectors[0].distanceToSquared(vectors[vectors.length - 1]) <= 1e-12) vectors.pop()
   if (vectors.length < 2) return null
-  const cumulative = [0]
-  for (let i = 1; i < vectors.length; i++) cumulative.push(cumulative[i - 1] + vectors[i - 1].distanceTo(vectors[i]))
-  const total = cumulative[cumulative.length - 1] || 1
-  const curve = new THREE.Curve()
-  curve.getPoint = (t, target = new THREE.Vector3()) => {
-    const distance = THREE.MathUtils.clamp(t, 0, 1) * total
-    let index = 0
-    while (index < cumulative.length - 2 && cumulative[index + 1] < distance) index++
-    const start = cumulative[index]
-    const end = cumulative[index + 1]
-    const local = end > start ? (distance - start) / (end - start) : 0
-    return target.copy(vectors[index]).lerp(vectors[index + 1], local)
-  }
-  curve.getPointAt = curve.getPoint
-  return curve
+  if (vectors.length === 2) return new THREE.LineCurve3(vectors[0], vectors[1])
+
+  // Centripetal Catmull-Rom dává hranici přirozený „ease“ přes kontrolní body:
+  // křivka stále prochází potvrzenými surface body, ale tangent se zprůměruje a
+  // ostré 90° zlomy už vizuálně nepůsobí jako zalomená polyline.
+  return new THREE.CatmullRomCurve3(vectors, closed, "centripetal", 0.35)
 }
 
-function TrimBoundaryTube({ points, radius }) {
+function TrimBoundaryTube({ points, radius, closed = false }) {
   const geometry = useMemo(() => {
-    const curve = makeTrimPolylineCurve(points)
+    const curve = makeTrimPolylineCurve(points, closed)
     if (!curve) return null
-    const tubularSegments = Math.max(4, Math.min(900, (points.length - 1) * 3))
-    return new THREE.TubeGeometry(curve, tubularSegments, radius, 6, false)
-  }, [points, radius])
+    const tubularSegments = Math.max(18, Math.min(1400, Math.max(points.length * 4, closed ? 72 : 32)))
+    return new THREE.TubeGeometry(curve, tubularSegments, radius, 10, closed)
+  }, [points, radius, closed])
   useEffect(() => () => geometry?.dispose?.(), [geometry])
   if (!geometry) return null
   return (
     <mesh geometry={geometry} renderOrder={1500} raycast={() => null}>
-      <meshBasicMaterial color="#69a7d8" transparent opacity={0.72} depthTest depthWrite={false} polygonOffset polygonOffsetFactor={-2} polygonOffsetUnits={-2} />
+      <meshBasicMaterial
+        color="#6fa8d6"
+        transparent
+        opacity={0.88}
+        depthTest
+        depthWrite={false}
+        polygonOffset
+        polygonOffsetFactor={-2.5}
+        polygonOffsetUnits={-2.5}
+      />
     </mesh>
   )
 }
@@ -1033,6 +1050,7 @@ function TrimSurfaceOverlay({
   keepComponent,
   hoverComponent,
   draggingPoint,
+  closed,
   onBeginPointDrag,
   onCloseLoop,
 }) {
@@ -1050,17 +1068,20 @@ function TrimSurfaceOverlay({
 
   if (!context) return null
   const pointRadius = Math.max(0.10, Math.min(1.15, context.diagonal * 0.0067))
-  const lineRadius = Math.max(0.018, Math.min(0.18, context.diagonal * 0.00062))
+  // Fyzická 3D tloušťka, ne 1px screen-space čára. U běžného dentálního scanu
+  // vychází průměr přibližně 0.20–0.30 mm, ale stále se škáluje podle modelu.
+  const lineRadius = Math.max(0.035, Math.min(0.32, context.diagonal * 0.00145))
   const previewComponent = keepComponent ?? hoverComponent
+  const visualBoundaryPoints = collectTrimBoundaryPoints(segments, !!closed)
 
   return (
     <group ref={groupRef} matrixAutoUpdate={false}>
       {boundaryPlan && previewComponent != null && (
         <TrimRegionPreview context={context} plan={boundaryPlan} componentId={previewComponent} />
       )}
-      {(segments || []).map((segment, index) => (
-        <TrimBoundaryTube key={`trim-line-${index}`} points={segment?.points || []} radius={lineRadius} />
-      ))}
+      {visualBoundaryPoints.length >= 2 && (
+        <TrimBoundaryTube points={visualBoundaryPoints} radius={lineRadius} closed={!!closed} />
+      )}
       {(controlNodes || []).map((control, index) => {
         const point = control?.point
         if (!point) return null
@@ -1074,7 +1095,11 @@ function TrimSurfaceOverlay({
             onPointerDown={(event) => {
               event.stopPropagation()
               event.nativeEvent?.preventDefault?.()
-              onBeginPointDrag?.(index)
+              // R3F a TrackballControls poslouchají stejný canvas. Zastav další
+              // nativní listener na tomto pointerdownu, aby kliknutí/drag kuličky
+              // nikdy současně nespustilo orbit kamery.
+              event.nativeEvent?.stopImmediatePropagation?.()
+              onBeginPointDrag?.(index, event)
             }}
             onClick={isFirst ? (event) => {
               event.stopPropagation()
@@ -5749,11 +5774,55 @@ export default function ClientPage() {
   const trimHistoryByUrlRef = useRef({})
   const trimLastDragUpdateRef = useRef(0)
   const trimPendingDragHitRef = useRef(null)
+  const trimSuppressClickUntilRef = useRef(0)
+  const trimPointerGestureRef = useRef(null)
   const trimBoundaryPlan = useMemo(() => {
     if (!trimClosed || !trimContext || !trimSegments.length) return null
     try { return buildTrimBoundaryPlan(trimContext, trimSegments) }
     catch (error) { console.warn("Trim boundary plan failed:", error); return null }
   }, [trimClosed, trimContext, trimSegments])
+
+  // Rozlišuj skutečný click od orbit/pan gesta. R3F může po dokončení drag gesta
+  // ještě emitnout onClick na mesh; v Ořezu by to jinak omylem položilo nový bod.
+  useEffect(() => {
+    if (!trimMode || typeof window === "undefined") return
+    const onPointerDown = (event) => {
+      trimPointerGestureRef.current = {
+        pointerId: event.pointerId,
+        button: event.button,
+        x: event.clientX,
+        y: event.clientY,
+        moved: false,
+      }
+    }
+    const onPointerMove = (event) => {
+      const gesture = trimPointerGestureRef.current
+      if (!gesture || gesture.pointerId !== event.pointerId || gesture.moved) return
+      const dx = event.clientX - gesture.x
+      const dy = event.clientY - gesture.y
+      if (dx * dx + dy * dy > 16) gesture.moved = true
+    }
+    const finishPointer = (event) => {
+      const gesture = trimPointerGestureRef.current
+      if (!gesture || (event?.pointerId != null && gesture.pointerId !== event.pointerId)) return
+      if (gesture.button !== 0 || gesture.moved) {
+        const now = typeof performance !== "undefined" ? performance.now() : Date.now()
+        trimSuppressClickUntilRef.current = now + 180
+      }
+      trimPointerGestureRef.current = null
+    }
+    window.addEventListener("pointerdown", onPointerDown, true)
+    window.addEventListener("pointermove", onPointerMove, true)
+    window.addEventListener("pointerup", finishPointer, true)
+    window.addEventListener("pointercancel", finishPointer, true)
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown, true)
+      window.removeEventListener("pointermove", onPointerMove, true)
+      window.removeEventListener("pointerup", finishPointer, true)
+      window.removeEventListener("pointercancel", finishPointer, true)
+      trimPointerGestureRef.current = null
+    }
+  }, [trimMode])
 
   // Komunikace s interním Case Cloud editorem. Veřejný viewer může stejné
   // zprávy posílat, ale bez autorizovaného parentu se nic neuloží.
@@ -6053,6 +6122,7 @@ export default function ClientPage() {
 
   const trackballRef = useRef(null)
   const cameraInteractingRef = useRef(false)
+  const [trackballResetNonce, setTrackballResetNonce] = useState(0)
   const rootGroupRef = useRef(null)
   const [cameraTarget, setCameraTarget] = useState([0, 0, 0])
   const [sliceOverlayInteracting, setSliceOverlayInteracting] = useState(false)
@@ -6445,6 +6515,10 @@ export default function ClientPage() {
     setTrimKeepComponent(null)
     setTrimHoverComponent(null)
     setTrimStage("boundary")
+    trimSuppressClickUntilRef.current = (typeof performance !== "undefined" ? performance.now() : Date.now()) + 180
+    // Dvojklik na start bod dříve mohl nechat TrackballControls v interním
+    // ROTATE stavu. Remount controls zachová kameru i target, ale vyčistí pointer state.
+    setTrackballResetNonce((value) => value + 1)
     setTrimMessage("Hranice je uzavřená. Body můžete dál posouvat. Najeďte na část modelu pro náhled a kliknutím potvrďte oblast, kterou chcete zachovat.")
   }, [trimContext, trimClosed, trimControlNodes])
 
@@ -6530,6 +6604,13 @@ export default function ClientPage() {
 
   const handleTrimSurfaceClick = useCallback((url, event) => {
     if (!trimMode || !trimContext || url !== trimSelection || trimBusy || trimDraggingPoint != null) return
+    const nativeEvent = event?.nativeEvent || event
+    const button = Number.isInteger(nativeEvent?.button) ? nativeEvent.button : event?.button
+    if (button != null && button !== 0) return
+    if (nativeEvent?.ctrlKey) return // Ctrl + LMB je pan, nikdy placement bodu.
+    if (typeof event?.delta === "number" && event.delta > 4) return
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now()
+    if (cameraInteractingRef.current || now < trimSuppressClickUntilRef.current) return
     const hit = resolveTrimHit(trimContext, modelObjectsRef.current[url], event)
     if (!hit) return
     if (!trimClosed) {
@@ -6587,6 +6668,7 @@ export default function ClientPage() {
     if (!trimMode || trimBusy) return
     trimLastDragUpdateRef.current = 0
     trimPendingDragHitRef.current = null
+    trimSuppressClickUntilRef.current = Number.POSITIVE_INFINITY
     setTrimDraggingPoint(index)
     setTrimKeepComponent(null)
     setTrimHoverComponent(null)
@@ -6600,17 +6682,20 @@ export default function ClientPage() {
       trimPendingDragHitRef.current = null
       if (pendingHit) moveTrimControlNode(trimDraggingPoint, pendingHit)
       setTrimDraggingPoint(null)
-      if (trackballRef.current) trackballRef.current.enabled = !sliceOverlayInteracting && !alignmentBusy
+      trimSuppressClickUntilRef.current = (typeof performance !== "undefined" ? performance.now() : Date.now()) + 160
+      // Recreate controls instead of merely enabled=true. Tím se odstraní jakýkoliv
+      // stale LEFT/ROTATE pointer state po přetažení kuličky.
+      setTrackballResetNonce((value) => value + 1)
     }
-    window.addEventListener("pointerup", finish)
-    window.addEventListener("pointercancel", finish)
-    window.addEventListener("blur", finish)
+    window.addEventListener("pointerup", finish, true)
+    window.addEventListener("pointercancel", finish, true)
+    window.addEventListener("blur", finish, true)
     return () => {
-      window.removeEventListener("pointerup", finish)
-      window.removeEventListener("pointercancel", finish)
-      window.removeEventListener("blur", finish)
+      window.removeEventListener("pointerup", finish, true)
+      window.removeEventListener("pointercancel", finish, true)
+      window.removeEventListener("blur", finish, true)
     }
-  }, [trimDraggingPoint, sliceOverlayInteracting, alignmentBusy, moveTrimControlNode])
+  }, [trimDraggingPoint, moveTrimControlNode])
 
   const removeLastTrimPoint = useCallback(() => {
     if (trimClosed || trimControlNodes.length === 0) return
@@ -11279,6 +11364,7 @@ export default function ClientPage() {
               keepComponent={trimKeepComponent}
               hoverComponent={trimHoverComponent}
               draggingPoint={trimDraggingPoint}
+              closed={trimClosed}
               onBeginPointDrag={beginTrimPointDrag}
               onCloseLoop={closeTrimLoop}
             />
@@ -11425,8 +11511,8 @@ export default function ClientPage() {
           />
         )}
 
-        <TouchTrackballControls ref={trackballRef} target={cameraTarget} enabled={!sliceOverlayInteracting && !alignmentBusy && trimDraggingPoint == null && !trimBusy} onInteractionChange={handleCameraInteraction} />
-        <RightButtonPan setTarget={setCameraTarget} trackballRef={trackballRef} />
+        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} ref={trackballRef} target={cameraTarget} enabled={!sliceOverlayInteracting && !alignmentBusy && trimDraggingPoint == null && !trimBusy} onInteractionChange={handleCameraInteraction} />
+        <RightButtonPan setTarget={setCameraTarget} trackballRef={trackballRef} onInteractionChange={handleCameraInteraction} />
       </Canvas>
 
       <Lightbox open={lightbox.open} onClose={() => setLightbox({ open: false, src: null, alt: "" })} src={lightbox.src} alt={lightbox.alt} />
