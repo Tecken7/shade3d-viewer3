@@ -7533,7 +7533,12 @@ export default function ClientPage() {
   }, [clearRepairWorkingState])
 
   const openRepairMode = useCallback(() => {
-    if (!analysisEligibleFiles.length) {
+    const repairEligibleFiles = files.filter((file) =>
+      ["stl", "ply", "obj"].includes(
+        inferExt(file.rawName || file.name || file.url)
+      )
+    )
+    if (!repairEligibleFiles.length) {
       setRepairMessage("Pro Opravu sítě je potřeba alespoň jeden STL, PLY nebo OBJ model.")
       return
     }
@@ -7546,7 +7551,7 @@ export default function ClientPage() {
     setRepairVariant("auto")
     setRepairMode(true)
     setRepairMessage("Vyberte model. Automatický režim vyhledá malé otevřené hranice, ruční režim dovolí označit problémovou oblast štětcem.")
-  }, [analysisEligibleFiles, clearRepairWorkingState])
+  }, [files, clearRepairWorkingState])
 
   const selectRepairHole = useCallback((holeId, contextValue = repairContext, holesValue = repairHoles) => {
     if (!contextValue || !holeId) return
