@@ -1912,624 +1912,7 @@ function repairConnectClosedRings(triangles, outer, inner) {
   }
 }
 
-
-/* ---------- Mesh Repair v11.7: 3D advancing front + lokální continuation ---------- */
-
-function repairTriangleNormalFromPositions(a, b, c, expected = null) {
-  const normal = b.clone().sub(a).cross(c.clone().sub(a))
-  if (normal.lengthSq() < 1e-14) return null
-  normal.normalize()
-  if (expected?.lengthSq?.() > 1e-12 && normal.dot(expected) < 0) normal.negate()
-  return normal
-}
-
-function repairBoundaryTriangleExpectedNormal(boundary, indices) {
-  const expected = new THREE.Vector3()
-  indices.forEach((index) => {
-    const normal = boundary[index]?.normal
-    if (normal?.isVector3) expected.add(normal)
-  })
-  if (expected.lengthSq() < 1e-12) expected.set(0, 0, 1)
-  return expected.normalize()
-}
-
-function repairAdvancingFrontTriangulation(boundary) {
-  const count = boundary?.length || 0
-  if (count < 3) return null
-
-  const positions = boundary.map((sample) => sample.position.clone())
-  const previous = Array.from({ length: count }, (_, index) => (index - 1 + count) % count)
-  const next = Array.from({ length: count }, (_, index) => (index + 1) % count)
-  const alive = new Array(count).fill(true)
-  const createdEdgeNormal = new Map()
-  const triangles = []
-  let remaining = count
-
-  const edgeKey = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`
-
-  const evaluateCandidate = (index) => {
-    if (!alive[index]) return null
-    const a = previous[index]
-    const c = next[index]
-    if (a === index || c === index || a === c) return null
-
-    let ids = [a, index, c]
-    const expected = repairBoundaryTriangleExpectedNormal(boundary, ids)
-    let normal = repairTriangleNormalFromPositions(
-      positions[ids[0]],
-      positions[ids[1]],
-      positions[ids[2]],
-      expected
-    )
-    if (!normal) return null
-
-    // Orientujeme triangle fyzicky, ne jen jeho vypočítanou normal.
-    const raw = positions[ids[1]].clone().sub(positions[ids[0]]).cross(
-      positions[ids[2]].clone().sub(positions[ids[0]])
-    )
-    if (raw.dot(expected) < 0) {
-      ids = [a, c, index]
-      normal = repairTriangleNormalFromPositions(
-        positions[ids[0]],
-        positions[ids[1]],
-        positions[ids[2]],
-        expected
-      )
-      if (!normal) return null
-    }
-
-    const pa = positions[ids[0]]
-    const pb = positions[ids[1]]
-    const pc = positions[ids[2]]
-    const l0 = pa.distanceTo(pb)
-    const l1 = pb.distanceTo(pc)
-    const l2 = pc.distanceTo(pa)
-    const area2 = pb.clone().sub(pa).cross(pc.clone().sub(pa)).length()
-    if (!(area2 > 1e-10)) return null
-    const area = area2 * 0.5
-    const quality = Math.max(
-      0,
-      Math.min(
-        1,
-        (4 * Math.sqrt(3) * area) /
-          Math.max(1e-12, l0 * l0 + l1 * l1 + l2 * l2)
-      )
-    )
-    const normalDot = Math.max(-1, Math.min(1, normal.dot(expected)))
-    const localEdge = Math.max(
-      positions[index].distanceTo(positions[a]),
-      positions[c].distanceTo(positions[index]),
-      1e-6
-    )
-    const diagonal = positions[c].distanceTo(positions[a])
-    const diagonalPenalty = Math.max(0, diagonal / localEdge - 1.5)
-
-    let cost =
-      (1 - normalDot) * 8 +
-      (1 - quality) * 1.0 +
-      diagonalPenalty * 0.30
-
-    // Pokud ear sdílí hranu s již vytvořeným trianglem, dihedrální úhel je
-    // okamžitě známý a můžeme silně penalizovat ostré/foldnuté spojení.
-    for (const [u, v] of [
-      [ids[0], ids[1]],
-      [ids[1], ids[2]],
-      [ids[2], ids[0]],
-    ]) {
-      const other = createdEdgeNormal.get(edgeKey(u, v))
-      if (!other?.isVector3) continue
-      const dot = Math.max(-1, Math.min(1, normal.dot(other)))
-      cost += (1 - dot) * 5
-      if (dot < 0) cost += (-dot) * 15
-    }
-
-    return { cost, ids, normal }
-  }
-
-  while (remaining > 3) {
-    let best = null
-    for (let index = 0; index < count; index++) {
-      if (!alive[index]) continue
-      const candidate = evaluateCandidate(index)
-      if (!candidate) continue
-      if (!best || candidate.cost < best.cost) best = { ...candidate, index }
-    }
-    if (!best) return null
-
-    triangles.push(best.ids.slice())
-    for (const [u, v] of [
-      [best.ids[0], best.ids[1]],
-      [best.ids[1], best.ids[2]],
-      [best.ids[2], best.ids[0]],
-    ]) {
-      createdEdgeNormal.set(edgeKey(u, v), best.normal.clone())
-    }
-
-    const index = best.index
-    const a = previous[index]
-    const c = next[index]
-    alive[index] = false
-    next[a] = c
-    previous[c] = a
-    remaining--
-  }
-
-  const final = []
-  for (let index = 0; index < count; index++) if (alive[index]) final.push(index)
-  if (final.length !== 3) return null
-  const finalExpected = repairBoundaryTriangleExpectedNormal(boundary, final)
-  const rawFinal = positions[final[1]].clone().sub(positions[final[0]]).cross(
-    positions[final[2]].clone().sub(positions[final[0]])
-  )
-  if (rawFinal.dot(finalExpected) < 0) [final[1], final[2]] = [final[2], final[1]]
-  triangles.push(final)
-
-  // Lokální edge-flip optimalizace. Na Rogers scanu to odstraní zbylé ostré
-  // diagonály bez jakékoliv 2D projekce boundary.
-  const boundaryEdges = new Set()
-  for (let index = 0; index < count; index++) {
-    const nextIndex = (index + 1) % count
-    boundaryEdges.add(edgeKey(index, nextIndex))
-  }
-
-  const triangleCost = (triangle) => {
-    const expected = repairBoundaryTriangleExpectedNormal(boundary, triangle)
-    const pa = positions[triangle[0]]
-    const pb = positions[triangle[1]]
-    const pc = positions[triangle[2]]
-    const normal = repairTriangleNormalFromPositions(pa, pb, pc, expected)
-    if (!normal) return 1e12
-    const area2 = pb.clone().sub(pa).cross(pc.clone().sub(pa)).length()
-    const l0 = pa.distanceTo(pb)
-    const l1 = pb.distanceTo(pc)
-    const l2 = pc.distanceTo(pa)
-    const quality = Math.max(
-      0,
-      Math.min(
-        1,
-        (2 * Math.sqrt(3) * area2) /
-          Math.max(1e-12, l0 * l0 + l1 * l1 + l2 * l2)
-      )
-    )
-    return (1 - normal.dot(expected)) * 8 + (1 - quality)
-  }
-
-  const pairCost = (first, second) => {
-    const n1 = repairTriangleNormalFromPositions(
-      positions[first[0]],
-      positions[first[1]],
-      positions[first[2]],
-      repairBoundaryTriangleExpectedNormal(boundary, first)
-    )
-    const n2 = repairTriangleNormalFromPositions(
-      positions[second[0]],
-      positions[second[1]],
-      positions[second[2]],
-      repairBoundaryTriangleExpectedNormal(boundary, second)
-    )
-    if (!n1 || !n2) return 1e12
-    const dot = Math.max(-1, Math.min(1, n1.dot(n2)))
-    return (
-      triangleCost(first) +
-      triangleCost(second) +
-      (1 - dot) * 5 +
-      Math.max(0, -dot) * 20
-    )
-  }
-
-  const orient = (ids) => {
-    const result = ids.slice()
-    const expected = repairBoundaryTriangleExpectedNormal(boundary, result)
-    const raw = positions[result[1]].clone().sub(positions[result[0]]).cross(
-      positions[result[2]].clone().sub(positions[result[0]])
-    )
-    if (raw.dot(expected) < 0) [result[1], result[2]] = [result[2], result[1]]
-    return result
-  }
-
-  for (let pass = 0; pass < 12; pass++) {
-    const edgeFaces = new Map()
-    const addEdge = (a, b, faceIndex) => {
-      const key = edgeKey(a, b)
-      const list = edgeFaces.get(key) || []
-      list.push(faceIndex)
-      edgeFaces.set(key, list)
-    }
-    triangles.forEach((triangle, faceIndex) => {
-      addEdge(triangle[0], triangle[1], faceIndex)
-      addEdge(triangle[1], triangle[2], faceIndex)
-      addEdge(triangle[2], triangle[0], faceIndex)
-    })
-
-    let changed = 0
-    for (const [key, faces] of edgeFaces) {
-      if (faces.length !== 2 || boundaryEdges.has(key)) continue
-      const [uString, vString] = key.split(":")
-      const u = Number(uString)
-      const v = Number(vString)
-      const firstIndex = faces[0]
-      const secondIndex = faces[1]
-      const first = triangles[firstIndex]
-      const second = triangles[secondIndex]
-      const w = first.find((value) => value !== u && value !== v)
-      const x = second.find((value) => value !== u && value !== v)
-      if (!Number.isInteger(w) || !Number.isInteger(x) || w === x) continue
-      const replacementKey = edgeKey(w, x)
-      if (edgeFaces.has(replacementKey)) continue
-
-      const currentCost = pairCost(first, second)
-      const altFirst = orient([w, x, u])
-      const altSecond = orient([x, w, v])
-      const alternativeCost = pairCost(altFirst, altSecond)
-
-      if (alternativeCost + 1e-6 < currentCost) {
-        triangles[firstIndex] = altFirst
-        triangles[secondIndex] = altSecond
-        changed++
-      }
-    }
-    if (!changed) break
-  }
-
-  return triangles
-}
-
-function repairRefineTriangulation(boundary, coarseTriangles, targetEdge) {
-  const boundaryCount = boundary.length
-  const vertices = boundary.map((sample, index) => ({
-    position: sample.position.clone(),
-    normal: sample.normal?.clone?.() || new THREE.Vector3(0, 0, 1),
-    color: sample.color ? sample.color.slice() : null,
-    uv: sample.uv ? sample.uv.slice() : null,
-    fixed: true,
-    boundaryIndex: index,
-  }))
-  let triangles = coarseTriangles.map((triangle) => triangle.slice())
-
-  const boundaryEdges = new Set()
-  for (let index = 0; index < boundaryCount; index++) {
-    const next = (index + 1) % boundaryCount
-    boundaryEdges.add(index < next ? `${index}:${next}` : `${next}:${index}`)
-  }
-  const edgeKey = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`
-  const threshold = Math.max(targetEdge * 1.55, 1e-5)
-
-  for (let pass = 0; pass < 9; pass++) {
-    const splitEdges = new Set()
-    triangles.forEach((triangle) => {
-      for (const [a, b] of [
-        [triangle[0], triangle[1]],
-        [triangle[1], triangle[2]],
-        [triangle[2], triangle[0]],
-      ]) {
-        const key = edgeKey(a, b)
-        if (boundaryEdges.has(key)) continue
-        const length = vertices[a].position.distanceTo(vertices[b].position)
-        if (length > threshold) splitEdges.add(key)
-      }
-    })
-    if (!splitEdges.size) break
-
-    const midpointIndex = new Map()
-    splitEdges.forEach((key) => {
-      const [aString, bString] = key.split(":")
-      const a = Number(aString)
-      const b = Number(bString)
-      const va = vertices[a]
-      const vb = vertices[b]
-      const normal = va.normal.clone().add(vb.normal)
-      if (normal.lengthSq() < 1e-12) normal.copy(va.normal)
-      normal.normalize()
-      midpointIndex.set(key, vertices.length)
-      vertices.push({
-        position: va.position.clone().lerp(vb.position, 0.5),
-        normal,
-        color: repairLerpAttribute(va.color, vb.color, 0.5),
-        uv: repairLerpAttribute(va.uv, vb.uv, 0.5),
-        fixed: false,
-        boundaryIndex: -1,
-      })
-    })
-
-    const getMid = (a, b) => midpointIndex.get(edgeKey(a, b))
-    const nextTriangles = []
-
-    triangles.forEach(([a, b, c]) => {
-      const mab = getMid(a, b)
-      const mbc = getMid(b, c)
-      const mca = getMid(c, a)
-      const ab = Number.isInteger(mab)
-      const bc = Number.isInteger(mbc)
-      const ca = Number.isInteger(mca)
-      const splitCount = Number(ab) + Number(bc) + Number(ca)
-
-      if (splitCount === 0) {
-        nextTriangles.push([a, b, c])
-      } else if (splitCount === 1) {
-        if (ab) nextTriangles.push([a, mab, c], [mab, b, c])
-        else if (bc) nextTriangles.push([b, mbc, a], [mbc, c, a])
-        else nextTriangles.push([c, mca, b], [mca, a, b])
-      } else if (splitCount === 2) {
-        if (ab && bc) {
-          nextTriangles.push([b, mbc, mab], [a, mab, c], [mab, mbc, c])
-        } else if (bc && ca) {
-          nextTriangles.push([c, mca, mbc], [b, mbc, a], [mbc, mca, a])
-        } else {
-          nextTriangles.push([a, mab, mca], [b, c, mab], [mab, c, mca])
-        }
-      } else {
-        nextTriangles.push(
-          [a, mab, mca],
-          [mab, b, mbc],
-          [mca, mbc, c],
-          [mab, mbc, mca]
-        )
-      }
-    })
-
-    triangles = nextTriangles
-  }
-
-  return { vertices, triangles, boundaryCount }
-}
-
-function repairBuildTopology(vertexCount, triangles) {
-  const adjacency = Array.from({ length: vertexCount }, () => new Set())
-  const incidentFaces = Array.from({ length: vertexCount }, () => [])
-  const edgeFaces = new Map()
-  const edgeKey = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`
-
-  const addEdge = (a, b, faceIndex) => {
-    adjacency[a].add(b)
-    adjacency[b].add(a)
-    const key = edgeKey(a, b)
-    const list = edgeFaces.get(key) || []
-    list.push(faceIndex)
-    edgeFaces.set(key, list)
-  }
-
-  triangles.forEach((triangle, faceIndex) => {
-    triangle.forEach((index) => incidentFaces[index].push(faceIndex))
-    addEdge(triangle[0], triangle[1], faceIndex)
-    addEdge(triangle[1], triangle[2], faceIndex)
-    addEdge(triangle[2], triangle[0], faceIndex)
-  })
-
-  const faceNeighbors = Array.from({ length: triangles.length }, () => new Set())
-  edgeFaces.forEach((faces) => {
-    if (faces.length !== 2) return
-    faceNeighbors[faces[0]].add(faces[1])
-    faceNeighbors[faces[1]].add(faces[0])
-  })
-
-  return { adjacency, incidentFaces, faceNeighbors }
-}
-
-function repairFitLocalContinuation(boundary, boundaryIndex, support, fitRadius) {
-  const sample = boundary[boundaryIndex]
-  if (!sample) return null
-
-  const normal = sample.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
-  if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1)
-  normal.normalize()
-
-  let tangent = boundary[(boundaryIndex + 1) % boundary.length].position
-    .clone()
-    .sub(boundary[(boundaryIndex - 1 + boundary.length) % boundary.length].position)
-  tangent.addScaledVector(normal, -tangent.dot(normal))
-  if (tangent.lengthSq() < 1e-12) tangent.set(1, 0, 0)
-  tangent.normalize()
-
-  let missing = sample.guideDirection?.clone?.().negate() || new THREE.Vector3()
-  missing.addScaledVector(normal, -missing.dot(normal))
-  missing.addScaledVector(tangent, -missing.dot(tangent))
-  if (missing.lengthSq() < 1e-12) missing.copy(normal).cross(tangent)
-  if (missing.lengthSq() < 1e-12) missing.set(0, 1, 0)
-  missing.normalize()
-
-  const ata = Array.from({ length: 6 }, () => new Array(6).fill(0))
-  const atb = new Array(6).fill(0)
-  let used = 0
-
-  const addEquation = (row, rhs, weight) => {
-    if (!(weight > 1e-9)) return
-    for (let i = 0; i < 6; i++) {
-      atb[i] += row[i] * rhs * weight
-      for (let j = 0; j < 6; j++) ata[i][j] += row[i] * row[j] * weight
-    }
-  }
-
-  const collect = (radius, maxHealthySide, minNormalDot) => {
-    used = 0
-    for (const supportSample of support || []) {
-      if (!supportSample?.position?.isVector3) continue
-      const delta = supportSample.position.clone().sub(sample.position)
-      const u = delta.dot(tangent)
-      const v = delta.dot(missing)
-      const z = delta.dot(normal)
-      const distance = Math.sqrt(u * u + v * v + z * z)
-      if (distance > radius || v > maxHealthySide) continue
-      if (
-        supportSample.normal?.isVector3 &&
-        supportSample.normal.dot(normal) < minNormalDot
-      ) continue
-      const sigma = Math.max(radius * 0.74, 1e-4)
-      const weight = Math.exp(-(distance * distance) / (sigma * sigma))
-      addEquation([u * u, v * v, u * v, u, v, 1], z, weight)
-      used++
-    }
-  }
-
-  collect(fitRadius, fitRadius * 0.22, 0.20)
-  if (used < 12) collect(fitRadius * 1.45, fitRadius * 0.30, 0.0)
-  if (used < 6) return null
-
-  // Přesný průchod boundary a nulová první derivace v lokálním tangent frame.
-  ata[5][5] += 8
-  ata[3][3] += 3
-  ata[4][4] += 3
-  for (let i = 0; i < 6; i++) ata[i][i] += 1e-7
-
-  const coeff = repairSolveLinear(ata, atb)
-  if (!coeff) return null
-  return { origin: sample.position.clone(), tangent, missing, normal, coeff, fitRadius, used }
-}
-
-function repairPredictContinuationPoint(fit, seed, distanceHint, robustRadius) {
-  if (!fit || !seed?.isVector3) return seed?.clone?.() || null
-  const delta = seed.clone().sub(fit.origin)
-  const u = delta.dot(fit.tangent)
-  const rawV = delta.dot(fit.missing)
-  const v = Math.max(rawV, Math.max(0, distanceHint) * 0.55)
-  const vv = Math.min(v, robustRadius * 1.15)
-
-  let z =
-    fit.coeff[0] * u * u +
-    fit.coeff[1] * vv * vv +
-    fit.coeff[2] * u * vv +
-    fit.coeff[3] * u +
-    fit.coeff[4] * vv +
-    fit.coeff[5]
-
-  const zLimit = Math.max(0.20, Math.min(robustRadius * 0.42, fit.fitRadius * 0.68))
-  z = Math.max(-zLimit, Math.min(zLimit, z))
-
-  return fit.origin
-    .clone()
-    .addScaledVector(fit.tangent, u)
-    .addScaledVector(fit.missing, vv)
-    .addScaledVector(fit.normal, z)
-}
-
-function repairSafeContinuationDeform({
-  vertices,
-  triangles,
-  boundaryCount,
-  predictions,
-  passes = 15,
-  alpha = 0.12,
-}) {
-  const topology = repairBuildTopology(vertices.length, triangles)
-  const positions = vertices.map((vertex) => vertex.position.clone())
-
-  const initialFaceNormals = triangles.map(([a, b, c]) => {
-    const normal = positions[b].clone().sub(positions[a]).cross(
-      positions[c].clone().sub(positions[a])
-    )
-    if (normal.lengthSq() < 1e-12) return new THREE.Vector3()
-    return normal.normalize()
-  })
-
-  const currentFaceNormal = (faceIndex) => {
-    const [a, b, c] = triangles[faceIndex]
-    const normal = positions[b].clone().sub(positions[a]).cross(
-      positions[c].clone().sub(positions[a])
-    )
-    if (normal.lengthSq() < 1e-12) return null
-    return normal.normalize()
-  }
-
-  let acceptedTotal = 0
-
-  for (let pass = 0; pass < passes; pass++) {
-    let accepted = 0
-
-    for (let vertexIndex = boundaryCount; vertexIndex < vertices.length; vertexIndex++) {
-      const prediction = predictions[vertexIndex]
-      if (!prediction?.isVector3) continue
-
-      const previousPosition = positions[vertexIndex].clone()
-      positions[vertexIndex].lerp(prediction, alpha)
-
-      let valid = true
-      const temporaryNormals = new Map()
-
-      for (const faceIndex of topology.incidentFaces[vertexIndex]) {
-        const normal = currentFaceNormal(faceIndex)
-        if (!normal) {
-          valid = false
-          break
-        }
-        const initial = initialFaceNormals[faceIndex]
-        if (initial.lengthSq() > 1e-12 && normal.dot(initial) < 0.25) {
-          valid = false
-          break
-        }
-        temporaryNormals.set(faceIndex, normal)
-      }
-
-      if (valid) {
-        for (const [faceIndex, normal] of temporaryNormals) {
-          for (const neighborFace of topology.faceNeighbors[faceIndex]) {
-            const neighborNormal =
-              temporaryNormals.get(neighborFace) || currentFaceNormal(neighborFace)
-            if (!neighborNormal || normal.dot(neighborNormal) < 0.20) {
-              valid = false
-              break
-            }
-          }
-          if (!valid) break
-        }
-      }
-
-      if (valid) {
-        accepted++
-        acceptedTotal++
-      } else {
-        positions[vertexIndex].copy(previousPosition)
-      }
-    }
-
-    if (!accepted) break
-  }
-
-  return { positions, topology, acceptedTotal }
-}
-
-function repairFinalizePatchNormals(vertices, triangles, positions) {
-  const sums = Array.from({ length: vertices.length }, () => new THREE.Vector3())
-  let reversedFaces = 0
-
-  // Vzhledem k tomu, že deformace je fold-safe, winding by měl být konzistentní.
-  // Přesto každý face naposledy kontrolujeme proti interpolované lokální normal.
-  triangles.forEach((triangle) => {
-    const [a, b, c] = triangle
-    let normal = positions[b].clone().sub(positions[a]).cross(
-      positions[c].clone().sub(positions[a])
-    )
-    if (normal.lengthSq() < 1e-12) return
-    normal.normalize()
-
-    const expected = vertices[a].normal
-      .clone()
-      .add(vertices[b].normal)
-      .add(vertices[c].normal)
-    if (expected.lengthSq() > 1e-12) {
-      expected.normalize()
-      if (normal.dot(expected) < 0) {
-        ;[triangle[1], triangle[2]] = [triangle[2], triangle[1]]
-        normal.negate()
-        reversedFaces++
-      }
-    }
-
-    sums[triangle[0]].add(normal)
-    sums[triangle[1]].add(normal)
-    sums[triangle[2]].add(normal)
-  })
-
-  return {
-    normals: sums.map((sum, index) => {
-      if (sum.lengthSq() < 1e-12) return vertices[index].normal.clone().normalize()
-      sum.normalize()
-      if (sum.dot(vertices[index].normal) < 0) sum.negate()
-      return sum
-    }),
-    reversedFaces,
-  }
-}
-
-function buildRepairPatchDataLegacyHarmonic(context, hole) {
+function buildRepairPatchData(context, hole) {
   if (!context || !hole?.boundary?.length) return null
 
   const boundary = repairPrepareBoundaryGuides(hole.boundary)
@@ -2856,1048 +2239,288 @@ function buildRepairPatchDataLegacyHarmonic(context, hole) {
   }
 }
 
-
-
-/* ---------- Mesh Repair v11.8: segmented growth + outward barrier ---------- */
-
-function repairBoundarySegmentsV118(boundary) {
-  const count = boundary?.length || 0
-  if (count < 3) return { segmentIds: new Array(count).fill(0), segments: [] }
-
-  const missingDirection = (sample) => {
-    const direction = sample?.guideDirection?.clone?.().negate() || new THREE.Vector3()
-    if (direction.lengthSq() < 1e-12) direction.set(1, 0, 0)
-    return direction.normalize()
-  }
-  const normalDirection = (sample) => {
-    const normal = sample?.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
-    if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1)
-    return normal.normalize()
+/* ---------- CGAL WASM Mesh Repair bridge ---------- */
+function buildCGALRepairWorkerPayload(context, hole) {
+  if (!context || !hole?.childUuid || !Array.isArray(hole.nodeIds) || hole.nodeIds.length < 3) {
+    throw new Error("CGAL: otvor nemá platnou boundary.")
   }
 
-  const breakBefore = new Array(count).fill(false)
-  const missingThreshold = Math.cos(34 * Math.PI / 180)
-  const normalThreshold = Math.cos(42 * Math.PI / 180)
-  for (let index = 0; index < count; index++) {
-    const previous = (index - 1 + count) % count
-    const missingDot = missingDirection(boundary[index]).dot(missingDirection(boundary[previous]))
-    const normalDot = normalDirection(boundary[index]).dot(normalDirection(boundary[previous]))
-    if (missingDot < missingThreshold || normalDot < normalThreshold) breakBefore[index] = true
+  // Do CGAL neposíláme ostatní objekty/scény. Pouze skutečnou triangulaci child
+  // meshe, ve kterém daná boundary leží. Tím se vyhneme náhodnému svaření
+  // souřadnic mezi více modely ve stejné scéně.
+  const sourceTriangles = context.triangles.filter((triangle) => triangle.childUuid === hole.childUuid)
+  if (!sourceTriangles.length) throw new Error("CGAL: model neobsahuje triangulaci pro vybraný otvor.")
+
+  const usedNodeIds = new Set()
+  sourceTriangles.forEach((triangle) => triangle.nodeIds.forEach((nodeId) => usedNodeIds.add(nodeId)))
+  hole.nodeIds.forEach((nodeId) => usedNodeIds.add(nodeId))
+
+  const sourceNodeIds = [...usedNodeIds].sort((a, b) => a - b)
+  const localBySource = new Map(sourceNodeIds.map((nodeId, index) => [nodeId, index]))
+
+  const positions = new Float64Array(sourceNodeIds.length * 3)
+  sourceNodeIds.forEach((nodeId, index) => {
+    const point = context.nodes[nodeId]
+    if (!point?.isVector3) throw new Error("CGAL: boundary obsahuje neplatný vertex.")
+    positions[index * 3 + 0] = point.x
+    positions[index * 3 + 1] = point.y
+    positions[index * 3 + 2] = point.z
+  })
+
+  const faces = new Uint32Array(sourceTriangles.length * 3)
+  sourceTriangles.forEach((triangle, triangleIndex) => {
+    for (let corner = 0; corner < 3; corner++) {
+      const local = localBySource.get(triangle.nodeIds[corner])
+      if (!Number.isInteger(local)) throw new Error("CGAL: nepodařilo se remapovat triangulaci.")
+      faces[triangleIndex * 3 + corner] = local
+    }
+  })
+
+  const boundary = new Uint32Array(hole.nodeIds.length)
+  hole.nodeIds.forEach((nodeId, index) => {
+    const local = localBySource.get(nodeId)
+    if (!Number.isInteger(local)) throw new Error("CGAL: nepodařilo se remapovat boundary.")
+    boundary[index] = local
+  })
+
+  return {
+    payload: {
+      positions: positions.buffer,
+      faces: faces.buffer,
+      boundary: boundary.buffer,
+      vertexCount: sourceNodeIds.length,
+      faceCount: sourceTriangles.length,
+      boundaryCount: boundary.length,
+      density: CGAL_REPAIR_DENSITY,
+      continuity: CGAL_REPAIR_CONTINUITY,
+    },
+    transferables: [positions.buffer, faces.buffer, boundary.buffer],
+    sourceNodeIds,
+  }
+}
+
+function buildRepairBoundaryAttributeMap(hole) {
+  const map = new Map()
+  ;(hole?.boundary || []).forEach((sample) => {
+    if (!Number.isInteger(sample?.nodeId)) return
+    map.set(sample.nodeId, {
+      color: Array.isArray(sample.color) && sample.color.length >= 3 ? sample.color.slice(0, 3) : null,
+      uv: Array.isArray(sample.uv) && sample.uv.length >= 2 ? sample.uv.slice(0, 2) : null,
+      normal: sample.normal?.isVector3
+        ? [sample.normal.x, sample.normal.y, sample.normal.z]
+        : null,
+    })
+  })
+  return map
+}
+
+function harmonicRepairAttribute(vertexCount, triangleIndexArray, anchors, dimensions, options = {}) {
+  if (!vertexCount || !triangleIndexArray?.length || !anchors?.length) return null
+  const validAnchors = anchors.filter((value) => Array.isArray(value) && value.length >= dimensions)
+  if (!validAnchors.length) return null
+
+  const adjacency = Array.from({ length: vertexCount }, () => new Set())
+  for (let i = 0; i + 2 < triangleIndexArray.length; i += 3) {
+    const a = triangleIndexArray[i], b = triangleIndexArray[i + 1], c = triangleIndexArray[i + 2]
+    if (a >= vertexCount || b >= vertexCount || c >= vertexCount) continue
+    adjacency[a].add(b); adjacency[a].add(c)
+    adjacency[b].add(a); adjacency[b].add(c)
+    adjacency[c].add(a); adjacency[c].add(b)
   }
 
-  // Když je hranice hladká a nikde není přirozený break, zůstane jeden segment.
-  if (!breakBefore.some(Boolean)) {
-    return {
-      segmentIds: new Array(count).fill(0),
-      segments: [{ id: 0, indices: Array.from({ length: count }, (_, index) => index) }],
+  const seed = new Array(dimensions).fill(0)
+  validAnchors.forEach((value) => {
+    for (let d = 0; d < dimensions; d++) seed[d] += Number(value[d]) || 0
+  })
+  for (let d = 0; d < dimensions; d++) seed[d] /= validAnchors.length
+
+  // UV seam: u/v mohou přes 0/1 přecházet přes wrap. U malé repair boundary je
+  // bezpečnější rozbalit pouze kanál s velkým skokem a po fairingu ho vrátit.
+  const unwrap = new Array(dimensions).fill(false)
+  if (options.wrap01) {
+    for (let d = 0; d < dimensions; d++) {
+      const values = validAnchors.map((value) => Number(value[d]) || 0)
+      const min = Math.min(...values), max = Math.max(...values)
+      unwrap[d] = max - min > 0.55 && min < 0.2 && max > 0.8
     }
   }
 
-  // Začneme za prvním breakem, aby segment přes index 0 nebyl uměle rozpůlený.
-  const start = breakBefore.findIndex(Boolean)
-  const segments = []
-  let current = []
-  for (let offset = 0; offset < count; offset++) {
-    const index = (start + offset) % count
-    if (offset > 0 && breakBefore[index] && current.length) {
-      segments.push({ id: segments.length, indices: current })
-      current = []
+  const values = Array.from({ length: vertexCount }, (_, index) => {
+    const anchor = anchors[index]
+    const result = anchor
+      ? Array.from({ length: dimensions }, (_, d) => Number(anchor[d]) || 0)
+      : seed.slice()
+    for (let d = 0; d < dimensions; d++) {
+      if (unwrap[d] && result[d] < 0.5) result[d] += 1
     }
-    current.push(index)
+    return result
+  })
+  const fixed = anchors.map((anchor) => !!anchor)
+
+  const iterations = Math.max(24, Math.min(140, Math.round(Math.sqrt(vertexCount) * 3.2)))
+  const relaxation = 0.74
+
+  for (let iteration = 0; iteration < iterations; iteration++) {
+    const next = values.map((value) => value.slice())
+    for (let vertex = 0; vertex < vertexCount; vertex++) {
+      if (fixed[vertex]) continue
+      const neighbors = adjacency[vertex]
+      if (!neighbors?.size) continue
+      const avg = new Array(dimensions).fill(0)
+      let count = 0
+      neighbors.forEach((neighbor) => {
+        const value = values[neighbor]
+        if (!value) return
+        for (let d = 0; d < dimensions; d++) avg[d] += value[d]
+        count++
+      })
+      if (!count) continue
+      for (let d = 0; d < dimensions; d++) {
+        avg[d] /= count
+        next[vertex][d] = values[vertex][d] * (1 - relaxation) + avg[d] * relaxation
+      }
+    }
+    for (let vertex = 0; vertex < vertexCount; vertex++) values[vertex] = next[vertex]
   }
-  if (current.length) segments.push({ id: segments.length, indices: current })
 
-  // Drobné segmenty jsou většinou jen lokální šum normál. Sloučíme je s
-  // sousedem, jehož průměrný missing direction je podobnější.
-  const minSize = Math.max(5, Math.min(18, Math.round(Math.sqrt(count) * 0.42)))
-  const segmentMeanMissing = (segment) => {
-    const sum = new THREE.Vector3()
-    segment.indices.forEach((index) => sum.add(missingDirection(boundary[index])))
-    if (sum.lengthSq() < 1e-12) return missingDirection(boundary[segment.indices[0]])
-    return sum.normalize()
+  if (options.wrap01) {
+    values.forEach((value) => {
+      for (let d = 0; d < dimensions; d++) {
+        if (unwrap[d]) value[d] = ((value[d] % 1) + 1) % 1
+      }
+    })
+  }
+  if (options.clamp01) {
+    values.forEach((value) => {
+      for (let d = 0; d < dimensions; d++) value[d] = Math.max(0, Math.min(1, value[d]))
+    })
+  }
+  return values
+}
+
+function buildCGALPatchVertexNormals(positions, triangles, boundaryAnchors, origins, sourceNodeIds, hole) {
+  const vertexCount = Math.floor(positions.length / 3)
+  const normals = Array.from({ length: vertexCount }, () => new THREE.Vector3())
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
+  const ab = new THREE.Vector3(), ac = new THREE.Vector3(), faceNormal = new THREE.Vector3()
+
+  for (let i = 0; i + 2 < triangles.length; i += 3) {
+    const ia = triangles[i], ib = triangles[i + 1], ic = triangles[i + 2]
+    if (ia >= vertexCount || ib >= vertexCount || ic >= vertexCount) continue
+    a.set(positions[ia * 3], positions[ia * 3 + 1], positions[ia * 3 + 2])
+    b.set(positions[ib * 3], positions[ib * 3 + 1], positions[ib * 3 + 2])
+    c.set(positions[ic * 3], positions[ic * 3 + 1], positions[ic * 3 + 2])
+    ab.copy(b).sub(a); ac.copy(c).sub(a)
+    faceNormal.copy(ab).cross(ac)
+    if (faceNormal.lengthSq() < 1e-18) continue
+    faceNormal.normalize()
+    normals[ia].add(faceNormal); normals[ib].add(faceNormal); normals[ic].add(faceNormal)
   }
 
-  let guard = 0
-  while (segments.length > 1 && guard++ < count * 2) {
-    const smallIndex = segments.findIndex((segment) => segment.indices.length < minSize)
-    if (smallIndex < 0) break
-    const previousIndex = (smallIndex - 1 + segments.length) % segments.length
-    const nextIndex = (smallIndex + 1) % segments.length
-    const currentDirection = segmentMeanMissing(segments[smallIndex])
-    const previousScore = currentDirection.dot(segmentMeanMissing(segments[previousIndex]))
-    const nextScore = currentDirection.dot(segmentMeanMissing(segments[nextIndex]))
-    const targetIndex = previousScore >= nextScore ? previousIndex : nextIndex
+  const expected = repairAverageBoundaryNormal(hole?.boundary || [])
+  const average = new THREE.Vector3()
+  normals.forEach((normal) => { if (normal.lengthSq() > 1e-18) average.add(normal) })
+  if (average.lengthSq() > 1e-18 && expected.lengthSq() > 1e-18 && average.dot(expected) < 0) {
+    normals.forEach((normal) => normal.negate())
+  }
 
-    if (targetIndex === previousIndex) {
-      segments[previousIndex].indices.push(...segments[smallIndex].indices)
+  for (let vertex = 0; vertex < vertexCount; vertex++) {
+    const originLocal = origins?.[vertex]
+    const sourceNodeId = Number.isInteger(originLocal) && originLocal >= 0
+      ? sourceNodeIds?.[originLocal]
+      : null
+    const sourceNormal = Number.isInteger(sourceNodeId) ? boundaryAnchors.get(sourceNodeId)?.normal : null
+    if (sourceNormal) {
+      normals[vertex].set(sourceNormal[0], sourceNormal[1], sourceNormal[2]).normalize()
+    } else if (normals[vertex].lengthSq() > 1e-18) {
+      normals[vertex].normalize()
     } else {
-      segments[nextIndex].indices.unshift(...segments[smallIndex].indices)
+      normals[vertex].copy(expected)
     }
-    segments.splice(smallIndex, 1)
   }
-
-  segments.forEach((segment, id) => { segment.id = id })
-  const segmentIds = new Array(count).fill(0)
-  segments.forEach((segment) => segment.indices.forEach((index) => { segmentIds[index] = segment.id }))
-  return { segmentIds, segments }
+  return normals.map((normal) => [normal.x, normal.y, normal.z])
 }
 
-function repairFitLocalContinuationV118(boundary, boundaryIndex, support, fitRadius, segmentIds) {
-  const sample = boundary[boundaryIndex]
-  if (!sample) return null
+function buildCGALRepairPatchData(context, hole, workerResult, sourceNodeIds, timings = null) {
+  if (!context || !hole || !workerResult) throw new Error("CGAL: chybí výsledek opravy.")
+  if (!workerResult.fairSuccess) throw new Error("CGAL fairing nedokončil opravu sítě.")
 
-  const normal = sample.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
-  if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1)
-  normal.normalize()
+  const positions = workerResult.positions instanceof Float64Array
+    ? workerResult.positions
+    : new Float64Array(workerResult.positions)
+  const triangleIndices = workerResult.triangles instanceof Uint32Array
+    ? workerResult.triangles
+    : new Uint32Array(workerResult.triangles)
+  const origins = workerResult.origins instanceof Int32Array
+    ? workerResult.origins
+    : new Int32Array(workerResult.origins)
 
-  let tangent = boundary[(boundaryIndex + 1) % boundary.length].position
-    .clone()
-    .sub(boundary[(boundaryIndex - 1 + boundary.length) % boundary.length].position)
-  tangent.addScaledVector(normal, -tangent.dot(normal))
-  if (tangent.lengthSq() < 1e-12) tangent.set(1, 0, 0)
-  tangent.normalize()
-
-  let healthy = sample.guideDirection?.clone?.() || new THREE.Vector3()
-  healthy.addScaledVector(normal, -healthy.dot(normal))
-  healthy.addScaledVector(tangent, -healthy.dot(tangent))
-  if (healthy.lengthSq() < 1e-12) healthy.copy(tangent).cross(normal)
-  if (healthy.lengthSq() < 1e-12) healthy.set(0, 1, 0)
-  healthy.normalize()
-  const missing = healthy.clone().negate()
-
-  const ata = Array.from({ length: 6 }, () => new Array(6).fill(0))
-  const atb = new Array(6).fill(0)
-  let used = 0
-
-  const addEquation = (row, rhs, weight) => {
-    if (!(weight > 1e-9)) return
-    for (let i = 0; i < 6; i++) {
-      atb[i] += row[i] * rhs * weight
-      for (let j = 0; j < 6; j++) ata[i][j] += row[i] * row[j] * weight
-    }
+  const vertexCount = Math.floor(positions.length / 3)
+  if (!vertexCount || triangleIndices.length < 3 || origins.length !== vertexCount) {
+    throw new Error("CGAL: worker vrátil neplatnou patch geometrii.")
   }
 
-  const collect = (radius, allowedMissingLeak, minNormalDot) => {
-    used = 0
-    for (const supportSample of support || []) {
-      if (!supportSample?.position?.isVector3) continue
-      const delta = supportSample.position.clone().sub(sample.position)
-      const u = delta.dot(tangent)
-      const v = delta.dot(missing)
-      const z = delta.dot(normal)
-      const distance = Math.sqrt(u * u + v * v + z * z)
-      if (distance > radius) continue
-      // Zdravá síť musí být převážně na OPAČNÉ straně než chybějící plocha.
-      // Tohle odfiltruje protilehlou stěnu otvoru, i když je v 3D blízko.
-      if (v > allowedMissingLeak) continue
-      if (Math.abs(u) > radius * 0.92) continue
-      if (supportSample.normal?.isVector3 && supportSample.normal.dot(normal) < minNormalDot) continue
+  const boundaryAnchors = buildRepairBoundaryAttributeMap(hole)
+  const colorAnchors = new Array(vertexCount).fill(null)
+  const uvAnchors = new Array(vertexCount).fill(null)
 
-      const sigma = Math.max(radius * 0.68, 1e-4)
-      const sideWeight = v <= 0 ? 1 : Math.max(0.05, 1 - v / Math.max(allowedMissingLeak, 1e-5))
-      const weight = Math.exp(-(distance * distance) / (sigma * sigma)) * sideWeight
-      addEquation([u * u, v * v, u * v, u, v, 1], z, weight)
-      used++
-    }
+  for (let vertex = 0; vertex < vertexCount; vertex++) {
+    const originLocal = origins[vertex]
+    if (originLocal < 0 || originLocal >= sourceNodeIds.length) continue
+    const sourceNodeId = sourceNodeIds[originLocal]
+    const anchor = boundaryAnchors.get(sourceNodeId)
+    if (!anchor) continue
+    if (anchor.color) colorAnchors[vertex] = anchor.color
+    if (anchor.uv) uvAnchors[vertex] = anchor.uv
   }
 
-  collect(fitRadius, fitRadius * 0.035, 0.34)
-  if (used < 12) collect(fitRadius * 1.25, fitRadius * 0.075, 0.18)
-  if (used < 7) collect(fitRadius * 1.55, fitRadius * 0.12, 0.0)
-  if (used < 6) return null
-
-  // Patch musí přesně projít boundary. První derivaci necháváme jen slabě
-  // regularizovanou, aby se mohla projevit skutečná curvature zdravého povrchu.
-  ata[5][5] += 18
-  ata[3][3] += 0.8
-  ata[4][4] += 0.8
-  for (let i = 0; i < 6; i++) ata[i][i] += 1e-7
-
-  const coeff = repairSolveLinear(ata, atb)
-  if (!coeff) return null
-  return {
-    origin: sample.position.clone(), tangent, healthy, missing, normal, coeff,
-    fitRadius, used, segmentId: segmentIds?.[boundaryIndex] ?? 0,
-  }
-}
-
-function repairComputeGrowthMapV118(vertices, triangles, boundaryCount) {
-  const topology = repairBuildTopology(vertices.length, triangles)
-  const distances = new Array(vertices.length).fill(Infinity)
-  const anchors = new Array(vertices.length).fill(-1)
-  const heap = []
-
-  const push = (item) => {
-    heap.push(item)
-    let index = heap.length - 1
-    while (index > 0) {
-      const parent = (index - 1) >> 1
-      if (heap[parent].distance <= item.distance) break
-      heap[index] = heap[parent]
-      index = parent
-    }
-    heap[index] = item
-  }
-  const pop = () => {
-    if (!heap.length) return null
-    const root = heap[0]
-    const last = heap.pop()
-    if (heap.length && last) {
-      let index = 0
-      while (true) {
-        let child = index * 2 + 1
-        if (child >= heap.length) break
-        if (child + 1 < heap.length && heap[child + 1].distance < heap[child].distance) child++
-        if (heap[child].distance >= last.distance) break
-        heap[index] = heap[child]
-        index = child
-      }
-      heap[index] = last
-    }
-    return root
-  }
-
-  for (let index = 0; index < boundaryCount; index++) {
-    distances[index] = 0
-    anchors[index] = index
-    push({ index, distance: 0, anchor: index })
-  }
-
-  while (heap.length) {
-    const current = pop()
-    if (!current || current.distance > distances[current.index] + 1e-9) continue
-    for (const neighbor of topology.adjacency[current.index] || []) {
-      const weight = vertices[current.index].position.distanceTo(vertices[neighbor].position)
-      const nextDistance = current.distance + Math.max(weight, 1e-6)
-      if (nextDistance + 1e-9 >= distances[neighbor]) continue
-      distances[neighbor] = nextDistance
-      anchors[neighbor] = current.anchor
-      push({ index: neighbor, distance: nextDistance, anchor: current.anchor })
-    }
-  }
-
-  return { ...topology, distances, anchors }
-}
-
-function repairPredictionFromSegmentV118({
-  boundary,
-  localFits,
-  segmentIds,
-  anchorIndex,
-  seed,
-  growthDistance,
-  robustRadius,
-  medianEdge,
-}) {
-  if (!Number.isInteger(anchorIndex) || anchorIndex < 0) return null
-  const segmentId = segmentIds?.[anchorIndex] ?? 0
-  const count = boundary.length
-  const candidates = []
-
-  // Blending pouze podél stejného lokálního boundary segmentu. Nikdy přes
-  // protilehlou část otvoru, i kdyby byla geometricky blíž.
-  for (let offset = -3; offset <= 3; offset++) {
-    const index = (anchorIndex + offset + count) % count
-    if ((segmentIds?.[index] ?? 0) !== segmentId) continue
-    const fit = localFits[index]
-    if (!fit) continue
-    const guideDot = boundary[index].guideDirection?.dot?.(boundary[anchorIndex].guideDirection) ?? 1
-    if (guideDot < 0.52) continue
-    candidates.push({ index, fit, offset })
-  }
-  if (!candidates.length && localFits[anchorIndex]) candidates.push({ index: anchorIndex, fit: localFits[anchorIndex], offset: 0 })
-  if (!candidates.length) return null
-
-  const blended = new THREE.Vector3()
-  let weightSum = 0
-  candidates.forEach(({ fit, offset }) => {
-    const predicted = repairPredictContinuationPoint(fit, seed, growthDistance, robustRadius)
-    if (!predicted) return
-    const weight = 1 / (1 + Math.abs(offset) * 0.72)
-    blended.addScaledVector(predicted, weight)
-    weightSum += weight
-  })
-  if (!(weightSum > 0)) return null
-  blended.multiplyScalar(1 / weightSum)
-
-  // Tvrdá outward bariéra. Každý vertex musí zůstat na chybějící straně
-  // lokální boundary. Povinná vzdálenost roste s topologickou hloubkou, ale je
-  // limitovaná, aby se na malém otvoru nevytvořila umělá boule.
-  const anchor = boundary[anchorIndex]
-  const healthy = anchor.guideDirection?.clone?.() || new THREE.Vector3()
-  if (healthy.lengthSq() > 1e-12) {
-    healthy.normalize()
-    const requiredMissing = Math.min(
-      robustRadius * 0.48,
-      Math.max(medianEdge * 0.28, growthDistance * 0.43)
-    )
-    const healthyProjection = blended.clone().sub(anchor.position).dot(healthy)
-    const maximumHealthyProjection = -requiredMissing
-    if (healthyProjection > maximumHealthyProjection) {
-      blended.addScaledVector(healthy, maximumHealthyProjection - healthyProjection)
-    }
-  }
-
-  return { position: blended, anchorIndex, segmentId }
-}
-
-function repairSafeSegmentedGrowthDeformV118({
-  vertices,
-  triangles,
-  boundaryCount,
-  predictionData,
-  growthMap,
-  passes = 26,
-  alpha = 0.16,
-}) {
-  const topology = growthMap || repairComputeGrowthMapV118(vertices, triangles, boundaryCount)
-  const positions = vertices.map((vertex) => vertex.position.clone())
-  const initialFaceNormals = triangles.map(([a, b, c]) => {
-    const normal = positions[b].clone().sub(positions[a]).cross(positions[c].clone().sub(positions[a]))
-    if (normal.lengthSq() < 1e-12) return new THREE.Vector3()
-    return normal.normalize()
-  })
-
-  const order = []
-  for (let index = boundaryCount; index < vertices.length; index++) order.push(index)
-  order.sort((a, b) => (topology.distances[a] || 0) - (topology.distances[b] || 0))
-
-  const currentFaceNormal = (faceIndex) => {
-    const [a, b, c] = triangles[faceIndex]
-    const normal = positions[b].clone().sub(positions[a]).cross(positions[c].clone().sub(positions[a]))
-    if (normal.lengthSq() < 1e-12) return null
-    return normal.normalize()
-  }
-
-  const validAt = (vertexIndex) => {
-    const temporaryNormals = new Map()
-    for (const faceIndex of topology.incidentFaces[vertexIndex]) {
-      const normal = currentFaceNormal(faceIndex)
-      if (!normal) return false
-      const initial = initialFaceNormals[faceIndex]
-      if (initial.lengthSq() > 1e-12 && normal.dot(initial) < 0.12) return false
-      temporaryNormals.set(faceIndex, normal)
-    }
-    for (const [faceIndex, normal] of temporaryNormals) {
-      for (const neighborFace of topology.faceNeighbors[faceIndex]) {
-        const neighborNormal = temporaryNormals.get(neighborFace) || currentFaceNormal(neighborFace)
-        if (!neighborNormal || normal.dot(neighborNormal) < 0.06) return false
-      }
-    }
-    return true
-  }
-
-  let acceptedTotal = 0
-  let barrierCorrections = 0
-  let backtrackedMoves = 0
-
-  for (let pass = 0; pass < passes; pass++) {
-    let acceptedThisPass = 0
-    const barrierRamp = Math.min(1, (pass + 1) / 9)
-
-    for (const vertexIndex of order) {
-      const prediction = predictionData[vertexIndex]
-      if (!prediction?.position?.isVector3) continue
-      const current = positions[vertexIndex].clone()
-      let accepted = false
-
-      for (const scale of [1, 0.5, 0.25, 0.125]) {
-        positions[vertexIndex].copy(current).lerp(prediction.position, alpha * scale)
-
-        const anchorIndex = prediction.anchorIndex
-        const anchor = vertices[anchorIndex]
-        const healthy = anchor?.boundaryIndex >= 0
-          ? null
-          : null
-        // Bariéra je už obsažená v prediction.position. Během prvních passů ji
-        // ale prosazujeme postupně, aby fronta rostla od boundary a nevznikl fold.
-        if (Number.isInteger(anchorIndex) && anchorIndex >= 0) {
-          const boundaryAnchor = vertices[anchorIndex]
-          const target = prediction.position
-          const allowed = current.clone().lerp(target, barrierRamp)
-          // Pokud je navržený krok ještě příliš na původní inward straně,
-          // přitáhneme jej minimálně k právě dosažené growth frontě.
-          if (positions[vertexIndex].distanceToSquared(target) > allowed.distanceToSquared(target) + 1e-10) {
-            positions[vertexIndex].lerp(allowed, 0.35)
-            barrierCorrections++
-          }
-        }
-
-        if (validAt(vertexIndex)) {
-          accepted = true
-          acceptedThisPass++
-          acceptedTotal++
-          if (scale < 1) backtrackedMoves++
-          break
-        }
-      }
-
-      if (!accepted) positions[vertexIndex].copy(current)
-    }
-
-    if (!acceptedThisPass) break
-  }
-
-  return { positions, topology, acceptedTotal, barrierCorrections, backtrackedMoves }
-}
-
-
-/* ---------- Mesh Repair v11.9: directional surface bridges ---------- */
-
-function repairCircularDistanceV119(a, b, count) {
-  const direct = Math.abs(a - b)
-  return Math.min(direct, count - direct)
-}
-
-function repairMissingDirectionV119(boundary, index) {
-  const sample = boundary[index]
-  const normal = sample?.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
-  if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1)
-  normal.normalize()
-
-  let direction = sample?.guideDirection?.clone?.().negate() || new THREE.Vector3()
-  direction.addScaledVector(normal, -direction.dot(normal))
-  if (direction.lengthSq() < 1e-12) {
-    const previous = boundary[(index - 1 + boundary.length) % boundary.length]?.position
-    const next = boundary[(index + 1) % boundary.length]?.position
-    const tangent = next?.clone?.().sub(previous || sample.position) || new THREE.Vector3(1, 0, 0)
-    if (tangent.lengthSq() < 1e-12) tangent.set(1, 0, 0)
-    tangent.normalize()
-    direction = normal.clone().cross(tangent)
-  }
-  if (direction.lengthSq() < 1e-12) direction.set(1, 0, 0)
-  return direction.normalize()
-}
-
-function repairBoundaryTangentV119(boundary, index) {
-  const count = boundary.length
-  const previous = boundary[(index - 1 + count) % count]?.position
-  const next = boundary[(index + 1) % count]?.position
-  const sample = boundary[index]
-  let tangent = next?.clone?.().sub(previous || sample.position) || new THREE.Vector3(1, 0, 0)
-  const normal = sample?.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
-  if (normal.lengthSq() > 1e-12) {
-    normal.normalize()
-    tangent.addScaledVector(normal, -tangent.dot(normal))
-  }
-  if (tangent.lengthSq() < 1e-12) tangent.set(1, 0, 0)
-  return tangent.normalize()
-}
-
-function repairPairScoreV119(boundary, index, candidateIndex, robustRadius, medianEdge) {
-  const count = boundary.length
-  const minArcSeparation = Math.max(7, Math.round(count * 0.075))
-  if (repairCircularDistanceV119(index, candidateIndex, count) < minArcSeparation) return null
-
-  const start = boundary[index]
-  const end = boundary[candidateIndex]
-  const delta = end.position.clone().sub(start.position)
-  const distance = delta.length()
-  if (!(distance > medianEdge * 4.5)) return null
-  if (distance > robustRadius * 3.2) return null
-  const direction = delta.clone().multiplyScalar(1 / distance)
-
-  const missingStart = repairMissingDirectionV119(boundary, index)
-  const missingEnd = repairMissingDirectionV119(boundary, candidateIndex)
-  const alignStart = direction.dot(missingStart)
-  const alignEnd = direction.clone().negate().dot(missingEnd)
-  if (alignStart < 0.12 || alignEnd < 0.10) return null
-
-  const normalStart = start.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
-  const normalEnd = end.normal?.clone?.() || new THREE.Vector3(0, 0, 1)
-  if (normalStart.lengthSq() > 1e-12) normalStart.normalize()
-  if (normalEnd.lengthSq() > 1e-12) normalEnd.normalize()
-  const normalDot = normalStart.dot(normalEnd)
-
-  const tangent = repairBoundaryTangentV119(boundary, index)
-  const lateral = Math.abs(delta.dot(tangent)) / Math.max(distance, 1e-6)
-  const normalOffset = Math.abs(delta.dot(normalStart)) / Math.max(distance, 1e-6)
-
-  // Preferujeme první rozumný protější zásah ve směru "chybějícího povrchu",
-  // ne nejvzdálenější bod celé boundary.
-  const forward = delta.dot(missingStart)
-  const forwardRatio = forward / Math.max(distance, 1e-6)
-
-  const score =
-    (1 - alignStart) * 2.8 +
-    (1 - alignEnd) * 2.6 +
-    lateral * 0.62 +
-    normalOffset * 0.30 +
-    Math.max(0, 0.05 - normalDot) * 0.30 +
-    Math.max(0, 0.40 - forwardRatio) * 1.4 +
-    (distance / Math.max(robustRadius * 2.2, medianEdge * 12)) * 0.14
-
-  return { score, distance, alignStart, alignEnd }
-}
-
-function repairBuildDirectionalPairsV119(boundary, robustRadius, medianEdge) {
-  const count = boundary.length
-  const pairs = new Array(count).fill(-1)
-  const pairScores = new Array(count).fill(Infinity)
-
-  for (let index = 0; index < count; index++) {
-    for (let candidate = 0; candidate < count; candidate++) {
-      if (candidate === index) continue
-      const evaluated = repairPairScoreV119(
-        boundary,
-        index,
-        candidate,
-        robustRadius,
-        medianEdge
-      )
-      if (!evaluated || evaluated.score >= pairScores[index]) continue
-      pairs[index] = candidate
-      pairScores[index] = evaluated.score
-    }
-  }
-
-  // Vyhladíme partner field po obvodu. Bez toho může geometricky velmi členitá
-  // boundary přeskakovat mezi dvěma podobnými protějšími kandidáty.
-  for (let pass = 0; pass < 5; pass++) {
-    const nextPairs = pairs.slice()
-    for (let index = 0; index < count; index++) {
-      if (pairs[index] < 0) continue
-      const neighborTargets = []
-      for (let offset = -3; offset <= 3; offset++) {
-        if (!offset) continue
-        const neighbor = (index + offset + count) % count
-        if (pairs[neighbor] < 0) continue
-        let target = pairs[neighbor]
-        const reference = pairs[index]
-        while (target - reference > count / 2) target -= count
-        while (target - reference < -count / 2) target += count
-        neighborTargets.push(target)
-      }
-      if (!neighborTargets.length) continue
-
-      neighborTargets.sort((a, b) => a - b)
-      const medianTarget = neighborTargets[Math.floor(neighborTargets.length / 2)]
-      let bestCandidate = pairs[index]
-      let bestCost = Infinity
-      const searchRadius = Math.max(6, Math.round(count * 0.035))
-
-      for (let delta = -searchRadius; delta <= searchRadius; delta++) {
-        const raw = Math.round(medianTarget + delta)
-        const candidate = ((raw % count) + count) % count
-        const evaluated = repairPairScoreV119(
-          boundary,
-          index,
-          candidate,
-          robustRadius,
-          medianEdge
-        )
-        if (!evaluated) continue
-
-        let candidateUnwrapped = candidate
-        while (candidateUnwrapped - medianTarget > count / 2) candidateUnwrapped -= count
-        while (candidateUnwrapped - medianTarget < -count / 2) candidateUnwrapped += count
-        const continuityPenalty =
-          Math.abs(candidateUnwrapped - medianTarget) /
-          Math.max(1, searchRadius)
-
-        const totalCost = evaluated.score + continuityPenalty * 0.32
-        if (totalCost < bestCost) {
-          bestCost = totalCost
-          bestCandidate = candidate
-        }
-      }
-      nextPairs[index] = bestCandidate
-    }
-    for (let index = 0; index < count; index++) pairs[index] = nextPairs[index]
-  }
-
-  // Pokud bod nemá validního partnera, využijeme nejbližšího souseda, který jej má.
-  for (let index = 0; index < count; index++) {
-    if (pairs[index] >= 0) continue
-    for (let radius = 1; radius < Math.min(count / 2, 40); radius++) {
-      const a = (index - radius + count) % count
-      const b = (index + radius) % count
-      if (pairs[a] >= 0) {
-        pairs[index] = pairs[a]
-        break
-      }
-      if (pairs[b] >= 0) {
-        pairs[index] = pairs[b]
-        break
-      }
-    }
-  }
-
-  return { pairs, pairScores }
-}
-
-function repairShortContinuationDirectionV119({
-  boundary,
-  index,
-  localFit,
-  medianEdge,
-  robustRadius,
-}) {
-  const origin = boundary[index].position
-  const missing = repairMissingDirectionV119(boundary, index)
-  if (!localFit) return missing
-
-  const step = Math.max(medianEdge * 2.5, robustRadius * 0.035)
-  const seed = origin.clone().addScaledVector(missing, step)
-  const predicted = repairPredictContinuationPoint(
-    localFit,
-    seed,
-    step,
-    robustRadius
-  )
-  if (!predicted?.isVector3) return missing
-
-  const direction = predicted.clone().sub(origin)
-  if (direction.lengthSq() < 1e-12) return missing
-  direction.normalize()
-  // Lokální curvature fit smí směr jen zpřesnit, nikdy jej otočit zpět do zdravé strany.
-  if (direction.dot(missing) < 0.30) return missing
-  return direction
-}
-
-function repairHermitePointV119(p0, p1, m0, m1, t) {
-  const tt = t * t
-  const ttt = tt * t
-  const h00 = 2 * ttt - 3 * tt + 1
-  const h10 = ttt - 2 * tt + t
-  const h01 = -2 * ttt + 3 * tt
-  const h11 = ttt - tt
-  return p0.clone()
-    .multiplyScalar(h00)
-    .addScaledVector(m0, h10)
-    .addScaledVector(p1, h01)
-    .addScaledVector(m1, h11)
-}
-
-function repairBridgePredictionV119({
-  boundary,
-  localFits,
-  pairMap,
-  anchorIndex,
-  seed,
-  growthDistance,
-  medianEdge,
-  robustRadius,
-}) {
-  const pairIndex = pairMap?.[anchorIndex]
-  if (!Number.isInteger(pairIndex) || pairIndex < 0 || pairIndex === anchorIndex) return null
-
-  const start = boundary[anchorIndex]
-  const end = boundary[pairIndex]
-  const chord = end.position.clone().sub(start.position)
-  const chordLength = chord.length()
-  if (!(chordLength > medianEdge * 4)) return null
-
-  const chordDirection = chord.clone().multiplyScalar(1 / chordLength)
-
-  const startDirection = repairShortContinuationDirectionV119({
-    boundary,
-    index: anchorIndex,
-    localFit: localFits?.[anchorIndex],
-    medianEdge,
-    robustRadius,
-  })
-  const endLeavingDirection = repairShortContinuationDirectionV119({
-    boundary,
-    index: pairIndex,
-    localFit: localFits?.[pairIndex],
-    medianEdge,
-    robustRadius,
-  })
-
-  // Hermite derivative na konci musí mířit VE SMĚRU průchodu k end pointu,
-  // tedy opačně než "leaving into hole" direction z koncové boundary.
-  const tangentScale = Math.max(
-    medianEdge * 4,
-    Math.min(chordLength * 0.46, robustRadius * 0.95)
-  )
-  const m0 = startDirection.clone().multiplyScalar(tangentScale)
-  const m1 = endLeavingDirection.clone().multiplyScalar(-tangentScale)
-
-  const seedOffset = seed.clone().sub(start.position)
-  const projectedT = Math.max(
-    0,
-    Math.min(1, seedOffset.dot(chordDirection) / Math.max(chordLength, 1e-6))
-  )
-  const endDistance = seed.distanceTo(end.position)
-  const distanceT = growthDistance /
-    Math.max(growthDistance + endDistance, 1e-6)
-
-  // Initial cap nám dává slušnou topologickou informaci, ale je geometricky
-  // inward. Proto z něj bereme jen parametr t po trajektorii, ne 3D polohu.
-  const t = Math.max(
-    0.015,
-    Math.min(0.985, projectedT * 0.58 + distanceT * 0.42)
+  const colors = harmonicRepairAttribute(vertexCount, triangleIndices, colorAnchors, 3, { clamp01: true })
+  const uvs = harmonicRepairAttribute(vertexCount, triangleIndices, uvAnchors, 2, { wrap01: true })
+  const normals = buildCGALPatchVertexNormals(
+    positions,
+    triangleIndices,
+    boundaryAnchors,
+    origins,
+    sourceNodeIds,
+    hole
   )
 
-  let position = repairHermitePointV119(
-    start.position,
-    end.position,
-    m0,
-    m1,
-    t
-  )
+  const corners = Array.from({ length: vertexCount }, (_, vertex) => ({
+    sourcePos: [
+      positions[vertex * 3 + 0],
+      positions[vertex * 3 + 1],
+      positions[vertex * 3 + 2],
+    ],
+    sourceNormal: normals?.[vertex] || null,
+    color: colors?.[vertex] || null,
+    uv: uvs?.[vertex] || null,
+  }))
 
-  // Velmi jemná stabilizace směrem k chordu zabrání přestřelení u extrémně
-  // ostrých lokálních curvature fits, ale tvar stále zůstává řízen tangenty.
-  const chordPoint = start.position.clone().lerp(end.position, t)
-  position.lerp(chordPoint, 0.08)
-
-  const normal = start.normal?.clone?.().lerp(
-    end.normal || start.normal,
-    t
-  ) || new THREE.Vector3(0, 0, 1)
-  if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1)
-  normal.normalize()
-
-  return {
-    position,
-    normal,
-    color: repairLerpAttribute(start.color, end.color, t),
-    uv: repairLerpAttribute(start.uv, end.uv, t),
-    anchorIndex,
-    pairIndex,
-    t,
+  const triangles = []
+  for (let i = 0; i + 2 < triangleIndices.length; i += 3) {
+    const a = triangleIndices[i], b = triangleIndices[i + 1], c = triangleIndices[i + 2]
+    if (a >= vertexCount || b >= vertexCount || c >= vertexCount) continue
+    triangles.push([corners[a], corners[b], corners[c]])
   }
-}
-
-function repairSmoothBridgePredictionsV119({
-  boundary,
-  localFits,
-  pairMap,
-  anchorIndex,
-  seed,
-  growthDistance,
-  medianEdge,
-  robustRadius,
-}) {
-  const count = boundary.length
-  const mainPair = pairMap?.[anchorIndex]
-  if (!Number.isInteger(mainPair) || mainPair < 0) return null
-
-  const predictions = []
-  for (let offset = -2; offset <= 2; offset++) {
-    const index = (anchorIndex + offset + count) % count
-    const pair = pairMap?.[index]
-    if (!Number.isInteger(pair) || pair < 0) continue
-    if (repairCircularDistanceV119(pair, mainPair, count) > Math.max(10, count * 0.075)) continue
-
-    const prediction = repairBridgePredictionV119({
-      boundary,
-      localFits,
-      pairMap,
-      anchorIndex: index,
-      seed,
-      growthDistance,
-      medianEdge,
-      robustRadius,
-    })
-    if (!prediction) continue
-    const weight = 1 / (1 + Math.abs(offset) * 0.8)
-    predictions.push({ prediction, weight })
-  }
-  if (!predictions.length) return null
-
-  const position = new THREE.Vector3()
-  const normal = new THREE.Vector3()
-  let weightSum = 0
-  let color = null
-  let uv = null
-  let tSum = 0
-
-  predictions.forEach(({ prediction, weight }) => {
-    position.addScaledVector(prediction.position, weight)
-    normal.addScaledVector(prediction.normal, weight)
-    if (prediction.color) {
-      if (!color) color = new Array(prediction.color.length).fill(0)
-      prediction.color.forEach((value, channel) => { color[channel] += value * weight })
-    }
-    if (prediction.uv) {
-      if (!uv) uv = new Array(prediction.uv.length).fill(0)
-      prediction.uv.forEach((value, channel) => { uv[channel] += value * weight })
-    }
-    tSum += prediction.t * weight
-    weightSum += weight
-  })
-
-  if (!(weightSum > 0)) return null
-  position.multiplyScalar(1 / weightSum)
-  if (normal.lengthSq() < 1e-12) normal.copy(boundary[anchorIndex].normal || new THREE.Vector3(0, 0, 1))
-  normal.normalize()
-  if (color) color = color.map((value) => value / weightSum)
-  if (uv) uv = uv.map((value) => value / weightSum)
-
-  return {
-    position,
-    normal,
-    color,
-    uv,
-    anchorIndex,
-    pairIndex: mainPair,
-    t: tSum / weightSum,
-  }
-}
-
-function repairSafeBridgeDeformV119({
-  vertices,
-  triangles,
-  boundaryCount,
-  predictions,
-  growthMap,
-  passes = 28,
-  alpha = 0.18,
-}) {
-  const topology = growthMap || repairComputeGrowthMapV118(vertices, triangles, boundaryCount)
-  const positions = vertices.map((vertex) => vertex.position.clone())
-
-  const initialFaceNormals = triangles.map(([a, b, c]) => {
-    const normal = positions[b].clone().sub(positions[a]).cross(
-      positions[c].clone().sub(positions[a])
-    )
-    if (normal.lengthSq() < 1e-12) return new THREE.Vector3()
-    return normal.normalize()
-  })
-
-  const order = []
-  for (let index = boundaryCount; index < vertices.length; index++) order.push(index)
-  order.sort((a, b) => (topology.distances[a] || 0) - (topology.distances[b] || 0))
-
-  const currentFaceNormal = (faceIndex) => {
-    const [a, b, c] = triangles[faceIndex]
-    const normal = positions[b].clone().sub(positions[a]).cross(
-      positions[c].clone().sub(positions[a])
-    )
-    if (normal.lengthSq() < 1e-12) return null
-    return normal.normalize()
-  }
-
-  const validAt = (vertexIndex) => {
-    const localNormals = new Map()
-    for (const faceIndex of topology.incidentFaces[vertexIndex] || []) {
-      const normal = currentFaceNormal(faceIndex)
-      if (!normal) return false
-      const initial = initialFaceNormals[faceIndex]
-      if (initial.lengthSq() > 1e-12 && normal.dot(initial) < 0.08) return false
-      localNormals.set(faceIndex, normal)
-    }
-
-    for (const [faceIndex, normal] of localNormals) {
-      for (const neighborFace of topology.faceNeighbors[faceIndex] || []) {
-        const neighborNormal = localNormals.get(neighborFace) || currentFaceNormal(neighborFace)
-        if (!neighborNormal || normal.dot(neighborNormal) < 0.025) return false
-      }
-    }
-    return true
-  }
-
-  let acceptedTotal = 0
-  let backtrackedMoves = 0
-
-  for (let pass = 0; pass < passes; pass++) {
-    let acceptedThisPass = 0
-    for (const vertexIndex of order) {
-      const prediction = predictions[vertexIndex]
-      if (!prediction?.position?.isVector3) continue
-
-      const current = positions[vertexIndex].clone()
-      let accepted = false
-      for (const scale of [1, 0.5, 0.25, 0.125, 0.0625]) {
-        positions[vertexIndex]
-          .copy(current)
-          .lerp(prediction.position, alpha * scale)
-        if (!validAt(vertexIndex)) continue
-        accepted = true
-        acceptedThisPass++
-        acceptedTotal++
-        if (scale < 1) backtrackedMoves++
-        break
-      }
-      if (!accepted) positions[vertexIndex].copy(current)
-    }
-
-    if (!acceptedThisPass) break
-  }
-
-  return { positions, topology, acceptedTotal, backtrackedMoves }
-}
-
-function buildRepairPatchData(context, hole) {
-  if (!context || !hole?.boundary?.length) return null
-
-  const boundary = repairPrepareBoundaryGuides(hole.boundary)
-  const boundaryPositions = boundary.map((sample) => sample.position.clone())
-  const edgeLengths = boundaryPositions.map((position, index) =>
-    position.distanceTo(boundaryPositions[(index + 1) % boundaryPositions.length])
-  )
-  const medianEdge = Math.max(
-    1e-5,
-    repairMedian(edgeLengths, Math.max(context.diagonal * 0.001, 1e-5))
-  )
-
-  const boundaryCenter = new THREE.Vector3()
-  boundaryPositions.forEach((position) => boundaryCenter.add(position))
-  boundaryCenter.multiplyScalar(1 / boundaryPositions.length)
-  const radialDistances = boundaryPositions.map((position) =>
-    position.distanceTo(boundaryCenter)
-  )
-  const robustRadius = Math.max(
-    1e-5,
-    repairMedian(radialDistances, Math.max(...radialDistances, 1e-5))
-  )
-
-  // Topologie zůstává stejná stabilní 3D advancing-front síť jako ve v11.7/11.8.
-  // Tentokrát ji ale nepoužíváme jako geometrický "cap" – jen jako connectivity.
-  const coarseTriangles = repairAdvancingFrontTriangulation(boundary)
-  if (!coarseTriangles?.length) {
-    console.warn("Mesh Repair: directional bridge topology selhala, používám harmonic fallback.")
-    return buildRepairPatchDataLegacyHarmonic(context, hole)
-  }
-
-  const targetEdge = Math.max(
-    medianEdge * 2.18,
-    Math.min(medianEdge * 2.90, robustRadius * 0.094)
-  )
-  const refined = repairRefineTriangulation(
-    boundary,
-    coarseTriangles,
-    targetEdge
-  )
-  if (!refined?.triangles?.length || refined.vertices.length < boundary.length) return null
-
-  // Zdravé okolí používáme jen pro KRÁTKÝ odhad tangenty/curvature těsně za
-  // hranou. Samotný tvar přes celý otvor už zdravý cloud neurčuje.
-  const segmentation = repairBoundarySegmentsV118(boundary)
-  const avgNormal = repairAverageBoundaryNormal(boundary)
-  const support = repairCollectHealthySupport(context, hole, avgNormal)
-  const fitRadius = Math.max(
-    medianEdge * 9.5,
-    Math.min(robustRadius * 0.58, context.diagonal * 0.036)
-  )
-  const localFits = boundary.map((_, index) =>
-    repairFitLocalContinuationV118(
-      boundary,
-      index,
-      support,
-      fitRadius,
-      segmentation.segmentIds
-    )
-  )
-
-  // Hlavní změna v11.9:
-  // každý boundary bod hledá protější bod ve směru, kterým by zdravý povrch
-  // přirozeně pokračoval přes díru. Výsledkem je hladké pole A -> B "rayů".
-  const pairing = repairBuildDirectionalPairsV119(
-    boundary,
-    robustRadius,
-    medianEdge
-  )
-
-  const growthMap = repairComputeGrowthMapV118(
-    refined.vertices,
-    refined.triangles,
-    refined.boundaryCount
-  )
-
-  const predictions = new Array(refined.vertices.length).fill(null)
-  let pairedVertices = 0
-
-  for (
-    let vertexIndex = refined.boundaryCount;
-    vertexIndex < refined.vertices.length;
-    vertexIndex++
-  ) {
-    const anchorIndex = growthMap.anchors[vertexIndex]
-    const growthDistance = growthMap.distances[vertexIndex]
-    if (!Number.isInteger(anchorIndex) || !Number.isFinite(growthDistance)) continue
-
-    const prediction = repairSmoothBridgePredictionsV119({
-      boundary,
-      localFits,
-      pairMap: pairing.pairs,
-      anchorIndex,
-      seed: refined.vertices[vertexIndex].position,
-      growthDistance,
-      medianEdge,
-      robustRadius,
-    })
-    if (!prediction) continue
-    predictions[vertexIndex] = prediction
-    pairedVertices++
-  }
-
-  // Geometrie se postupně přitahuje na directional surface trajectories.
-  // Každý krok má fold/dihedral kontrolu + backtracking.
-  const deformation = repairSafeBridgeDeformV119({
-    vertices: refined.vertices,
-    triangles: refined.triangles,
-    boundaryCount: refined.boundaryCount,
-    predictions,
-    growthMap,
-    passes: 28,
-    alpha: 0.18,
-  })
-
-  const trianglesIndex = refined.triangles.map((triangle) => triangle.slice())
-  const finalNormals = repairFinalizePatchNormals(
-    refined.vertices,
-    trianglesIndex,
-    deformation.positions
-  )
-
-  const corners = refined.vertices.map((vertex, index) => {
-    const prediction = predictions[index]
-    return {
-      sourcePos: trimArr(deformation.positions[index]),
-      sourceNormal: trimArr(finalNormals.normals[index]),
-      color:
-        index < refined.boundaryCount
-          ? (vertex.color ? vertex.color.slice() : null)
-          : (prediction?.color || (vertex.color ? vertex.color.slice() : null)),
-      uv:
-        index < refined.boundaryCount
-          ? (vertex.uv ? vertex.uv.slice() : null)
-          : (prediction?.uv || (vertex.uv ? vertex.uv.slice() : null)),
-    }
-  })
-
-  const triangles = trianglesIndex.map(([a, b, c]) => [
-    corners[a],
-    corners[b],
-    corners[c],
-  ])
-
-  const validPairs = pairing.pairs.filter(
-    (pair, index) =>
-      Number.isInteger(pair) &&
-      pair >= 0 &&
-      pair !== index
-  ).length
+  if (!triangles.length) throw new Error("CGAL: výsledný patch neobsahuje trojúhelníky.")
 
   return {
     holeId: hole.id,
     childUuid: hole.childUuid,
     materialIndex: hole.materialIndex || 0,
     triangles,
-    boundaryPoints: boundaryPositions.map(trimArr),
+    boundaryPoints: (hole.points || []).map(trimArr),
     reconstruction: {
-      method: "directional-surface-bridges-v1",
-      boundaryVertices: boundary.length,
-      validPairs,
-      pairedVertices,
-      vertexCount: refined.vertices.length,
+      method: "cgal-wasm-c1-dense225",
+      densityControlFactor: CGAL_REPAIR_DENSITY,
+      continuity: CGAL_REPAIR_CONTINUITY,
+      fairSuccess: true,
+      vertexCount,
       triangleCount: triangles.length,
-      medianEdge,
-      targetEdge,
-      robustRadius,
-      supportSamples: support.length,
-      fitRadius,
-      acceptedBridgeMoves: deformation.acceptedTotal,
-      backtrackedMoves: deformation.backtrackedMoves,
-      reversedFaces: finalNormals.reversedFaces,
+      timings,
     },
   }
 }
-
 function createRepairPatchPreviewGeometry(patchData) {
   if (!patchData?.triangles?.length) return null
   const positions = []
@@ -5115,6 +3738,9 @@ export function applySurfaceComparison(meshA, meshB, tolerance = 0.25) {
 const ALIGNMENT_POINT_COLORS = ["#fbbf24", "#ef4444", "#22c55e"]
 const IDENTITY_MATRIX_ARRAY = new THREE.Matrix4().identity().toArray()
 const USE_ALIGNMENT_WORKER = true
+const USE_CGAL_REPAIR_WORKER = true
+const CGAL_REPAIR_DENSITY = 2.25
+const CGAL_REPAIR_CONTINUITY = 1
 
 // Stejné nastavení používá i legacy fallback, aby měl při případném selhání Workeru
 // stejnou exact-surface matematiku a podobný výkon jako hlavní Best Fit engine.
@@ -8791,6 +7417,11 @@ export default function ClientPage() {
   const [repairExportBusyUrl, setRepairExportBusyUrl] = useState("")
   const repairHistoryByUrlRef = useRef({})
   const repairPaintLastAtRef = useRef(0)
+  const repairWorkerRef = useRef(null)
+  const repairWorkerRequestsRef = useRef(new Map())
+  const repairWorkerRequestIdRef = useRef(0)
+  const repairWorkerFailedRef = useRef(false)
+  const repairPatchCacheRef = useRef(new Map())
 
   // Rozlišuj skutečný click od orbit/pan gesta. R3F může po dokončení drag gesta
   // ještě emitnout onClick na mesh; v Ořezu by to jinak omylem položilo nový bod.
@@ -8878,6 +7509,156 @@ export default function ClientPage() {
       payload: { active: !!repairMode },
     }, "*")
   }, [repairMode])
+
+
+  useEffect(() => {
+    if (!USE_CGAL_REPAIR_WORKER || typeof Worker === "undefined") return undefined
+
+    let worker = null
+    try {
+      worker = new Worker(new URL("./workers/repair.worker.js", import.meta.url))
+    } catch (error) {
+      repairWorkerFailedRef.current = true
+      console.error("[ARTHETIC CGAL Repair] Worker se nepodařilo vytvořit.", error)
+      return undefined
+    }
+
+    repairWorkerRef.current = worker
+    repairWorkerFailedRef.current = false
+
+    const rejectAll = (error) => {
+      for (const request of repairWorkerRequestsRef.current.values()) request.reject(error)
+      repairWorkerRequestsRef.current.clear()
+    }
+
+    const handleMessage = (event) => {
+      const message = event.data || {}
+      if (message.type === "READY") {
+        console.info("[ARTHETIC CGAL Repair] WASM engine připraven")
+        return
+      }
+      if (message.type === "INIT_ERROR") {
+        repairWorkerFailedRef.current = true
+        const error = new Error(message.message || "CGAL WASM engine se nepodařilo inicializovat.")
+        error.repairWorkerKind = "infrastructure"
+        rejectAll(error)
+        console.error("[ARTHETIC CGAL Repair] init error:", message)
+        return
+      }
+
+      const request = repairWorkerRequestsRef.current.get(message.requestId)
+      if (!request) return
+
+      if (message.type === "PROGRESS") {
+        request.onProgress?.(message.progress || null)
+        return
+      }
+
+      repairWorkerRequestsRef.current.delete(message.requestId)
+
+      if (message.type === "RESULT") {
+        request.resolve({
+          result: {
+            positions: new Float64Array(message.result?.positions || new ArrayBuffer(0)),
+            triangles: new Uint32Array(message.result?.triangles || new ArrayBuffer(0)),
+            origins: new Int32Array(message.result?.origins || new ArrayBuffer(0)),
+            fairSuccess: !!message.result?.fairSuccess,
+            errorCode: Number(message.result?.errorCode) || 0,
+          },
+          sourceNodeIds: request.sourceNodeIds,
+          timings: message.timings || null,
+        })
+        return
+      }
+
+      if (message.type === "ERROR") {
+        const error = new Error(message.message || "CGAL oprava sítě selhala.")
+        error.repairWorkerKind = message.kind || "algorithm"
+        error.repairErrorCode = message.errorCode
+        if (message.stack) error.workerStack = message.stack
+        request.reject(error)
+      }
+    }
+
+    const handleError = (event) => {
+      repairWorkerFailedRef.current = true
+      const error = new Error(event?.message || "CGAL Repair Worker není dostupný.")
+      error.repairWorkerKind = "infrastructure"
+      console.error("[ARTHETIC CGAL Repair] runtime error:", event)
+      rejectAll(error)
+      try { worker?.terminate() } catch {}
+      if (repairWorkerRef.current === worker) repairWorkerRef.current = null
+    }
+
+    worker.addEventListener("message", handleMessage)
+    worker.addEventListener("error", handleError)
+
+    return () => {
+      worker.removeEventListener("message", handleMessage)
+      worker.removeEventListener("error", handleError)
+      const error = new Error("CGAL Repair Worker byl ukončen.")
+      error.repairWorkerKind = "infrastructure"
+      rejectAll(error)
+      try { worker.terminate() } catch {}
+      if (repairWorkerRef.current === worker) repairWorkerRef.current = null
+    }
+  }, [])
+
+  const runCGALRepairWorker = useCallback((context, hole, onProgress) => {
+    const worker = repairWorkerRef.current
+    if (!USE_CGAL_REPAIR_WORKER || !worker || repairWorkerFailedRef.current) {
+      const error = new Error("CGAL Mesh Repair engine není připravený. Zkontrolujte /wasm/mesh-repair.js a /wasm/mesh-repair.wasm.")
+      error.repairWorkerKind = "infrastructure"
+      return Promise.reject(error)
+    }
+
+    let prepared
+    try {
+      prepared = buildCGALRepairWorkerPayload(context, hole)
+    } catch (error) {
+      error.repairWorkerKind = "algorithm"
+      return Promise.reject(error)
+    }
+
+    const requestId = `repair-${Date.now()}-${++repairWorkerRequestIdRef.current}`
+    return new Promise((resolve, reject) => {
+      repairWorkerRequestsRef.current.set(requestId, {
+        resolve,
+        reject,
+        onProgress,
+        sourceNodeIds: prepared.sourceNodeIds,
+      })
+      try {
+        worker.postMessage({
+          type: "REPAIR_HOLE",
+          requestId,
+          payload: prepared.payload,
+        }, prepared.transferables)
+      } catch (error) {
+        repairWorkerRequestsRef.current.delete(requestId)
+        error.repairWorkerKind = "infrastructure"
+        reject(error)
+      }
+    })
+  }, [])
+
+  const prepareCGALRepairPatch = useCallback(async (context, hole, onProgress) => {
+    if (!context || !hole) throw new Error("CGAL: není vybraný otvor.")
+    const cacheKey = `${hole.childUuid}:${hole.id}:${context.nodes.length}:${context.triangles.length}:${hole.nodeIds?.length || 0}`
+    const cached = repairPatchCacheRef.current.get(cacheKey)
+    if (cached) return cached
+
+    const response = await runCGALRepairWorker(context, hole, onProgress)
+    const patch = buildCGALRepairPatchData(
+      context,
+      hole,
+      response.result,
+      response.sourceNodeIds,
+      response.timings
+    )
+    repairPatchCacheRef.current.set(cacheKey, patch)
+    return patch
+  }, [runCGALRepairWorker])
 
   useEffect(() => {
     if (!USE_ALIGNMENT_WORKER || typeof Worker === "undefined") return undefined
@@ -9875,6 +8656,7 @@ export default function ClientPage() {
     setRepairPainting(false)
     setRepairBusy(false)
     setRepairMessage("")
+    repairPatchCacheRef.current.clear()
     if (trackballRef.current) trackballRef.current.enabled = !sliceOverlayInteracting && !alignmentBusy
   }, [sliceOverlayInteracting, alignmentBusy])
 
@@ -9904,21 +8686,34 @@ export default function ClientPage() {
     setRepairMessage("Vyberte model. Automatický režim vyhledá malé otevřené hranice, ruční režim dovolí označit problémovou oblast štětcem.")
   }, [files, clearRepairWorkingState])
 
-  const selectRepairHole = useCallback((holeId, contextValue = repairContext, holesValue = repairHoles) => {
-    if (!contextValue || !holeId) return
+  const selectRepairHole = useCallback(async (holeId, contextValue = repairContext, holesValue = repairHoles) => {
+    if (repairBusy || !contextValue || !holeId) return
     const hole = holesValue.find((item) => item.id === holeId)
     if (!hole) return
+
+    setRepairSelectedHoleId(hole.id)
+    setRepairPreviewPatch(null)
+    setRepairStage("preview")
+    setRepairBusy(true)
+    setRepairMessage(`CGAL C1 + Dense225 počítá náhled ${hole.id.replace("hole-", "otvoru ")}…`)
+
     try {
-      const patch = buildRepairPatchData(contextValue, hole)
-      setRepairSelectedHoleId(hole.id)
+      const patch = await prepareCGALRepairPatch(contextValue, hole, (progress) => {
+        const percent = Number(progress?.percent)
+        if (Number.isFinite(percent)) {
+          setRepairMessage(`CGAL C1 + Dense225 · ${Math.max(0, Math.min(100, Math.round(percent)))} % · připravuji náhled opravy…`)
+        }
+      })
       setRepairPreviewPatch(patch)
-      setRepairStage("preview")
-      setRepairMessage(`Náhled ${hole.id.replace("hole-", "otvoru ")} je připravený. Zelená plocha ukazuje curvature-aware doplnění povrchu.`)
+      setRepairMessage(`CGAL náhled ${hole.id.replace("hole-", "otvoru ")} je připravený. Zelená plocha je skutečný C1 + Dense225 patch.`)
     } catch (error) {
-      console.error("Repair preview error:", error)
-      setRepairMessage(error?.message || "Náhled opravy se nepodařilo vytvořit.")
+      console.error("CGAL repair preview error:", error)
+      setRepairPreviewPatch(null)
+      setRepairMessage(error?.message || "CGAL náhled opravy se nepodařilo vytvořit.")
+    } finally {
+      setRepairBusy(false)
     }
-  }, [repairContext, repairHoles])
+  }, [repairBusy, repairContext, repairHoles, prepareCGALRepairPatch])
 
   const selectRepairModel = useCallback((url) => {
     if (repairBusy || !url) return
@@ -9927,9 +8722,12 @@ export default function ClientPage() {
       setRepairMessage("Model ještě není načtený. Zkuste to za okamžik.")
       return
     }
+
     setRepairBusy(true)
     setRepairMessage("Analyzuji otevřené hrany a topologii sítě…")
-    window.setTimeout(() => {
+    repairPatchCacheRef.current.clear()
+
+    window.setTimeout(async () => {
       try {
         const context = buildTrimMeshContext(object)
         const holes = findRepairBoundaryLoops(context)
@@ -9940,6 +8738,7 @@ export default function ClientPage() {
         setRepairBrushCursor(null)
         setRepairSelectedHoleId("")
         setRepairPreviewPatch(null)
+
         if (repairVariant === "manual") {
           setRepairStage("paint")
           setRepairMessage(holes.length
@@ -9950,22 +8749,28 @@ export default function ClientPage() {
           const first = candidates[0] || holes[0]
           setRepairStage(first ? "preview" : "detect")
           if (first) {
-            const patch = buildRepairPatchData(context, first)
             setRepairSelectedHoleId(first.id)
+            setRepairMessage(`Nalezeno ${holes.length} otevřených smyček (${candidates.length} doporučených). CGAL C1 + Dense225 počítá skutečný náhled…`)
+            const patch = await prepareCGALRepairPatch(context, first, (progress) => {
+              const percent = Number(progress?.percent)
+              if (Number.isFinite(percent)) {
+                setRepairMessage(`CGAL C1 + Dense225 · ${Math.max(0, Math.min(100, Math.round(percent)))} % · připravuji náhled…`)
+              }
+            })
             setRepairPreviewPatch(patch)
-            setRepairMessage(`Nalezeno ${holes.length} otevřených smyček (${candidates.length} doporučených k automatické opravě). Zeleně vidíte náhled vybraného otvoru.`)
+            setRepairMessage(`Nalezeno ${holes.length} otevřených smyček (${candidates.length} doporučených). Zeleně vidíte skutečný CGAL C1 + Dense225 patch.`)
           } else {
             setRepairMessage("Na tomto modelu jsem nenašel žádnou uzavřenou otevřenou hranu. Přepněte na Ručně a označte problémovou oblast.")
           }
         }
       } catch (error) {
-        console.error("Repair context error:", error)
-        setRepairMessage(error?.message || "Síť modelu se nepodařilo analyzovat.")
+        console.error("Repair context / CGAL error:", error)
+        setRepairMessage(error?.message || "Síť modelu se nepodařilo analyzovat nebo CGAL engine není dostupný.")
       } finally {
         setRepairBusy(false)
       }
     }, 20)
-  }, [repairBusy, repairVariant])
+  }, [repairBusy, repairVariant, prepareCGALRepairPatch])
 
   const changeRepairVariant = useCallback((variant) => {
     if (variant !== "auto" && variant !== "manual") return
@@ -10090,49 +8895,71 @@ export default function ClientPage() {
       setRepairMessage("V označené oblasti jsem nenašel uzavřenou otevřenou hranu. Rozšiřte paint přes samotný okraj díry/trhliny a zkuste to znovu.")
       return
     }
+    setRepairMessage("Otvor v označené oblasti byl nalezen. Připravuji skutečný CGAL C1 + Dense225 patch…")
     selectRepairHole(best.hole.id)
-    setRepairMessage("Otvor v označené oblasti byl nalezen. Zelená plocha je náhled dopočítaného povrchu; pokud sedí, potvrďte Opravit.")
   }, [repairContext, repairPaintedTriangles, repairHoles, selectRepairHole])
 
-  const applyRepairHoles = useCallback((holeIds, mode = repairVariant) => {
+  const applyRepairHoles = useCallback(async (holeIds, mode = repairVariant) => {
     if (!repairContext || !repairSelection || repairBusy) return
     const selected = repairHoles.filter((hole) => holeIds.includes(hole.id))
     if (!selected.length) return
+
     setRepairBusy(true)
-    setRepairMessage(selected.length > 1 ? `Dopočítávám a uzavírám ${selected.length} otvorů…` : "Dopočítávám chybějící povrch a uzavírám otvor…")
-    window.setTimeout(() => {
-      try {
-        const patches = selected.map((hole) => buildRepairPatchData(repairContext, hole)).filter(Boolean)
-        const backup = applyRepairPatchesToObject(repairContext, patches)
-        if (!backup.length) throw new Error("Opravu se nepodařilo aplikovat na geometrii.")
-        const stack = repairHistoryByUrlRef.current[repairSelection] || []
-        repairHistoryByUrlRef.current[repairSelection] = [...stack, backup]
-        setRepairedExportsByUrl((previous) => ({
-          ...previous,
-          [repairSelection]: {
-            count: (previous[repairSelection]?.count || 0) + patches.length,
-            mode,
-            saveRequested: false,
-            createdAt: Date.now(),
-          },
-        }))
-        invalidateComparisonResult()
-        setRepairContext(null)
-        setRepairHoles([])
-        setRepairSelectedHoleId("")
-        setRepairPreviewPatch(null)
-        setRepairPaintedTriangles(new Set())
-        setRepairBrushCursor(null)
-        setRepairStage("result")
-        setRepairMessage(`Oprava je hotová. Doplněný patch plynule pokračuje v lokálním zakřivení a přebírá vertex colors/UV z okolní boundary.`)
-      } catch (error) {
-        console.error("Repair apply error:", error)
-        setRepairMessage(error?.message || "Oprava sítě se nepodařila.")
-      } finally {
-        setRepairBusy(false)
+    setRepairMessage(selected.length > 1
+      ? `CGAL připravuje ${selected.length} oprav C1 + Dense225…`
+      : "CGAL připravuje finální C1 + Dense225 patch…")
+
+    try {
+      const patches = []
+      for (let index = 0; index < selected.length; index++) {
+        const hole = selected[index]
+        setRepairMessage(selected.length > 1
+          ? `CGAL C1 + Dense225 · otvor ${index + 1}/${selected.length}…`
+          : "CGAL C1 + Dense225 · dokončuji opravu…")
+        const patch = await prepareCGALRepairPatch(repairContext, hole, (progress) => {
+          const percent = Number(progress?.percent)
+          if (!Number.isFinite(percent)) return
+          setRepairMessage(selected.length > 1
+            ? `CGAL C1 + Dense225 · otvor ${index + 1}/${selected.length} · ${Math.round(percent)} %`
+            : `CGAL C1 + Dense225 · ${Math.round(percent)} %`)
+        })
+        if (patch) patches.push(patch)
       }
-    }, 20)
-  }, [repairContext, repairSelection, repairBusy, repairHoles, repairVariant, invalidateComparisonResult])
+
+      if (!patches.length) throw new Error("CGAL nevytvořil žádný patch.")
+      const backup = applyRepairPatchesToObject(repairContext, patches)
+      if (!backup.length) throw new Error("Opravu se nepodařilo aplikovat na geometrii.")
+
+      const stack = repairHistoryByUrlRef.current[repairSelection] || []
+      repairHistoryByUrlRef.current[repairSelection] = [...stack, backup]
+      setRepairedExportsByUrl((previous) => ({
+        ...previous,
+        [repairSelection]: {
+          count: (previous[repairSelection]?.count || 0) + patches.length,
+          mode,
+          engine: "cgal-wasm-c1-dense225",
+          saveRequested: false,
+          createdAt: Date.now(),
+        },
+      }))
+
+      invalidateComparisonResult()
+      repairPatchCacheRef.current.clear()
+      setRepairContext(null)
+      setRepairHoles([])
+      setRepairSelectedHoleId("")
+      setRepairPreviewPatch(null)
+      setRepairPaintedTriangles(new Set())
+      setRepairBrushCursor(null)
+      setRepairStage("result")
+      setRepairMessage(`Oprava je hotová · CGAL C1 + Dense225 · ${patches.length === 1 ? "1 otvor" : `${patches.length} otvorů`}. Vertex colors/UV jsou harmonicky dopočítané z boundary.`)
+    } catch (error) {
+      console.error("CGAL repair apply error:", error)
+      setRepairMessage(error?.message || "CGAL Oprava sítě se nepodařila.")
+    } finally {
+      setRepairBusy(false)
+    }
+  }, [repairContext, repairSelection, repairBusy, repairHoles, repairVariant, invalidateComparisonResult, prepareCGALRepairPatch])
 
   const repairSelectedHole = useCallback(() => {
     if (repairSelectedHoleId) applyRepairHoles([repairSelectedHoleId])
@@ -10205,6 +9032,7 @@ export default function ClientPage() {
         derivedFrom: file.rawName || file.name || makeRepairedExportName(file),
         repairHoleCount: Number(info.count) || 1,
         repairMode: info.mode || "auto",
+        repairEngine: info.engine || "cgal-wasm-c1-dense225",
       }
     } finally {
       disposeAlignedExportObject(exportObject)
@@ -10241,6 +9069,7 @@ export default function ClientPage() {
           derivedFrom: result.derivedFrom,
           repairHoleCount: result.repairHoleCount,
           repairMode: result.repairMode,
+          repairEngine: result.repairEngine,
           createdAt: new Date().toISOString(),
         },
       }, "*", [buffer])
