@@ -8776,6 +8776,136 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
   }
 }
 
+
+// V17 – isotropic scan-to-base transition helpers.
+// Transition už není tvořený sadou horizontálních ringů. Místo toho triangulujeme
+// úzký periodický parametrický pás (U = obvod, V = hloubka přechodu) a jeho body
+// promítáme zpět na přesně stejnou shape-locked surface, kterou používala V12/V16.
+function cadClosedLoopArcTable(points) {
+  const cumulative = [0]
+  let total = 0
+  for (let i = 0; i < (points?.length || 0); i++) {
+    total += points[i].distanceTo(points[(i + 1) % points.length])
+    cumulative.push(total)
+  }
+  return { cumulative, total }
+}
+
+function cadSampleClosedLoopArc(points, table, fraction) {
+  if (!Array.isArray(points) || !points.length) return new THREE.Vector3()
+  if (points.length === 1) return points[0].clone()
+  const total = table?.total || 0
+  if (total <= 1e-9) return points[0].clone()
+  let f = Number(fraction) || 0
+  f = ((f % 1) + 1) % 1
+  const distance = f * total
+  const cumulative = table.cumulative
+  let lo = 0, hi = points.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (cumulative[mid] <= distance) lo = mid
+    else hi = mid - 1
+  }
+  const edge = Math.min(points.length - 1, lo)
+  const start = cumulative[edge]
+  const end = cumulative[edge + 1]
+  const t = end > start ? THREE.MathUtils.clamp((distance - start) / (end - start), 0, 1) : 0
+  return points[edge].clone().lerp(points[(edge + 1) % points.length], t)
+}
+
+function cadSampleClosedLoopUniform(points, fraction) {
+  if (!Array.isArray(points) || !points.length) return new THREE.Vector3()
+  if (points.length === 1) return points[0].clone()
+  let f = Number(fraction) || 0
+  f = ((f % 1) + 1) % 1
+  const scaled = f * points.length
+  const index = Math.floor(scaled) % points.length
+  const t = scaled - Math.floor(scaled)
+  return points[index].clone().lerp(points[(index + 1) % points.length], t)
+}
+
+function cadBuildIsotropicTransitionUV(rawLoop, bottomCount, transitionDepth, targetSpacing = 0.58) {
+  const rawCount = rawLoop?.length || 0
+  if (rawCount < 4 || bottomCount < 4) throw new Error("Přechod scan–báze se nepodařilo triangulovat.")
+  const arc = cadClosedLoopArcTable(rawLoop)
+  const perimeter = Math.max(1e-6, arc.total)
+  const depth = Math.max(0.25, transitionDepth)
+  const spacing = Math.max(0.42, Math.min(0.68, targetSpacing))
+  const boundary = []
+  const boundaryMeta = []
+  const pushBoundary = (x, y, meta) => {
+    boundary.push(new THREE.Vector2(x, y))
+    boundaryMeta.push(meta)
+  }
+
+  // Horní constrained boundary = přesná relaxovaná trim boundary.
+  for (let i = 0; i < rawCount; i++) {
+    const u = arc.cumulative[i] / perimeter
+    pushBoundary(u * perimeter, 0, { kind: "top", index: i, u, v: 0 })
+  }
+  // Periodický pravý roh je geometricky stejný bod jako u=0.
+  pushBoundary(perimeter, 0, { kind: "top", index: 0, u: 1, v: 0 })
+
+  // Boční seam rozdělíme na ~isotropní segmenty. Levá a pravá strana se po
+  // triangulaci svaří na stejné 3D indexy, takže patch je topologicky válec.
+  const sideSections = Math.max(2, Math.ceil(depth / spacing))
+  for (let k = 1; k < sideSections; k++) {
+    const v = k / sideSections
+    pushBoundary(perimeter, v * depth, { kind: "side", level: k, u: 1, v })
+  }
+
+  // Spodní constrained boundary = pravidelný transition-end profil, obráceně,
+  // protože obcházíme obvod parametrického obdélníku.
+  pushBoundary(perimeter, depth, { kind: "bottom", index: 0, u: 1, v: 1 })
+  for (let i = bottomCount - 1; i >= 1; i--) {
+    const u = i / bottomCount
+    pushBoundary(u * perimeter, depth, { kind: "bottom", index: i, u, v: 1 })
+  }
+  pushBoundary(0, depth, { kind: "bottom", index: 0, u: 0, v: 1 })
+
+  for (let k = sideSections - 1; k >= 1; k--) {
+    const v = k / sideSections
+    pushBoundary(0, v * depth, { kind: "side", level: k, u: 0, v })
+  }
+
+  const initialFaces = THREE.ShapeUtils.triangulateShape(boundary, [])
+  if (!initialFaces?.length) throw new Error("Přechod scan–báze se nepodařilo triangulovat.")
+
+  // Hexagonální Steiner distribuce v parametrickém prostoru rozbije viditelné
+  // horizontální ringy. U hran necháváme malý clearance, přesné boundary jsou
+  // constrained a nikdy se neposouvají.
+  const clearance = Math.max(0.16, spacing * 0.28)
+  const steiner = cadGenerateHexSteinerPoints(boundary, spacing, clearance)
+  const inserted = cadInsertSteinerPointsIntoTriangulation(boundary, initialFaces, steiner)
+  const firstDelaunay = cadConstrainedDelaunayFlips(inserted.points, inserted.faces, boundary.length, 34)
+  const relaxed = cadRelaxCapInterior(
+    inserted.points,
+    firstDelaunay.faces,
+    boundary.length,
+    boundary,
+    1,
+    0.08,
+    Math.max(0.12, spacing * 0.18)
+  )
+  const finalDelaunay = cadConstrainedDelaunayFlips(relaxed.points, firstDelaunay.faces, boundary.length, 26)
+
+  return {
+    points: relaxed.points,
+    faces: finalDelaunay.faces,
+    boundaryCount: boundary.length,
+    boundaryMeta,
+    perimeter,
+    depth,
+    spacing,
+    sideSections,
+    steinerRequested: steiner.length,
+    steinerInserted: inserted.inserted,
+    steinerSkipped: inserted.skipped,
+    flips: firstDelaunay.flips + finalDelaunay.flips,
+    relaxMoves: relaxed.moved,
+  }
+}
+
 function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
   const collectedTrianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
   const boundaryData = cadExtractBoundaryLoopsRobust(collectedTrianglePositions)
@@ -8837,62 +8967,43 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   // Samotný CAD bridge proto držíme typicky ~1.0–1.45 mm a nezávisle na Total Height.
   const desiredTransitionDepth = Math.max(0.95, Math.min(1.45, boundaryData.diagonal * 0.0205))
   const transitionDepth = Math.max(0.48, Math.min(desiredTransitionDepth, availableBaseDepth * 0.42))
-  const transitionSteps = transitionDepth >= 1.15 ? 7 : 6
-  const transitionRings = []
-  const transitionRingCounts = []
-
   const smoothstep = (t) => t * t * (3 - 2 * t)
   const profileEase = (t) => {
     const s = smoothstep(t)
     return s * s * (3 - 2 * s)
   }
 
-  // V12 shape-locked transition zůstává ve V15 beze změny.
-  // V11 zlepšil topologii tím, že počet bodů snižoval postupně, ale první ringy
-  // znovu vzorkovaly přímo syrovou hustou boundary. Tím se do přechodu vrátila
-  // vysokofrekvenční zubatost a báze mohla opticky působit zvlněně.
-  //
-  // V12 proto nejdřív vytvoří KAŽDÝ geometrický ring přesně stejným způsobem jako
-  // hladký V10 profil (~0.39 mm sampling). Teprve hotovou křivku pak případně
-  // převzorkuje na vyšší počet bodů pro lepší triangulaci. Nové body tedy leží
-  // přímo na V10 polyline a nemohou změnit její tvar – mění se jen topologie.
-  const sourceCount = rawLoop.length
+  // V17 – stejný shape-locked geometrický profil jako V12/V16, ale bez
+  // horizontálních transition ringů. Definujeme kontinuální parametrickou surface
+  // a tu následně vyplníme isotropní Delaunay triangulací.
   const targetCount = sampledRawLoop.length
   const targetY = boundaryExtremeY + (isUpper ? transitionDepth : -transitionDepth)
   const capMargin = Math.min(0.45, Math.max(0.16, availableBaseDepth * 0.08))
-  for (let step = 1; step <= transitionSteps; step++) {
-    const t = step / transitionSteps
-    const profileT = profileEase(t)
-    const verticalT = smoothstep(t)
-    const countEase = smoothstep(Math.min(1, t * 1.04))
-    const ringCount = step === transitionSteps
-      ? targetCount
-      : Math.max(targetCount, Math.round(THREE.MathUtils.lerp(sourceCount, targetCount, countEase)))
-    transitionRingCounts.push(ringCount)
+  const rawArcTable = cadClosedLoopArcTable(rawLoop)
 
-    // Canonical V10 geometry – vždy stejný targetCount a stejná parametrizace.
-    const canonicalRing = sampledRawLoop.map((raw, i) => {
-      const smooth = regularized[i] || raw
-      const interpolatedY = THREE.MathUtils.lerp(raw.y, targetY, verticalT)
-      const y = isUpper
-        ? Math.min(interpolatedY, baseCapY - capMargin)
-        : Math.max(interpolatedY, baseCapY + capMargin)
-      return new THREE.Vector3(
-        THREE.MathUtils.lerp(raw.x, smooth.x, profileT),
-        y,
-        THREE.MathUtils.lerp(raw.z, smooth.z, profileT)
-      )
-    })
-
-    // Upsampling probíhá až na hotové canonical polyline. Proto přidává vertexy,
-    // ale nevrací do modelu detail původní raw boundary ani neposouvá profil.
-    const ring = ringCount === targetCount
-      ? canonicalRing
-      : cadResampleClosedLoopCount(canonicalRing, ringCount)
-    transitionRings.push(ring)
+  const evaluateTransitionSurface = (u, v) => {
+    const vv = THREE.MathUtils.clamp(v, 0, 1)
+    const raw = cadSampleClosedLoopArc(rawLoop, rawArcTable, u)
+    const smooth = cadSampleClosedLoopUniform(regularized, u)
+    const profileT = profileEase(vv)
+    const verticalT = smoothstep(vv)
+    const interpolatedY = THREE.MathUtils.lerp(raw.y, targetY, verticalT)
+    const y = isUpper
+      ? Math.min(interpolatedY, baseCapY - capMargin)
+      : Math.max(interpolatedY, baseCapY + capMargin)
+    return new THREE.Vector3(
+      THREE.MathUtils.lerp(raw.x, smooth.x, profileT),
+      y,
+      THREE.MathUtils.lerp(raw.z, smooth.z, profileT)
+    )
   }
 
-  const transitionLoop = transitionRings[transitionRings.length - 1]
+  // Spodní hrana transition patchu je stále přesně ten samý regularizovaný profil,
+  // takže V17 nemění shape báze – mění pouze distribuci polygonů v přechodu.
+  const transitionLoop = new Array(targetCount)
+  for (let i = 0; i < targetCount; i++) transitionLoop[i] = evaluateTransitionSurface(i / targetCount, 1)
+  const transitionPatchSpacing = Math.max(0.50, Math.min(0.62, boundaryData.diagonal * 0.0105))
+  const transitionPatchUV = cadBuildIsotropicTransitionUV(rawLoop, targetCount, transitionDepth, transitionPatchSpacing)
   const seamOffset = Math.min(0.10, Math.max(0.04, availableBaseDepth * 0.025))
   const seamY = isUpper
     ? Math.min(transitionLoop[0].y + seamOffset, baseCapY)
@@ -8934,7 +9045,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   }
 
   const exactBoundaryIndices = appendRing(rawLoop)
-  const transitionRingIndices = transitionRings.map(appendRing)
+  const transitionEndIndices = appendRing(transitionLoop)
   const seamIndices = appendRing(seamLoop)
   const wallRingIndices = wallRings.slice(1).map(appendRing)
 
@@ -8956,34 +9067,52 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     }
   }
 
-  // Přesná hustá source boundary -> první ~0.4mm CAD ring.
-  cadStitchClosedRings(
-    indices,
-    exactBoundaryIndices,
-    rawLoop,
-    transitionRingIndices[0],
-    transitionRings[0],
-    isUpper
-  )
-
-  // V11: každý transition ring může mít jiný počet bodů. Stitchujeme proto
-  // postupně mezi sousedními ringy místo jednoho agresivního zipperu.
-  for (let ring = 0; ring < transitionRingIndices.length - 1; ring++) {
-    cadStitchClosedRings(
-      indices,
-      transitionRingIndices[ring],
-      transitionRings[ring],
-      transitionRingIndices[ring + 1],
-      transitionRings[ring + 1],
-      isUpper
-    )
+  // V17 isotropic transition patch. Boundary UV polygon má dvě kopie
+  // periodického seam okraje; v 3D je mapujeme na stejné indexy, takže se válec
+  // uzavře bez otevřené podélné hrany.
+  const patchIndexMap = new Array(transitionPatchUV.points.length)
+  const sideIndexMap = new Map()
+  for (let pi = 0; pi < transitionPatchUV.points.length; pi++) {
+    if (pi < transitionPatchUV.boundaryCount) {
+      const meta = transitionPatchUV.boundaryMeta[pi]
+      if (meta?.kind === "top") {
+        patchIndexMap[pi] = exactBoundaryIndices[meta.index % exactBoundaryIndices.length]
+        continue
+      }
+      if (meta?.kind === "bottom") {
+        patchIndexMap[pi] = transitionEndIndices[meta.index % transitionEndIndices.length]
+        continue
+      }
+      if (meta?.kind === "side") {
+        if (sideIndexMap.has(meta.level)) {
+          patchIndexMap[pi] = sideIndexMap.get(meta.level)
+          continue
+        }
+        const p = evaluateTransitionSurface(0, meta.v)
+        const index = positions.length / 3
+        positions.push(p.x, p.y, p.z)
+        sideIndexMap.set(meta.level, index)
+        patchIndexMap[pi] = index
+        continue
+      }
+    }
+    const uv = transitionPatchUV.points[pi]
+    const u = transitionPatchUV.perimeter > 1e-9 ? uv.x / transitionPatchUV.perimeter : 0
+    const v = transitionPatchUV.depth > 1e-9 ? uv.y / transitionPatchUV.depth : 0
+    const p = evaluateTransitionSurface(u, v)
+    patchIndexMap[pi] = positions.length / 3
+    positions.push(p.x, p.y, p.z)
+  }
+  for (const [a, b, c] of transitionPatchUV.faces) {
+    const ia = patchIndexMap[a], ib = patchIndexMap[b], ic = patchIndexMap[c]
+    if (ia == null || ib == null || ic == null || ia === ib || ib === ic || ic === ia) continue
+    pushTri(ia, ib, ic)
   }
 
   // Krátký 0.1mm seam – samostatný ring stejně jako v referenčním Medit STL.
-  const lastTransitionIndices = transitionRingIndices[transitionRingIndices.length - 1]
-  for (let i = 0; i < lastTransitionIndices.length; i++) {
-    const j = (i + 1) % lastTransitionIndices.length
-    pushQuad(lastTransitionIndices[i], lastTransitionIndices[j], seamIndices[j], seamIndices[i])
+  for (let i = 0; i < transitionEndIndices.length; i++) {
+    const j = (i + 1) % transitionEndIndices.length
+    pushQuad(transitionEndIndices[i], transitionEndIndices[j], seamIndices[j], seamIndices[i])
   }
 
   // V11: wall ringy zůstávají pravidelné, ale diagonálu střídáme checkerboardově,
@@ -9002,7 +9131,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   }
   const bottomWallIndices = previousWallRing
 
-  // V16 bottom cap: matched boundary strip + quality-aware Delaunay refinement.
+  // V16 bottom cap (frozen in V17): matched boundary strip + quality-aware Delaunay refinement.
   // Boundary posledního wall ringu zůstává 1:1 beze změny; první pás je nyní
   // geometricky kontrolovaný a nové body se vkládají pouze tam, kde skutečně
   // zlepší lokální kvalitu bez vytvoření krátkých skinny hran.
@@ -9048,9 +9177,16 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       openBoundaryLoops: finalBoundary.loops.length,
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
-      transitionRings: transitionSteps,
-      transitionMode: "medit-shape-locked-v13",
-      transitionRingCounts,
+      transitionRings: 0,
+      transitionMode: "isotropic-shape-locked-v17",
+      transitionPatchSpacing: transitionPatchUV.spacing,
+      transitionPatchVertices: transitionPatchUV.points.length,
+      transitionPatchTriangles: transitionPatchUV.faces.length,
+      transitionPatchSteinerRequested: transitionPatchUV.steinerRequested,
+      transitionPatchSteinerInserted: transitionPatchUV.steinerInserted,
+      transitionPatchSteinerSkipped: transitionPatchUV.steinerSkipped,
+      transitionPatchFlips: transitionPatchUV.flips,
+      transitionPatchRelaxMoves: transitionPatchUV.relaxMoves,
       seamOffset,
       profileTargetSpacing,
       profilePoints: seamLoop.length,
