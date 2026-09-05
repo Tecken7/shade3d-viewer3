@@ -7949,16 +7949,21 @@ function cadOptimizeCapTriangulation(contour, refined, options = {}) {
 }
 
 
-// V14 – boundary-aware constrained Delaunay bottom cap.
-// Místo dalšího dělení původního Earcut stromu vytvoříme skutečně novou síť:
-// 1) Earcut nám zachová přesnou konkávní boundary,
-// 2) těsně pod boundary vytvoříme samostatný inward Steiner ring,
-// 3) zbytek plochy vyplní jemnější téměř hexagonální síť (~0.8 mm),
-// 4) každý bod vložíme do existujícího face (boundary hrany se nikdy nemění),
-// 5) vnitřní hrany převedeme Delaunay incircle flipy,
-// 6) velmi jemný relaxation pass jen mimo boundary ring + finální Delaunay recovery.
-// Tím se síť přiblíží Medit capu i u konkávní vnitřní části U a nevznikají
-// dlouhé trojúhelníky natažené přímo z boundary.
+// V15 – adaptive boundary strip + local Delaunay refinement.
+//
+// V14 už trefila celkovou hustotu Medit capu velmi dobře, ale analýza ukázala
+// dva lokální problémy:
+//   1) první inward ring byl příliš daleko od boundary (~0.66 mm),
+//   2) několik dlouhých hran zůstávalo hluboko uvnitř plochy.
+//
+// V15 proto dělí úlohu na dvě oddělené části:
+//   • mezi přesnou boundary a matched inward ringem vytvoří explicitní annular
+//     strip široký typicky 0.35–0.42 mm; diagonála každého quadu se volí podle
+//     lepší minimální kvality trojúhelníků,
+//   • uvnitř tohoto ring obrysu vytvoří constrained Delaunay síť a pouze hrany
+//     delší než ~1.9 mm lokálně conforming rozdělí.
+//
+// Tvar boundary se nikdy neposouvá a globální hustota capu se nezvyšuje.
 function cadDistancePointSegment2D(point, a, b) {
   const abx = b.x - a.x, aby = b.y - a.y
   const apx = point.x - a.x, apy = point.y - a.y
@@ -7988,8 +7993,8 @@ function cadGenerateHexSteinerPoints(polygon, spacing = 0.82, minBoundaryDistanc
   const sx = Math.max(0.52, spacing)
   const sy = sx * Math.sqrt(3) * 0.5
   const clearance = Number.isFinite(minBoundaryDistance)
-    ? Math.max(sx * 0.25, minBoundaryDistance)
-    : sx * 0.30
+    ? Math.max(sx * 0.18, minBoundaryDistance)
+    : sx * 0.27
   const result = []
   let row = 0
   for (let y = minY + sy * 0.55; y <= maxY - sy * 0.35; y += sy, row++) {
@@ -8001,8 +8006,8 @@ function cadGenerateHexSteinerPoints(polygon, spacing = 0.82, minBoundaryDistanc
       result.push(p)
     }
   }
-  // Deterministické rozptýlení pořadí vkládání – omezuje dlouhé lokální řetězce
-  // vznikající při vkládání bodů po jednotlivých řádcích gridu.
+  // Deterministické rozptýlení pořadí vkládání – omezuje lokální řetězce
+  // vznikající při sekvenčním vkládání gridu po řádcích.
   result.sort((a, b) => {
     const ha = Math.sin(a.x * 12.9898 + a.y * 78.233) * 43758.5453
     const hb = Math.sin(b.x * 12.9898 + b.y * 78.233) * 43758.5453
@@ -8046,43 +8051,6 @@ function cadResampleClosedLoop2D(points, targetSpacing = 0.8, minCount = 32, max
     result.push(a.clone().lerp(b, t))
   }
   return result
-}
-
-function cadGenerateBoundaryAwareSteinerRing(polygon, spacing = 0.8, inset = 0.62) {
-  if (!Array.isArray(polygon) || polygon.length < 3) return []
-  const sampled = cadResampleClosedLoop2D(polygon, Math.max(spacing * 0.92, 0.55), 40, 480)
-  const ccw = cadSignedArea2D(polygon) >= 0
-  const ring = []
-  const minSeparation = Math.max(0.28, spacing * 0.48)
-
-  for (let i = 0; i < sampled.length; i++) {
-    const prev = sampled[(i - 1 + sampled.length) % sampled.length]
-    const point = sampled[i]
-    const next = sampled[(i + 1) % sampled.length]
-    const tx = next.x - prev.x
-    const ty = next.y - prev.y
-    const length = Math.hypot(tx, ty) || 1
-    // U CCW polygonu leží interiér vlevo od tangenty, u CW vpravo.
-    const nx = ccw ? -ty / length : ty / length
-    const ny = ccw ? tx / length : -tx / length
-
-    // V silně konkávních místech může plný inset skočit přes protější stěnu.
-    // Zkoušíme proto několik bezpečnějších hloubek, ale nikdy nepřidáváme bod,
-    // který není uvnitř nebo zůstane prakticky nalepený na boundary.
-    let accepted = null
-    for (const scale of [1, 0.82, 0.64, 0.48]) {
-      const candidate = new THREE.Vector2(point.x + nx * inset * scale, point.y + ny * inset * scale)
-      if (!cadPointInPolygon2D(candidate, polygon)) continue
-      const distance = cadMinDistanceToPolygon2D(candidate, polygon)
-      if (distance < Math.max(0.20, inset * scale * 0.46)) continue
-      accepted = candidate
-      break
-    }
-    if (!accepted) continue
-    if (ring.some((existing) => existing.distanceTo(accepted) < minSeparation)) continue
-    ring.push(accepted)
-  }
-  return ring
 }
 
 function cadMergeSteinerPointsUnique(groups, minDistance = 0.34) {
@@ -8164,24 +8132,14 @@ function cadConstrainedDelaunayFlips(points, faces, boundaryCount, maxPasses = 2
   }
 
   for (let pass = 0; pass < maxPasses; pass++) {
-    const edgeMap = new Map()
-    for (let fi = 0; fi < result.length; fi++) {
-      const [a, b, c] = result[fi]
-      for (const [u, v] of [[a,b],[b,c],[c,a]]) {
-        const key = cadEdgeKey(u, v)
-        let list = edgeMap.get(key)
-        if (!list) { list = []; edgeMap.set(key, list) }
-        list.push(fi)
-      }
-    }
-
+    const edgeMap = cadBuildEdgeFaceMap(result)
     const candidates = []
     for (const [key, adjacent] of edgeMap.entries()) {
       if (adjacent.length !== 2 || boundaryEdges.has(key)) continue
       const [fa, fb] = adjacent
       const faceA = result[fa], faceB = result[fb]
-      const [uText, vText] = key.split(':')
-      const u = Number(uText), v = Number(vText)
+      const [uStr, vStr] = key.split(':')
+      const u = Number(uStr), v = Number(vStr)
       const a = faceA.find((x) => x !== u && x !== v)
       const b = faceB.find((x) => x !== u && x !== v)
       if (a == null || b == null || a === b) continue
@@ -8198,8 +8156,6 @@ function cadConstrainedDelaunayFlips(points, faces, boundaryCount, maxPasses = 2
       const circleScore = cadInCircleScore2D(points[u], points[v], points[a], points[b])
       if (circleScore <= 1e-7) continue
 
-      // Delaunay flip by neměl zhoršit minimální úhel; tato pojistka chrání
-      // numericky skoro-kolineární quad oblasti na velmi jemné boundary.
       const oldQuality = Math.min(
         cadTriangleQuality2D(points[faceA[0]], points[faceA[1]], points[faceA[2]]),
         cadTriangleQuality2D(points[faceB[0]], points[faceB[1]], points[faceB[2]])
@@ -8231,47 +8187,227 @@ function cadConstrainedDelaunayFlips(points, faces, boundaryCount, maxPasses = 2
   return { faces: result, flips: totalFlips }
 }
 
+function cadGenerateMatchedAdaptiveBoundaryRing(polygon, targetSpacing = 0.80) {
+  if (!Array.isArray(polygon) || polygon.length < 3) return { ring: [], insets: [] }
+  const ccw = cadSignedArea2D(polygon) >= 0
+  const baseInset = Math.max(0.35, Math.min(0.42, targetSpacing * 0.48))
+  const ring = []
+  const insets = []
+
+  for (let i = 0; i < polygon.length; i++) {
+    const prev = polygon[(i - 1 + polygon.length) % polygon.length]
+    const point = polygon[i]
+    const next = polygon[(i + 1) % polygon.length]
+
+    const e0x = point.x - prev.x, e0y = point.y - prev.y
+    const e1x = next.x - point.x, e1y = next.y - point.y
+    const e0l = Math.hypot(e0x, e0y) || 1
+    const e1l = Math.hypot(e1x, e1y) || 1
+    const dot = Math.max(-1, Math.min(1, (e0x * e1x + e0y * e1y) / (e0l * e1l)))
+    const turn = Math.acos(dot)
+    const curvature = Math.max(0, Math.min(1, turn / (Math.PI * 0.55)))
+    const desiredInset = Math.max(0.35, Math.min(0.42, baseInset * (1.04 - curvature * 0.12)))
+
+    const tx = next.x - prev.x
+    const ty = next.y - prev.y
+    const tl = Math.hypot(tx, ty) || 1
+    const nx = ccw ? -ty / tl : ty / tl
+    const ny = ccw ? tx / tl : -tx / tl
+
+    let accepted = null
+    let acceptedInset = desiredInset
+    for (const scale of [1, 0.94, 0.86, 0.76, 0.66, 0.56]) {
+      const depth = desiredInset * scale
+      const candidate = new THREE.Vector2(point.x + nx * depth, point.y + ny * depth)
+      if (!cadPointInPolygon2D(candidate, polygon)) continue
+      const minDistance = cadMinDistanceToPolygon2D(candidate, polygon)
+      if (minDistance < Math.max(0.16, depth * 0.42)) continue
+      accepted = candidate
+      acceptedInset = depth
+      break
+    }
+
+    // Nouzový fallback pro velmi konkávní místo: stále jdeme po lokální inward
+    // normále, pouze povolíme menší bezpečný krok. Ring musí zůstat 1:1 matched.
+    if (!accepted) {
+      for (const depth of [0.24, 0.20, 0.16, 0.12]) {
+        const candidate = new THREE.Vector2(point.x + nx * depth, point.y + ny * depth)
+        if (!cadPointInPolygon2D(candidate, polygon)) continue
+        accepted = candidate
+        acceptedInset = depth
+        break
+      }
+    }
+    if (!accepted) {
+      // Prakticky by k tomu u pravidelného U-profile nemělo dojít; zachováme ale
+      // numerickou robustnost a vložíme mikrokrok dovnitř místo NaN/rozbitého ring.
+      accepted = new THREE.Vector2(point.x + nx * 0.08, point.y + ny * 0.08)
+      acceptedInset = 0.08
+    }
+
+    ring.push(accepted)
+    insets.push(acceptedInset)
+  }
+  return { ring, insets }
+}
+
+function cadBuildMatchedBoundaryStripFaces(outer, inner) {
+  if (!Array.isArray(outer) || !Array.isArray(inner) || outer.length !== inner.length || outer.length < 3) return []
+  const count = outer.length
+  const points = [...outer, ...inner]
+  const sign = Math.sign(cadSignedArea2D(outer)) || 1
+  const orientFace = (a, b, c) => {
+    const orientation = cadOrient2D(points[a], points[b], points[c])
+    return ((sign >= 0 && orientation >= 0) || (sign < 0 && orientation < 0)) ? [a, b, c] : [a, c, b]
+  }
+  const faces = []
+  for (let i = 0; i < count; i++) {
+    const j = (i + 1) % count
+    const a = i, b = j, c = count + j, d = count + i
+    const optionA = [orientFace(a, b, c), orientFace(a, c, d)]
+    const optionB = [orientFace(a, b, d), orientFace(b, c, d)]
+    const qa = Math.min(
+      cadTriangleQuality2D(points[optionA[0][0]], points[optionA[0][1]], points[optionA[0][2]]),
+      cadTriangleQuality2D(points[optionA[1][0]], points[optionA[1][1]], points[optionA[1][2]])
+    )
+    const qb = Math.min(
+      cadTriangleQuality2D(points[optionB[0][0]], points[optionB[0][1]], points[optionB[0][2]]),
+      cadTriangleQuality2D(points[optionB[1][0]], points[optionB[1][1]], points[optionB[1][2]])
+    )
+    faces.push(...(qb > qa ? optionB : optionA))
+  }
+  return faces
+}
+
+function cadSplitLongInteriorEdges(points, faces, boundaryCount, targetMaxEdge = 1.92, maxSplits = 180) {
+  const resultPoints = points.map((p) => p.clone())
+  const resultFaces = faces.map((f) => [f[0], f[1], f[2]])
+  const boundaryEdges = new Set()
+  for (let i = 0; i < boundaryCount; i++) boundaryEdges.add(cadEdgeKey(i, (i + 1) % boundaryCount))
+  let splits = 0
+
+  const orientFace = (a, b, c, sign) => {
+    const orientation = cadOrient2D(resultPoints[a], resultPoints[b], resultPoints[c])
+    return ((sign >= 0 && orientation >= 0) || (sign < 0 && orientation < 0)) ? [a, b, c] : [a, c, b]
+  }
+
+  while (splits < maxSplits) {
+    const edgeMap = cadBuildEdgeFaceMap(resultFaces)
+    let best = null
+    for (const [key, adjacent] of edgeMap.entries()) {
+      if (adjacent.length !== 2 || boundaryEdges.has(key)) continue
+      const [uStr, vStr] = key.split(':')
+      const u = Number(uStr), v = Number(vStr)
+      const length = resultPoints[u].distanceTo(resultPoints[v])
+      if (length <= targetMaxEdge + 1e-7) continue
+      if (!best || length > best.length) best = { key, adjacent, u, v, length }
+    }
+    if (!best) break
+
+    const [fa, fb] = best.adjacent
+    const faceA = resultFaces[fa]
+    const faceB = resultFaces[fb]
+    const a = faceA.find((x) => x !== best.u && x !== best.v)
+    const b = faceB.find((x) => x !== best.u && x !== best.v)
+    if (a == null || b == null || a === b) break
+
+    const midpoint = resultPoints[best.u].clone().add(resultPoints[best.v]).multiplyScalar(0.5)
+    const m = resultPoints.length
+    resultPoints.push(midpoint)
+    const signA = Math.sign(cadOrient2D(resultPoints[faceA[0]], resultPoints[faceA[1]], resultPoints[faceA[2]])) || 1
+    const signB = Math.sign(cadOrient2D(resultPoints[faceB[0]], resultPoints[faceB[1]], resultPoints[faceB[2]])) || 1
+
+    const a1 = orientFace(best.u, m, a, signA)
+    const a2 = orientFace(m, best.v, a, signA)
+    const b1 = orientFace(best.v, m, b, signB)
+    const b2 = orientFace(m, best.u, b, signB)
+    resultFaces[fa] = a1
+    resultFaces[fb] = b1
+    resultFaces.push(a2, b2)
+    splits++
+  }
+  return { points: resultPoints, faces: resultFaces, splits }
+}
+
 function cadBuildConstrainedDelaunayCap(contour, targetSpacing = 0.80) {
-  const initialFaces = THREE.ShapeUtils.triangulateShape(contour, [])
-  if (!initialFaces?.length) throw new Error("Spodní plochu báze se nepodařilo triangulovat.")
+  if (!Array.isArray(contour) || contour.length < 3) throw new Error("Spodní plochu báze se nepodařilo triangulovat.")
 
-  // V14: samostatný inward ring stabilizuje první řadu triangulace pod boundary.
-  // Hex grid proto může začít o něco hlouběji a Delaunay nemusí překlenovat
-  // konkávní U-obrys jedním dlouhým trojúhelníkem.
-  const ringInset = Math.max(0.52, Math.min(0.72, targetSpacing * 0.78))
-  const boundaryRing = cadGenerateBoundaryAwareSteinerRing(contour, targetSpacing, ringInset)
-  const hexClearance = ringInset + targetSpacing * 0.36
-  const hex = cadGenerateHexSteinerPoints(contour, targetSpacing, hexClearance)
-  const steiner = cadMergeSteinerPointsUnique([boundaryRing, hex], Math.max(0.28, targetSpacing * 0.38))
+  // 1) Explicitní matched strip 0.35–0.42 mm od skutečné boundary.
+  const adaptiveRing = cadGenerateMatchedAdaptiveBoundaryRing(contour, targetSpacing)
+  const innerRing = adaptiveRing.ring
+  if (innerRing.length !== contour.length) throw new Error("Nepodařilo se vytvořit stabilní boundary strip spodní plochy.")
+  const stripFaces = cadBuildMatchedBoundaryStripFaces(contour, innerRing)
 
-  const inserted = cadInsertSteinerPointsIntoTriangulation(contour, initialFaces, steiner)
-  const firstDelaunay = cadConstrainedDelaunayFlips(inserted.points, inserted.faces, contour.length, 42)
+  // 2) Vnitřní Delaunay oblast už má jako constrained boundary právě inward ring.
+  const initialFaces = THREE.ShapeUtils.triangulateShape(innerRing, [])
+  if (!initialFaces?.length) throw new Error("Vnitřní plochu báze se nepodařilo triangulovat.")
+  const hexClearance = Math.max(0.20, targetSpacing * 0.27)
+  const hex = cadGenerateHexSteinerPoints(innerRing, targetSpacing, hexClearance)
+  const steiner = cadMergeSteinerPointsUnique([hex], Math.max(0.27, targetSpacing * 0.36))
+  const inserted = cadInsertSteinerPointsIntoTriangulation(innerRing, initialFaces, steiner)
+  const firstDelaunay = cadConstrainedDelaunayFlips(inserted.points, inserted.faces, innerRing.length, 42)
 
-  // Body v první cca jedné vrstvě od boundary necháváme shape-locked; relaxujeme
-  // jen skutečné interior Steiner body. Tím zůstává obrys i jeho lokální hustota
-  // přesně stabilní a zlepšuje se pouze isotropie uprostřed capu.
-  const protectedBand = ringInset + targetSpacing * 0.24
+  // Jemná relaxace pouze hluboko uvnitř; matched ring zůstává absolutně fixed.
   const relaxed = cadRelaxCapInterior(
     inserted.points,
     firstDelaunay.faces,
-    contour.length,
-    contour,
+    innerRing.length,
+    innerRing,
     1,
-    0.14,
-    protectedBand
+    0.12,
+    Math.max(0.14, targetSpacing * 0.16)
   )
-  const secondDelaunay = cadConstrainedDelaunayFlips(relaxed.points, firstDelaunay.faces, contour.length, 30)
-  const quality = cadCapQualityStats(relaxed.points, secondDelaunay.faces)
+  const secondDelaunay = cadConstrainedDelaunayFlips(relaxed.points, firstDelaunay.faces, innerRing.length, 32)
+
+  // 3) Lokální refinement pouze pro dlouhé interior hrany. Nezvyšujeme hustotu
+  // celé plochy; split proběhne jen tam, kde Delaunay nechal >~1.9 mm edge.
+  const longEdgeTarget = Math.max(1.88, Math.min(1.98, targetSpacing * 2.38))
+  const refined = cadSplitLongInteriorEdges(
+    relaxed.points,
+    secondDelaunay.faces,
+    innerRing.length,
+    longEdgeTarget,
+    180
+  )
+  const thirdDelaunay = cadConstrainedDelaunayFlips(refined.points, refined.faces, innerRing.length, 34)
+  // Krátký druhý safety pass zachytí případnou delší náhradní diagonálu po flipu.
+  const refinedAgain = cadSplitLongInteriorEdges(
+    refined.points,
+    thirdDelaunay.faces,
+    innerRing.length,
+    Math.min(2.02, longEdgeTarget + 0.06),
+    72
+  )
+  const finalDelaunay = cadConstrainedDelaunayFlips(refinedAgain.points, refinedAgain.faces, innerRing.length, 26)
+
+  // 4) Spojíme outer strip a vnitřní triangulaci do jedné point/index sady.
+  const outerCount = contour.length
+  const points = contour.map((p) => p.clone())
+  for (const point of refinedAgain.points) points.push(point.clone())
+  const faces = stripFaces.map((f) => [f[0], f[1], f[2]])
+  for (const face of finalDelaunay.faces) faces.push(face.map((index) => outerCount + index))
+
+  const quality = cadCapQualityStats(points, faces)
+  const insetMin = adaptiveRing.insets.length ? Math.min(...adaptiveRing.insets) : 0
+  const insetMax = adaptiveRing.insets.length ? Math.max(...adaptiveRing.insets) : 0
+  const insetMean = adaptiveRing.insets.length
+    ? adaptiveRing.insets.reduce((sum, value) => sum + value, 0) / adaptiveRing.insets.length
+    : 0
+
   return {
-    points: relaxed.points,
-    faces: secondDelaunay.faces,
+    points,
+    faces,
     steinerRequested: steiner.length,
     steinerInserted: inserted.inserted,
     steinerSkipped: inserted.skipped,
-    boundaryRingRequested: boundaryRing.length,
+    boundaryRingRequested: innerRing.length,
     hexRequested: hex.length,
-    ringInset,
-    flips: firstDelaunay.flips + secondDelaunay.flips,
+    ringInset: insetMean,
+    ringInsetMin: insetMin,
+    ringInsetMax: insetMax,
+    longEdgeTarget,
+    longEdgeSplits: refined.splits + refinedAgain.splits,
+    flips: firstDelaunay.flips + secondDelaunay.flips + thirdDelaunay.flips + finalDelaunay.flips,
     relaxedMoves: relaxed.moved,
     quality,
   }
@@ -8527,7 +8663,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     return s * s * (3 - 2 * s)
   }
 
-  // V14 – boundary-aware Delaunay Bottom Cap.
+  // V12 shape-locked transition zůstává ve V15 beze změny.
   // V11 zlepšil topologii tím, že počet bodů snižoval postupně, ale první ringy
   // znovu vzorkovaly přímo syrovou hustou boundary. Tím se do přechodu vrátila
   // vysokofrekvenční zubatost a báze mohla opticky působit zvlněně.
@@ -8682,10 +8818,10 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   }
   const bottomWallIndices = previousWallRing
 
-  // V14 bottom cap: jemnější boundary-aware constrained Delaunay remesh.
-  // Boundary posledního wall ringu zůstává 1:1 beze změny; uvnitř ale už
-  // nerefinujeme Earcut trojúhelníky. Vložíme nový ~hexagonální bodový vzor a
-  // topologii přestavíme Delaunay incircle flipy.
+  // V15 bottom cap: explicitní matched boundary strip + lokálně refined Delaunay.
+  // Boundary posledního wall ringu zůstává 1:1 beze změny; první pás je nyní
+  // geometricky kontrolovaný a vnitřní síť se zahušťuje pouze tam, kde zůstane
+  // hrana delší než cílových ~1.9–2.0 mm.
   const contour2D = bottomLoop.map((p) => new THREE.Vector2(p.x, p.z))
   const capPointSpacing = Math.max(0.75, Math.min(0.85, boundaryData.diagonal * 0.0155))
   const delaunayCap = cadBuildConstrainedDelaunayCap(contour2D, capPointSpacing)
@@ -8736,12 +8872,18 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       profilePoints: seamLoop.length,
       wallTargetSpacing,
       wallSections,
-      capMethod: "constrained-delaunay-v13",
+      capMethod: "adaptive-boundary-delaunay-v15",
       capVertices: delaunayCap.points.length,
       capTriangles: delaunayCap.faces.length,
       capSteinerRequested: delaunayCap.steinerRequested,
       capSteinerInserted: delaunayCap.steinerInserted,
       capSteinerSkipped: delaunayCap.steinerSkipped,
+      capBoundaryRingPoints: delaunayCap.boundaryRingRequested,
+      capBoundaryInset: delaunayCap.ringInset,
+      capBoundaryInsetMin: delaunayCap.ringInsetMin,
+      capBoundaryInsetMax: delaunayCap.ringInsetMax,
+      capLongEdgeTarget: delaunayCap.longEdgeTarget,
+      capLongEdgeSplits: delaunayCap.longEdgeSplits,
       capEdgeFlips: delaunayCap.flips,
       capRelaxMoves: delaunayCap.relaxedMoves,
       capMinQuality: delaunayCap.quality.minQuality,
