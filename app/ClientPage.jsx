@@ -7611,6 +7611,38 @@ function cadResampleClosedLoop(points, targetSpacing = 0.39, minCount = 48, maxC
 }
 
 
+// V19 – resampling finálního Straight profilu měříme pouze v půdorysu XZ.
+// Y zvlnění raw/regularized boundary nemá ovlivňovat počet vertexů na už rovné
+// stěně. To přesně odpovídá referenčnímu Medit profilu (~0.388 mm / segment).
+function cadResampleClosedLoopXZ(points, targetSpacing = 0.388, minCount = 48, maxCount = 820) {
+  if (!Array.isArray(points) || points.length < 4) return (points || []).map((p) => p.clone())
+  const cumulative = [0]
+  let perimeter = 0
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i]
+    const b = points[(i + 1) % points.length]
+    const dx = b.x - a.x
+    const dz = b.z - a.z
+    perimeter += Math.hypot(dx, dz)
+    cumulative.push(perimeter)
+  }
+  if (!Number.isFinite(perimeter) || perimeter <= 1e-6) return points.map((p) => p.clone())
+  const count = Math.max(minCount, Math.min(maxCount, Math.round(perimeter / Math.max(0.08, targetSpacing))))
+  const result = []
+  let edge = 0
+  for (let sample = 0; sample < count; sample++) {
+    const distance = (sample / count) * perimeter
+    while (edge + 1 < cumulative.length - 1 && cumulative[edge + 1] < distance) edge++
+    const a = points[edge % points.length]
+    const b = points[(edge + 1) % points.length]
+    const start = cumulative[edge]
+    const end = cumulative[edge + 1]
+    const t = end > start ? THREE.MathUtils.clamp((distance - start) / (end - start), 0, 1) : 0
+    result.push(a.clone().lerp(b, t))
+  }
+  return result
+}
+
 function cadResampleClosedLoopCount(points, desiredCount) {
   if (!Array.isArray(points) || points.length < 4) return (points || []).map((p) => p.clone())
   const count = Math.max(4, Math.round(Number(desiredCount) || points.length))
@@ -8987,7 +9019,7 @@ function cadBuildGradedTransitionRows(perimeter, sourceCount, targetCount, trans
 // Místo globálních horizontálních ringů rozdělujeme přechod po jednotlivých
 // sloupcích kolem archu podle skutečné 3D délky daného profilu. Krátká místa
 // tak dostanou méně segmentů a hlubší části více, bez dlouhých jehlových faces.
-function cadBuildAdaptiveTransitionColumns(evaluateSurface, count, firstV = 0.055, targetSpacing = 0.52) {
+function cadBuildAdaptiveTransitionColumns(evaluateSurface, count, firstV = 0.07, targetSpacing = 0.78, maxAllowedSegments = 10) {
   const columns = new Array(count)
   let minSegments = Infinity
   let maxSegments = 0
@@ -9013,7 +9045,7 @@ function cadBuildAdaptiveTransitionColumns(evaluateSurface, count, firstV = 0.05
       previous = point
     }
 
-    const segments = Math.max(2, Math.min(18, Math.ceil(total / Math.max(0.34, targetSpacing))))
+    const segments = Math.max(2, Math.min(Math.max(3, maxAllowedSegments), Math.ceil(total / Math.max(0.50, targetSpacing))))
     const levels = [firstV]
     for (let k = 1; k < segments; k++) {
       const wanted = (total * k) / segments
@@ -9086,6 +9118,113 @@ function cadStitchOpenTransitionColumns(indices, indicesA, levelsA, indicesB, le
   }
 }
 
+// V19 – intrinsic/local Delaunay edge flips pro transition patch.
+// V18 už měl bezpečné fyzicky adaptivní vertexy, ale konektivita stále prozrazovala
+// sloupcovou strukturu. Zde měníme POUZE diagonály mezi sousedními triangles;
+// boundary scanu i transition-end ring zůstávají constrained a shape se nehýbe.
+function cadOptimizeTransitionEdgeFlips(indices, positions, startIndex, endIndex, maxPasses = 5) {
+  const edgeKey = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`
+  const point = (id) => {
+    const o = id * 3
+    return [positions[o], positions[o + 1], positions[o + 2]]
+  }
+  const distance = (a, b) => {
+    const A = point(a), B = point(b)
+    return Math.hypot(A[0] - B[0], A[1] - B[1], A[2] - B[2])
+  }
+  const normal = (a, b, c) => {
+    const A = point(a), B = point(b), C = point(c)
+    const ux = B[0] - A[0], uy = B[1] - A[1], uz = B[2] - A[2]
+    const vx = C[0] - A[0], vy = C[1] - A[1], vz = C[2] - A[2]
+    return [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx]
+  }
+  const normalized = (n) => {
+    const l = Math.hypot(n[0], n[1], n[2]) || 1
+    return [n[0] / l, n[1] / l, n[2] / l]
+  }
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+  const angleAt = (center, a, b) => {
+    const C = point(center), A = point(a), B = point(b)
+    const ux = A[0] - C[0], uy = A[1] - C[1], uz = A[2] - C[2]
+    const vx = B[0] - C[0], vy = B[1] - C[1], vz = B[2] - C[2]
+    const lu = Math.hypot(ux, uy, uz), lv = Math.hypot(vx, vy, vz)
+    if (lu < 1e-8 || lv < 1e-8) return 0
+    const c = THREE.MathUtils.clamp((ux * vx + uy * vy + uz * vz) / (lu * lv), -1, 1)
+    return Math.acos(c)
+  }
+  const minAngle = (a, b, c) => Math.min(angleAt(a, b, c), angleAt(b, c, a), angleAt(c, a, b))
+  const maxEdge = (a, b, c) => Math.max(distance(a, b), distance(b, c), distance(c, a))
+  const orient = (tri, referenceNormal) => {
+    const n = normal(tri[0], tri[1], tri[2])
+    return dot(n, referenceNormal) >= 0 ? tri : [tri[0], tri[2], tri[1]]
+  }
+
+  let flips = 0
+  let passes = 0
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const edges = new Map()
+    const add = (a, b, opp, offset) => {
+      const key = edgeKey(a, b)
+      let list = edges.get(key)
+      if (!list) { list = []; edges.set(key, list) }
+      list.push({ a, b, opp, offset })
+    }
+    for (let offset = startIndex; offset + 2 < endIndex; offset += 3) {
+      const a = indices[offset], b = indices[offset + 1], c = indices[offset + 2]
+      add(a, b, c, offset); add(b, c, a, offset); add(c, a, b, offset)
+    }
+
+    const candidates = []
+    for (const list of edges.values()) {
+      if (list.length !== 2) continue
+      const r0 = list[0], r1 = list[1]
+      const a = Math.min(r0.a, r0.b), b = Math.max(r0.a, r0.b)
+      const c = r0.opp, d = r1.opp
+      if (c === d || c === a || c === b || d === a || d === b) continue
+      if (edges.has(edgeKey(c, d))) continue
+      const newDiagonal = distance(c, d)
+      if (!Number.isFinite(newDiagonal) || newDiagonal < 0.20 || newDiagonal > 2.20) continue
+      const t0 = [indices[r0.offset], indices[r0.offset + 1], indices[r0.offset + 2]]
+      const t1 = [indices[r1.offset], indices[r1.offset + 1], indices[r1.offset + 2]]
+      const n0 = normalized(normal(t0[0], t0[1], t0[2]))
+      const n1 = normalized(normal(t1[0], t1[1], t1[2]))
+      let ref = normalized([n0[0] + n1[0], n0[1] + n1[1], n0[2] + n1[2]])
+      if (!Number.isFinite(ref[0])) ref = n0
+      const p0 = orient([c, d, a], ref)
+      const p1 = orient([d, c, b], ref)
+      const pn0 = normalized(normal(p0[0], p0[1], p0[2]))
+      const pn1 = normalized(normal(p1[0], p1[1], p1[2]))
+      if (dot(pn0, ref) < 0.35 || dot(pn1, ref) < 0.35) continue
+      const oldQuality = Math.min(minAngle(t0[0], t0[1], t0[2]), minAngle(t1[0], t1[1], t1[2]))
+      const newQuality = Math.min(minAngle(p0[0], p0[1], p0[2]), minAngle(p1[0], p1[1], p1[2]))
+      const oldMax = Math.max(maxEdge(t0[0], t0[1], t0[2]), maxEdge(t1[0], t1[1], t1[2]))
+      const newMax = Math.max(maxEdge(p0[0], p0[1], p0[2]), maxEdge(p1[0], p1[1], p1[2]))
+      if (newMax > Math.max(2.20, oldMax * 1.08)) continue
+      const oppositeSum = angleAt(c, a, b) + angleAt(d, a, b)
+      const qualityGain = newQuality - oldQuality
+      const delaunayGain = oppositeSum - Math.PI
+      if (delaunayGain <= 0.018 && qualityGain <= THREE.MathUtils.degToRad(1.2)) continue
+      if (newQuality + THREE.MathUtils.degToRad(0.35) < oldQuality) continue
+      const score = delaunayGain * 12 + qualityGain * 8 + Math.max(0, oldMax - newMax)
+      candidates.push({ r0, r1, p0, p1, score })
+    }
+    candidates.sort((a, b) => b.score - a.score)
+    const usedTriangles = new Set()
+    let passFlips = 0
+    for (const candidate of candidates) {
+      const o0 = candidate.r0.offset, o1 = candidate.r1.offset
+      if (usedTriangles.has(o0) || usedTriangles.has(o1)) continue
+      indices[o0] = candidate.p0[0]; indices[o0 + 1] = candidate.p0[1]; indices[o0 + 2] = candidate.p0[2]
+      indices[o1] = candidate.p1[0]; indices[o1 + 1] = candidate.p1[1]; indices[o1 + 2] = candidate.p1[2]
+      usedTriangles.add(o0); usedTriangles.add(o1)
+      passFlips++; flips++
+    }
+    passes++
+    if (!passFlips) break
+  }
+  return { flips, passes }
+}
+
 function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
   const collectedTrianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
   const boundaryData = cadExtractBoundaryLoopsRobust(collectedTrianglePositions)
@@ -9133,7 +9272,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   // V10: přesná source boundary zůstává nedotčená pro samotné napojení na scan,
   // ale pracovní Straight profil už nepřebírá její přehnaně hustý sampling.
   // Medit reference ~169 mm / 435 segmentů => ~0.39 mm na segment.
-  const profileTargetSpacing = 0.39
+  const profileTargetSpacing = 0.388
   const sampledRawLoop = cadResampleClosedLoop(rawLoop, profileTargetSpacing)
   let regularized = cadSmoothClosedLoop(sampledRawLoop, 30)
   regularized = cadSmoothClosedLoop(regularized, 10)
@@ -9141,18 +9280,18 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   // určovala počet bodů ještě z delší raw boundary, takže po smoothingu zůstalo
   // ~495 bodů na ~169 mm místo referenčních ~435. Resamplujeme proto znovu až
   // po regularizaci a wall density tak odpovídá skutečnému finálnímu obvodu.
-  regularized = cadResampleClosedLoop(regularized, profileTargetSpacing)
+  regularized = cadResampleClosedLoopXZ(regularized, profileTargetSpacing)
 
   const boundaryMinY = Math.min(...rawLoop.map((p) => p.y))
   const boundaryMaxY = Math.max(...rawLoop.map((p) => p.y))
   const boundaryExtremeY = isUpper ? boundaryMaxY : boundaryMinY
   const availableBaseDepth = Math.max(0.6, isUpper ? baseCapY - boundaryExtremeY : boundaryExtremeY - baseCapY)
 
-  // V18 – Medit-calibrated transition height. Přímé měření referenčního STL
-  // ukazuje, že pravidelná stěna začíná prakticky v rovině EXTREME trim boundary,
-  // ne o dalších ~1.0–1.4 mm směrem do báze. Předchozí posun dělal wall o ~1.2 mm
-  // kratší a přechod zbytečně vysoký. Držíme jen zanedbatelný 0.02mm offset.
-  const transitionEndOffset = Math.min(0.04, Math.max(0.015, boundaryData.diagonal * 0.00035))
+  // V19 – kalibrace podle skutečné délky rovné stěny v referenčním Medit STL.
+  // V18 končil transition jen ~0.02 mm za extreme boundary a straight wall tak vyšel
+  // asi o 0.18 mm delší než Medit. Posun ~0.20 mm dává téměř stejnou výšku straight
+  // části, ale pořád ponechává naprostou většinu blendu v původním scan→base pásu.
+  const transitionEndOffset = Math.min(0.22, Math.max(0.18, boundaryData.diagonal * 0.0033))
   const targetY = boundaryExtremeY + (isUpper ? transitionEndOffset : -transitionEndOffset)
   const transitionDepth = transitionEndOffset
   const smoothstep = (t) => t * t * (3 - 2 * t)
@@ -9191,12 +9330,16 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   // transitionDepth. Raw boundary má lokálně několikamilimetrové rozdíly Y, takže
   // každá pozice kolem archu dostane vlastní počet segmentů podle skutečné 3D
   // délky surface column. Tím mizí dlouhé jehly v hlubších částech trimu.
-  const transitionColumnSpacing = Math.max(0.46, Math.min(0.56, boundaryData.diagonal * 0.0092))
+  // V19: V18 byl topologicky bezpečný, ale výrazně hustší než Medit a
+  // ve wireframu proto působil jako jemná svislá záclona. Fyzický spacing zvedáme
+  // k ~0.75–0.80 mm a výslednou konektivitu následně intrinsic-Delaunay flipujeme.
+  const transitionColumnSpacing = Math.max(0.72, Math.min(0.80, boundaryData.diagonal * 0.0130))
   const transitionColumns = cadBuildAdaptiveTransitionColumns(
     evaluateTransitionSurface,
     targetCount,
-    0.055,
-    transitionColumnSpacing
+    0.07,
+    transitionColumnSpacing,
+    10
   )
   const seamOffset = Math.min(0.10, Math.max(0.04, availableBaseDepth * 0.025))
   const seamY = isUpper
@@ -9206,9 +9349,9 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
 
   // V10: pravidelná stěna dostává horizontální ringy po ~1.08 mm (Medit reference).
   // Total Height tak pouze přidává/ubírá počet stejných wall sekcí a nemění transition.
-  const wallTargetSpacing = 1.08
+  const wallTargetSpacing = 1.088
   const wallDepth = Math.max(0, Math.abs(baseCapY - seamY))
-  const wallSections = Math.max(1, Math.ceil(wallDepth / wallTargetSpacing))
+  const wallSections = Math.max(1, Math.round(wallDepth / wallTargetSpacing))
   const wallRings = [seamLoop]
   for (let section = 1; section <= wallSections; section++) {
     const t = section / wallSections
@@ -9270,6 +9413,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   }
   const firstTransitionIndices = appendRing(firstTransitionPoints)
 
+  const transitionIndexStart = indices.length
   cadStitchClosedRings(
     indices,
     exactBoundaryIndices, rawLoop,
@@ -9309,6 +9453,11 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       isUpper
     )
   }
+
+  const transitionIndexEnd = indices.length
+  const transitionRemesh = cadOptimizeTransitionEdgeFlips(
+    indices, positions, transitionIndexStart, transitionIndexEnd, 5
+  )
 
   // Krátký 0.1mm seam – samostatný ring stejně jako v referenčním Medit STL.
   for (let i = 0; i < transitionEndIndices.length; i++) {
@@ -9379,13 +9528,15 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionEndOffset,
-      transitionMode: "adaptive-columns-medit-calibrated-v18",
+      transitionMode: "adaptive-columns-intrinsic-remesh-v19",
       transitionColumnSpacing: transitionColumns.targetSpacing,
       transitionColumnMinSegments: transitionColumns.minSegments,
       transitionColumnMaxSegments: transitionColumns.maxSegments,
       transitionColumnMinLength: transitionColumns.minColumnLength,
       transitionColumnMaxLength: transitionColumns.maxColumnLength,
       transitionColumnInteriorVertices: transitionInteriorVertices,
+      transitionEdgeFlips: transitionRemesh.flips,
+      transitionEdgeFlipPasses: transitionRemesh.passes,
       transitionPatchSourceCount: rawLoop.length,
       transitionPatchTargetCount: targetCount,
       seamOffset,
