@@ -7568,6 +7568,40 @@ function cadSignedAreaXZ(points) {
   return area * 0.5
 }
 
+// V8 – plynulé XZ normály uzavřeného profilu pro skutečný round-over/fillet.
+// U kladně orientovaného (CCW) loopu leží materiál vlevo od směru hrany,
+// takže vnější normála je pravá normála tangenty. Normály ještě lehce
+// low-passujeme po obvodu, aby bevel nekopíroval každý drobný zub boundary.
+function cadSmoothOutwardNormalsXZ(points) {
+  if (!Array.isArray(points) || points.length < 3) return []
+  const ccw = cadSignedAreaXZ(points) >= 0
+  const raw = points.map((point, i) => {
+    const prev = points[(i - 1 + points.length) % points.length]
+    const next = points[(i + 1) % points.length]
+    const tx = next.x - prev.x
+    const tz = next.z - prev.z
+    const length = Math.hypot(tx, tz) || 1
+    const nx = ccw ? tz / length : -tz / length
+    const nz = ccw ? -tx / length : tx / length
+    return new THREE.Vector3(nx, 0, nz)
+  })
+
+  const radius = Math.max(2, Math.min(7, Math.round(points.length / 150)))
+  return raw.map((normal, i) => {
+    const sum = new THREE.Vector3()
+    let weightSum = 0
+    for (let offset = -radius; offset <= radius; offset++) {
+      const idx = (i + offset + raw.length) % raw.length
+      const weight = radius + 1 - Math.abs(offset)
+      sum.addScaledVector(raw[idx], weight)
+      weightSum += weight
+    }
+    if (weightSum > 0) sum.multiplyScalar(1 / weightSum)
+    if (sum.lengthSq() < 1e-10) return normal.clone()
+    return sum.normalize()
+  })
+}
+
 // V7 – Boundary Relaxation
 //
 // V6 uklidnil samotnou CAD bázi, ale první milimetry nad napojením stále nesly
@@ -7756,24 +7790,48 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const desiredTransitionDepth = Math.max(1.55, Math.min(3.8, boundaryData.diagonal * 0.052))
   // U velmi nízké báze nesmí transition band přestřelit spodní cap a obrátit stěnu zpět.
   const transitionDepth = Math.max(0.55, Math.min(desiredTransitionDepth, availableBaseDepth * 0.72))
-  const transitionSteps = 6
+
+  // V8 – skutečný round-over mezi scanem a pravidelnou stěnou báze.
+  // Pro typický dentální model vychází radius zhruba 0.8–1.0 mm.
+  // Radius se automaticky zmenší u nízké báze, takže nikdy nespotřebuje podstatnou
+  // část dostupné výšky. Osm segmentů přes 90° je pro tento rozměr už opticky
+  // velmi hladkých, ale stále přidává jen zanedbatelné množství polygonů.
+  const desiredBevelRadius = Math.max(0.55, Math.min(1.00, boundaryData.diagonal * 0.013))
+  const bevelRadius = Math.max(0.18, Math.min(
+    desiredBevelRadius,
+    availableBaseDepth * 0.28,
+    transitionDepth * 0.62
+  ))
+  const bevelSegments = bevelRadius >= 0.72 ? 8 : 6
+  const transitionSteps = bevelSegments
   const transitionRings = [rawLoop.map((p) => p.clone())]
+  const outwardNormals = cadSmoothOutwardNormalsXZ(regularized)
   const smoothstep = (t) => t * t * (3 - 2 * t)
 
   for (let step = 1; step <= transitionSteps; step++) {
     const t = step / transitionSteps
     const eased = smoothstep(t)
+    const theta = t * Math.PI * 0.5
+    // Čtvrtkružnice: nahoře má téměř horizontální tečnu do scanu, dole
+    // přechází do vertikální stěny. Zbytek transitionDepth je přidán smoothstepem,
+    // který má nulovou derivaci na obou koncích a round-over tak nerozbije.
+    const radialOffset = Math.sin(theta) * bevelRadius
+    const roundedDrop = bevelRadius * (1 - Math.cos(theta))
+    const extraDrop = Math.max(0, transitionDepth - bevelRadius) * eased
+    const verticalDrop = roundedDrop + extraDrop
+
     const ring = rawLoop.map((raw, i) => {
       const smooth = regularized[i] || raw
-      const requestedTargetY = smooth.y + (isUpper ? transitionDepth : -transitionDepth)
+      const outward = outwardNormals[i] || new THREE.Vector3()
       const capMargin = Math.min(0.65, Math.max(0.22, availableBaseDepth * 0.12))
-      const targetY = isUpper
-        ? Math.min(requestedTargetY, baseCapY - capMargin)
-        : Math.max(requestedTargetY, baseCapY + capMargin)
+      const requestedY = THREE.MathUtils.lerp(raw.y, smooth.y, eased) + (isUpper ? verticalDrop : -verticalDrop)
+      const y = isUpper
+        ? Math.min(requestedY, baseCapY - capMargin)
+        : Math.max(requestedY, baseCapY + capMargin)
       return new THREE.Vector3(
-        THREE.MathUtils.lerp(raw.x, smooth.x, eased),
-        THREE.MathUtils.lerp(raw.y, targetY, eased),
-        THREE.MathUtils.lerp(raw.z, smooth.z, eased)
+        THREE.MathUtils.lerp(raw.x, smooth.x, eased) + outward.x * radialOffset,
+        y,
+        THREE.MathUtils.lerp(raw.z, smooth.z, eased) + outward.z * radialOffset
       )
     })
     transitionRings.push(ring)
@@ -7870,6 +7928,8 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionRings: transitionSteps,
+      bevelRadius,
+      bevelSegments,
       boundaryRelaxationBand: boundaryRelaxation.bandWidth,
       boundaryRelaxationMaxShift: boundaryRelaxation.maxBoundaryShift,
       boundaryRelaxationAffectedVertices: boundaryRelaxation.affectedVertices,
