@@ -12964,6 +12964,11 @@ export default function ClientPage() {
     region: trimKeepComponent != null || trimStage === "result",
     result: trimStage === "result",
   }
+  const trimShowStatusMessage =
+    trimBusy ||
+    (!!trimMessage &&
+      /nepodař|potřeba|není|nerozdělila|jednoznačně|alespoň|zkuste/i.test(trimMessage))
+
   const trimWorkspace = trimMode && (
     <div style={{
       position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)", zIndex: 72,
@@ -12973,33 +12978,58 @@ export default function ClientPage() {
       color: "#f3f3f3", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
       animation: "artheticAlignMenuIn .24s ease-out both",
     }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, minWidth: 0 }}>
         <div style={{ minWidth: 0, flex: "1 1 auto" }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
             <span style={{ display: "inline-flex", alignItems: "baseline", gap: 0, fontSize: 13 }}><span style={{ fontWeight: 850 }}>ART</span><span style={{ fontWeight: 300 }}>HETIC</span></span>
             <span style={{ color: "#d7d7d7", fontSize: 13, fontWeight: 340 }}>Ořez</span>
             {trimSelectedFile && <span style={{ marginLeft: 4, color: "#777", fontSize: 9.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stripExt(trimSelectedFile.rawName || trimSelectedFile.name)}</span>}
           </div>
-          <div style={{ marginTop: 7, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
-            {[
-              ["model", "Model"], ["boundary", "Hranice"], ["region", "Oblast"], ["result", "Výsledek"],
-            ].map(([key, label], index) => {
-              const done = trimStepDone[key]
-              const active = (key === "model" && trimStage === "model") || (key === "boundary" && trimStage === "boundary") || (key === "region" && trimStage === "region") || (key === "result" && trimStage === "result")
-              return <React.Fragment key={key}>
-                <div style={analysisStepChipStyle(active, done)}>{done && <span style={{ color: "#86efac" }}>✓</span>}<span>{label}</span></div>
-                {index < 3 && <div style={{ width: 12, height: 1, background: "rgba(255,255,255,.07)" }} />}
-              </React.Fragment>
-            })}
+
+          <div style={{ marginTop: 7, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", minWidth: 0 }}>
+              {[
+                ["model", "Model"], ["boundary", "Hranice"], ["region", "Oblast"], ["result", "Výsledek"],
+              ].map(([key, label], index) => {
+                const done = trimStepDone[key]
+                const active = (key === "model" && trimStage === "model") || (key === "boundary" && trimStage === "boundary") || (key === "region" && trimStage === "region") || (key === "result" && trimStage === "result")
+                return <React.Fragment key={key}>
+                  <div style={analysisStepChipStyle(active, done)}>{done && <span style={{ color: "#86efac" }}>✓</span>}<span>{label}</span></div>
+                  {index < 3 && <div style={{ width: 12, height: 1, background: "rgba(255,255,255,.07)" }} />}
+                </React.Fragment>
+              })}
+            </div>
+
+            {trimStage !== "model" && trimSelectedFile && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginLeft: "auto" }}>
+                {trimStage === "boundary" && !trimClosed && trimControlNodes.length > 0 && (
+                  <button type="button" onClick={removeLastTrimPoint} style={{ height: 29, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 8.8, fontWeight: 680, cursor: "pointer" }}>Smazat poslední</button>
+                )}
+                {(trimStage === "boundary" || trimStage === "region") && (
+                  <button type="button" onClick={resetTrimBoundary} style={{ height: 29, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 8.8, fontWeight: 680, cursor: "pointer" }}>Reset hranice</button>
+                )}
+                {trimStage === "boundary" && !trimClosed && trimControlNodes.length >= 3 && (
+                  <button type="button" onClick={closeTrimLoop} style={{ height: 29, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(251,191,36,.18)", background: "rgba(245,158,11,.065)", color: "#fde68a", fontSize: 8.8, fontWeight: 710, cursor: "pointer" }}>Uzavřít hranici</button>
+                )}
+                {trimStage === "result" && (
+                  <>
+                    <button type="button" onClick={() => undoLastTrim(trimSelection)} style={{ height: 29, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 8.8, fontWeight: 680, cursor: "pointer" }}>Vrátit ořez</button>
+                    <button type="button" onClick={() => downloadTrimmedModel(trimSelection)} disabled={trimExportBusyUrl === trimSelection}
+                      style={{ height: 29, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,.10)", background: "rgba(255,255,255,.04)", color: "#e1e1e1", fontSize: 8.8, fontWeight: 700, cursor: trimExportBusyUrl === trimSelection ? "wait" : "pointer" }}>{trimExportBusyUrl === trimSelection ? "Připravuji…" : "Stáhnout"}</button>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
+
         <button type="button" onClick={closeTrimMode} disabled={trimBusy}
-          style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#c8c8c8", cursor: trimBusy ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}>
-          Hotovo / Zavřít
+          style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#c8c8c8", cursor: trimBusy ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690, flex: "0 0 auto" }}>
+          Zavřít
         </button>
       </div>
 
-      <div style={{ height: 1, margin: "10px 0", background: "rgba(255,255,255,.065)" }} />
+      <div style={{ height: 1, margin: "9px 0", background: "rgba(255,255,255,.065)" }} />
 
       {trimStage === "model" && (
         <div style={{ display: "grid", gridTemplateColumns: "minmax(220px,1fr) auto", gap: 10, alignItems: "center" }}>
@@ -13009,36 +13039,16 @@ export default function ClientPage() {
       )}
 
       {trimStage !== "model" && trimSelectedFile && (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-          <div style={{ minWidth: 0, color: "#8b8b8b", fontSize: 9.3, lineHeight: 1.45 }}>
-            {trimStage === "boundary" && !trimClosed && <>LMB klik = nový bod · přetažení kuličky = oprava bodu · dvojklik na první žlutý bod = uzavřít.</>}
-            {trimStage === "boundary" && trimClosed && <>Smyčka je uzavřená. Body můžete dál přetahovat. Najeďte myší na jednu stranu pro náhled; kliknutím na zelenou oblast se Ořez rovnou provede.</>}
-            {trimStage === "region" && <>Potvrzuji vybranou oblast a provádím Ořez…</>}
-            {trimStage === "result" && <>Ořez je aplikovaný na geometrii v této session. Výsledek lze stáhnout; při uložení scény se změněný model uloží automaticky.</>}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-            {trimStage === "boundary" && !trimClosed && trimControlNodes.length > 0 && (
-              <button type="button" onClick={removeLastTrimPoint} style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 9, fontWeight: 680, cursor: "pointer" }}>Smazat poslední</button>
-            )}
-            {(trimStage === "boundary" || trimStage === "region") && (
-              <button type="button" onClick={resetTrimBoundary} style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 9, fontWeight: 680, cursor: "pointer" }}>Reset hranice</button>
-            )}
-            {trimStage === "boundary" && !trimClosed && trimControlNodes.length >= 3 && (
-              <button type="button" onClick={closeTrimLoop} style={{ height: 31, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(251,191,36,.18)", background: "rgba(245,158,11,.065)", color: "#fde68a", fontSize: 9, fontWeight: 710, cursor: "pointer" }}>Uzavřít hranici</button>
-            )}
-            {trimStage === "result" && (
-              <>
-                <button type="button" onClick={() => undoLastTrim(trimSelection)} style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 9, fontWeight: 680, cursor: "pointer" }}>Vrátit ořez</button>
-                <button type="button" onClick={() => downloadTrimmedModel(trimSelection)} disabled={trimExportBusyUrl === trimSelection}
-                  style={{ height: 31, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,.10)", background: "rgba(255,255,255,.04)", color: "#e1e1e1", fontSize: 9, fontWeight: 700, cursor: trimExportBusyUrl === trimSelection ? "wait" : "pointer" }}>{trimExportBusyUrl === trimSelection ? "Připravuji…" : "Stáhnout"}</button>
-              </>
-            )}
-          </div>
+        <div style={{ minWidth: 0, color: "#8b8b8b", fontSize: 9.3, lineHeight: 1.45 }}>
+          {trimStage === "boundary" && !trimClosed && <>LMB klik = nový bod · přetažení kuličky = oprava bodu · dvojklik na první žlutý bod = uzavřít.</>}
+          {trimStage === "boundary" && trimClosed && <>Smyčka je uzavřená. Body můžete dál přetahovat. Najeďte myší na jednu stranu pro náhled; kliknutím na zelenou oblast se Ořez rovnou provede.</>}
+          {trimStage === "region" && <>Potvrzuji vybranou oblast a provádím Ořez…</>}
+          {trimStage === "result" && <>Ořez je aplikovaný na geometrii v této session. Výsledek lze stáhnout; při uložení scény se změněný model uloží automaticky.</>}
         </div>
       )}
 
-      {(trimMessage || trimBusy) && (
-        <div style={{ marginTop: 9, padding: "7px 9px", borderRadius: 9, background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.055)", color: trimBusy ? "#cfcfcf" : "#787878", fontSize: 8.8, lineHeight: 1.45 }}>
+      {trimShowStatusMessage && (
+        <div style={{ marginTop: 9, padding: "7px 9px", borderRadius: 9, background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.055)", color: trimBusy ? "#cfcfcf" : "#a1a1a1", fontSize: 8.8, lineHeight: 1.45 }}>
           {trimBusy && <span style={{ display: "inline-block", width: 9, height: 9, marginRight: 7, border: "1.5px solid rgba(255,255,255,.18)", borderTopColor: "#d7d7d7", borderRadius: "50%", animation: "artheticAnalysisSpin .8s linear infinite", verticalAlign: "-1px" }} />}
           {trimMessage}
         </div>
