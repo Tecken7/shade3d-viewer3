@@ -1772,6 +1772,50 @@ function classifyRepairBoundaryLoops(context, loops) {
       ),
     },
   }
+
+}
+
+function repairPointSegmentDistanceSq(point, a, b) {
+  const px = point.x, py = point.y, pz = point.z
+  const ax = a.x, ay = a.y, az = a.z
+  const bx = b.x, by = b.y, bz = b.z
+  const abx = bx - ax, aby = by - ay, abz = bz - az
+  const apx = px - ax, apy = py - ay, apz = pz - az
+  const denom = abx * abx + aby * aby + abz * abz
+  const t = denom > 1e-18
+    ? Math.max(0, Math.min(1, (apx * abx + apy * aby + apz * abz) / denom))
+    : 0
+  const dx = px - (ax + abx * t)
+  const dy = py - (ay + aby * t)
+  const dz = pz - (az + abz * t)
+  return dx * dx + dy * dy + dz * dz
+}
+
+function findRepairHoleNearPoint(context, holes, completedHoleIds, point) {
+  if (!context || !point || !Array.isArray(holes) || !holes.length) return null
+  const p = trimVec(point)
+  const completed = new Set(completedHoleIds || [])
+
+  // Přibližně 1 % diagonály modelu. U intraorálního skenu to dává pohodlnou
+  // hit-zónu kolem boundary, ale stále neumožní vybírat otvor z velké dálky.
+  const threshold = Math.max(0.28, Math.min(1.25, context.diagonal * 0.0115))
+  let best = null
+  let bestDistanceSq = threshold * threshold
+
+  for (const hole of holes) {
+    if (!hole || completed.has(hole.id) || !Array.isArray(hole.points) || hole.points.length < 2) continue
+    const points = hole.points
+    for (let i = 0; i < points.length; i++) {
+      const a = points[i]
+      const b = points[(i + 1) % points.length]
+      const distanceSq = repairPointSegmentDistanceSq(p, a, b)
+      if (distanceSq < bestDistanceSq) {
+        bestDistanceSq = distanceSq
+        best = hole
+      }
+    }
+  }
+  return best
 }
 
 function repairAverageBoundaryNormal(boundary) {
@@ -2695,7 +2739,7 @@ function createRepairPaintGeometry(context, triangleSet) {
   return geometry
 }
 
-function RepairOverlay({ context, modelMatrix, holes, selectedHoleIds, completedHoleIds, paintedTriangles, brushCursor, brushRadius }) {
+function RepairOverlay({ context, modelMatrix, holes, selectedHoleIds, completedHoleIds, hoveredHoleId, paintedTriangles, brushCursor, brushRadius }) {
   const groupRef = useRef(null)
   useEffect(() => {
     const group = groupRef.current
@@ -2717,18 +2761,19 @@ function RepairOverlay({ context, modelMatrix, holes, selectedHoleIds, completed
       {(holes || []).slice(0, 64).map((hole) => {
         const selected = selectedSet.has(hole.id)
         const completed = completedSet.has(hole.id)
+        const hovered = !completed && hoveredHoleId === hole.id
         const points = hole.points.map(trimArr)
         return (
           <group key={hole.id}>
             <TrimBoundaryTube
               points={points}
-              radius={selected ? lineRadius * 1.45 : completed ? lineRadius * 0.86 : lineRadius * 0.78}
+              radius={selected ? lineRadius * 1.45 : hovered ? lineRadius * 1.12 : completed ? lineRadius * 0.86 : lineRadius * 0.78}
               closed
-              color={selected ? "#7dd3fc" : completed ? "#86efac" : "#6f7f8a"}
-              opacity={selected ? 0.98 : completed ? 0.42 : 0.34}
-              roughness={selected ? 0.20 : completed ? 0.28 : 0.38}
-              metalness={selected ? 0.18 : completed ? 0.06 : 0.03}
-              renderOrder={selected ? 1502 : completed ? 1500 : 1498}
+              color={selected ? "#7dd3fc" : hovered ? "#ededed" : completed ? "#86efac" : "#6f7f8a"}
+              opacity={selected ? 0.98 : hovered ? 0.84 : completed ? 0.42 : 0.34}
+              roughness={selected ? 0.20 : hovered ? 0.24 : completed ? 0.28 : 0.38}
+              metalness={selected ? 0.18 : hovered ? 0.10 : completed ? 0.06 : 0.03}
+              renderOrder={selected ? 1502 : hovered ? 1501 : completed ? 1500 : 1498}
             />
             {selected && !completed && (
               <TrimBoundaryTube
@@ -2740,6 +2785,18 @@ function RepairOverlay({ context, modelMatrix, holes, selectedHoleIds, completed
                 roughness={0.22}
                 metalness={0.08}
                 renderOrder={1501}
+              />
+            )}
+            {hovered && !selected && (
+              <TrimBoundaryTube
+                points={points}
+                radius={lineRadius * 1.72}
+                closed
+                color="#ffffff"
+                opacity={0.07}
+                roughness={0.28}
+                metalness={0.03}
+                renderOrder={1500}
               />
             )}
           </group>
@@ -5499,6 +5556,9 @@ function AnyModel({
   onRepairSurfaceDown,
   onRepairSurfaceMove,
   onRepairSurfaceOut,
+  onRepairHoleMove,
+  onRepairHoleClick,
+  onRepairHoleOut,
 }) {
   const [object3D, setObject3D] = useState(null)
   const ext = useMemo(() => inferExt(name || url), [name, url])
@@ -5786,6 +5846,8 @@ function AnyModel({
       } : onTrimSurfaceClick ? (e) => {
         e.stopPropagation()
         onTrimSurfaceClick(url, e)
+      } : onRepairHoleClick ? (e) => {
+        onRepairHoleClick(url, e)
       } : undefined}
       onPointerDown={onRepairSurfaceDown ? (e) => {
         onRepairSurfaceDown(url, e)
@@ -5795,9 +5857,10 @@ function AnyModel({
         setAlignmentHoverVisual(true)
         onAlignmentHover?.(url, true)
       } : undefined}
-      onPointerMove={onTrimSurfaceMove || onRepairSurfaceMove || (analysisMode && onHoverDist) ? (e) => {
+      onPointerMove={onTrimSurfaceMove || onRepairSurfaceMove || onRepairHoleMove || (analysisMode && onHoverDist) ? (e) => {
         if (onTrimSurfaceMove) onTrimSurfaceMove(url, e)
         if (onRepairSurfaceMove) onRepairSurfaceMove(url, e)
+        if (onRepairHoleMove) onRepairHoleMove(url, e)
         if (analysisMode && onHoverDist) {
           e.stopPropagation(); 
           const distAttr = e.object.geometry.getAttribute('_analysisDist');
@@ -5813,7 +5876,7 @@ function AnyModel({
           }
         }
       } : undefined}
-      onPointerOut={(analysisMode && onHoverDist) || onAlignmentSelect || onTrimSurfaceMove || onTrimSurfaceOut || onRepairSurfaceMove || onRepairSurfaceOut ? () => {
+      onPointerOut={(analysisMode && onHoverDist) || onAlignmentSelect || onTrimSurfaceMove || onTrimSurfaceOut || onRepairSurfaceMove || onRepairSurfaceOut || onRepairHoleMove || onRepairHoleOut ? () => {
         if (onAlignmentSelect) {
           setAlignmentHoverVisual(false)
           onAlignmentHover?.(url, false)
@@ -5821,6 +5884,7 @@ function AnyModel({
         if (analysisMode && onHoverDist) onHoverDist(null)
         if (onTrimSurfaceOut) onTrimSurfaceOut(url)
         if (onRepairSurfaceOut) onRepairSurfaceOut(url)
+        if (onRepairHoleOut) onRepairHoleOut(url)
       } : undefined}
       onDoubleClick={analysisMode && onPinNote ? (e) => {
         e.stopPropagation();
@@ -7486,6 +7550,7 @@ export default function ClientPage() {
   const [repairSelectedHoleId, setRepairSelectedHoleId] = useState("")
   const [repairSelectedHoleIds, setRepairSelectedHoleIds] = useState([])
   const [repairCompletedHoleIds, setRepairCompletedHoleIds] = useState([])
+  const [repairHoveredHoleId, setRepairHoveredHoleId] = useState("")
   const [repairHiddenBottomBoundary, setRepairHiddenBottomBoundary] = useState(null)
   const [repairPreviewPatch, setRepairPreviewPatch] = useState(null)
   const [repairPaintedTriangles, setRepairPaintedTriangles] = useState(() => new Set())
@@ -7502,6 +7567,7 @@ export default function ClientPage() {
   const [repairExportBusyUrl, setRepairExportBusyUrl] = useState("")
   const repairHistoryByUrlRef = useRef({})
   const repairPaintLastAtRef = useRef(0)
+  const repairHoleHoverLastAtRef = useRef(0)
   const repairWorkerRef = useRef(null)
   const repairWorkerRequestsRef = useRef(new Map())
   const repairWorkerRequestIdRef = useRef(0)
@@ -8790,6 +8856,7 @@ export default function ClientPage() {
     setRepairSelectedHoleId("")
     setRepairSelectedHoleIds([])
     setRepairCompletedHoleIds([])
+    setRepairHoveredHoleId("")
     setRepairHiddenBottomBoundary(null)
     setRepairPreviewPatch(null)
     setRepairPaintedTriangles(new Set())
@@ -8897,6 +8964,7 @@ export default function ClientPage() {
       setRepairBrushCursor(null)
       setRepairSelectedHoleId("")
       setRepairSelectedHoleIds([])
+      setRepairHoveredHoleId("")
       setRepairPreviewPatch(null)
 
       if (repairVariant === "manual") {
@@ -9013,6 +9081,64 @@ export default function ClientPage() {
     }
   }, [repairPainting])
 
+
+  const handleRepairHoleMove = useCallback((url, event) => {
+    if (!repairMode || repairVariant !== "auto" || repairBusy || url !== repairSelection || !repairContext) return
+
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now()
+    if (now - repairHoleHoverLastAtRef.current < 22) return
+    repairHoleHoverLastAtRef.current = now
+
+    const hit = resolveTrimHit(repairContext, modelObjectsRef.current[url], event)
+    if (!hit) {
+      setRepairHoveredHoleId("")
+      return
+    }
+
+    const hole = findRepairHoleNearPoint(
+      repairContext,
+      repairHoles,
+      repairCompletedHoleIds,
+      hit.point
+    )
+    setRepairHoveredHoleId((previous) => previous === (hole?.id || "") ? previous : (hole?.id || ""))
+  }, [repairMode, repairVariant, repairBusy, repairSelection, repairContext, repairHoles, repairCompletedHoleIds])
+
+  const handleRepairHoleOut = useCallback(() => {
+    setRepairHoveredHoleId("")
+  }, [])
+
+  const handleRepairHoleClick = useCallback((url, event) => {
+    if (!repairMode || repairVariant !== "auto" || repairBusy || url !== repairSelection || !repairContext) return
+    if ((event.button ?? event.nativeEvent?.button ?? 0) !== 0) return
+    if (Number.isFinite(event.delta) && event.delta > 5) return
+
+    const hit = resolveTrimHit(repairContext, modelObjectsRef.current[url], event)
+    if (!hit) return
+    const hole = findRepairHoleNearPoint(
+      repairContext,
+      repairHoles,
+      repairCompletedHoleIds,
+      hit.point
+    )
+    if (!hole) return
+
+    event.stopPropagation?.()
+    event.nativeEvent?.preventDefault?.()
+    setRepairHoveredHoleId(hole.id)
+    selectRepairHole(hole.id)
+  }, [repairMode, repairVariant, repairBusy, repairSelection, repairContext, repairHoles, repairCompletedHoleIds, selectRepairHole])
+
+  useEffect(() => {
+    if (typeof document === "undefined") return
+    if (!repairMode || repairVariant !== "auto" || !repairHoveredHoleId || repairBusy) return
+    const previous = document.body.style.cursor
+    document.body.style.cursor = "pointer"
+    return () => {
+      document.body.style.cursor = previous
+    }
+  }, [repairMode, repairVariant, repairHoveredHoleId, repairBusy])
+
   const clearRepairPaint = useCallback(() => {
     setRepairPaintedTriangles(new Set())
     setRepairBrushCursor(null)
@@ -9118,6 +9244,7 @@ export default function ClientPage() {
       setRepairCompletedHoleIds(completedIds)
       setRepairSelectedHoleId("")
       setRepairSelectedHoleIds([])
+      setRepairHoveredHoleId("")
       setRepairPreviewPatch(null)
       setRepairPaintedTriangles(new Set())
       setRepairBrushCursor(null)
@@ -12947,7 +13074,7 @@ export default function ClientPage() {
 
       {repairVariant === "manual" && repairStage === "preview" && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-          <div style={{ color: "#8b8b8b", fontSize: 9.2 }}>Jasně modrý obrys označuje boundary vybraného otvoru. CGAL se spustí až po potvrzení opravy.</div>
+          <div style={{ color: "#8b8b8b", fontSize: 9.2 }}>Najeďte kurzorem na hranu otvoru a kliknutím ji vyberte přímo ve scéně, nebo použijte tlačítka níže. Jasně modrý obrys označuje vybrané boundary.</div>
           <div style={{ display: "flex", gap: 6 }}>
             <button type="button" onClick={() => { setRepairStage("paint"); setRepairSelectedHoleId(""); setRepairPreviewPatch(null) }} style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 9, fontWeight: 680, cursor: "pointer" }}>Zpět k paintu</button>
             <button type="button" onClick={repairSelectedHole} disabled={!repairSelectedHoleId || repairBusy} style={{ height: 31, padding: "0 11px", borderRadius: 8, border: "1px solid rgba(74,222,128,.20)", background: "rgba(34,197,94,.075)", color: "#bbf7d0", fontSize: 9, fontWeight: 720, cursor: repairBusy ? "wait" : "pointer" }}>Opravit</button>
@@ -12987,15 +13114,29 @@ export default function ClientPage() {
     <div className="artheticRepairSideActions">
       <div style={{ padding: "1px 2px 7px", color: "#696969", fontSize: 8.1, fontWeight: 720, letterSpacing: ".035em", textTransform: "uppercase" }}>Výsledek</div>
       <div style={{ display: "grid", gap: 6 }}>
-        <button type="button" onClick={() => undoLastRepair(repairSelection)} disabled={repairBusy}
-          style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: repairBusy ? "#555" : "#aaa", fontSize: 9, fontWeight: 680, cursor: repairBusy ? "wait" : "pointer" }}>Vrátit poslední</button>
-        <button type="button" onClick={() => downloadRepairedModel(repairSelection)} disabled={repairBusy || repairExportBusyUrl === repairSelection}
-          style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.10)", background: "rgba(255,255,255,.04)", color: repairBusy ? "#555" : "#e1e1e1", fontSize: 9, fontWeight: 700, cursor: repairBusy || repairExportBusyUrl === repairSelection ? "wait" : "pointer" }}>
+        <button
+          type="button"
+          onClick={() => undoLastRepair(repairSelection)}
+          disabled={repairBusy}
+          style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: repairBusy ? "#555" : "#c8c8c8", cursor: repairBusy ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
+        >
+          Vrátit poslední
+        </button>
+        <button
+          type="button"
+          onClick={() => downloadRepairedModel(repairSelection)}
+          disabled={repairBusy || repairExportBusyUrl === repairSelection}
+          style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: repairBusy || repairExportBusyUrl === repairSelection ? "#555" : "#c8c8c8", cursor: repairBusy || repairExportBusyUrl === repairSelection ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
+        >
           {repairExportBusyUrl === repairSelection ? "Připravuji…" : "Stáhnout"}
         </button>
         {editorCapabilities.canSaveRepairedToCase && (
-          <button type="button" onClick={() => saveRepairedModelToCase(repairSelection)} disabled={repairBusy || repairExportBusyUrl === repairSelection || !!repairedExportsByUrl[repairSelection]?.saveRequested}
-            style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(74,222,128,.17)", background: "rgba(34,197,94,.06)", color: repairedExportsByUrl[repairSelection]?.saveRequested ? "#66836f" : repairBusy ? "#4f6756" : "#bbf7d0", fontSize: 9, fontWeight: 710, cursor: repairBusy || repairedExportsByUrl[repairSelection]?.saveRequested ? "default" : "pointer" }}>
+          <button
+            type="button"
+            onClick={() => saveRepairedModelToCase(repairSelection)}
+            disabled={repairBusy || repairExportBusyUrl === repairSelection || !!repairedExportsByUrl[repairSelection]?.saveRequested}
+            style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: repairBusy || repairedExportsByUrl[repairSelection]?.saveRequested ? "#555" : "#c8c8c8", cursor: repairBusy || repairedExportsByUrl[repairSelection]?.saveRequested ? "default" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
+          >
             {repairedExportsByUrl[repairSelection]?.saveRequested ? "Předáno" : "Uložit do zakázky"}
           </button>
         )}
@@ -14169,6 +14310,9 @@ export default function ClientPage() {
                 onRepairSurfaceDown={repairMode && repairVariant === "manual" && repairSelection === f.url && repairStage === "paint" ? handleRepairSurfaceDown : null}
                 onRepairSurfaceMove={repairMode && repairVariant === "manual" && repairSelection === f.url && repairStage === "paint" ? handleRepairSurfaceMove : null}
                 onRepairSurfaceOut={repairMode && repairVariant === "manual" && repairSelection === f.url && repairStage === "paint" ? handleRepairSurfaceOut : null}
+                onRepairHoleMove={repairMode && repairVariant === "auto" && repairSelection === f.url && repairStage !== "result" ? handleRepairHoleMove : null}
+                onRepairHoleClick={repairMode && repairVariant === "auto" && repairSelection === f.url && repairStage !== "result" ? handleRepairHoleClick : null}
+                onRepairHoleOut={repairMode && repairVariant === "auto" && repairSelection === f.url && repairStage !== "result" ? handleRepairHoleOut : null}
               />
             ))}
           </Suspense>
@@ -14198,6 +14342,7 @@ export default function ClientPage() {
                 : (repairSelectedHoleId ? repairHoles.filter((hole) => hole.id === repairSelectedHoleId) : [])}
               selectedHoleIds={repairVariant === "auto" ? repairSelectedHoleIds : (repairSelectedHoleId ? [repairSelectedHoleId] : [])}
               completedHoleIds={repairCompletedHoleIds}
+              hoveredHoleId={repairHoveredHoleId}
               paintedTriangles={repairPaintedTriangles}
               brushCursor={repairBrushCursor}
               brushRadius={repairContext.diagonal * repairBrushFactor}
