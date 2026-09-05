@@ -8576,7 +8576,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [runCGALRepairWorker])
 
   useEffect(() => {
-    if (!USE_ALIGNMENT_WORKER || typeof Worker === "undefined") return undefined
+    // Alignment Demo pracuje výhradně s lokálními Blob URL. Pro tento veřejný
+    // sandbox záměrně používáme ověřený main-thread ICP fallback, aby Best Fit
+    // nebyl závislý na bundlingu / lifecycle Web Workeru. Běžný viewer a interní
+    // Align nadále používají analysis.worker.js beze změny.
+    if (alignmentDemoStandalone || !USE_ALIGNMENT_WORKER || typeof Worker === "undefined") return undefined
 
     let worker = null
     try {
@@ -8647,7 +8651,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       try { worker.terminate() } catch {}
       if (alignmentWorkerRef.current === worker) alignmentWorkerRef.current = null
     }
-  }, [])
+  }, [alignmentDemoStandalone])
 
   const runAlignmentWorkerBestFit = useCallback((payload, transferables, onProgress) => {
     const worker = alignmentWorkerRef.current
@@ -11276,7 +11280,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       let result = null
       let workerUsed = false
 
-      if (USE_ALIGNMENT_WORKER && alignmentWorkerRef.current && !alignmentWorkerFailedRef.current) {
+      if (!alignmentDemoStandalone && USE_ALIGNMENT_WORKER && alignmentWorkerRef.current && !alignmentWorkerFailedRef.current) {
         const prepareStartedAt = performance.now()
         try {
           setAlignmentMessage("Připravuji data pro výpočet na samostatném vlákně…")
@@ -11377,7 +11381,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setAlignmentProgress(null)
       setAlignmentOperation(null)
     }
-  }, [getAlignmentPair, modelTransforms, alignmentPointsA.length, alignmentPointsB.length, applyModelTransform, refreshAlignmentMetrics, runAlignmentWorkerBestFit])
+  }, [getAlignmentPair, modelTransforms, alignmentPointsA.length, alignmentPointsB.length, applyModelTransform, refreshAlignmentMetrics, runAlignmentWorkerBestFit, alignmentDemoStandalone])
 
   const resetAlignmentTransform = useCallback(async () => {
     const { aUrl, bUrl } = getAlignmentPair()
