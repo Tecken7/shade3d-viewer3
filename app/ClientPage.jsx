@@ -7577,7 +7577,7 @@ function cadSignedAreaXZ(points) {
 }
 
 
-// V10 – Medit-style meshing helpers.
+// V10/V11 – Medit-style meshing helpers.
 // Referenční Medit export používá na pravidelném profilu zhruba 0.4 mm sampling,
 // horizontální wall ringy po ~1.1 mm a výrazně hustší, rovnoměrnější bottom cap.
 function cadClosedLoopPerimeter(points) {
@@ -7595,6 +7595,32 @@ function cadResampleClosedLoop(points, targetSpacing = 0.39, minCount = 48, maxC
   const cumulative = [0]
   for (let i = 0; i < points.length; i++) cumulative.push(cumulative[cumulative.length - 1] + points[i].distanceTo(points[(i + 1) % points.length]))
   const total = cumulative[cumulative.length - 1] || perimeter
+  const result = []
+  let edge = 0
+  for (let sample = 0; sample < count; sample++) {
+    const distance = (sample / count) * total
+    while (edge + 1 < cumulative.length - 1 && cumulative[edge + 1] < distance) edge++
+    const a = points[edge % points.length]
+    const b = points[(edge + 1) % points.length]
+    const start = cumulative[edge]
+    const end = cumulative[edge + 1]
+    const t = end > start ? THREE.MathUtils.clamp((distance - start) / (end - start), 0, 1) : 0
+    result.push(a.clone().lerp(b, t))
+  }
+  return result
+}
+
+
+function cadResampleClosedLoopCount(points, desiredCount) {
+  if (!Array.isArray(points) || points.length < 4) return (points || []).map((p) => p.clone())
+  const count = Math.max(4, Math.round(Number(desiredCount) || points.length))
+  if (count === points.length) return points.map((p) => p.clone())
+  const cumulative = [0]
+  for (let i = 0; i < points.length; i++) {
+    cumulative.push(cumulative[cumulative.length - 1] + points[i].distanceTo(points[(i + 1) % points.length]))
+  }
+  const total = cumulative[cumulative.length - 1]
+  if (!Number.isFinite(total) || total <= 1e-9) return points.map((p) => p.clone())
   const result = []
   let edge = 0
   for (let sample = 0; sample < count; sample++) {
@@ -7734,6 +7760,191 @@ function cadRefineCapTriangulation(contour, initialFaces, targetEdge = 1.85, max
     maxEdge = Math.max(maxEdge, edgeLength(a,b), edgeLength(b,c), edgeLength(c,a))
   }
   return { points, faces, iterations, maxEdge }
+}
+
+
+// V11 – isotropic cap optimization.
+// V10 už odstranil obří fan triangulaci, ale dělení midpointů si stále neslo
+// radiální „rodokmen“ původního earcutu. V11 proto po conforming refinementu:
+// 1) opakovaně flipuje vnitřní hrany, pokud tím roste minimální kvalita obou face,
+// 2) lehce relaxuje pouze VNITŘNÍ vertexy (boundary zůstává přesně stejná),
+// 3) znovu provede edge-flip pass. Tím se síť přiblíží isotropní triangulaci.
+function cadOrient2D(a, b, c) {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+function cadTriangleQuality2D(a, b, c) {
+  const area2 = Math.abs(cadOrient2D(a, b, c))
+  if (area2 <= 1e-12) return 0
+  const ab = a.distanceToSquared(b)
+  const bc = b.distanceToSquared(c)
+  const ca = c.distanceToSquared(a)
+  const denom = ab + bc + ca
+  if (denom <= 1e-12) return 0
+  // 1.0 = rovnostranný trojúhelník, 0 = degenerovaný.
+  return Math.min(1, (2 * Math.sqrt(3) * area2) / denom)
+}
+
+function cadPointInPolygon2D(point, polygon) {
+  let inside = false
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const a = polygon[i], b = polygon[j]
+    const intersect = ((a.y > point.y) !== (b.y > point.y)) &&
+      (point.x < (b.x - a.x) * (point.y - a.y) / ((b.y - a.y) || 1e-12) + a.x)
+    if (intersect) inside = !inside
+  }
+  return inside
+}
+
+function cadOptimizeCapEdgeFlips(points, faces, boundaryCount, maxPasses = 10) {
+  const result = faces.map((f) => [f[0], f[1], f[2]])
+  const boundaryEdges = new Set()
+  for (let i = 0; i < boundaryCount; i++) boundaryEdges.add(cadEdgeKey(i, (i + 1) % boundaryCount))
+  let totalFlips = 0
+
+  const orientedFace = (a, b, c, sign) => {
+    const current = cadOrient2D(points[a], points[b], points[c])
+    if ((sign >= 0 && current >= 0) || (sign < 0 && current < 0)) return [a, b, c]
+    return [a, c, b]
+  }
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const edgeMap = new Map()
+    for (let fi = 0; fi < result.length; fi++) {
+      const [a,b,c] = result[fi]
+      for (const [u,v] of [[a,b],[b,c],[c,a]]) {
+        const key = cadEdgeKey(u, v)
+        let list = edgeMap.get(key)
+        if (!list) { list = []; edgeMap.set(key, list) }
+        list.push(fi)
+      }
+    }
+
+    const candidates = []
+    for (const [key, adjacent] of edgeMap.entries()) {
+      if (adjacent.length !== 2 || boundaryEdges.has(key)) continue
+      const [fa, fb] = adjacent
+      const faceA = result[fa], faceB = result[fb]
+      const [uStr, vStr] = key.split(':')
+      const u = Number(uStr), v = Number(vStr)
+      const a = faceA.find((x) => x !== u && x !== v)
+      const b = faceB.find((x) => x !== u && x !== v)
+      if (a == null || b == null || a === b) continue
+
+      const oldArea = Math.abs(cadOrient2D(points[faceA[0]], points[faceA[1]], points[faceA[2]])) +
+        Math.abs(cadOrient2D(points[faceB[0]], points[faceB[1]], points[faceB[2]]))
+      const newArea = Math.abs(cadOrient2D(points[a], points[b], points[u])) +
+        Math.abs(cadOrient2D(points[b], points[a], points[v]))
+      if (oldArea <= 1e-10 || Math.abs(newArea - oldArea) / oldArea > 1e-4) continue
+
+      const oldQuality = Math.min(
+        cadTriangleQuality2D(points[faceA[0]], points[faceA[1]], points[faceA[2]]),
+        cadTriangleQuality2D(points[faceB[0]], points[faceB[1]], points[faceB[2]])
+      )
+      const newQuality = Math.min(
+        cadTriangleQuality2D(points[a], points[b], points[u]),
+        cadTriangleQuality2D(points[b], points[a], points[v])
+      )
+      const improvement = newQuality - oldQuality
+      if (improvement > 0.012) candidates.push({ fa, fb, u, v, a, b, improvement })
+    }
+
+    if (!candidates.length) break
+    candidates.sort((x, y) => y.improvement - x.improvement)
+    const usedFaces = new Set()
+    let passFlips = 0
+    for (const candidate of candidates) {
+      const { fa, fb, u, v, a, b } = candidate
+      if (usedFaces.has(fa) || usedFaces.has(fb)) continue
+      const signA = Math.sign(cadOrient2D(points[result[fa][0]], points[result[fa][1]], points[result[fa][2]])) || 1
+      const signB = Math.sign(cadOrient2D(points[result[fb][0]], points[result[fb][1]], points[result[fb][2]])) || 1
+      result[fa] = orientedFace(a, b, u, signA)
+      result[fb] = orientedFace(b, a, v, signB)
+      usedFaces.add(fa); usedFaces.add(fb)
+      passFlips++; totalFlips++
+    }
+    if (!passFlips) break
+  }
+  return { faces: result, flips: totalFlips }
+}
+
+function cadRelaxCapInterior(points, faces, boundaryCount, polygon, passes = 3, strength = 0.34) {
+  const result = points.map((p) => p.clone())
+  let moved = 0
+  for (let pass = 0; pass < passes; pass++) {
+    const neighbors = Array.from({ length: result.length }, () => new Set())
+    const incident = Array.from({ length: result.length }, () => [])
+    for (let fi = 0; fi < faces.length; fi++) {
+      const [a,b,c] = faces[fi]
+      neighbors[a].add(b); neighbors[a].add(c)
+      neighbors[b].add(a); neighbors[b].add(c)
+      neighbors[c].add(a); neighbors[c].add(b)
+      incident[a].push(fi); incident[b].push(fi); incident[c].push(fi)
+    }
+
+    const proposals = new Map()
+    for (let i = boundaryCount; i < result.length; i++) {
+      const list = [...neighbors[i]]
+      if (list.length < 3) continue
+      const average = new THREE.Vector2()
+      for (const neighbor of list) average.add(result[neighbor])
+      average.multiplyScalar(1 / list.length)
+      const candidate = result[i].clone().lerp(average, strength)
+      if (!cadPointInPolygon2D(candidate, polygon)) continue
+
+      let safe = true
+      for (const fi of incident[i]) {
+        const face = faces[fi]
+        const oldPoints = face.map((idx) => result[idx])
+        const oldSign = cadOrient2D(oldPoints[0], oldPoints[1], oldPoints[2])
+        const newPoints = face.map((idx) => idx === i ? candidate : result[idx])
+        const newSign = cadOrient2D(newPoints[0], newPoints[1], newPoints[2])
+        if (Math.abs(newSign) < 1e-9 || oldSign * newSign <= 0) { safe = false; break }
+      }
+      if (safe) proposals.set(i, candidate)
+    }
+    if (!proposals.size) break
+    for (const [index, value] of proposals.entries()) { result[index] = value; moved++ }
+  }
+  return { points: result, moved }
+}
+
+function cadCapQualityStats(points, faces) {
+  let minQuality = 1
+  let sumQuality = 0
+  let maxEdge = 0
+  let skinny = 0
+  for (const [a,b,c] of faces) {
+    const pa = points[a], pb = points[b], pc = points[c]
+    const quality = cadTriangleQuality2D(pa, pb, pc)
+    minQuality = Math.min(minQuality, quality)
+    sumQuality += quality
+    maxEdge = Math.max(maxEdge, pa.distanceTo(pb), pb.distanceTo(pc), pc.distanceTo(pa))
+    if (quality < 0.12) skinny++
+  }
+  return {
+    minQuality: faces.length ? minQuality : 0,
+    meanQuality: faces.length ? sumQuality / faces.length : 0,
+    maxEdge,
+    skinny,
+  }
+}
+
+function cadOptimizeCapTriangulation(contour, refined, options = {}) {
+  const boundaryCount = contour.length
+  const flipPasses = Math.max(1, Number(options.flipPasses) || 12)
+  const smoothPasses = Math.max(0, Number(options.smoothPasses) || 3)
+  const firstFlip = cadOptimizeCapEdgeFlips(refined.points, refined.faces, boundaryCount, flipPasses)
+  const relaxed = cadRelaxCapInterior(refined.points, firstFlip.faces, boundaryCount, contour, smoothPasses, 0.32)
+  const secondFlip = cadOptimizeCapEdgeFlips(relaxed.points, firstFlip.faces, boundaryCount, Math.max(4, Math.ceil(flipPasses * 0.65)))
+  const quality = cadCapQualityStats(relaxed.points, secondFlip.faces)
+  return {
+    points: relaxed.points,
+    faces: secondFlip.faces,
+    flips: firstFlip.flips + secondFlip.flips,
+    relaxedMoves: relaxed.moved,
+    quality,
+  }
 }
 
 // Pomocné XZ normály profilu (ponecháno pro budoucí Curved / bottom-bevel nástroje).
@@ -7976,8 +8187,9 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   // Samotný CAD bridge proto držíme typicky ~1.0–1.45 mm a nezávisle na Total Height.
   const desiredTransitionDepth = Math.max(0.95, Math.min(1.45, boundaryData.diagonal * 0.0205))
   const transitionDepth = Math.max(0.48, Math.min(desiredTransitionDepth, availableBaseDepth * 0.42))
-  const transitionSteps = transitionDepth >= 1.15 ? 6 : 5
+  const transitionSteps = transitionDepth >= 1.15 ? 7 : 6
   const transitionRings = []
+  const transitionRingCounts = []
 
   const smoothstep = (t) => t * t * (3 - 2 * t)
   const profileEase = (t) => {
@@ -7985,17 +8197,28 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     return s * s * (3 - 2 * s)
   }
 
-  // První CAD ring už má Medit-like ~0.4 mm sampling; přesná hustá boundary scanu
-  // se k němu později sešije zipper stripem.
+  // V11: místo jediného zipper skoku 900+ -> ~430 vertexů počet bodů ubývá
+  // postupně přes několik ringů. Každý ring si znovu vzorkuje RAW i smooth profil
+  // stejným počtem bodů, takže délka hran zůstává v transition pásu mnohem vyrovnanější.
+  const sourceCount = rawLoop.length
+  const targetCount = sampledRawLoop.length
   for (let step = 1; step <= transitionSteps; step++) {
     const t = step / transitionSteps
     const profileT = profileEase(t)
     const verticalT = smoothstep(t)
-    const ring = sampledRawLoop.map((raw, i) => {
-      const smooth = regularized[i] || raw
-      const targetY = boundaryExtremeY + (isUpper ? transitionDepth : -transitionDepth)
+    const countEase = smoothstep(Math.min(1, t * 1.04))
+    const ringCount = step === transitionSteps
+      ? targetCount
+      : Math.max(24, Math.round(THREE.MathUtils.lerp(sourceCount, targetCount, countEase)))
+    transitionRingCounts.push(ringCount)
+
+    const rawSample = cadResampleClosedLoopCount(rawLoop, ringCount)
+    const smoothSample = cadResampleClosedLoopCount(regularized, ringCount)
+    const targetY = boundaryExtremeY + (isUpper ? transitionDepth : -transitionDepth)
+    const capMargin = Math.min(0.45, Math.max(0.16, availableBaseDepth * 0.08))
+    const ring = rawSample.map((raw, i) => {
+      const smooth = smoothSample[i] || raw
       const interpolatedY = THREE.MathUtils.lerp(raw.y, targetY, verticalT)
-      const capMargin = Math.min(0.45, Math.max(0.16, availableBaseDepth * 0.08))
       const y = isUpper
         ? Math.min(interpolatedY, baseCapY - capMargin)
         : Math.max(interpolatedY, baseCapY + capMargin)
@@ -8062,6 +8285,15 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     pushTri(a, b, c)
     pushTri(a, c, d)
   }
+  const pushQuadAlternating = (a, b, c, d, flip = false) => {
+    if (flip) {
+      pushTri(a, b, d)
+      pushTri(b, c, d)
+    } else {
+      pushTri(a, b, c)
+      pushTri(a, c, d)
+    }
+  }
 
   // Přesná hustá source boundary -> první ~0.4mm CAD ring.
   cadStitchClosedRings(
@@ -8073,14 +8305,17 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     isUpper
   )
 
-  // Zbytek transition ringů má shodný, pravidelný sampling.
+  // V11: každý transition ring může mít jiný počet bodů. Stitchujeme proto
+  // postupně mezi sousedními ringy místo jednoho agresivního zipperu.
   for (let ring = 0; ring < transitionRingIndices.length - 1; ring++) {
-    const upperRing = transitionRingIndices[ring]
-    const lowerRing = transitionRingIndices[ring + 1]
-    for (let i = 0; i < upperRing.length; i++) {
-      const j = (i + 1) % upperRing.length
-      pushQuad(upperRing[i], upperRing[j], lowerRing[j], lowerRing[i])
-    }
+    cadStitchClosedRings(
+      indices,
+      transitionRingIndices[ring],
+      transitionRings[ring],
+      transitionRingIndices[ring + 1],
+      transitionRings[ring + 1],
+      isUpper
+    )
   }
 
   // Krátký 0.1mm seam – samostatný ring stejně jako v referenčním Medit STL.
@@ -8090,31 +8325,38 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     pushQuad(lastTransitionIndices[i], lastTransitionIndices[j], seamIndices[j], seamIndices[i])
   }
 
-  // V10: horizontálně subdividovaná stěna místo jednoho dlouhého quad stripu.
+  // V11: wall ringy zůstávají pravidelné, ale diagonálu střídáme checkerboardově,
+  // aby se nevytvářel jeden viditelný šikmý směr přes celou stěnu.
   let previousWallRing = seamIndices
-  for (const nextWallRing of wallRingIndices) {
+  for (let wallRing = 0; wallRing < wallRingIndices.length; wallRing++) {
+    const nextWallRing = wallRingIndices[wallRing]
     for (let i = 0; i < previousWallRing.length; i++) {
       const j = (i + 1) % previousWallRing.length
-      pushQuad(previousWallRing[i], previousWallRing[j], nextWallRing[j], nextWallRing[i])
+      pushQuadAlternating(
+        previousWallRing[i], previousWallRing[j], nextWallRing[j], nextWallRing[i],
+        ((i + wallRing) & 1) === 1
+      )
     }
     previousWallRing = nextWallRing
   }
   const bottomWallIndices = previousWallRing
 
-  // Spodní cap: boundary zůstává identická s posledním wall ringem, ale samotná
-  // plocha dostane adaptivní interior refinement. Tím zmizí dlouhé 20–30mm vějíře.
+  // V11 bottom cap: jemnější conforming refinement + isotropic edge flips a
+  // relaxation vnitřních bodů. Boundary se nikdy neposune, takže cap zůstane přesně
+  // napojený na poslední wall ring, ale uvnitř zmizí radiální „vějířové“ švy.
   const contour2D = bottomLoop.map((p) => new THREE.Vector2(p.x, p.z))
   const initialFaces = THREE.ShapeUtils.triangulateShape(contour2D, [])
   if (!initialFaces?.length) throw new Error("Spodní plochu báze se nepodařilo triangulovat.")
-  const capTargetEdge = Math.max(1.55, Math.min(1.95, boundaryData.diagonal * 0.035))
-  const refinedCap = cadRefineCapTriangulation(contour2D, initialFaces, capTargetEdge, 8)
-  const capIndices = new Array(refinedCap.points.length)
-  for (let i = 0; i < refinedCap.points.length; i++) {
-    const point = refinedCap.points[i]
+  const capTargetEdge = Math.max(1.05, Math.min(1.45, boundaryData.diagonal * 0.024))
+  const refinedCap = cadRefineCapTriangulation(contour2D, initialFaces, capTargetEdge, 10)
+  const optimizedCap = cadOptimizeCapTriangulation(contour2D, refinedCap, { flipPasses: 14, smoothPasses: 4 })
+  const capIndices = new Array(optimizedCap.points.length)
+  for (let i = 0; i < optimizedCap.points.length; i++) {
+    const point = optimizedCap.points[i]
     capIndices[i] = positions.length / 3
     positions.push(point.x, baseCapY, point.y)
   }
-  refinedCap.faces.forEach(([a, b, c]) => pushTri(capIndices[a], capIndices[b], capIndices[c]))
+  optimizedCap.faces.forEach(([a, b, c]) => pushTri(capIndices[a], capIndices[b], capIndices[c]))
 
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3))
@@ -8148,16 +8390,22 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionRings: transitionSteps,
-      transitionMode: "medit-straight-v10",
+      transitionMode: "medit-isotropic-v11",
+      transitionRingCounts,
       seamOffset,
       profileTargetSpacing,
       profilePoints: seamLoop.length,
       wallTargetSpacing,
       wallSections,
-      capVertices: refinedCap.points.length,
-      capTriangles: refinedCap.faces.length,
+      capVertices: optimizedCap.points.length,
+      capTriangles: optimizedCap.faces.length,
+      capEdgeFlips: optimizedCap.flips,
+      capRelaxMoves: optimizedCap.relaxedMoves,
+      capMinQuality: optimizedCap.quality.minQuality,
+      capMeanQuality: optimizedCap.quality.meanQuality,
+      capSkinnyTriangles: optimizedCap.quality.skinny,
       capTargetEdge,
-      capMaxEdge: refinedCap.maxEdge,
+      capMaxEdge: optimizedCap.quality.maxEdge,
       capRefineIterations: refinedCap.iterations,
       boundaryRelaxationBand: boundaryRelaxation.bandWidth,
       boundaryRelaxationMaxShift: boundaryRelaxation.maxBoundaryShift,
