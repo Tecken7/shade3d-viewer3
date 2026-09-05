@@ -7610,6 +7610,166 @@ function CadEyeIcon({ active = false }) {
   )
 }
 
+function CadOrientationReferencePlane({ center = [0, 0, 0], y = 0, size = 80, compact = false }) {
+  const gridRef = useRef(null)
+  useEffect(() => {
+    const helper = gridRef.current
+    if (!helper) return
+    const mats = Array.isArray(helper.material) ? helper.material : [helper.material]
+    mats.filter(Boolean).forEach((material) => {
+      material.transparent = true
+      material.opacity = compact ? 0.26 : 0.18
+      material.depthWrite = false
+      material.toneMapped = false
+      material.needsUpdate = true
+    })
+  }, [compact])
+
+  return (
+    <group position={[Number(center?.[0]) || 0, Number(y) || 0, Number(center?.[2]) || 0]}>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} renderOrder={2}>
+        <planeGeometry args={[Math.max(1, size), Math.max(1, size)]} />
+        <meshBasicMaterial color="#60a5fa" transparent opacity={compact ? 0.035 : 0.055} side={THREE.DoubleSide} depthWrite={false} />
+      </mesh>
+      <gridHelper ref={gridRef} args={[Math.max(1, size), compact ? 8 : 14, "#93c5fd", "#2563eb"]} position={[0, 0.002, 0]} renderOrder={3} />
+    </group>
+  )
+}
+
+function CadOrientationMiniModel({ sourceObject, modelMatrix }) {
+  const clone = useMemo(() => sourceObject?.clone?.(true) || null, [sourceObject])
+
+  useEffect(() => {
+    if (!clone) return
+    clone.matrixAutoUpdate = false
+    if (Array.isArray(modelMatrix) && modelMatrix.length === 16) clone.matrix.fromArray(modelMatrix)
+    else clone.matrix.identity()
+    clone.matrixWorldNeedsUpdate = true
+    clone.updateMatrixWorld(true)
+  }, [clone, modelMatrix])
+
+  if (!clone) return null
+  return <primitive object={clone} />
+}
+
+function CadOrientationMiniCamera({ rootRef, view, modelMatrix }) {
+  const { camera, size: canvasSize } = useThree()
+
+  useEffect(() => {
+    let raf = 0
+    const frame = () => {
+      const root = rootRef.current
+      if (!root || !camera) return
+      root.updateMatrixWorld(true)
+      const box = new THREE.Box3().setFromObject(root)
+      if (box.isEmpty()) return
+      const center = box.getCenter(new THREE.Vector3())
+      const dims = box.getSize(new THREE.Vector3())
+      const aspect = Math.max(0.35, (canvasSize.width || 1) / Math.max(1, canvasSize.height || 1))
+      let screenWidth = dims.x
+      let screenHeight = dims.y
+      if (view === "top") {
+        screenWidth = dims.x
+        screenHeight = dims.z
+      } else if (view === "side") {
+        screenWidth = dims.z
+        screenHeight = dims.y
+      }
+      const halfHeight = Math.max(screenHeight * 0.5, screenWidth / (2 * aspect), 1) * 1.24
+      const halfWidth = halfHeight * aspect
+      camera.left = -halfWidth
+      camera.right = halfWidth
+      camera.top = halfHeight
+      camera.bottom = -halfHeight
+      camera.zoom = 1
+      const distance = Math.max(dims.x, dims.y, dims.z, 1) * 3.2 + 8
+      if (view === "top") {
+        camera.position.set(center.x, center.y + distance, center.z)
+        camera.up.set(0, 0, -1)
+      } else if (view === "side") {
+        camera.position.set(center.x + distance, center.y, center.z)
+        camera.up.set(0, 1, 0)
+      } else {
+        camera.position.set(center.x, center.y, center.z + distance)
+        camera.up.set(0, 1, 0)
+      }
+      camera.near = 0.01
+      camera.far = distance * 12 + 100
+      camera.lookAt(center)
+      camera.updateProjectionMatrix()
+    }
+    raf = requestAnimationFrame(frame)
+    return () => cancelAnimationFrame(raf)
+  }, [camera, canvasSize.width, canvasSize.height, view, modelMatrix, rootRef])
+
+  return null
+}
+
+function CadOrientationMiniView({ label, view, sourceObject, modelMatrix, planeCenter, planeY, planeSize, onDrag }) {
+  const rootRef = useRef(null)
+  const dragRef = useRef(null)
+
+  const beginDrag = (event) => {
+    if (!sourceObject) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture?.(event.pointerId)
+    dragRef.current = { x: event.clientX, y: event.clientY, pointerId: event.pointerId }
+    event.currentTarget.style.cursor = "grabbing"
+  }
+  const moveDrag = (event) => {
+    const state = dragRef.current
+    if (!state || state.pointerId !== event.pointerId) return
+    event.preventDefault()
+    event.stopPropagation()
+    const dx = event.clientX - state.x
+    const dy = event.clientY - state.y
+    state.x = event.clientX
+    state.y = event.clientY
+    if (Math.abs(dx) + Math.abs(dy) > 0) onDrag?.(view, dx, dy)
+  }
+  const endDrag = (event) => {
+    if (!dragRef.current) return
+    event.preventDefault()
+    event.stopPropagation()
+    try { event.currentTarget.releasePointerCapture?.(event.pointerId) } catch {}
+    dragRef.current = null
+    event.currentTarget.style.cursor = "grab"
+  }
+
+  return (
+    <div className="artheticCadOrthoView" style={{
+      position:"relative", height:126, borderRadius:12, overflow:"hidden",
+      border:"1px solid rgba(255,255,255,.09)", background:"rgba(10,10,10,.94)",
+      boxShadow:"0 12px 34px rgba(0,0,0,.28)", userSelect:"none",
+    }}>
+      <Canvas orthographic camera={{ position:[0,0,100], near:0.01, far:100000, zoom:1 }} gl={{ antialias:true }} style={{ position:"absolute", inset:0, pointerEvents:"none" }}>
+        <color attach="background" args={["#0b0b0b"]} />
+        <ambientLight intensity={0.58} />
+        <directionalLight position={[0,5,8]} intensity={1.05} />
+        <directionalLight position={[-7,1,-3]} intensity={0.55} />
+        <group ref={rootRef}>
+          <CadOrientationMiniModel sourceObject={sourceObject} modelMatrix={modelMatrix} />
+        </group>
+        <CadOrientationReferencePlane center={planeCenter} y={planeY} size={planeSize} compact />
+        <CadOrientationMiniCamera rootRef={rootRef} view={view} modelMatrix={modelMatrix} />
+      </Canvas>
+      <div style={{ position:"absolute", left:8, top:7, zIndex:4, padding:"4px 6px", borderRadius:7, background:"rgba(0,0,0,.54)", border:"1px solid rgba(255,255,255,.06)", color:"#d7d7d7", fontSize:8.1, fontWeight:760, letterSpacing:".015em", pointerEvents:"none" }}>{label}</div>
+      <div style={{ position:"absolute", left:8, right:8, bottom:7, zIndex:4, display:"flex", justifyContent:"space-between", alignItems:"center", color:"#606060", fontSize:7.4, pointerEvents:"none" }}>
+        <span>tažením doladit</span><span style={{ color:"#8c8c8c" }}>{view === "top" ? "Y" : view === "front" ? "Z" : "X"}</span>
+      </div>
+      <div
+        onPointerDown={beginDrag}
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        style={{ position:"absolute", inset:0, zIndex:5, cursor:sourceObject?"grab":"default", touchAction:"none" }}
+        title="Tažením myší jemně natočte model v tomto pohledu"
+      />
+    </div>
+  )
+}
+
 
 export default function ClientPage({ forceCadMode = false } = {}) {
   const hideSidebar = getParam("hideSidebar") === "1";
@@ -7967,6 +8127,13 @@ export default function ClientPage({ forceCadMode = false } = {}) {
   const [cadFileUrl, setCadFileUrl] = useState("")
   const [cadFileName, setCadFileName] = useState("")
   const [cadOrientationPoints, setCadOrientationPoints] = useState([])
+  const [cadOrientationPrepared, setCadOrientationPrepared] = useState(false)
+  const [cadOrientationBaseMatrix, setCadOrientationBaseMatrix] = useState(null)
+  const [cadOrientationPivot, setCadOrientationPivot] = useState([0, 0, 0])
+  const [cadOrientationPlaneY, setCadOrientationPlaneY] = useState(0)
+  const [cadOrientationPlaneCenter, setCadOrientationPlaneCenter] = useState([0, 0, 0])
+  const [cadOrientationPlaneSize, setCadOrientationPlaneSize] = useState(80)
+  const [cadOrientationAdjust, setCadOrientationAdjust] = useState({ x: 0, y: 0, z: 0 })
   const [cadBusy, setCadBusy] = useState(false)
   const [cadMessage, setCadMessage] = useState("Nahrajte jeden STL, PLY nebo OBJ scan.")
   const [cadNaturalHeight, setCadNaturalHeight] = useState(20)
@@ -9312,6 +9479,13 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     setCadFileUrl("")
     setCadFileName("")
     setCadOrientationPoints([])
+    setCadOrientationPrepared(false)
+    setCadOrientationBaseMatrix(null)
+    setCadOrientationPivot([0, 0, 0])
+    setCadOrientationPlaneY(0)
+    setCadOrientationPlaneCenter([0, 0, 0])
+    setCadOrientationPlaneSize(80)
+    setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
     setCadStage("scan")
     setCadBusy(false)
     setCadMessage("Nahrajte jeden STL, PLY nebo OBJ scan.")
@@ -9351,6 +9525,13 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     setCadFileUrl(objectUrl)
     setCadFileName(file.name)
     setCadOrientationPoints([])
+    setCadOrientationPrepared(false)
+    setCadOrientationBaseMatrix(null)
+    setCadOrientationPivot([0, 0, 0])
+    setCadOrientationPlaneY(0)
+    setCadOrientationPlaneCenter([0, 0, 0])
+    setCadOrientationPlaneSize(80)
+    setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
     setCadStage("orient")
     setCadPreviewActive(false)
     setCadPreviewStats(null)
@@ -9362,7 +9543,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
   }, [cadBusy])
 
   const handleCadOrientationSurfaceClick = useCallback((url, event) => {
-    if (!cadStandalone || cadStage !== "orient" || cadBusy || url !== cadFileUrl || cadOrientationPoints.length >= 3) return
+    if (!cadStandalone || cadStage !== "orient" || cadBusy || cadOrientationPrepared || url !== cadFileUrl || cadOrientationPoints.length >= 3) return
     const nativeEvent = event?.nativeEvent || event
     const button = Number.isInteger(nativeEvent?.button) ? nativeEvent.button : event?.button
     if (button != null && button !== 0) return
@@ -9376,18 +9557,18 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     const point = event.point.clone().applyMatrix4(rootInverse)
     const next = [...cadOrientationPoints, point.toArray()]
     setCadOrientationPoints(next)
-    const labels = ["Levý zadní bod uložen.", "Pravý zadní bod uložen.", "Třetí bod uložen. Zkontrolujte body a potvrďte orientaci."]
+    const labels = ["Levý zadní bod uložen.", "Pravý zadní bod uložen.", "Třetí bod uložen · model se automaticky srovná k referenční rovině."]
     setCadMessage(labels[Math.min(2, next.length - 1)])
-  }, [cadStandalone, cadStage, cadBusy, cadFileUrl, cadOrientationPoints])
+  }, [cadStandalone, cadStage, cadBusy, cadOrientationPrepared, cadFileUrl, cadOrientationPoints])
 
   const undoCadOrientationPoint = useCallback(() => {
-    if (cadStage !== "orient" || cadBusy) return
+    if (cadStage !== "orient" || cadBusy || cadOrientationPrepared) return
     setCadOrientationPoints((previous) => previous.slice(0, -1))
     setCadMessage("Poslední orientační bod byl odebrán.")
-  }, [cadStage, cadBusy])
+  }, [cadStage, cadBusy, cadOrientationPrepared])
 
-  const applyCadOrientation = useCallback(() => {
-    if (!cadFileUrl || cadOrientationPoints.length !== 3 || cadBusy) return
+  const prepareCadOrientation = useCallback(() => {
+    if (!cadFileUrl || cadOrientationPoints.length !== 3 || cadBusy || cadOrientationPrepared) return
     const sourceObject = modelObjectsRef.current[cadFileUrl]
     if (!sourceObject || !rootGroupRef.current) {
       setCadMessage("Model ještě není připravený. Zkuste to za okamžik.")
@@ -9398,15 +9579,30 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     window.setTimeout(() => {
       try {
         const result = cadBuildOrientationMatrix(cadOrientationPoints, sourceObject, rootGroupRef.current)
-        sourceObject.matrixAutoUpdate = false
-        sourceObject.matrix.fromArray(result.matrix)
-        sourceObject.updateMatrixWorld(true)
+        const pivot = new THREE.Vector3().fromArray(result.pivot)
+        const aroundPivot = new THREE.Matrix4()
+          .makeTranslation(pivot.x, pivot.y, pivot.z)
+          .multiply(result.rotation)
+          .multiply(new THREE.Matrix4().makeTranslation(-pivot.x, -pivot.y, -pivot.z))
+        const transformedPoints = cadOrientationPoints.map((value) => new THREE.Vector3().fromArray(value).applyMatrix4(aroundPivot))
+        const planeY = transformedPoints.reduce((sum, point) => sum + point.y, 0) / transformedPoints.length
+
         applyModelTransform(cadFileUrl, result.matrix)
-        setCadOrientationPoints([])
-        setCadStage("trim")
-        setTrimMode(true)
-        setCadMessage("Ořez · vytvořte uzavřenou hranici kolem části scanu, kterou chcete zachovat.")
-        window.setTimeout(() => selectTrimModel(cadFileUrl), 40)
+        sourceObject.updateMatrixWorld(true)
+        rootGroupRef.current?.updateMatrixWorld(true)
+        const box = cadObjectBoundsInRoot(sourceObject, rootGroupRef.current)
+        const center = box.isEmpty() ? pivot.clone() : box.getCenter(new THREE.Vector3())
+        const dims = box.isEmpty() ? new THREE.Vector3(50, 30, 50) : box.getSize(new THREE.Vector3())
+        const planeSize = Math.max(dims.x, dims.z, 20) * 1.48
+
+        setCadOrientationBaseMatrix(result.matrix.slice())
+        setCadOrientationPivot(result.pivot.slice())
+        setCadOrientationPlaneY(planeY)
+        setCadOrientationPlaneCenter(center.toArray())
+        setCadOrientationPlaneSize(planeSize)
+        setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
+        setCadOrientationPrepared(true)
+        setCadMessage("Automatická orientace je připravená. Zkontrolujte modrou rovinu a tři kontrolní pohledy vpravo; tažením v nich můžete sklon jemně doladit.")
       } catch (error) {
         console.error("CAD orientation error:", error)
         setCadMessage(error?.message || "Model se nepodařilo orientovat.")
@@ -9414,7 +9610,63 @@ export default function ClientPage({ forceCadMode = false } = {}) {
         setCadBusy(false)
       }
     }, 30)
-  }, [cadFileUrl, cadOrientationPoints, cadBusy, applyModelTransform, selectTrimModel])
+  }, [cadFileUrl, cadOrientationPoints, cadBusy, cadOrientationPrepared, applyModelTransform])
+
+  useEffect(() => {
+    if (!cadStandalone || cadStage !== "orient" || cadOrientationPrepared || cadBusy || cadOrientationPoints.length !== 3) return
+    prepareCadOrientation()
+  }, [cadStandalone, cadStage, cadOrientationPrepared, cadBusy, cadOrientationPoints.length, prepareCadOrientation])
+
+  useEffect(() => {
+    if (!cadOrientationPrepared || !cadOrientationBaseMatrix || !cadFileUrl || cadStage !== "orient") return
+    const pivot = new THREE.Vector3().fromArray(cadOrientationPivot)
+    const rotation = new THREE.Matrix4().makeRotationFromEuler(
+      new THREE.Euler(cadOrientationAdjust.x, cadOrientationAdjust.y, cadOrientationAdjust.z, "XYZ")
+    )
+    const manualAroundPivot = new THREE.Matrix4()
+      .makeTranslation(pivot.x, pivot.y, pivot.z)
+      .multiply(rotation)
+      .multiply(new THREE.Matrix4().makeTranslation(-pivot.x, -pivot.y, -pivot.z))
+    const nextMatrix = manualAroundPivot.multiply(new THREE.Matrix4().fromArray(cadOrientationBaseMatrix)).toArray()
+    applyModelTransform(cadFileUrl, nextMatrix)
+  }, [cadOrientationPrepared, cadOrientationBaseMatrix, cadOrientationPivot, cadOrientationAdjust, cadFileUrl, cadStage, applyModelTransform])
+
+  const handleCadOrientationMiniDrag = useCallback((view, dx, dy) => {
+    if (!cadOrientationPrepared || cadBusy || cadStage !== "orient") return
+    const speed = 0.0055
+    setCadOrientationAdjust((previous) => {
+      const next = { ...previous }
+      if (view === "top") next.y += dx * speed
+      else if (view === "front") next.z -= dx * speed
+      else if (view === "side") next.x += dx * speed
+      return next
+    })
+  }, [cadOrientationPrepared, cadBusy, cadStage])
+
+  const resetCadOrientationFineTune = useCallback(() => {
+    if (!cadOrientationPrepared || cadBusy) return
+    setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
+    setCadMessage("Jemné doladění bylo vráceno na automatickou orientaci podle 3 bodů.")
+  }, [cadOrientationPrepared, cadBusy])
+
+  const restartCadOrientationPoints = useCallback(() => {
+    if (cadBusy || !cadFileUrl) return
+    applyModelTransform(cadFileUrl, new THREE.Matrix4().identity().toArray())
+    setCadOrientationPoints([])
+    setCadOrientationPrepared(false)
+    setCadOrientationBaseMatrix(null)
+    setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
+    setCadMessage("Orientace · klikněte znovu na levý zadní bod, pravý zadní bod a potom na střed fronty.")
+  }, [cadBusy, cadFileUrl, applyModelTransform])
+
+  const confirmCadOrientation = useCallback(() => {
+    if (!cadFileUrl || !cadOrientationPrepared || cadBusy) return
+    setCadOrientationPoints([])
+    setCadStage("trim")
+    setTrimMode(true)
+    setCadMessage("Ořez · vytvořte uzavřenou hranici kolem části scanu, kterou chcete zachovat.")
+    window.setTimeout(() => selectTrimModel(cadFileUrl), 40)
+  }, [cadFileUrl, cadOrientationPrepared, cadBusy, selectTrimModel])
 
   const invalidateCadPreview = useCallback((message = "Parametry byly změněny. Klikněte na Preview pro nový náhled.") => {
     setCadPreviewActive(false)
@@ -13572,6 +13824,9 @@ export default function ClientPage({ forceCadMode = false } = {}) {
         .artheticCadReady { animation:artheticCadReadyPulse 2.1s ease-in-out infinite; }
         .artheticCadRange { accent-color:#f1f1f1; }
         .artheticCadUpload:hover { border-color:rgba(255,255,255,.20) !important; background:rgba(255,255,255,.045) !important; transform:translateY(-1px); }
+        .artheticCadOrthoViews { width:min(250px, 22vw); }
+        @media (max-width:1100px) { .artheticCadOrthoViews { width:205px !important; } .artheticCadOrthoView { height:112px !important; } }
+        @media (max-width:820px) { .artheticCadOrthoViews { display:none !important; } }
       `}</style>
 
       <div style={{
@@ -13626,11 +13881,17 @@ export default function ClientPage({ forceCadMode = false } = {}) {
         {cadStage === "orient" && (
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
             <div style={{ minWidth:0, color:"#858585", fontSize:9.4, lineHeight:1.45 }}>
-              Klikněte postupně: <b style={{ color:"#cfcfcf" }}>1.</b> levý zadní bod · <b style={{ color:"#cfcfcf" }}>2.</b> pravý zadní bod · <b style={{ color:"#cfcfcf" }}>3.</b> střed fronty. Body: <span style={{ color:cadOrientationPoints.length === 3 ? "#86efac" : "#bdbdbd", fontVariantNumeric:"tabular-nums" }}>{cadOrientationPoints.length}/3</span>
+              {!cadOrientationPrepared ? <>
+                Klikněte postupně: <b style={{ color:"#cfcfcf" }}>1.</b> levý zadní bod · <b style={{ color:"#cfcfcf" }}>2.</b> pravý zadní bod · <b style={{ color:"#cfcfcf" }}>3.</b> střed fronty. Body: <span style={{ color:cadOrientationPoints.length === 3 ? "#86efac" : "#bdbdbd", fontVariantNumeric:"tabular-nums" }}>{cadOrientationPoints.length}/3</span>
+              </> : <>
+                Model je srovnaný k <span style={{ color:"#93c5fd", fontWeight:720 }}>referenční rovině</span>. V pravých pohledech tažením dolaďte náklon; hlavní scénou můžete dál volně otáčet pro kontrolu.
+              </>}
             </div>
             <div style={{ display:"flex", gap:6, flex:"0 0 auto" }}>
-              {cadOrientationPoints.length > 0 && <button type="button" onClick={undoCadOrientationPoint} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:9, fontWeight:690, cursor:"pointer" }}>Zpět bod</button>}
-              {cadOrientationPoints.length === 3 && <button className="artheticCadPrimary artheticCadReady" type="button" onClick={applyCadOrientation} disabled={cadBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:cadBusy?"wait":"pointer" }}>Orientovat</button>}
+              {!cadOrientationPrepared && cadOrientationPoints.length > 0 && <button type="button" onClick={undoCadOrientationPoint} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:9, fontWeight:690, cursor:"pointer" }}>Zpět bod</button>}
+              {cadOrientationPrepared && <button type="button" onClick={resetCadOrientationFineTune} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:9, fontWeight:690, cursor:"pointer" }}>Reset sklonu</button>}
+              {cadOrientationPrepared && <button type="button" onClick={restartCadOrientationPoints} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#888", fontSize:9, fontWeight:690, cursor:"pointer" }}>Znovu 3 body</button>}
+              {cadOrientationPrepared && <button className="artheticCadPrimary artheticCadReady" type="button" onClick={confirmCadOrientation} disabled={cadBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:cadBusy?"wait":"pointer" }}>Potvrdit orientaci</button>}
             </div>
           </div>
         )}
@@ -13699,6 +13960,20 @@ export default function ClientPage({ forceCadMode = false } = {}) {
             <div style={{ marginTop:5, color:"#666", fontSize:9.2, lineHeight:1.5 }}>STL · PLY · OBJ<br/>Soubor zůstává lokálně v tomto prohlížeči.</div>
             <input type="file" accept=".stl,.ply,.obj" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) handleCadLocalFile(file); event.target.value = "" }} />
           </label>
+        </div>
+      )}
+
+      {cadStage === "orient" && cadOrientationPrepared && (
+        <div className="artheticCadOrthoViews" style={{
+          position:"absolute", right:16, top:146, zIndex:84,
+          display:"grid", gap:8, fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif",
+        }}>
+          <div style={{ padding:"0 2px 2px", color:"#666", fontSize:8.1, lineHeight:1.35 }}>
+            Kontrolní pohledy · tažením model jemně natočíte vůči rovině
+          </div>
+          <CadOrientationMiniView label="Okluzní" view="top" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} />
+          <CadOrientationMiniView label="Frontální" view="front" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} />
+          <CadOrientationMiniView label="Boční" view="side" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} />
         </div>
       )}
     </>
@@ -15542,9 +15817,13 @@ export default function ClientPage({ forceCadMode = false } = {}) {
             ))}
           </Suspense>
 
-          {cadStandalone && cadStage === "orient" && cadOrientationPoints.map((point, index) => (
+          {cadStandalone && cadStage === "orient" && !cadOrientationPrepared && cadOrientationPoints.map((point, index) => (
             <AlignmentMarker key={`cad-orient-${index}`} point={point} index={index} radius={cadMarkerRadius} />
           ))}
+
+          {cadStandalone && cadStage === "orient" && cadOrientationPrepared && (
+            <CadOrientationReferencePlane center={cadOrientationPlaneCenter} y={cadOrientationPlaneY} size={cadOrientationPlaneSize} />
+          )}
 
           {cadStandalone && (cadPreviewActive || cadStage === "result") && cadPreviewGeometry && (
             <CadPreviewMesh geometry={cadPreviewGeometry} />
