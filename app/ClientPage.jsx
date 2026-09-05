@@ -2829,7 +2829,7 @@ function RepairOverlay({ context, modelMatrix, holes, selectedHoleIds, completed
               renderOrder={selected ? 1502 : hovered ? 1501 : completed ? 1500 : 1498}
               pulse={!selected && !completed && !hovered}
               pulseStrength={0.82}
-              pulseSpeed={1.02}
+              pulseSpeed={1.50}
               pulseMinOpacity={0.055}
               pulseMaxOpacity={0.78}
               pulseToColor="#ffffff"
@@ -13384,7 +13384,7 @@ export default function ClientPage() {
             <span style={{ minWidth: 0, flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#d1d1d1", fontSize: 8.9, fontWeight: 560 }}>
               {repairProgressLabel || "Pracuji…"}
             </span>
-            <span style={{ flex: "0 0 auto", minWidth: 31, textAlign: "right", color: repairProgressPercent >= 100 ? "#9fe2b2" : "#a8d8ee", fontSize: 8.9, fontVariantNumeric: "tabular-nums", fontWeight: 760 }}>
+            <span style={{ flex: "0 0 auto", minWidth: 31, textAlign: "right", color: "#f4f4f5", fontSize: 8.9, fontVariantNumeric: "tabular-nums", fontWeight: 760 }}>
               {Math.round(repairProgressPercent)} %
             </span>
           </div>
