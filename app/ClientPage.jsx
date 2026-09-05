@@ -7286,7 +7286,7 @@ function cadObjectBoundsInRoot(sourceObject, viewerRoot) {
   return box
 }
 
-function cadBuildOrientationMatrix(points, sourceObject, viewerRoot) {
+function cadBuildOrientationMatrix(points, sourceObject, viewerRoot, arch = "lower") {
   if (!Array.isArray(points) || points.length < 3) throw new Error("Pro orientaci jsou potřeba 3 body.")
   if (!sourceObject || !viewerRoot) throw new Error("Model ještě není připravený.")
 
@@ -7312,11 +7312,16 @@ function cadBuildOrientationMatrix(points, sourceObject, viewerRoot) {
   const centroid = box.getCenter(new THREE.Vector3())
 
   const sourceBasis = new THREE.Matrix4().makeBasis(xAxis, sourceAnterior, baseDir)
-  // ARTHETIC CAD souřadnice: +X = pravá strana, +Z = anterior, -Y = báze.
+  // ARTHETIC CAD souřadnice: +X = pravá strana, +Z = anterior.
+  // Horní a dolní čelist musí ležet na opačných stranách okluzní roviny:
+  // Upper roste od roviny do +Y, Lower do -Y. Díky tomu jsou kontrolní
+  // pohledy stejné jako v Model Builderu a už samotné zařazení souboru
+  // Upper/Lower určuje správnou stranu referenční roviny.
+  const baseAxisY = arch === "upper" ? 1 : -1
   const targetBasis = new THREE.Matrix4().makeBasis(
     new THREE.Vector3(1, 0, 0),
     new THREE.Vector3(0, 0, 1),
-    new THREE.Vector3(0, -1, 0)
+    new THREE.Vector3(0, baseAxisY, 0)
   )
   const rotation = targetBasis.clone().multiply(sourceBasis.clone().invert())
   const current = sourceObject.matrix?.clone?.() || new THREE.Matrix4()
@@ -7525,27 +7530,30 @@ function cadSignedAreaXZ(points) {
   return area * 0.5
 }
 
-function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight) {
+function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower") {
   const trianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
   const boundaryData = cadExtractBoundaryLoops(trianglePositions)
   const boundary = boundaryData.loops[0]?.points
   if (!boundary || boundary.length < 4) throw new Error("Po Ořezu nebyla nalezena hlavní uzavřená hranice modelu.")
 
   const box = boundaryData.box
-  const maxY = box.max.y
   const naturalHeight = Math.max(0.01, box.max.y - box.min.y)
   const requestedHeight = Math.max(naturalHeight + 1.5, Number(totalHeight) || naturalHeight + 8)
-  const bottomY = maxY - requestedHeight
+  const isUpper = arch === "upper"
+  // Lower se staví směrem do -Y, Upper zrcadlově do +Y.
+  const baseCapY = isUpper ? box.min.y + requestedHeight : box.max.y - requestedHeight
 
   const rawLoop = cadSignedAreaXZ(boundary) < 0 ? boundary.slice().reverse() : boundary.slice()
   const smoothed = cadSmoothClosedLoop(rawLoop, 30)
   const transitionDrop = Math.max(0.65, Math.min(1.6, boundaryData.diagonal * 0.025))
   const transitionLoop = smoothed.map((p, i) => new THREE.Vector3(
     p.x,
-    Math.min(p.y - transitionDrop, rawLoop[i].y - transitionDrop * 0.55),
+    isUpper
+      ? Math.max(p.y + transitionDrop, rawLoop[i].y + transitionDrop * 0.55)
+      : Math.min(p.y - transitionDrop, rawLoop[i].y - transitionDrop * 0.55),
     p.z
   ))
-  const bottomLoop = transitionLoop.map((p) => new THREE.Vector3(p.x, bottomY, p.z))
+  const bottomLoop = transitionLoop.map((p) => new THREE.Vector3(p.x, baseCapY, p.z))
 
   const output = trianglePositions.slice()
   const pushTri = (a, b, c) => output.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z)
@@ -7554,21 +7562,26 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight) {
   for (let i = 0; i < rawLoop.length; i++) {
     const j = (i + 1) % rawLoop.length
     const a = rawLoop[i], b = rawLoop[j], c = transitionLoop[j], d = transitionLoop[i]
-    pushTri(a, b, c); pushTri(a, c, d)
+    if (isUpper) { pushTri(a, c, b); pushTri(a, d, c) }
+    else { pushTri(a, b, c); pushTri(a, c, d) }
   }
 
   // Pravidelná téměř svislá stěna základny.
   for (let i = 0; i < transitionLoop.length; i++) {
     const j = (i + 1) % transitionLoop.length
     const a = transitionLoop[i], b = transitionLoop[j], c = bottomLoop[j], d = bottomLoop[i]
-    pushTri(a, b, c); pushTri(a, c, d)
+    if (isUpper) { pushTri(a, c, b); pushTri(a, d, c) }
+    else { pushTri(a, b, c); pushTri(a, c, d) }
   }
 
   const contour2D = bottomLoop.map((p) => new THREE.Vector2(p.x, p.z))
   let faces = THREE.ShapeUtils.triangulateShape(contour2D, [])
   if (!faces?.length) throw new Error("Spodní plochu báze se nepodařilo triangulovat.")
-  // Bottom má normálu -Y.
-  faces.forEach(([a, b, c]) => pushTri(bottomLoop[a], bottomLoop[b], bottomLoop[c]))
+  // Koncová plocha míří ven: Lower -Y, Upper +Y.
+  faces.forEach(([a, b, c]) => {
+    if (isUpper) pushTri(bottomLoop[a], bottomLoop[c], bottomLoop[b])
+    else pushTri(bottomLoop[a], bottomLoop[b], bottomLoop[c])
+  })
 
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(output, 3))
@@ -7582,7 +7595,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight) {
     stats: {
       totalHeight: requestedHeight,
       naturalHeight,
-      bottomY,
+      bottomY: baseCapY,
       boundaryPoints: rawLoop.length,
       sourceBoundaryLoops: boundaryData.loops.length,
       openBoundaryLoops: finalBoundary.loops.length,
@@ -7710,7 +7723,7 @@ function CadOrientationMiniCamera({ rootRef, view, modelMatrix }) {
   return null
 }
 
-function CadOrientationMiniView({ label, view, sourceObject, modelMatrix, planeCenter, planeY, planeSize, onDrag }) {
+function CadOrientationMiniView({ label, view, sourceObject, modelMatrix, planeCenter, planeY, planeSize, onDrag, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 } }) {
   const rootRef = useRef(null)
   const dragRef = useRef(null)
 
@@ -7750,9 +7763,15 @@ function CadOrientationMiniView({ label, view, sourceObject, modelMatrix, planeC
     }}>
       <Canvas orthographic camera={{ position:[0,0,100], near:0.01, far:100000, zoom:1 }} gl={{ antialias:true }} style={{ position:"absolute", inset:0, pointerEvents:"none" }}>
         <color attach="background" args={["#0b0b0b"]} />
-        <ambientLight intensity={0.58} />
-        <directionalLight position={[0,5,8]} intensity={1.05} />
-        <directionalLight position={[-7,1,-3]} intensity={0.55} />
+        {/* Stejný light rig jako v hlavní Shade3D scéně. Mini pohled už není
+            nasvícen jedním dominantním světlem a materiál se čte stejně jako
+            v hlavním pracovním okně. */}
+        <ambientLight intensity={0.35 * sceneIntensity} />
+        <directionalLight position={[0, 5, 5]} intensity={1.2 * sceneIntensity} />
+        <directionalLight position={[-10, 0, 0]} intensity={0.9 * sceneIntensity} />
+        <directionalLight position={[10, 0, 0]} intensity={1.0 * sceneIntensity} />
+        <directionalLight position={[0, -5, -5]} intensity={0.7 * sceneIntensity} />
+        <Headlight enabled={headlightCfg?.enabled !== false} intensity={(headlightCfg?.intensity ?? 2) * highlightIntensity} />
         <group ref={rootRef}>
           <CadOrientationMiniModel sourceObject={sourceObject} modelMatrix={modelMatrix} />
         </group>
@@ -8128,7 +8147,15 @@ export default function ClientPage({ forceCadMode = false } = {}) {
   }, [trimClosed, trimContext, trimSegments])
 
   // -- ARTHETIC CAD Tools · Model Builder V1 --
-  const [cadStage, setCadStage] = useState("scan") // scan | orient | trim | base | result
+  const [cadStage, setCadStage] = useState("scan") // scan | repair | orient | trim | base | result
+  // Upper/Lower nejsou jen názvy souborů. Typ čelisti je součást CAD workflow,
+  // protože určuje stranu okluzní roviny při orientaci a později i směr báze.
+  const [cadUpperUrl, setCadUpperUrl] = useState("")
+  const [cadLowerUrl, setCadLowerUrl] = useState("")
+  const [cadUpperName, setCadUpperName] = useState("")
+  const [cadLowerName, setCadLowerName] = useState("")
+  const [cadActiveArch, setCadActiveArch] = useState("upper") // upper | lower
+  const [cadArchRepairDone, setCadArchRepairDone] = useState({ upper: false, lower: false })
   const [cadFileUrl, setCadFileUrl] = useState("")
   const [cadFileName, setCadFileName] = useState("")
   const [cadOrientationPoints, setCadOrientationPoints] = useState([])
@@ -8140,15 +8167,18 @@ export default function ClientPage({ forceCadMode = false } = {}) {
   const [cadOrientationPlaneSize, setCadOrientationPlaneSize] = useState(80)
   const [cadOrientationAdjust, setCadOrientationAdjust] = useState({ x: 0, y: 0, z: 0 })
   const [cadBusy, setCadBusy] = useState(false)
-  const [cadMessage, setCadMessage] = useState("Nahrajte jeden STL, PLY nebo OBJ scan.")
+  const [cadMessage, setCadMessage] = useState("Nahrajte Upper a/nebo Lower scan.")
   const [cadNaturalHeight, setCadNaturalHeight] = useState(20)
   const [cadTotalHeight, setCadTotalHeight] = useState(30)
   const [cadPreviewActive, setCadPreviewActive] = useState(false)
   const [cadPreviewGeometry, setCadPreviewGeometry] = useState(null)
   const [cadPreviewStats, setCadPreviewStats] = useState(null)
-  const cadObjectUrlRef = useRef("")
+  const cadObjectUrlsRef = useRef({ upper: "", lower: "" })
 
-  useEffect(() => () => cadDisposeObjectUrl(cadObjectUrlRef.current), [])
+  useEffect(() => () => {
+    cadDisposeObjectUrl(cadObjectUrlsRef.current.upper)
+    cadDisposeObjectUrl(cadObjectUrlsRef.current.lower)
+  }, [])
 
   // -- OPRAVA SÍTĚ --
   const [repairMode, setRepairMode] = useState(false)
@@ -9478,9 +9508,16 @@ export default function ClientPage({ forceCadMode = false } = {}) {
 
   const resetCadBuilder = useCallback(() => {
     setTrimMode(false)
-    clearTrimWorkingState()
-    cadDisposeObjectUrl(cadObjectUrlRef.current)
-    cadObjectUrlRef.current = ""
+    setRepairMode(false)
+    cadDisposeObjectUrl(cadObjectUrlsRef.current.upper)
+    cadDisposeObjectUrl(cadObjectUrlsRef.current.lower)
+    cadObjectUrlsRef.current = { upper: "", lower: "" }
+    setCadUpperUrl("")
+    setCadLowerUrl("")
+    setCadUpperName("")
+    setCadLowerName("")
+    setCadActiveArch("upper")
+    setCadArchRepairDone({ upper: false, lower: false })
     setCadFileUrl("")
     setCadFileName("")
     setCadOrientationPoints([])
@@ -9493,12 +9530,22 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
     setCadStage("scan")
     setCadBusy(false)
-    setCadMessage("Nahrajte jeden STL, PLY nebo OBJ scan.")
+    setCadMessage("Nahrajte Upper a/nebo Lower scan.")
     setCadNaturalHeight(20)
     setCadTotalHeight(30)
     setCadPreviewActive(false)
     setCadPreviewStats(null)
     setCadPreviewGeometry((previous) => { previous?.dispose?.(); return null })
+    setRepairSelection("")
+    setRepairContext(null)
+    setRepairHoles([])
+    setRepairSelectedHoleId("")
+    setRepairSelectedHoleIds([])
+    setRepairCompletedHoleIds([])
+    setRepairHoveredHoleId("")
+    setRepairHiddenBottomBoundary(null)
+    setRepairPreviewPatch(null)
+    setRepairMessage("")
     setFiles([])
     setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([]); setVertexColors([]); setWireframes([]); setGhostModes([])
     setModelTransforms({})
@@ -9506,46 +9553,96 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     modelObjectsRef.current = {}
     setDidInitialFrame(false)
     setInitialCameraState(null)
-  }, [clearTrimWorkingState])
+  }, [])
 
-  const handleCadLocalFile = useCallback((file) => {
-    if (!file || cadBusy) return
+  const activateCadArch = useCallback((arch, options = {}) => {
+    const url = arch === "upper" ? cadUpperUrl : cadLowerUrl
+    const name = arch === "upper" ? cadUpperName : cadLowerName
+    if (!url) return false
+    setCadActiveArch(arch)
+    setCadFileUrl(url)
+    setCadFileName(name)
+    if (options.resetOrientation !== false) {
+      setCadOrientationPoints([])
+      setCadOrientationPrepared(false)
+      setCadOrientationBaseMatrix(null)
+      setCadOrientationPivot([0, 0, 0])
+      setCadOrientationPlaneY(0)
+      setCadOrientationPlaneCenter([0, 0, 0])
+      setCadOrientationPlaneSize(80)
+      setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
+    }
+    setCadPreviewActive(false)
+    setCadPreviewStats(null)
+    setCadPreviewGeometry((previous) => { previous?.dispose?.(); return null })
+    setDidInitialFrame(false)
+    setInitialCameraState(null)
+    return true
+  }, [cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName])
+
+  const handleCadLocalFile = useCallback((file, arch = "upper") => {
+    if (!file || cadBusy || (arch !== "upper" && arch !== "lower")) return
     const ext = inferExt(file.name)
     if (!CAD_SUPPORTED_EXTENSIONS.has(ext)) {
       setCadMessage("Model Builder V1 podporuje STL, PLY a OBJ.")
       return
     }
-    cadDisposeObjectUrl(cadObjectUrlRef.current)
+
+    const previousUrl = cadObjectUrlsRef.current[arch]
+    if (previousUrl) {
+      cadDisposeObjectUrl(previousUrl)
+      delete modelObjectsRef.current[previousUrl]
+      delete meshesRef.current[previousUrl]
+      setModelTransforms((previous) => {
+        const next = { ...previous }
+        delete next[previousUrl]
+        return next
+      })
+    }
+
     const objectUrl = URL.createObjectURL(file)
-    cadObjectUrlRef.current = objectUrl
+    cadObjectUrlsRef.current[arch] = objectUrl
     const nextFile = {
       url: objectUrl,
-      name: stripExt(file.name) || "Model",
+      name: stripExt(file.name) || (arch === "upper" ? "Upper" : "Lower"),
       rawName: file.name,
+      cadArch: arch,
       c: "#dad7d1", o: 1, v: true, r: 0.24, m: 0.08, vc: false, km: false, wf: false, gh: false,
     }
-    setFiles([nextFile])
-    setColors(["#dad7d1"]); setOpacities([1]); setVisibles([true]); setRoughnesses([0.24]); setMetalnesses([0.08]); setVertexColors([false]); setWireframes([false]); setGhostModes([false])
-    setModelTransforms({})
-    setCadFileUrl(objectUrl)
-    setCadFileName(file.name)
-    setCadOrientationPoints([])
-    setCadOrientationPrepared(false)
-    setCadOrientationBaseMatrix(null)
-    setCadOrientationPivot([0, 0, 0])
-    setCadOrientationPlaneY(0)
-    setCadOrientationPlaneCenter([0, 0, 0])
-    setCadOrientationPlaneSize(80)
-    setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
-    setCadStage("orient")
-    setCadPreviewActive(false)
-    setCadPreviewStats(null)
-    setCadPreviewGeometry((previous) => { previous?.dispose?.(); return null })
-    setCadMessage("Orientace · klikněte na levý zadní bod, pravý zadní bod a potom na střed fronty.")
+    const withoutArch = files.filter((item) => item.cadArch !== arch && item.url !== previousUrl)
+    const nextFiles = [...withoutArch, nextFile].sort((a, b) => (a.cadArch === "upper" ? -1 : 1) - (b.cadArch === "upper" ? -1 : 1))
+    setFiles(nextFiles)
+    setColors(nextFiles.map(() => "#dad7d1"))
+    setOpacities(nextFiles.map(() => 1))
+    setVisibles(nextFiles.map(() => true))
+    setRoughnesses(nextFiles.map(() => 0.24))
+    setMetalnesses(nextFiles.map(() => 0.08))
+    setVertexColors(nextFiles.map(() => false))
+    setWireframes(nextFiles.map(() => false))
+    setGhostModes(nextFiles.map(() => false))
+
+    if (arch === "upper") {
+      setCadUpperUrl(objectUrl)
+      setCadUpperName(file.name)
+    } else {
+      setCadLowerUrl(objectUrl)
+      setCadLowerName(file.name)
+    }
+    setCadArchRepairDone((previous) => ({ ...previous, [arch]: false }))
+
+    // První nahraný model se stane aktivním; další arch lze přepnout v Opravě sítě.
+    const activeUrl = cadActiveArch === "upper" ? cadUpperUrl : cadLowerUrl
+    if (!activeUrl || cadActiveArch === arch) {
+      setCadActiveArch(arch)
+      setCadFileUrl(objectUrl)
+      setCadFileName(file.name)
+    }
+    setCadStage("scan")
+    setCadMessage(`${arch === "upper" ? "Upper" : "Lower"} je načtený. ${nextFiles.length === 2 ? "Obě čelisti jsou připravené; pokračujte kontrolou sítě." : "Můžete přidat i druhou čelist nebo pokračovat kontrolou sítě."}`)
     setIsAutoRotating(false)
     setDidInitialFrame(false)
     setInitialCameraState(null)
-  }, [cadBusy])
+  }, [cadBusy, files, cadActiveArch, cadUpperUrl, cadLowerUrl])
 
   const handleCadOrientationSurfaceClick = useCallback((url, event) => {
     if (!cadStandalone || cadStage !== "orient" || cadBusy || cadOrientationPrepared || url !== cadFileUrl || cadOrientationPoints.length >= 3) return
@@ -9583,7 +9680,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     setCadMessage("Srovnávám model podle 3 bodů…")
     window.setTimeout(() => {
       try {
-        const result = cadBuildOrientationMatrix(cadOrientationPoints, sourceObject, rootGroupRef.current)
+        const result = cadBuildOrientationMatrix(cadOrientationPoints, sourceObject, rootGroupRef.current, cadActiveArch)
         const pivot = new THREE.Vector3().fromArray(result.pivot)
         const aroundPivot = new THREE.Matrix4()
           .makeTranslation(pivot.x, pivot.y, pivot.z)
@@ -9615,7 +9712,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
         setCadBusy(false)
       }
     }, 30)
-  }, [cadFileUrl, cadOrientationPoints, cadBusy, cadOrientationPrepared, applyModelTransform])
+  }, [cadFileUrl, cadOrientationPoints, cadBusy, cadOrientationPrepared, cadActiveArch, applyModelTransform])
 
   useEffect(() => {
     if (!cadStandalone || cadStage !== "orient" || cadOrientationPrepared || cadBusy || cadOrientationPoints.length !== 3) return
@@ -9707,7 +9804,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     setCadMessage("Generuji Preview hladké solid báze…")
     window.setTimeout(() => {
       try {
-        const result = cadBuildSolidBaseGeometry(sourceObject, rootGroupRef.current, cadTotalHeight)
+        const result = cadBuildSolidBaseGeometry(sourceObject, rootGroupRef.current, cadTotalHeight, cadActiveArch)
         setCadPreviewGeometry((previous) => { previous?.dispose?.(); return result.geometry })
         setCadPreviewStats(result.stats)
         setCadPreviewActive(true)
@@ -9722,7 +9819,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
         setCadBusy(false)
       }
     }, 35)
-  }, [cadStage, cadBusy, cadFileUrl, cadPreviewActive, cadTotalHeight])
+  }, [cadStage, cadBusy, cadFileUrl, cadPreviewActive, cadTotalHeight, cadActiveArch])
 
   const applyCadBase = useCallback(() => {
     if (cadStage !== "base" || !cadPreviewActive || !cadPreviewGeometry || cadBusy) return
@@ -9891,7 +9988,11 @@ export default function ClientPage({ forceCadMode = false } = {}) {
       setRepairHoveredHoleId("")
       setRepairPreviewPatch(null)
 
-      if (repairVariant === "manual") {
+      if (cadStandalone && cadStage === "repair") {
+        // Model Builder začíná vždy bezpečnou Auto kontrolou. Ruční režim si
+        // uživatel může zapnout až následně, pokud potřebuje řešit atypické místo.
+        setRepairStage("detect")
+      } else if (repairVariant === "manual") {
         setRepairStage("paint")
       } else {
         setRepairStage("detect")
@@ -9905,8 +10006,85 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     } finally {
       setRepairBusy(false)
     }
-  }, [repairBusy, repairVariant, startRepairProgress, updateRepairProgress, finishRepairProgress, resetRepairProgress])
+  }, [repairBusy, repairVariant, cadStandalone, cadStage, startRepairProgress, updateRepairProgress, finishRepairProgress, resetRepairProgress])
 
+
+
+  // ---- Model Builder · povinná kontrola / oprava sítě před orientací ----
+  const startCadRepairForArch = useCallback((arch) => {
+    if (!cadStandalone || cadBusy || repairBusy) return
+    const url = arch === "upper" ? cadUpperUrl : cadLowerUrl
+    const name = arch === "upper" ? cadUpperName : cadLowerName
+    if (!url) return
+
+    setCadActiveArch(arch)
+    setCadFileUrl(url)
+    setCadFileName(name)
+    setCadStage("repair")
+    setIsAutoRotating(false)
+    clearRepairWorkingState()
+    setRepairVariant("auto")
+    setRepairMode(true)
+    setCadMessage(`Oprava sítě · ${arch === "upper" ? "Upper" : "Lower"}. Nejdřív opravte všechny nalezené otevřené hranice; spodní otevřená boundary scanu se ignoruje.`)
+
+    // Model se může po uploadu ještě dokončovat v loaderu. Krátké čekání drží
+    // přechod plynulý; pokud objekt ještě není připravený, selectRepairModel
+    // uživateli korektně řekne, že má zkusit znovu.
+    window.setTimeout(() => selectRepairModel(url), 80)
+  }, [cadStandalone, cadBusy, repairBusy, cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName, clearRepairWorkingState, selectRepairModel])
+
+  const beginCadRepairStage = useCallback(() => {
+    const arch = cadUpperUrl ? "upper" : cadLowerUrl ? "lower" : ""
+    if (!arch) {
+      setCadMessage("Nejdřív nahrajte Upper nebo Lower scan.")
+      return
+    }
+    startCadRepairForArch(arch)
+  }, [cadUpperUrl, cadLowerUrl, startCadRepairForArch])
+
+  useEffect(() => {
+    if (!cadStandalone || cadStage !== "repair" || !repairSelection || !repairContext || repairBusy || repairStage === "model") return
+    const arch = repairSelection === cadUpperUrl ? "upper" : repairSelection === cadLowerUrl ? "lower" : ""
+    if (!arch) return
+    const completed = new Set(repairCompletedHoleIds)
+    const pending = repairHoles.filter((hole) => !completed.has(hole.id))
+    if (pending.length === 0) {
+      setCadArchRepairDone((previous) => previous[arch] ? previous : ({ ...previous, [arch]: true }))
+    } else {
+      setCadArchRepairDone((previous) => !previous[arch] ? previous : ({ ...previous, [arch]: false }))
+    }
+  }, [cadStandalone, cadStage, repairSelection, repairContext, repairBusy, repairStage, repairHoles, repairCompletedHoleIds, cadUpperUrl, cadLowerUrl])
+
+  const continueCadAfterRepair = useCallback(() => {
+    const loadedUpperOk = !cadUpperUrl || cadArchRepairDone.upper
+    const loadedLowerOk = !cadLowerUrl || cadArchRepairDone.lower
+    if (!loadedUpperOk || !loadedLowerOk) {
+      const missing = [cadUpperUrl && !cadArchRepairDone.upper ? "Upper" : "", cadLowerUrl && !cadArchRepairDone.lower ? "Lower" : ""].filter(Boolean).join(" a ")
+      setCadMessage(`Nejdřív dokončete kontrolu sítě: ${missing}.`)
+      return
+    }
+
+    const arch = cadActiveArch === "lower" && cadLowerUrl ? "lower" : cadUpperUrl ? "upper" : "lower"
+    const url = arch === "upper" ? cadUpperUrl : cadLowerUrl
+    const name = arch === "upper" ? cadUpperName : cadLowerName
+    clearRepairWorkingState()
+    setRepairMode(false)
+    setCadActiveArch(arch)
+    setCadFileUrl(url)
+    setCadFileName(name)
+    setCadOrientationPoints([])
+    setCadOrientationPrepared(false)
+    setCadOrientationBaseMatrix(null)
+    setCadOrientationPivot([0, 0, 0])
+    setCadOrientationPlaneY(0)
+    setCadOrientationPlaneCenter([0, 0, 0])
+    setCadOrientationPlaneSize(80)
+    setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
+    setCadStage("orient")
+    setCadMessage(`Orientace · ${arch === "upper" ? "Upper" : "Lower"}. Klikněte na levý zadní bod, pravý zadní bod a potom na střed fronty.`)
+    setDidInitialFrame(false)
+    setInitialCameraState(null)
+  }, [cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName, cadActiveArch, cadArchRepairDone, clearRepairWorkingState])
 
   const changeRepairVariant = useCallback((variant) => {
     if (variant !== "auto" && variant !== "manual") return
@@ -13812,8 +13990,10 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     }
   }
 
-  const cadStepOrder = ["scan", "orient", "trim", "base", "result"]
-  const cadStepLabels = { scan: "Scan", orient: "Orientace", trim: "Ořez", base: "Báze", result: "Výsledek" }
+  const cadStepOrder = ["scan", "repair", "orient", "trim", "base", "result"]
+  const cadStepLabels = { scan: "Scan", repair: "Oprava", orient: "Orientace", trim: "Ořez", base: "Báze", result: "Výsledek" }
+  const cadLoadedArchCount = (cadUpperUrl ? 1 : 0) + (cadLowerUrl ? 1 : 0)
+  const cadRepairAllReady = cadLoadedArchCount > 0 && (!cadUpperUrl || cadArchRepairDone.upper) && (!cadLowerUrl || cadArchRepairDone.lower)
   const cadStepDone = (step) => cadStepOrder.indexOf(cadStage) > cadStepOrder.indexOf(step) || (step === "result" && cadStage === "result")
   const cadMinHeight = Math.max(1, cadNaturalHeight + 1.5)
   const cadMaxHeight = Math.max(cadMinHeight + 4, cadNaturalHeight + 35)
@@ -13871,16 +14051,32 @@ export default function ClientPage({ forceCadMode = false } = {}) {
         <div style={{ height:1, margin:"9px 0", background:"rgba(255,255,255,.065)" }} />
 
         {cadStage === "scan" && (
-          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12 }}>
-            <div style={{ color:"#858585", fontSize:9.5, lineHeight:1.45 }}>Nahrajte jeden intraorální scan. V1 pracuje lokálně v prohlížeči a zatím nic neukládá do LabCase.</div>
-            <label className="artheticCadUpload" style={{
-              height:33, padding:"0 12px", borderRadius:9, border:"1px dashed rgba(255,255,255,.13)", background:"rgba(255,255,255,.025)",
-              display:"inline-flex", alignItems:"center", gap:7, color:"#e5e5e5", fontSize:9.4, fontWeight:720, cursor:"pointer", transition:"all .16s ease", whiteSpace:"nowrap",
-            }}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M5 20h14"/></svg>
-              Nahrát scan
-              <input type="file" accept=".stl,.ply,.obj" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) handleCadLocalFile(file); event.target.value = "" }} />
-            </label>
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
+            <div style={{ color:"#858585", fontSize:9.5, lineHeight:1.45, minWidth:0 }}>
+              Nahrajte <span style={{ color:cadUpperUrl?"#d8d8d8":"#8a8a8a", fontWeight:720 }}>Upper</span> a/nebo <span style={{ color:cadLowerUrl?"#d8d8d8":"#8a8a8a", fontWeight:720 }}>Lower</span>. Typ čelisti určuje správnou stranu okluzní roviny. {cadLoadedArchCount ? `${cadLoadedArchCount}/2 načteno.` : ""}
+            </div>
+            {cadLoadedArchCount > 0 && (
+              <button className="artheticCadPrimary artheticCadReady" type="button" onClick={beginCadRepairStage} disabled={cadBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:cadBusy?"wait":"pointer", whiteSpace:"nowrap" }}>
+                Pokračovat · Oprava sítě
+              </button>
+            )}
+          </div>
+        )}
+
+        {cadStage === "repair" && (
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
+            <div style={{ minWidth:0 }}>
+              <div style={{ color:"#858585", fontSize:9.35, lineHeight:1.45 }}>
+                Před dalšími CAD kroky musí být scan bez opravovatelných děr. Vyberte čelist a dokončete její kontrolu v panelu Oprava sítě níže.
+              </div>
+              <div style={{ marginTop:7, display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
+                {cadUpperUrl && <button type="button" onClick={() => startCadRepairForArch("upper")} disabled={repairBusy} style={{ height:28, padding:"0 10px", borderRadius:8, border:cadActiveArch==="upper"?"1px solid rgba(96,165,250,.28)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="upper"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadArchRepairDone.upper?"#9ad9ad":cadActiveArch==="upper"?"#bfdbfe":"#999", fontSize:8.8, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{cadArchRepairDone.upper?"✓ ":""}Upper</button>}
+                {cadLowerUrl && <button type="button" onClick={() => startCadRepairForArch("lower")} disabled={repairBusy} style={{ height:28, padding:"0 10px", borderRadius:8, border:cadActiveArch==="lower"?"1px solid rgba(96,165,250,.28)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="lower"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadArchRepairDone.lower?"#9ad9ad":cadActiveArch==="lower"?"#bfdbfe":"#999", fontSize:8.8, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{cadArchRepairDone.lower?"✓ ":""}Lower</button>}
+              </div>
+            </div>
+            <button className={cadRepairAllReady?"artheticCadPrimary artheticCadReady":"artheticCadPrimary"} type="button" onClick={continueCadAfterRepair} disabled={!cadRepairAllReady || repairBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:cadRepairAllReady?"1px solid rgba(74,222,128,.24)":"1px solid rgba(255,255,255,.07)", background:cadRepairAllReady?"rgba(34,197,94,.11)":"rgba(255,255,255,.025)", color:cadRepairAllReady?"#bbf7d0":"#555", fontSize:9, fontWeight:740, cursor:!cadRepairAllReady||repairBusy?"default":"pointer", whiteSpace:"nowrap" }}>
+              Pokračovat · Orientace
+            </button>
           </div>
         )}
 
@@ -13894,6 +14090,11 @@ export default function ClientPage({ forceCadMode = false } = {}) {
               </>}
             </div>
             <div style={{ display:"flex", gap:6, flex:"0 0 auto" }}>
+              {cadUpperUrl && cadLowerUrl && !cadOrientationPrepared && cadOrientationPoints.length === 0 && <>
+                <button type="button" onClick={() => { activateCadArch("upper"); setCadMessage("Orientace · Upper. Klikněte na levý zadní bod, pravý zadní bod a potom na střed fronty.") }} disabled={cadBusy} style={{ height:31, padding:"0 9px", borderRadius:8, border:cadActiveArch==="upper"?"1px solid rgba(96,165,250,.26)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="upper"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadActiveArch==="upper"?"#bfdbfe":"#777", fontSize:8.8, fontWeight:720, cursor:"pointer" }}>Upper</button>
+                <button type="button" onClick={() => { activateCadArch("lower"); setCadMessage("Orientace · Lower. Klikněte na levý zadní bod, pravý zadní bod a potom na střed fronty.") }} disabled={cadBusy} style={{ height:31, padding:"0 9px", borderRadius:8, border:cadActiveArch==="lower"?"1px solid rgba(96,165,250,.26)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="lower"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadActiveArch==="lower"?"#bfdbfe":"#777", fontSize:8.8, fontWeight:720, cursor:"pointer" }}>Lower</button>
+                <div aria-hidden="true" style={{ width:1, height:21, margin:"5px 1px", background:"rgba(255,255,255,.075)" }} />
+              </>}
               {!cadOrientationPrepared && cadOrientationPoints.length > 0 && <button type="button" onClick={undoCadOrientationPoint} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:9, fontWeight:690, cursor:"pointer" }}>Zpět bod</button>}
               {cadOrientationPrepared && <button type="button" onClick={resetCadOrientationFineTune} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:9, fontWeight:690, cursor:"pointer" }}>Reset sklonu</button>}
               {cadOrientationPrepared && <button type="button" onClick={restartCadOrientationPoints} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#888", fontSize:9, fontWeight:690, cursor:"pointer" }}>Znovu 3 body</button>}
@@ -13960,12 +14161,24 @@ export default function ClientPage({ forceCadMode = false } = {}) {
 
       {cadStage === "scan" && (
         <div style={{ position:"absolute", inset:0, zIndex:6, display:"grid", placeItems:"center", pointerEvents:"none", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif" }}>
-          <label className="artheticCadUpload" style={{ pointerEvents:"auto", width:"min(420px, calc(100vw - 44px))", padding:"30px 24px", borderRadius:18, border:"1px dashed rgba(255,255,255,.13)", background:"rgba(12,12,12,.84)", boxShadow:"0 24px 80px rgba(0,0,0,.42)", backdropFilter:"blur(18px)", textAlign:"center", cursor:"pointer", transition:"all .18s ease" }}>
-            <div style={{ width:42, height:42, margin:"0 auto", borderRadius:13, display:"grid", placeItems:"center", border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.035)", color:"#cfcfcf" }}><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M5 20h14"/></svg></div>
-            <div style={{ marginTop:12, color:"#ededed", fontSize:13, fontWeight:760 }}>Vybrat scan</div>
-            <div style={{ marginTop:5, color:"#666", fontSize:9.2, lineHeight:1.5 }}>STL · PLY · OBJ<br/>Soubor zůstává lokálně v tomto prohlížeči.</div>
-            <input type="file" accept=".stl,.ply,.obj" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) handleCadLocalFile(file); event.target.value = "" }} />
-          </label>
+          <div style={{ pointerEvents:"auto", width:"min(760px, calc(100vw - 44px))", padding:"22px", borderRadius:18, border:"1px solid rgba(255,255,255,.10)", background:"rgba(12,12,12,.84)", boxShadow:"0 24px 80px rgba(0,0,0,.42)", backdropFilter:"blur(18px)" }}>
+            <div style={{ color:"#ededed", fontSize:13, fontWeight:760, textAlign:"center" }}>Vyberte čelisti</div>
+            <div style={{ marginTop:5, color:"#666", fontSize:9.2, lineHeight:1.5, textAlign:"center" }}>Upper a Lower se evidují zvlášť, aby orientace i pozdější báze věděly, na které straně okluzní roviny mají být.</div>
+            <div style={{ marginTop:16, display:"grid", gridTemplateColumns:"repeat(2,minmax(0,1fr))", gap:12 }}>
+              {[{ arch:"upper", label:"Nahrát Upper", url:cadUpperUrl, name:cadUpperName }, { arch:"lower", label:"Nahrát Lower", url:cadLowerUrl, name:cadLowerName }].map((item) => (
+                <label key={item.arch} className="artheticCadUpload" style={{ minHeight:142, padding:"18px 16px", borderRadius:15, border:item.url?"1px solid rgba(74,222,128,.20)":"1px dashed rgba(255,255,255,.13)", background:item.url?"rgba(34,197,94,.045)":"rgba(255,255,255,.022)", display:"grid", placeItems:"center", textAlign:"center", cursor:"pointer", transition:"all .18s ease" }}>
+                  <div>
+                    <div style={{ width:38, height:38, margin:"0 auto", borderRadius:12, display:"grid", placeItems:"center", border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.035)", color:item.url?"#bbf7d0":"#cfcfcf" }}>
+                      {item.url ? <span style={{ fontSize:15, fontWeight:800 }}>✓</span> : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M5 20h14"/></svg>}
+                    </div>
+                    <div style={{ marginTop:10, color:item.url?"#e7f8ec":"#ededed", fontSize:12, fontWeight:760 }}>{item.label}</div>
+                    <div style={{ marginTop:4, minHeight:28, color:item.url?"#7ea88a":"#5f5f5f", fontSize:8.8, lineHeight:1.45, overflow:"hidden", textOverflow:"ellipsis" }}>{item.url ? item.name : "STL · PLY · OBJ"}</div>
+                  </div>
+                  <input type="file" accept=".stl,.ply,.obj" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) handleCadLocalFile(file, item.arch); event.target.value = "" }} />
+                </label>
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
@@ -13978,9 +14191,9 @@ export default function ClientPage({ forceCadMode = false } = {}) {
           <div style={{ padding:"0 3px 3px", color:"#666", fontSize:8.4, lineHeight:1.4 }}>
             Kontrolní pohledy · levý bok, fronta a pravý bok · tažením model jemně dolaďte vůči rovině
           </div>
-          <CadOrientationMiniView label="Levý bok" view="side-left" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} />
-          <CadOrientationMiniView label="Frontální" view="front" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} />
-          <CadOrientationMiniView label="Pravý bok" view="side-right" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} />
+          <CadOrientationMiniView label="Levý bok" view="side-left" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} />
+          <CadOrientationMiniView label="Frontální" view="front" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} />
+          <CadOrientationMiniView label="Pravý bok" view="side-right" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} />
         </div>
       )}
     </>
@@ -14261,8 +14474,8 @@ export default function ClientPage({ forceCadMode = false } = {}) {
   const repairAllVisibleSelected = repairPendingHoles.length > 0 && repairSelectedAutoCount === repairPendingHoles.length
   const repairWorkspace = repairMode && (
     <div style={{
-      position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)", zIndex: 73,
-      width: "min(820px, calc(100vw - 32px))", boxSizing: "border-box", padding: "11px 12px",
+      position: "absolute", top: cadStandalone && cadStage === "repair" ? 146 : 10, left: "50%", transform: "translateX(-50%)", zIndex: cadStandalone && cadStage === "repair" ? 85 : 73,
+      width: cadStandalone && cadStage === "repair" ? "min(850px, calc(100vw - 34px))" : "min(820px, calc(100vw - 32px))", boxSizing: "border-box", padding: "11px 12px",
       borderRadius: 15, background: "rgba(11,11,11,.955)", border: "1px solid rgba(255,255,255,.10)",
       boxShadow: "0 22px 70px rgba(0,0,0,.46)", backdropFilter: "blur(22px)", WebkitBackdropFilter: "blur(22px)",
       color: "#f3f3f3", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", animation: "artheticAlignMenuIn .24s ease-out both",
@@ -14609,7 +14822,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     </div>
   )
 
-  const repairActionsPanel = repairMode && (
+  const repairActionsPanel = repairMode && !(cadStandalone && cadStage === "repair") && (
     <div className="artheticRepairSideActions">
       <div style={{ display: "grid", gap: 6 }}>
         {repairSelection && repairedExportsByUrl[repairSelection] && (
@@ -15773,8 +15986,10 @@ export default function ClientPage({ forceCadMode = false } = {}) {
                   ? false
                   : repairMode && repairSelection
                     ? f.url === repairSelection
-                    : trimMode && trimSelection
-                      ? f.url === trimSelection
+                    : cadStandalone && cadStage !== "scan"
+                      ? f.url === cadFileUrl
+                      : trimMode && trimSelection
+                        ? f.url === trimSelection
                     : alignmentMode && alignmentModelsSelected
                       ? (f.url === alignmentPair.aUrl || f.url === alignmentPair.bUrl)
                       : (visibles[i] ?? true)}
