@@ -7762,7 +7762,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   // Primárně používáme přesnou křivku uloženou přímo z CAD Ořezu. Fallback
   // zůstává robustní detekce otevřené hrany z výsledné mesh.
   const boundary = override.length >= 4 ? override : boundaryData.loops[0]?.points
-  if (!boundary || boundary.length < 4) throw new Error("Po Ořezu se nepodařilo obnovit uzavřenou hranici. Vraťte se o krok zpět a znovu potvrďte Ořez.")
+  if (!boundary || boundary.length < 4) throw new Error("Nepodařilo se obnovit hlavní otevřenou hranici modelu. Vraťte se do kroku Ořez a vytvořte hranici, nebo použijte Nechat vše u předem oříznutého scanu.")
 
   const box = boundaryData.box
   const naturalHeight = Math.max(0.01, box.max.y - box.min.y)
@@ -10204,11 +10204,54 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const confirmCadOrientation = useCallback(() => {
     if (!cadFileUrl || !cadOrientationPrepared || cadBusy) return
     setCadOrientationPoints([])
+    setCadTrimBoundaryPoints([])
     setCadStage("trim")
     setTrimMode(true)
-    setCadMessage("Ořez · vytvořte uzavřenou hranici kolem části scanu, kterou chcete zachovat.")
+    setCadMessage("Ořez · vytvořte uzavřenou hranici kolem části scanu, kterou chcete zachovat, nebo zvolte Nechat vše u předem oříznutého scanu.")
     window.setTimeout(() => selectTrimModel(cadFileUrl), 40)
   }, [cadFileUrl, cadOrientationPrepared, cadBusy, selectTrimModel])
+
+  // Medit-style "Nechat vše": žádný nový řez ani změna source geometrie.
+  // Base Generator si v dalším kroku vezme největší zbývající otevřenou boundary
+  // přímo z aktuálního (už opraveného/orientovaného) scanu. To je ideální pro
+  // předem oříznuté STL a pro přesné A/B testy proti Medit Model Builderu.
+  const keepCadWholeScan = useCallback(() => {
+    if (!cadFileUrl || cadBusy || trimBusy) return
+    const sourceObject = modelObjectsRef.current[cadFileUrl]
+    const viewerRoot = rootGroupRef.current
+    if (!sourceObject || !viewerRoot) {
+      setCadMessage("Model ještě není připravený. Zkuste Nechat vše za okamžik.")
+      return
+    }
+
+    try {
+      const trianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
+      const boundaryData = cadExtractBoundaryLoopsRobust(trianglePositions)
+      const mainBoundary = boundaryData?.loops?.[0]
+      if (!mainBoundary || (mainBoundary.points?.length || 0) < 4) {
+        setCadMessage("Nechat vše nelze použít: na scanu nebyla nalezena hlavní otevřená hranice pro napojení báze.")
+        return
+      }
+
+      // [] je záměr: cadBuildSolidBaseGeometry pak použije přesně boundary
+      // detekovanou z původní geometrie, nikoli křivku vytvořenou Ořezem.
+      setCadTrimBoundaryPoints([])
+      setTrimControlNodes([])
+      setTrimSegments([])
+      setTrimClosed(false)
+      setTrimKeepComponent(null)
+      setTrimHoverComponent(null)
+      setTrimReadyActionLeaving(false)
+      setTrimSelection(cadFileUrl)
+      setTrimContext(null)
+      setTrimMode(false)
+      setTrimStage("result")
+      setCadMessage(`Nechat vše · scan zůstal beze změny. Použiji jeho hlavní otevřenou hranici (${mainBoundary.points.length} bodů) pro vytvoření báze.`)
+    } catch (error) {
+      console.error("CAD keep-all boundary error:", error)
+      setCadMessage(error?.message || "Hlavní otevřenou hranici scanu se nepodařilo připravit.")
+    }
+  }, [cadFileUrl, cadBusy, trimBusy])
 
   const invalidateCadPreview = useCallback((message = "Parametry byly změněny. Klikněte na Preview pro nový náhled.") => {
     setCadPreviewActive(false)
@@ -14713,12 +14756,22 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         {cadStage === "trim" && (
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
             <div style={{ minWidth:0, color:"#858585", fontSize:9.3, lineHeight:1.45 }}>
-              {!trimClosed && <>Klikáním vytvořte hranici · kuličky lze přetahovat · smyčku uzavřete dvojklikem na první bod nebo tlačítkem.</>}
+              {!trimClosed && trimControlNodes.length === 0 && <>Klikáním vytvořte hranici, nebo zvolte <b style={{ color:"#cfcfcf" }}>Nechat vše</b>, pokud je scan už předem oříznutý.</>}
+              {!trimClosed && trimControlNodes.length > 0 && <>Klikáním pokračujte v hranici · kuličky lze přetahovat · smyčku uzavřete dvojklikem na první bod nebo tlačítkem.</>}
               {trimClosed && trimKeepComponent == null && <>Smyčka je uzavřená. Najeďte na část scanu a klikněte na oblast, kterou chcete zachovat.</>}
               {trimKeepComponent != null && !trimBusy && <>Zelená oblast zůstane zachovaná. Potvrďte Oříznout.</>}
               {trimBusy && <>Ořezávám vybranou oblast…</>}
             </div>
-            <div style={{ display:"flex", gap:6, flexWrap:"wrap", justifyContent:"flex-end", flex:"0 0 auto" }}>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap", justifyContent:"flex-end", flex:"0 0 auto", alignItems:"center" }}>
+              {!trimClosed && trimControlNodes.length === 0 && (
+                <label title="Ponechá původní scan beze změny a použije jeho existující otevřenou hranici pro bázi." style={{
+                  height:29, padding:"0 9px", borderRadius:8, border:"1px solid rgba(255,255,255,.09)", background:"rgba(255,255,255,.03)",
+                  color:"#bdbdbd", fontSize:8.8, fontWeight:700, cursor:(cadBusy || trimBusy)?"wait":"pointer", display:"inline-flex", alignItems:"center", gap:7, userSelect:"none",
+                }}>
+                  <input type="checkbox" checked={false} disabled={cadBusy || trimBusy} onChange={(event) => { if (event.target.checked) keepCadWholeScan() }} style={{ width:13, height:13, margin:0, accentColor:"#4ade80", cursor:(cadBusy || trimBusy)?"wait":"pointer" }} />
+                  <span>Nechat vše</span>
+                </label>
+              )}
               {!trimClosed && trimControlNodes.length > 0 && <button type="button" onClick={removeLastTrimPoint} style={{ height:29, padding:"0 9px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:8.8, fontWeight:680, cursor:"pointer" }}>Smazat poslední</button>}
               {trimControlNodes.length > 0 && <button type="button" onClick={resetTrimBoundary} style={{ height:29, padding:"0 9px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:8.8, fontWeight:680, cursor:"pointer" }}>Reset hranice</button>}
               {!trimClosed && trimControlNodes.length >= 3 && <button type="button" onClick={closeTrimLoop} style={{ height:29, padding:"0 10px", borderRadius:8, border:"1px solid rgba(251,191,36,.18)", background:"rgba(245,158,11,.065)", color:"#fde68a", fontSize:8.8, fontWeight:710, cursor:"pointer" }}>Uzavřít hranici</button>}
