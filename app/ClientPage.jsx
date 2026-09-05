@@ -8907,55 +8907,65 @@ function cadBuildIsotropicTransitionUV(rawLoop, bottomCount, transitionDepth, ta
 }
 
 
-// V17.1 – safe staggered transition strip.
-// Global Delaunay nad velmi dlouhým a úzkým periodickým obdélníkem může při
-// nepříznivé triangulaci nechat dlouhé UV diagonály. Po zabalení U kolem archu
-// se taková hrana v 3D stane obřím trojúhelníkem přes celý model.
+// V17.2 – graded shape-locked transition strip.
+// V17.1 už zabránil globálním Delaunay diagonálám přes celý arch, ale interní
+// řady byly řidší než finální seam profil. Tím vznikl nežádoucí density dip:
+// hustá scan boundary -> řídký střed -> znovu hustší seam, což vytvářelo velké
+// vějířové/šikmé trojúhelníky.
 //
-// V17.1 proto používá lokální, topologicky bezpečný strip: několik lehce
-// nepravidelných/staggered řad v parametrickém prostoru a každou sousední
-// dvojici sešijeme pouze lokálně. Shape zůstává stejná – mění se jen topologie.
-function cadBuildSafeTransitionRows(perimeter, transitionDepth, targetSpacing = 0.58) {
+// V17.2 drží počet bodů MONOTÓNNĚ mezi source boundary a finálním profilem.
+// Počet bodů klesá geometricky a vertikální pozice řad se rozloží podle jejich
+// lokálního horizontálního spacingu. Tvar surface je stále 100% shape-locked.
+function cadBuildGradedTransitionRows(perimeter, sourceCount, targetCount, transitionDepth, targetSpacing = 0.39) {
   const length = Math.max(1e-6, Number(perimeter) || 1)
   const depth = Math.max(0.25, Number(transitionDepth) || 0.8)
-  const spacing = Math.max(0.46, Math.min(0.62, Number(targetSpacing) || 0.58))
+  const src = Math.max(8, Math.round(Number(sourceCount) || targetCount || 8))
+  const dst = Math.max(8, Math.round(Number(targetCount) || src))
+  const spacing = Math.max(0.34, Math.min(0.46, Number(targetSpacing) || 0.39))
 
-  // Vodorovný sampling držíme o něco řidší než seam profil (~0.39 mm),
-  // aby transition nebyl zbytečně přehustěný.
-  const baseCount = Math.max(96, Math.min(520, Math.round(length / spacing)))
+  // Transition kolem 1.0–1.4 mm typicky potřebuje 4–5 intervalů. Více řad by
+  // začalo znovu vytvářet horizontální "žebřík", méně by bylo příliš hrubé.
+  const nominalVertical = Math.max(0.22, spacing * 0.72)
+  const sections = Math.max(4, Math.min(6, Math.ceil(depth / nominalVertical)))
 
-  // Přibližně ekvilaterální trojúhelníky: vertikální rozteč ~0.78 * spacing.
-  // Minimálně tři vnitřní řady, aby se změna profilu nerozpadla do jednoho
-  // zipper pásu.
-  const idealRowStep = spacing * 0.78
-  const sections = Math.max(4, Math.min(7, Math.ceil(depth / Math.max(0.22, idealRowStep))))
-  const rows = []
-
-  const hash01 = (a, b) => {
-    const x = Math.sin((a + 1) * 12.9898 + (b + 1) * 78.233) * 43758.5453
-    return x - Math.floor(x)
-  }
-
+  // Counts včetně obou constrained hran. Geometrická interpolace zaručí, že
+  // hustota nikdy neklesne pod finální seam profil a změna mezi sousedními
+  // řadami je malá.
+  const counts = [src]
   for (let r = 1; r < sections; r++) {
-    // Mírně střídáme počet bodů mezi řadami. Tím nevznikají dlouhé souvislé
-    // horizontální edge-chainy, ale stále zůstává lokální konektivita.
-    const countDelta = (r % 3) - 1 // -1, 0, +1
-    const count = Math.max(64, baseCount + countDelta)
-    const phase = (r & 1) ? 0.5 : 0
-    const baseV = r / sections
-    const maxJitter = Math.min(0.028, 0.12 / sections)
-    const row = []
+    const t = r / sections
+    const geometric = Math.exp(Math.log(src) * (1 - t) + Math.log(dst) * t)
+    const c = src >= dst
+      ? Math.max(dst, Math.min(counts[counts.length - 1], Math.round(geometric)))
+      : Math.min(dst, Math.max(counts[counts.length - 1], Math.round(geometric)))
+    counts.push(c)
+  }
+  counts.push(dst)
 
-    for (let i = 0; i < count; i++) {
-      const u = ((i + phase) / count) % 1
-      const noise = (hash01(i, r) - 0.5) * 2
-      // Jitter je jen malý zlomek vzdálenosti mezi řadami, takže se řady
-      // nemohou překřížit.
-      const vMin = (r - 0.30) / sections
-      const vMax = (r + 0.30) / sections
-      const v = THREE.MathUtils.clamp(baseV + noise * maxJitter, vMin, vMax)
-      row.push({ u, v })
-    }
+  // Near-equilateral spacing: hrubší spodní řady dostanou o něco větší část
+  // transition depth, jemná scan boundary menší. Po normalizaci součet přesně
+  // odpovídá transitionDepth.
+  const weights = []
+  for (let r = 0; r < sections; r++) {
+    const hA = length / Math.max(1, counts[r])
+    const hB = length / Math.max(1, counts[r + 1])
+    weights.push(Math.max(1e-6, 0.72 * Math.sqrt(hA * hB)))
+  }
+  const weightSum = weights.reduce((a, b) => a + b, 0) || 1
+  const vLevels = [0]
+  let accum = 0
+  for (let r = 0; r < sections; r++) {
+    accum += weights[r]
+    vLevels.push(accum / weightSum)
+  }
+  vLevels[vLevels.length - 1] = 1
+
+  const rows = []
+  for (let r = 1; r < sections; r++) {
+    const count = counts[r]
+    const v = vLevels[r]
+    const row = new Array(count)
+    for (let i = 0; i < count; i++) row[i] = { u: i / count, v }
     rows.push(row)
   }
 
@@ -8964,7 +8974,10 @@ function cadBuildSafeTransitionRows(perimeter, transitionDepth, targetSpacing = 
     perimeter: length,
     depth,
     spacing,
-    baseCount,
+    sourceCount: src,
+    targetCount: dst,
+    counts,
+    vLevels,
     sections,
   }
 }
@@ -9036,9 +9049,8 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     return s * s * (3 - 2 * s)
   }
 
-  // V17.1 – stejný shape-locked geometrický profil jako V12/V16, ale bezpečně bez
-  // horizontálních transition ringů. Definujeme kontinuální parametrickou surface
-  // a tu následně vyplníme isotropní Delaunay triangulací.
+  // V17.2 – stejný shape-locked geometrický profil jako V12/V16. Surface je
+  // kontinuální; topologie používá graded lokální řady bez density dipu V17.1.
   const targetCount = sampledRawLoop.length
   const targetY = boundaryExtremeY + (isUpper ? transitionDepth : -transitionDepth)
   const capMargin = Math.min(0.45, Math.max(0.16, availableBaseDepth * 0.08))
@@ -9065,8 +9077,14 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   // takže V17 nemění shape báze – mění pouze distribuci polygonů v přechodu.
   const transitionLoop = new Array(targetCount)
   for (let i = 0; i < targetCount; i++) transitionLoop[i] = evaluateTransitionSurface(i / targetCount, 1)
-  const transitionPatchSpacing = Math.max(0.50, Math.min(0.62, boundaryData.diagonal * 0.0105))
-  const transitionPatchRows = cadBuildSafeTransitionRows(rawArcTable.total, transitionDepth, transitionPatchSpacing)
+  const transitionPatchSpacing = Math.max(0.37, Math.min(0.43, boundaryData.diagonal * 0.0072))
+  const transitionPatchRows = cadBuildGradedTransitionRows(
+    rawArcTable.total,
+    rawLoop.length,
+    targetCount,
+    transitionDepth,
+    transitionPatchSpacing
+  )
   const seamOffset = Math.min(0.10, Math.max(0.04, availableBaseDepth * 0.025))
   const seamY = isUpper
     ? Math.min(transitionLoop[0].y + seamOffset, baseCapY)
@@ -9130,9 +9148,9 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     }
   }
 
-  // V17.1 safe isotropic-like transition. Místo globální triangulace celého
-  // unwrapped pásu stavíme lokální staggered řady. Každá face proto spojuje jen
-  // blízké body v U a nemůže přeskočit přes celý arch.
+  // V17.2 graded local transition. Počet bodů se mezi source boundary a seamem
+  // mění monotónně, takže nevzniká řídký střed ani následné vějíře. Každá face
+  // stále spojuje pouze lokálně sousední body kolem archu.
   const transitionRowIndices = []
   const transitionRowPoints = []
   for (const row of transitionPatchRows.rows) {
@@ -9239,10 +9257,13 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionRings: transitionPatchRows.rows.length,
-      transitionMode: "safe-staggered-shape-locked-v17.1",
+      transitionMode: "graded-shape-locked-v17.2",
       transitionPatchSpacing: transitionPatchRows.spacing,
       transitionPatchSections: transitionPatchRows.sections,
-      transitionPatchBaseCount: transitionPatchRows.baseCount,
+      transitionPatchCounts: transitionPatchRows.counts,
+      transitionPatchVLevels: transitionPatchRows.vLevels,
+      transitionPatchSourceCount: transitionPatchRows.sourceCount,
+      transitionPatchTargetCount: transitionPatchRows.targetCount,
       transitionPatchVertices: transitionPatchRows.rows.reduce((sum, row) => sum + row.length, 0),
       seamOffset,
       profileTargetSpacing,
