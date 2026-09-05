@@ -7494,6 +7494,10 @@ export default function ClientPage() {
   const [repairPainting, setRepairPainting] = useState(false)
   const [repairBusy, setRepairBusy] = useState(false)
   const [repairMessage, setRepairMessage] = useState("")
+  const [repairProgressVisible, setRepairProgressVisible] = useState(false)
+  const [repairProgressLeaving, setRepairProgressLeaving] = useState(false)
+  const [repairProgressPercent, setRepairProgressPercent] = useState(0)
+  const [repairProgressLabel, setRepairProgressLabel] = useState("")
   const [repairedExportsByUrl, setRepairedExportsByUrl] = useState({})
   const [repairExportBusyUrl, setRepairExportBusyUrl] = useState("")
   const repairHistoryByUrlRef = useRef({})
@@ -7503,6 +7507,59 @@ export default function ClientPage() {
   const repairWorkerRequestIdRef = useRef(0)
   const repairWorkerFailedRef = useRef(false)
   const repairPatchCacheRef = useRef(new Map())
+  const repairProgressLeaveTimerRef = useRef(null)
+  const repairProgressHideTimerRef = useRef(null)
+
+  const clearRepairProgressTimers = useCallback(() => {
+    if (repairProgressLeaveTimerRef.current) clearTimeout(repairProgressLeaveTimerRef.current)
+    if (repairProgressHideTimerRef.current) clearTimeout(repairProgressHideTimerRef.current)
+    repairProgressLeaveTimerRef.current = null
+    repairProgressHideTimerRef.current = null
+  }, [])
+
+  const startRepairProgress = useCallback((label, percent = 4) => {
+    clearRepairProgressTimers()
+    setRepairProgressLeaving(false)
+    setRepairProgressVisible(true)
+    setRepairProgressLabel(label || "Pracuji…")
+    setRepairProgressPercent(Math.max(0, Math.min(100, Number(percent) || 0)))
+  }, [clearRepairProgressTimers])
+
+  const updateRepairProgress = useCallback((label, percent) => {
+    setRepairProgressVisible(true)
+    setRepairProgressLeaving(false)
+    if (label != null) setRepairProgressLabel(label)
+    if (Number.isFinite(Number(percent))) {
+      setRepairProgressPercent(Math.max(0, Math.min(100, Number(percent))))
+    }
+  }, [])
+
+  const finishRepairProgress = useCallback((label = "Hotovo") => {
+    clearRepairProgressTimers()
+    setRepairProgressVisible(true)
+    setRepairProgressLeaving(false)
+    setRepairProgressLabel(label)
+    setRepairProgressPercent(100)
+    repairProgressLeaveTimerRef.current = setTimeout(() => {
+      setRepairProgressLeaving(true)
+      repairProgressHideTimerRef.current = setTimeout(() => {
+        setRepairProgressVisible(false)
+        setRepairProgressLeaving(false)
+        setRepairProgressLabel("")
+        setRepairProgressPercent(0)
+      }, 680)
+    }, 260)
+  }, [clearRepairProgressTimers])
+
+  const resetRepairProgress = useCallback(() => {
+    clearRepairProgressTimers()
+    setRepairProgressVisible(false)
+    setRepairProgressLeaving(false)
+    setRepairProgressLabel("")
+    setRepairProgressPercent(0)
+  }, [clearRepairProgressTimers])
+
+  useEffect(() => () => clearRepairProgressTimers(), [clearRepairProgressTimers])
 
   // Rozlišuj skutečný click od orbit/pan gesta. R3F může po dokončení drag gesta
   // ještě emitnout onClick na mesh; v Ořezu by to jinak omylem položilo nový bod.
@@ -8740,9 +8797,10 @@ export default function ClientPage() {
     setRepairPainting(false)
     setRepairBusy(false)
     setRepairMessage("")
+    resetRepairProgress()
     repairPatchCacheRef.current.clear()
     if (trackballRef.current) trackballRef.current.enabled = !sliceOverlayInteracting && !alignmentBusy
-  }, [sliceOverlayInteracting, alignmentBusy])
+  }, [sliceOverlayInteracting, alignmentBusy, resetRepairProgress])
 
   const closeRepairMode = useCallback(() => {
     clearRepairWorkingState()
@@ -8813,20 +8871,20 @@ export default function ClientPage() {
     }
 
     setRepairBusy(true)
-    setRepairMessage("Analyzuji model · připravuji topologii…")
+    setRepairMessage("")
+    startRepairProgress("Analyzuji model · připravuji topologii", 8)
     repairPatchCacheRef.current.clear()
 
     try {
-      // Dvě RAF + macrotask zajistí, že se spinner/indeterminate bar opravdu
-      // vykreslí a přesune na compositor ještě před těžkou synchronní analýzou.
       await repairWaitForBusyPaint()
-
+      updateRepairProgress("Analyzuji model · připravuji topologii", 18)
       const context = buildTrimMeshContext(object)
 
-      setRepairMessage("Analyzuji model · hledám otevřené boundary…")
+      updateRepairProgress("Analyzuji model · hledám otevřené boundary", 58)
       await repairWaitForBusyPaint()
-
       const rawHoles = findRepairBoundaryLoops(context)
+
+      updateRepairProgress("Analyzuji model · klasifikuji nalezené otvory", 86)
       const classified = classifyRepairBoundaryLoops(context, rawHoles)
       const holes = classified.visible
 
@@ -8841,28 +8899,21 @@ export default function ClientPage() {
       setRepairSelectedHoleIds([])
       setRepairPreviewPatch(null)
 
-      const ignoredText = classified.hiddenBottom
-        ? " Dominantní spodní otevřená boundary byla automaticky ignorována."
-        : ""
-
       if (repairVariant === "manual") {
         setRepairStage("paint")
-        setRepairMessage(holes.length
-          ? `Našel jsem ${holes.length} opravovatelných otevřených hranic.${ignoredText} LMB štětcem označte oblast kolem problému a potom klikněte na Najít v označení.`
-          : `Automatická analýza nenašla opravovatelnou uzavřenou boundary.${ignoredText}`)
       } else {
         setRepairStage("detect")
-        // Výsledek analýzy už je zobrazený v horním summary řádku.
-        // Nedublujeme stejnou informaci v dolním status boxu.
-        setRepairMessage("")
       }
+      setRepairMessage(holes.length ? "" : "Automatická analýza nenašla opravovatelnou uzavřenou boundary.")
+      finishRepairProgress(holes.length ? `Analýza hotová · ${holes.length} ${holes.length === 1 ? "otvor" : "otvory"}` : "Analýza hotová")
     } catch (error) {
       console.error("Repair context error:", error)
+      resetRepairProgress()
       setRepairMessage(error?.message || "Síť modelu se nepodařilo analyzovat.")
     } finally {
       setRepairBusy(false)
     }
-  }, [repairBusy, repairVariant])
+  }, [repairBusy, repairVariant, startRepairProgress, updateRepairProgress, finishRepairProgress, resetRepairProgress])
 
 
   const changeRepairVariant = useCallback((variant) => {
@@ -9001,9 +9052,10 @@ export default function ClientPage() {
 
     setRepairStage("preview")
     setRepairBusy(true)
-    setRepairMessage(selected.length > 1
-      ? `CGAL připravuje ${selected.length} oprav C1 + Dense225…`
-      : "CGAL připravuje finální C1 + Dense225 patch…")
+    setRepairMessage("")
+    startRepairProgress(selected.length > 1
+      ? `CGAL C1 + Dense225 · připravuji ${selected.length} otvorů`
+      : "CGAL C1 + Dense225 · připravuji opravu", 3)
 
     try {
       const patches = []
@@ -9011,16 +9063,19 @@ export default function ClientPage() {
 
       for (let index = 0; index < selected.length; index++) {
         const hole = selected[index]
-        setRepairMessage(selected.length > 1
-          ? `CGAL C1 + Dense225 · otvor ${index + 1}/${selected.length}…`
-          : "CGAL C1 + Dense225 · dokončuji opravu…")
+        const basePercent = (index / selected.length) * 100
+        const spanPercent = 100 / selected.length
+        const label = selected.length > 1
+          ? `CGAL C1 + Dense225 · otvor ${index + 1}/${selected.length}`
+          : "CGAL C1 + Dense225 · opravuji otvor"
+
+        updateRepairProgress(label, Math.max(4, basePercent + 2))
 
         const patch = await prepareCGALRepairPatch(repairContext, hole, (progress) => {
           const percent = Number(progress?.percent)
           if (!Number.isFinite(percent)) return
-          setRepairMessage(selected.length > 1
-            ? `CGAL C1 + Dense225 · otvor ${index + 1}/${selected.length} · ${Math.round(percent)} %`
-            : `CGAL C1 + Dense225 · ${Math.round(percent)} %`)
+          const globalPercent = basePercent + spanPercent * Math.max(0, Math.min(100, percent)) / 100
+          updateRepairProgress(label, Math.min(98, globalPercent))
         })
 
         if (patch) {
@@ -9029,7 +9084,7 @@ export default function ClientPage() {
         }
       }
 
-      if (!patches.length) throw new Error("CGAL nevytvořil žádný patch.")
+      updateRepairProgress("Aplikuji opravenou geometrii", 98.5)
       const backup = applyRepairPatchesToObject(repairContext, patches)
       if (!backup.length) throw new Error("Opravu se nepodařilo aplikovat na geometrii.")
 
@@ -9048,9 +9103,6 @@ export default function ClientPage() {
 
       invalidateComparisonResult()
 
-      // ZÁSADNÍ UX změna v12.2:
-      // původní analýzu necháváme živou. Opravené díry jen označíme jako hotové,
-      // takže uživatel může bez dalšího scanování pokračovat na zbylé boundary.
       const completedSet = new Set([...repairCompletedHoleIds, ...patchedHoleIds])
       const completedIds = [...completedSet]
       const remaining = repairHoles.filter((hole) => !completedSet.has(hole.id))
@@ -9062,26 +9114,20 @@ export default function ClientPage() {
       setRepairPaintedTriangles(new Set())
       setRepairBrushCursor(null)
 
-      if (remaining.length && mode === "auto") {
-        setRepairStage("detect")
-        setRepairMessage(
-          `Oprava hotová · ${patches.length === 1 ? "1 otvor" : `${patches.length} otvorů`} doplněno. ` +
-          `Zbývá ${remaining.length === 1 ? "1 nalezený otvor" : `${remaining.length} nalezené otvory`} – můžete pokračovat bez nové analýzy.`
-        )
-      } else if (remaining.length && mode === "manual") {
-        setRepairStage("paint")
-        setRepairMessage("Oprava hotová. Původní analýza zůstává zachovaná; můžete označit další nalezenou boundary.")
-      } else {
-        setRepairStage("result")
-        setRepairMessage(`Oprava je hotová · CGAL C1 + Dense225 · ${completedIds.length === 1 ? "1 otvor" : `${completedIds.length} otvorů`} opraveno.`)
-      }
+      if (remaining.length && mode === "auto") setRepairStage("detect")
+      else if (remaining.length && mode === "manual") setRepairStage("paint")
+      else setRepairStage("result")
+
+      setRepairMessage("")
+      finishRepairProgress(patches.length === 1 ? "Oprava hotová" : `${patches.length} opravy hotové`)
     } catch (error) {
       console.error("CGAL repair apply error:", error)
+      resetRepairProgress()
       setRepairMessage(error?.message || "CGAL Oprava sítě se nepodařila.")
     } finally {
       setRepairBusy(false)
     }
-  }, [repairContext, repairSelection, repairBusy, repairHoles, repairVariant, repairCompletedHoleIds, invalidateComparisonResult, prepareCGALRepairPatch])
+  }, [repairContext, repairSelection, repairBusy, repairHoles, repairVariant, repairCompletedHoleIds, invalidateComparisonResult, prepareCGALRepairPatch, startRepairProgress, updateRepairProgress, finishRepairProgress, resetRepairProgress])
 
 
   const repairSelectedHole = useCallback(() => {
@@ -12583,42 +12629,6 @@ export default function ClientPage() {
       color: "#f3f3f3", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
       animation: "artheticAlignMenuIn .24s ease-out both",
     }}>
-      <style>{`
-        @keyframes artheticRepairSpinnerSpin {
-          from { transform: translateZ(0) rotate(0deg); }
-          to { transform: translateZ(0) rotate(360deg); }
-        }
-        @keyframes artheticRepairBusySlide {
-          0% { transform: translate3d(-115%,0,0) scaleX(.42); opacity:.22; }
-          45% { opacity:.9; }
-          100% { transform: translate3d(235%,0,0) scaleX(.72); opacity:.18; }
-        }
-        .artheticRepairSpinner {
-          display:inline-block;
-          width:10px;
-          height:10px;
-          box-sizing:border-box;
-          border:1.6px solid rgba(255,255,255,.18);
-          border-top-color:#e5e7eb;
-          border-right-color:rgba(125,211,252,.72);
-          border-radius:50%;
-          animation:artheticRepairSpinnerSpin .68s linear infinite;
-          transform-origin:50% 50%;
-          will-change:transform;
-          backface-visibility:hidden;
-          contain:paint;
-        }
-        .artheticRepairBusySlider {
-          width:34%;
-          height:100%;
-          border-radius:999px;
-          background:linear-gradient(90deg, rgba(56,189,248,.05), rgba(125,211,252,.92), rgba(255,255,255,.72), rgba(56,189,248,.05));
-          animation:artheticRepairBusySlide 1.05s cubic-bezier(.35,.05,.35,.95) infinite;
-          will-change:transform, opacity;
-          transform:translate3d(-115%,0,0);
-          backface-visibility:hidden;
-        }
-      `}</style>
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
         <div style={{ minWidth: 0, flex: "1 1 auto" }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
@@ -12710,6 +12720,53 @@ export default function ClientPage() {
       boxShadow: "0 22px 70px rgba(0,0,0,.46)", backdropFilter: "blur(22px)", WebkitBackdropFilter: "blur(22px)",
       color: "#f3f3f3", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", animation: "artheticAlignMenuIn .24s ease-out both",
     }}>
+      <style>{`
+        @keyframes artheticRepairSpinnerSpin {
+          from { transform: translateZ(0) rotate(0deg); }
+          to { transform: translateZ(0) rotate(360deg); }
+        }
+        @keyframes artheticRepairProgressIn {
+          from { opacity:0; transform:translate3d(0,7px,0) scale(.988); filter:blur(4px); }
+          to { opacity:1; transform:translate3d(0,0,0) scale(1); filter:blur(0); }
+        }
+        @keyframes artheticRepairProgressOut {
+          0% { opacity:1; transform:translate3d(0,0,0) scale(1); filter:blur(0); }
+          100% { opacity:0; transform:translate3d(0,-5px,0) scale(.992); filter:blur(4px); }
+        }
+        .artheticRepairSpinner {
+          display:inline-block; width:11px; height:11px; box-sizing:border-box;
+          border:1.7px solid rgba(255,255,255,.16);
+          border-top-color:#f5f5f5; border-right-color:rgba(125,211,252,.82);
+          border-radius:50%; animation:artheticRepairSpinnerSpin .66s linear infinite;
+          transform-origin:50% 50%; will-change:transform; backface-visibility:hidden; contain:paint;
+        }
+        .artheticRepairProgressPanel {
+          animation:artheticRepairProgressIn .30s cubic-bezier(.16,.84,.44,1) both;
+          will-change:transform,opacity,filter;
+        }
+        .artheticRepairProgressPanel.isLeaving {
+          animation:artheticRepairProgressOut .66s cubic-bezier(.16,.84,.44,1) forwards;
+          pointer-events:none;
+        }
+        .artheticRepairProgressFill {
+          height:100%; border-radius:999px;
+          background:linear-gradient(90deg, rgba(56,189,248,.72), rgba(125,211,252,.98), rgba(255,255,255,.88));
+          box-shadow:0 0 16px rgba(56,189,248,.20);
+          transition:width .32s cubic-bezier(.2,.75,.25,1);
+          will-change:width;
+        }
+        .artheticRepairSideActions {
+          position:absolute; top:10px; left:calc(50% + 420px); z-index:74; width:148px;
+          box-sizing:border-box; padding:8px; border-radius:13px;
+          background:rgba(11,11,11,.955); border:1px solid rgba(255,255,255,.10);
+          box-shadow:0 18px 58px rgba(0,0,0,.42); backdrop-filter:blur(22px); -webkit-backdrop-filter:blur(22px);
+          animation:artheticAlignMenuIn .24s ease-out both;
+          font-family:Inter,ui-sans-serif,system-ui,sans-serif;
+        }
+        @media (max-width: 1160px) {
+          .artheticRepairSideActions { top:178px; left:auto; right:10px; }
+        }
+      `}</style>
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
         <div style={{ minWidth: 0, flex: "1 1 auto" }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 6, flexWrap: "wrap" }}>
@@ -12813,28 +12870,6 @@ export default function ClientPage() {
         </div>
       )}
 
-      {repairSelection && repairedExportsByUrl[repairSelection] && repairStage !== "result" && (
-        <div style={{ marginTop: 9, paddingTop: 9, borderTop: "1px solid rgba(255,255,255,.055)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-          <div style={{ color: "#707070", fontSize: 8.9 }}>
-            V této session opraveno {Number(repairedExportsByUrl[repairSelection]?.count) || 0} {Number(repairedExportsByUrl[repairSelection]?.count) === 1 ? "místo" : "míst"}. Nalezené zbývající díry zůstávají připravené bez nové analýzy.
-          </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            <button type="button" onClick={() => undoLastRepair(repairSelection)} disabled={repairBusy}
-              style={{ height: 28, padding: "0 8px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#999", fontSize: 8.6, fontWeight: 680, cursor: repairBusy ? "wait" : "pointer" }}>Vrátit poslední</button>
-            <button type="button" onClick={() => downloadRepairedModel(repairSelection)} disabled={repairBusy || repairExportBusyUrl === repairSelection}
-              style={{ height: 28, padding: "0 8px", borderRadius: 8, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#d8d8d8", fontSize: 8.6, fontWeight: 690, cursor: repairBusy || repairExportBusyUrl === repairSelection ? "wait" : "pointer" }}>
-              {repairExportBusyUrl === repairSelection ? "Připravuji…" : "Stáhnout"}
-            </button>
-            {editorCapabilities.canSaveRepairedToCase && (
-              <button type="button" onClick={() => saveRepairedModelToCase(repairSelection)} disabled={repairBusy || repairExportBusyUrl === repairSelection || !!repairedExportsByUrl[repairSelection]?.saveRequested}
-                style={{ height: 28, padding: "0 8px", borderRadius: 8, border: "1px solid rgba(74,222,128,.16)", background: "rgba(34,197,94,.055)", color: repairedExportsByUrl[repairSelection]?.saveRequested ? "#647568" : "#b8edc6", fontSize: 8.6, fontWeight: 700, cursor: repairBusy || repairedExportsByUrl[repairSelection]?.saveRequested ? "default" : "pointer" }}>
-                {repairedExportsByUrl[repairSelection]?.saveRequested ? "Předáno" : "Uložit do zakázky"}
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
       {repairVariant === "manual" && repairStage === "paint" && (
         <div style={{ display: "grid", gridTemplateColumns: "minmax(250px,1fr) auto", gap: 12, alignItems: "center" }}>
           <div>
@@ -12862,33 +12897,54 @@ export default function ClientPage() {
         </div>
       )}
 
-      {repairStage === "result" && repairSelection && (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-          <div style={{ color: "#8b8b8b", fontSize: 9.2 }}>Síť je opravená v této session. Můžete opravit další otvor, vrátit poslední krok nebo exportovat výsledek.</div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            <button type="button" onClick={continueRepair} style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(96,165,250,.16)", background: "rgba(59,130,246,.055)", color: "#bfdbfe", fontSize: 9, fontWeight: 690, cursor: "pointer" }}>Opravit další</button>
-            <button type="button" onClick={() => undoLastRepair(repairSelection)} style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 9, fontWeight: 680, cursor: "pointer" }}>Vrátit opravu</button>
-            <button type="button" onClick={() => downloadRepairedModel(repairSelection)} disabled={repairExportBusyUrl === repairSelection} style={{ height: 31, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,.10)", background: "rgba(255,255,255,.04)", color: "#e1e1e1", fontSize: 9, fontWeight: 700, cursor: repairExportBusyUrl === repairSelection ? "wait" : "pointer" }}>{repairExportBusyUrl === repairSelection ? "Připravuji…" : "Stáhnout"}</button>
-            {editorCapabilities.canSaveRepairedToCase && <button type="button" onClick={() => saveRepairedModelToCase(repairSelection)} disabled={repairExportBusyUrl === repairSelection || !!repairedExportsByUrl[repairSelection]?.saveRequested} style={{ height: 31, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(74,222,128,.17)", background: "rgba(34,197,94,.06)", color: repairedExportsByUrl[repairSelection]?.saveRequested ? "#66836f" : "#bbf7d0", fontSize: 9, fontWeight: 710, cursor: repairedExportsByUrl[repairSelection]?.saveRequested ? "default" : "pointer" }}>{repairedExportsByUrl[repairSelection]?.saveRequested ? "Předáno" : "Uložit do zakázky"}</button>}
+      {repairProgressVisible && (
+        <div
+          className={`artheticRepairProgressPanel${repairProgressLeaving ? " isLeaving" : ""}`}
+          style={{ marginTop: 9, padding: "8px 9px 9px", borderRadius: 10, background: "rgba(255,255,255,.026)", border: "1px solid rgba(255,255,255,.065)" }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span className="artheticRepairSpinner" aria-hidden="true" />
+            <span style={{ minWidth: 0, flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#d1d1d1", fontSize: 8.9, fontWeight: 560 }}>
+              {repairProgressLabel || "Pracuji…"}
+            </span>
+            <span style={{ flex: "0 0 auto", minWidth: 31, textAlign: "right", color: repairProgressPercent >= 100 ? "#9fe2b2" : "#a8d8ee", fontSize: 8.9, fontVariantNumeric: "tabular-nums", fontWeight: 760 }}>
+              {Math.round(repairProgressPercent)} %
+            </span>
+          </div>
+          <div style={{ marginTop: 7, height: 2, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.055)" }}>
+            <div className="artheticRepairProgressFill" style={{ width: `${Math.max(1.5, repairProgressPercent)}%` }} />
           </div>
         </div>
       )}
 
-      {(repairMessage || repairBusy) && (
-        <div style={{ position: "relative", overflow: "hidden", marginTop: 9, padding: repairBusy ? "7px 9px 9px" : "7px 9px", borderRadius: 9, background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.055)", color: repairBusy ? "#cfcfcf" : "#787878", fontSize: 8.8, lineHeight: 1.45 }}>
-          <span style={{ display: "inline-flex", alignItems: "center", minHeight: 12 }}>
-            {repairBusy && <span className="artheticRepairSpinner" style={{ marginRight: 7, flex: "0 0 auto" }} aria-hidden="true" />}
-            <span>{repairMessage || "Pracuji…"}</span>
-          </span>
-          {repairBusy && (
-            <span aria-hidden="true" style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 1.5, overflow: "hidden", background: "rgba(255,255,255,.025)" }}>
-              <span className="artheticRepairBusySlider" />
-            </span>
-          )}
+      {!repairProgressVisible && repairMessage && /nepodař|nenaš|potřeba|není načten|selhal|chyba/i.test(repairMessage) && (
+        <div style={{ marginTop: 9, padding: "7px 9px", borderRadius: 9, background: "rgba(239,68,68,.045)", border: "1px solid rgba(248,113,113,.11)", color: "#ba8585", fontSize: 8.8, lineHeight: 1.45 }}>
+          {repairMessage}
         </div>
       )}
     </div>
   )
+
+  const repairActionsPanel = repairMode && repairSelection && repairedExportsByUrl[repairSelection] && (
+    <div className="artheticRepairSideActions">
+      <div style={{ padding: "1px 2px 7px", color: "#696969", fontSize: 8.1, fontWeight: 720, letterSpacing: ".035em", textTransform: "uppercase" }}>Výsledek</div>
+      <div style={{ display: "grid", gap: 6 }}>
+        <button type="button" onClick={() => undoLastRepair(repairSelection)} disabled={repairBusy}
+          style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: repairBusy ? "#555" : "#aaa", fontSize: 9, fontWeight: 680, cursor: repairBusy ? "wait" : "pointer" }}>Vrátit poslední</button>
+        <button type="button" onClick={() => downloadRepairedModel(repairSelection)} disabled={repairBusy || repairExportBusyUrl === repairSelection}
+          style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.10)", background: "rgba(255,255,255,.04)", color: repairBusy ? "#555" : "#e1e1e1", fontSize: 9, fontWeight: 700, cursor: repairBusy || repairExportBusyUrl === repairSelection ? "wait" : "pointer" }}>
+          {repairExportBusyUrl === repairSelection ? "Připravuji…" : "Stáhnout"}
+        </button>
+        {editorCapabilities.canSaveRepairedToCase && (
+          <button type="button" onClick={() => saveRepairedModelToCase(repairSelection)} disabled={repairBusy || repairExportBusyUrl === repairSelection || !!repairedExportsByUrl[repairSelection]?.saveRequested}
+            style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(74,222,128,.17)", background: "rgba(34,197,94,.06)", color: repairedExportsByUrl[repairSelection]?.saveRequested ? "#66836f" : repairBusy ? "#4f6756" : "#bbf7d0", fontSize: 9, fontWeight: 710, cursor: repairBusy || repairedExportsByUrl[repairSelection]?.saveRequested ? "default" : "pointer" }}>
+            {repairedExportsByUrl[repairSelection]?.saveRequested ? "Předáno" : "Uložit do zakázky"}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+
 
   const alignmentWorkspace = alignmentMode && (
     <>
@@ -13571,6 +13627,7 @@ export default function ClientPage() {
 
       {trimWorkspace}
       {repairWorkspace}
+      {repairActionsPanel}
       {alignmentWorkspace}
 
       {dicomLayoutActive && (
