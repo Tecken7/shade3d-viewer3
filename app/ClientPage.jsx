@@ -7844,9 +7844,11 @@ function CadOrientationMiniView({ label, view, sourceObject, modelMatrix, planeC
 }
 
 
-export default function ClientPage({ forceCadMode = false } = {}) {
+export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = false } = {}) {
   const hideSidebar = getParam("hideSidebar") === "1";
   const cadStandalone = forceCadMode || (getParam("mode") === "cad" && (getParam("cadTool") || "model") === "model"); // ÚPRAVA 1: Zjištění, jestli máme schovat levý panel
+  const alignmentDemoStandalone = forceAlignmentDemo || getParam("mode") === "alignment-demo"
+  const standaloneToolMode = cadStandalone || alignmentDemoStandalone
   const [sceneIntensity, setSceneIntensity] = useState(1)
   const [highlightIntensity, setHighlightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
@@ -8165,6 +8167,21 @@ export default function ClientPage({ forceCadMode = false } = {}) {
   const alignmentWorkerRequestsRef = useRef(new Map())
   const alignmentWorkerRequestIdRef = useRef(0)
   const alignmentWorkerFailedRef = useRef(false)
+
+  // -- VEŘEJNÉ LOKÁLNÍ ALIGNMENT DEMO --
+  // Soubory jsou drženy pouze jako browser Blob URL. Nic se neposílá na backend.
+  const alignmentDemoEntriesRef = useRef({ A: null, B: null })
+  const alignmentDemoObjectUrlsRef = useRef({ A: "", B: "" })
+  const [alignmentDemoFiles, setAlignmentDemoFiles] = useState({ A: null, B: null })
+  const [alignmentDemoMessage, setAlignmentDemoMessage] = useState("Nahrajte Reference A a Moving B. Soubory zůstanou pouze v tomto zařízení.")
+
+  useEffect(() => () => {
+    if (typeof URL === "undefined") return
+    for (const url of Object.values(alignmentDemoObjectUrlsRef.current || {})) {
+      if (!url) continue
+      try { URL.revokeObjectURL(url) } catch {}
+    }
+  }, [])
 
   // -- OŘEZ MODELU --
   const [trimMode, setTrimMode] = useState(false)
@@ -10721,6 +10738,151 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     return () => window.removeEventListener("message", handler)
   }, [flushPendingDerivedModelsForScene])
 
+
+  const clearAlignmentDemoFiles = useCallback(() => {
+    for (const url of Object.values(alignmentDemoObjectUrlsRef.current || {})) {
+      if (!url) continue
+      try { URL.revokeObjectURL(url) } catch {}
+      delete modelObjectsRef.current[url]
+      delete meshesRef.current[url]
+    }
+    alignmentDemoEntriesRef.current = { A: null, B: null }
+    alignmentDemoObjectUrlsRef.current = { A: "", B: "" }
+    setAlignmentDemoFiles({ A: null, B: null })
+    setAlignmentDemoMessage("Nahrajte Reference A a Moving B. Soubory zůstanou pouze v tomto zařízení.")
+    setFiles([])
+    setColors([])
+    setOpacities([])
+    setVisibles([])
+    setRoughnesses([])
+    setMetalnesses([])
+    setVertexColors([])
+    setWireframes([])
+    setGhostModes([])
+    setModelTransforms({})
+    setAlignmentSelection([])
+    setAlignmentPointsA([])
+    setAlignmentPointsB([])
+    setAlignmentStats(null)
+    setAlignmentProgress(null)
+    setAlignmentPrealignMatrix(null)
+    setAlignmentWorkflowStage("points")
+    setAlignmentStep("models")
+    setAlignmentPreviewBusy({ A: false, B: false })
+    setAlignedExportsByUrl({})
+    setAlignedExportBusyUrl("")
+    setAlignmentCompletion(null)
+    setAlignmentOperation(null)
+    setComparisonSnapshot(null)
+    setShowHeatmap(false)
+    setShowComparison(false)
+    setDidInitialFrame(false)
+    setInitialCameraState(null)
+  }, [])
+
+  const handleAlignmentDemoLocalFile = useCallback((file, side) => {
+    if (!alignmentDemoStandalone || !file || (side !== "A" && side !== "B") || alignmentBusy) return
+    const ext = inferExt(file.name)
+    if (!["stl", "ply", "obj"].includes(ext)) {
+      setAlignmentDemoMessage("Demo podporuje STL, PLY a OBJ.")
+      return
+    }
+
+    const previousUrl = alignmentDemoObjectUrlsRef.current[side]
+    if (previousUrl) {
+      try { URL.revokeObjectURL(previousUrl) } catch {}
+      delete modelObjectsRef.current[previousUrl]
+      delete meshesRef.current[previousUrl]
+    }
+
+    const objectUrl = URL.createObjectURL(file)
+    const entry = {
+      url: objectUrl,
+      name: stripExt(file.name) || (side === "A" ? "Reference A" : "Moving B"),
+      rawName: file.name,
+      alignmentDemoSide: side,
+      c: side === "A" ? "#AAA08E" : "#DAD7D1",
+      o: 1,
+      v: true,
+      r: 0.32,
+      m: 0.06,
+      vc: false,
+      km: false,
+      wf: false,
+      gh: false,
+    }
+    alignmentDemoObjectUrlsRef.current[side] = objectUrl
+    alignmentDemoEntriesRef.current[side] = entry
+
+    const a = alignmentDemoEntriesRef.current.A
+    const b = alignmentDemoEntriesRef.current.B
+    const nextFiles = [a, b].filter(Boolean)
+    setAlignmentDemoFiles({ A: a, B: b })
+    setFiles(nextFiles)
+    setColors(nextFiles.map((item) => item.c))
+    setOpacities(nextFiles.map(() => 1))
+    setVisibles(nextFiles.map(() => true))
+    setRoughnesses(nextFiles.map(() => 0.32))
+    setMetalnesses(nextFiles.map(() => 0.06))
+    setVertexColors(nextFiles.map(() => false))
+    setWireframes(nextFiles.map(() => false))
+    setGhostModes(nextFiles.map(() => false))
+    setModelTransforms({})
+    setAlignmentSelection([])
+    setAlignmentPointsA([])
+    setAlignmentPointsB([])
+    setAlignmentStats(null)
+    setAlignmentProgress(null)
+    setAlignmentPrealignMatrix(null)
+    setAlignmentWorkflowStage("points")
+    setAlignmentStep("models")
+    setAlignmentPreviewBusy({ A: false, B: false })
+    setShowHeatmap(false)
+    setShowComparison(false)
+    setIsAutoRotating(false)
+    setDidInitialFrame(false)
+    setInitialCameraState(null)
+    setAlignmentDemoMessage(
+      a && b
+        ? "Oba modely jsou připravené. Spusťte lokální zarovnání."
+        : `${side === "A" ? "Reference A" : "Moving B"} je načtený. Doplňte druhý model.`
+    )
+  }, [alignmentDemoStandalone, alignmentBusy])
+
+  const startAlignmentDemo = useCallback(() => {
+    const a = alignmentDemoEntriesRef.current.A
+    const b = alignmentDemoEntriesRef.current.B
+    if (!a || !b || alignmentBusy) {
+      setAlignmentDemoMessage("Nejdřív nahrajte oba modely.")
+      return
+    }
+
+    setAlignmentSelection([a.url, b.url])
+    setAlignmentPointsA([])
+    setAlignmentPointsB([])
+    setAlignmentProgress(null)
+    setAlignmentStats(null)
+    setAlignmentPrealignMatrix(null)
+    setAlignmentWorkflowStage("points")
+    setModelTransforms({})
+    setAlignedExportsByUrl({})
+    setAlignedExportBusyUrl("")
+    setAlignmentCompletion(null)
+    setAlignmentOperation(null)
+    setComparisonSnapshot(null)
+    // Loader obou pracovních viewportů doběhne před automatickým přechodem na Body.
+    setAlignmentPreviewBusy({ A: true, B: true })
+    setAlignmentStep("models")
+    setAlignmentTransition("entering")
+    setAlignmentMode(true)
+    setAlignmentMessage("Načítám lokální Reference A a Moving B…")
+    setIsAutoRotating(false)
+    setHeatmapMenuOpen(false)
+    setComparisonMenuOpen(false)
+    setShowHeatmap(false)
+    setShowComparison(false)
+    requestAnimationFrame(() => requestAnimationFrame(() => setAlignmentTransition("active")))
+  }, [alignmentBusy])
 
   const getAlignmentPair = useCallback(() => {
     if (alignmentSelection.length !== 2) return { aUrl: null, bUrl: null, fileA: null, fileB: null }
@@ -15053,6 +15215,96 @@ export default function ClientPage({ forceCadMode = false } = {}) {
   )
 
 
+  const alignmentDemoWorkspace = alignmentDemoStandalone && !alignmentMode && (
+    <>
+      <style>{`
+        @keyframes artheticAlignmentDemoIn { from { opacity:0; transform:translate(-50%,-46%) scale(.985); filter:blur(6px); } to { opacity:1; transform:translate(-50%,-50%) scale(1); filter:blur(0); } }
+        @keyframes artheticAlignmentDemoGlow { 0%,100% { box-shadow:0 0 0 1px rgba(34,197,94,.03), 0 18px 52px rgba(0,0,0,.30); } 50% { box-shadow:0 0 0 1px rgba(74,222,128,.10), 0 18px 58px rgba(0,0,0,.36); } }
+      `}</style>
+      <div aria-hidden="true" style={{ position:"absolute", inset:0, zIndex:20, pointerEvents:"none", background:"radial-gradient(circle at 50% 48%, rgba(255,255,255,.025), rgba(0,0,0,.18) 62%, rgba(0,0,0,.36) 100%)" }} />
+      <div style={{
+        position:"absolute", left:"50%", top:"50%", transform:"translate(-50%,-50%)", zIndex:60,
+        width:"min(780px, calc(100vw - 36px))", padding:18, boxSizing:"border-box", borderRadius:20,
+        background:"rgba(11,11,11,.965)", border:"1px solid rgba(255,255,255,.10)", boxShadow:"0 28px 90px rgba(0,0,0,.55)",
+        backdropFilter:"blur(24px)", WebkitBackdropFilter:"blur(24px)", color:"#ededed",
+        fontFamily:"Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+        animation:"artheticAlignmentDemoIn .34s cubic-bezier(.2,.78,.24,1) both",
+      }}>
+        <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:18, padding:"2px 2px 15px" }}>
+          <div style={{ minWidth:0 }}>
+            <div style={{ fontSize:17, lineHeight:1, letterSpacing:"-.025em" }}>
+              <span style={{ fontWeight:860 }}>ART</span><span style={{ fontWeight:300 }}>HETIC</span><span style={{ marginLeft:7, color:"#d8d8d8", fontWeight:350 }}>Alignment Demo</span>
+            </div>
+            <div style={{ marginTop:8, color:"#757575", fontSize:10.5, lineHeight:1.5, fontWeight:560 }}>
+              Nahrajte dva STL / PLY / OBJ modely a vyzkoušejte 3 body → Předzarovnat → BestFit → Odchylka.
+            </div>
+          </div>
+          <div style={{ flex:"0 0 auto", display:"inline-flex", alignItems:"center", gap:7, minHeight:29, padding:"0 10px", borderRadius:999, border:"1px solid rgba(74,222,128,.18)", background:"rgba(34,197,94,.07)", color:"#9fe5b4", fontSize:8.8, fontWeight:730, letterSpacing:".02em" }}>
+            <span style={{ width:6, height:6, borderRadius:"50%", background:"#4ade80", boxShadow:"0 0 10px rgba(74,222,128,.55)" }} />
+            POUZE LOKÁLNĚ V PROHLÍŽEČI
+          </div>
+        </div>
+
+        <div style={{ height:1, background:"rgba(255,255,255,.065)", margin:"0 0 14px" }} />
+
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(2, minmax(0, 1fr))", gap:12 }}>
+          {[
+            { side:"A", title:"Reference A", subtitle:"Model, který zůstane na místě", accent:"#60a5fa" },
+            { side:"B", title:"Moving B", subtitle:"Model, který se bude zarovnávat", accent:"#f472b6" },
+          ].map((item) => {
+            const entry = alignmentDemoFiles[item.side]
+            return (
+              <label key={item.side} style={{
+                minHeight:150, padding:14, boxSizing:"border-box", borderRadius:15, cursor:alignmentBusy ? "wait" : "pointer",
+                border:entry ? "1px solid rgba(74,222,128,.20)" : "1px dashed rgba(255,255,255,.13)",
+                background:entry ? "rgba(34,197,94,.045)" : "rgba(255,255,255,.025)",
+                display:"flex", flexDirection:"column", justifyContent:"space-between", gap:12,
+                transition:"background .18s ease, border-color .18s ease, transform .18s ease",
+              }}>
+                <input type="file" accept=".stl,.ply,.obj" hidden disabled={alignmentBusy} onChange={(event) => { const file = event.target.files?.[0]; if (file) handleAlignmentDemoLocalFile(file, item.side); event.target.value = "" }} />
+                <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                  <span style={{ width:30, height:30, borderRadius:10, display:"grid", placeItems:"center", background:"rgba(255,255,255,.055)", border:"1px solid rgba(255,255,255,.08)", color:item.accent, fontSize:11, fontWeight:850 }}>{item.side}</span>
+                  <div style={{ minWidth:0 }}>
+                    <div style={{ color:"#eeeeee", fontSize:11.5, fontWeight:760 }}>{item.title}</div>
+                    <div style={{ marginTop:3, color:"#666", fontSize:8.8, fontWeight:570 }}>{item.subtitle}</div>
+                  </div>
+                </div>
+                <div style={{ minHeight:48, borderRadius:11, padding:"10px 11px", boxSizing:"border-box", background:"rgba(0,0,0,.18)", border:"1px solid rgba(255,255,255,.055)", display:"flex", alignItems:"center", gap:9 }}>
+                  <span style={{ width:7, height:7, borderRadius:"50%", flex:"0 0 auto", background:entry ? "#4ade80" : "#555", boxShadow:entry ? "0 0 9px rgba(74,222,128,.35)" : "none" }} />
+                  <span style={{ minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", color:entry ? "#d5d5d5" : "#737373", fontSize:9.5, fontWeight:620 }}>
+                    {entry ? entry.rawName : `Klikněte a nahrajte ${item.title}`}
+                  </span>
+                </div>
+              </label>
+            )
+          })}
+        </div>
+
+        <div style={{ marginTop:13, minHeight:34, padding:"9px 11px", boxSizing:"border-box", borderRadius:10, background:"rgba(255,255,255,.022)", border:"1px solid rgba(255,255,255,.055)", color:"#777", fontSize:9, fontWeight:590, lineHeight:1.45 }}>
+          {alignmentDemoMessage}
+        </div>
+
+        <div style={{ marginTop:14, display:"flex", alignItems:"center", justifyContent:"space-between", gap:10 }}>
+          <button type="button" onClick={clearAlignmentDemoFiles} disabled={alignmentBusy || (!alignmentDemoFiles.A && !alignmentDemoFiles.B)} style={{ height:36, padding:"0 12px", borderRadius:10, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:alignmentBusy || (!alignmentDemoFiles.A && !alignmentDemoFiles.B) ? "#4f4f4f" : "#aaa", cursor:alignmentBusy || (!alignmentDemoFiles.A && !alignmentDemoFiles.B) ? "not-allowed" : "pointer", fontFamily:"inherit", fontSize:9.5, fontWeight:680 }}>
+            Vymazat modely
+          </button>
+          <button type="button" onClick={startAlignmentDemo} disabled={alignmentBusy || !alignmentDemoFiles.A || !alignmentDemoFiles.B} style={{
+            height:38, padding:"0 15px", borderRadius:11,
+            border:alignmentDemoFiles.A && alignmentDemoFiles.B ? "1px solid rgba(74,222,128,.28)" : "1px solid rgba(255,255,255,.07)",
+            background:alignmentDemoFiles.A && alignmentDemoFiles.B ? "rgba(20,62,37,.88)" : "rgba(255,255,255,.025)",
+            color:alignmentDemoFiles.A && alignmentDemoFiles.B ? "#bdf7cd" : "#4d4d4d",
+            cursor:alignmentDemoFiles.A && alignmentDemoFiles.B && !alignmentBusy ? "pointer" : "not-allowed",
+            fontFamily:"inherit", fontSize:10, fontWeight:760,
+            animation:alignmentDemoFiles.A && alignmentDemoFiles.B ? "artheticAlignmentDemoGlow 2.4s ease-in-out infinite" : "none",
+          }}>
+            Spustit zarovnání
+          </button>
+        </div>
+      </div>
+    </>
+  )
+
+
   const alignmentWorkspace = alignmentMode && (
     <>
       <style>{`
@@ -15221,7 +15473,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
       }}>
         <div style={{ minWidth: 148, padding: "0 7px 0 2px" }}>
           <div style={{ fontSize: 15, letterSpacing: "-.02em", whiteSpace: "nowrap", lineHeight: 1 }}>
-            <span style={{ fontWeight: 850 }}>ART</span><span style={{ fontWeight: 300 }}>HETIC</span><span style={{ fontWeight: 300, marginLeft: 6, color: "#dddddd" }}>Align</span>
+            <span style={{ fontWeight: 850 }}>ART</span><span style={{ fontWeight: 300 }}>HETIC</span><span style={{ fontWeight: 300, marginLeft: 6, color: "#dddddd" }}>{alignmentDemoStandalone ? "Alignment Demo" : "Align"}</span>
           </div>
           <div style={{ fontSize: 9, color: "#737373", marginTop: 5, fontWeight: 560 }}>Rigid registration · mm</div>
         </div>
@@ -15314,7 +15566,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
               <path d="M15 6L9 12L15 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
               <path d="M9.5 12H20" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
             </svg>
-            <span>Vrátit se zpět na hlavní scénu</span>
+            <span>{alignmentDemoStandalone ? "Zpět na výběr modelů" : "Vrátit se zpět na hlavní scénu"}</span>
           </button>
         </div>
       </div>
@@ -15550,11 +15802,12 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black", overflow: "hidden" }}>
       <PreloadIcons />
       {cadWorkspace}
-      {!cadStandalone && !alignmentMode && !trimMode && !repairMode && !mobileSliceSplitActive && logoEl}
-      {!cadStandalone && !hideSidebar && !alignmentMode && !trimMode && !repairMode && sidebar}
-      {!cadStandalone && !alignmentMode && !trimMode && !repairMode && topBarRight}
+      {alignmentDemoWorkspace}
+      {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && !mobileSliceSplitActive && logoEl}
+      {!standaloneToolMode && !hideSidebar && !alignmentMode && !trimMode && !repairMode && sidebar}
+      {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && topBarRight}
 
-      {!cadStandalone && isMobile && mobileFunctionsOpen && !alignmentMode && (
+      {!standaloneToolMode && isMobile && mobileFunctionsOpen && !alignmentMode && (
         <>
           <div
             onClick={() => { setMobileFunctionsOpen(false); setMobileFunctionsSheetHeight(null) }}
@@ -16159,7 +16412,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
         <AlignmentFastRaycast enabled={(cadStandalone && cadStage === "orient") || (alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy) || (trimMode && !!trimSelection) || (repairMode && !!repairSelection)} />
 
-        <AutoRotateScene enabled={!cadStandalone && !alignmentMode && !trimMode && !repairMode && isAutoRotating} target={cameraTarget} speedFactor={spinSpeed} />
+        <AutoRotateScene enabled={!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && isAutoRotating} target={cameraTarget} speedFactor={spinSpeed} />
 
         <group ref={rootGroupRef}>
           <Suspense fallback={null}>
