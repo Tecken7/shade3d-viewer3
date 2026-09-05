@@ -7312,18 +7312,26 @@ function cadBuildOrientationMatrix(points, sourceObject, viewerRoot, arch = "low
   const centroid = box.getCenter(new THREE.Vector3())
 
   const sourceBasis = new THREE.Matrix4().makeBasis(xAxis, sourceAnterior, baseDir)
-  // ARTHETIC CAD souřadnice: +X = pravá strana, +Z = anterior.
-  // Horní a dolní čelist musí ležet na opačných stranách okluzní roviny:
-  // Upper roste od roviny do +Y, Lower do -Y. Díky tomu jsou kontrolní
-  // pohledy stejné jako v Model Builderu a už samotné zařazení souboru
-  // Upper/Lower určuje správnou stranu referenční roviny.
-  const baseAxisY = arch === "upper" ? 1 : -1
+  // ARTHETIC CAD souřadnice musí zůstat pravotočivé.
+  // Lower: +X = pravá strana, +Z = anterior, normála báze míří do -Y.
+  // Upper musí být na opačné straně okluzní roviny, ale NESMÍME pouze
+  // převrátit Y (to by vytvořilo determinant -1 = zrcadlení). Proto Upper
+  // používá čistou 180° rotaci kolem X: +X zůstává zachované, zatímco
+  // anterior se mapuje do -Z a normála báze do +Y. Výsledkem je vždy
+  // rigidní rotace bez změny chirality modelu.
+  const isUpper = arch === "upper"
+  const baseAxisY = isUpper ? 1 : -1
+  const anteriorAxisZ = isUpper ? -1 : 1
   const targetBasis = new THREE.Matrix4().makeBasis(
     new THREE.Vector3(1, 0, 0),
-    new THREE.Vector3(0, 0, 1),
+    new THREE.Vector3(0, 0, anteriorAxisZ),
     new THREE.Vector3(0, baseAxisY, 0)
   )
   const rotation = targetBasis.clone().multiply(sourceBasis.clone().invert())
+  const rotationDeterminant = rotation.determinant()
+  if (!Number.isFinite(rotationDeterminant) || rotationDeterminant < 0.999 || rotationDeterminant > 1.001) {
+    throw new Error("Orientace by vedla k neplatné nebo zrcadlené transformaci.")
+  }
   const current = sourceObject.matrix?.clone?.() || new THREE.Matrix4()
   const pivot = centroid
   const aroundPivot = new THREE.Matrix4()
