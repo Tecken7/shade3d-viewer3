@@ -1118,7 +1118,16 @@ function makeTrimPolylineCurve(points, closed = false) {
   return new THREE.CatmullRomCurve3(vectors, !!closed, "centripetal", 0.24)
 }
 
-function TrimBoundaryTube({ points, radius, closed = false }) {
+function TrimBoundaryTube({
+  points,
+  radius,
+  closed = false,
+  color = "#72acd6",
+  opacity = 0.80,
+  roughness = 0.32,
+  metalness = 0.06,
+  renderOrder = 1500,
+}) {
   const geometry = useMemo(() => {
     const curve = makeTrimPolylineCurve(points, closed)
     if (!curve) return null
@@ -1128,13 +1137,13 @@ function TrimBoundaryTube({ points, radius, closed = false }) {
   useEffect(() => () => geometry?.dispose?.(), [geometry])
   if (!geometry) return null
   return (
-    <mesh geometry={geometry} renderOrder={1500} raycast={() => null}>
+    <mesh geometry={geometry} renderOrder={renderOrder} raycast={() => null}>
       <meshStandardMaterial
-        color="#72acd6"
-        roughness={0.32}
-        metalness={0.06}
+        color={color}
+        roughness={roughness}
+        metalness={metalness}
         transparent
-        opacity={0.80}
+        opacity={opacity}
         depthTest
         depthWrite={false}
         polygonOffset
@@ -1719,6 +1728,42 @@ function findRepairBoundaryLoops(context) {
     })
   }
   return loops.sort((a,b) => a.area - b.area)
+}
+
+function classifyRepairBoundaryLoops(context, loops) {
+  const list = Array.isArray(loops) ? loops.slice() : []
+  if (!context || !list.length) return { visible: list, hiddenBottom: null }
+
+  // Spodní otevřená boundary intraorálního scanu je typicky zdaleka nejdelší
+  // otevřená smyčka celého modelu. Schováváme ji pouze při vysoké jistotě.
+  const byPerimeter = list.slice().sort((a, b) => b.perimeter - a.perimeter)
+  const largest = byPerimeter[0]
+  const second = byPerimeter[1] || null
+  const diagonal = Math.max(1e-6, Number(context.diagonal) || 0)
+  const sizeRatio = largest.perimeter / diagonal
+  const dominanceRatio = second
+    ? largest.perimeter / Math.max(1e-6, second.perimeter)
+    : Infinity
+
+  const highConfidenceBottom =
+    !largest.likely &&
+    sizeRatio >= 2.15 &&
+    (second ? dominanceRatio >= 2.35 : sizeRatio >= 2.8)
+
+  if (!highConfidenceBottom) return { visible: list, hiddenBottom: null }
+
+  return {
+    visible: list.filter((hole) => hole.id !== largest.id),
+    hiddenBottom: {
+      ...largest,
+      bottomConfidence: Math.min(
+        1,
+        0.72 +
+          Math.min(0.18, (sizeRatio - 2.15) * 0.08) +
+          Math.min(0.10, (dominanceRatio - 2.35) * 0.04)
+      ),
+    },
+  }
 }
 
 function repairAverageBoundaryNormal(boundary) {
@@ -2642,7 +2687,7 @@ function createRepairPaintGeometry(context, triangleSet) {
   return geometry
 }
 
-function RepairOverlay({ context, modelMatrix, holes, selectedHoleId, previewPatch, paintedTriangles, brushCursor, brushRadius }) {
+function RepairOverlay({ context, modelMatrix, holes, selectedHoleIds, paintedTriangles, brushCursor, brushRadius }) {
   const groupRef = useRef(null)
   useEffect(() => {
     const group = groupRef.current
@@ -2653,21 +2698,43 @@ function RepairOverlay({ context, modelMatrix, holes, selectedHoleId, previewPat
     group.matrixWorldNeedsUpdate = true
     group.updateMatrixWorld(true)
   }, [modelMatrix])
-  const previewGeometry = useMemo(() => createRepairPatchPreviewGeometry(previewPatch), [previewPatch])
   const paintGeometry = useMemo(() => createRepairPaintGeometry(context, paintedTriangles), [context, paintedTriangles])
-  useEffect(() => () => { previewGeometry?.dispose?.(); paintGeometry?.dispose?.() }, [previewGeometry, paintGeometry])
+  useEffect(() => () => { paintGeometry?.dispose?.() }, [paintGeometry])
+  const selectedSet = useMemo(() => new Set(selectedHoleIds || []), [selectedHoleIds])
   if (!context) return null
   const lineRadius = Math.max(0.025, Math.min(0.22, context.diagonal * 0.00105))
   return (
     <group ref={groupRef} matrixAutoUpdate={false}>
-      {(holes || []).slice(0, 32).map((hole) => (
-        <TrimBoundaryTube key={hole.id} points={hole.points.map(trimArr)} radius={hole.id === selectedHoleId ? lineRadius * 1.35 : lineRadius} closed />
-      ))}
-      {previewGeometry && (
-        <mesh geometry={previewGeometry} renderOrder={1490} raycast={() => null}>
-          <meshStandardMaterial color="#4ade80" roughness={0.34} metalness={0.04} transparent opacity={0.28} depthWrite={false} depthTest side={THREE.DoubleSide} polygonOffset polygonOffsetFactor={-2} polygonOffsetUnits={-2} />
-        </mesh>
-      )}
+      {(holes || []).slice(0, 64).map((hole) => {
+        const selected = selectedSet.has(hole.id)
+        const points = hole.points.map(trimArr)
+        return (
+          <group key={hole.id}>
+            <TrimBoundaryTube
+              points={points}
+              radius={selected ? lineRadius * 1.45 : lineRadius * 0.78}
+              closed
+              color={selected ? "#7dd3fc" : "#6f7f8a"}
+              opacity={selected ? 0.98 : 0.34}
+              roughness={selected ? 0.20 : 0.38}
+              metalness={selected ? 0.18 : 0.03}
+              renderOrder={selected ? 1502 : 1498}
+            />
+            {selected && (
+              <TrimBoundaryTube
+                points={points}
+                radius={lineRadius * 2.35}
+                closed
+                color="#38bdf8"
+                opacity={0.12}
+                roughness={0.22}
+                metalness={0.08}
+                renderOrder={1501}
+              />
+            )}
+          </group>
+        )
+      })}
       {paintGeometry && (
         <mesh geometry={paintGeometry} renderOrder={1492} raycast={() => null}>
           <meshBasicMaterial color="#60a5fa" transparent opacity={0.22} depthWrite={false} depthTest side={THREE.DoubleSide} polygonOffset polygonOffsetFactor={-2.5} polygonOffsetUnits={-2.5} />
@@ -2682,6 +2749,7 @@ function RepairOverlay({ context, modelMatrix, holes, selectedHoleId, previewPat
     </group>
   )
 }
+
 
 
 /* ---------- Ikony ---------- */
@@ -7406,6 +7474,8 @@ export default function ClientPage() {
   const [repairContext, setRepairContext] = useState(null)
   const [repairHoles, setRepairHoles] = useState([])
   const [repairSelectedHoleId, setRepairSelectedHoleId] = useState("")
+  const [repairSelectedHoleIds, setRepairSelectedHoleIds] = useState([])
+  const [repairHiddenBottomBoundary, setRepairHiddenBottomBoundary] = useState(null)
   const [repairPreviewPatch, setRepairPreviewPatch] = useState(null)
   const [repairPaintedTriangles, setRepairPaintedTriangles] = useState(() => new Set())
   const [repairBrushFactor, setRepairBrushFactor] = useState(0.035)
@@ -8650,6 +8720,8 @@ export default function ClientPage() {
     setRepairContext(null)
     setRepairHoles([])
     setRepairSelectedHoleId("")
+    setRepairSelectedHoleIds([])
+    setRepairHiddenBottomBoundary(null)
     setRepairPreviewPatch(null)
     setRepairPaintedTriangles(new Set())
     setRepairBrushCursor(null)
@@ -8683,37 +8755,38 @@ export default function ClientPage() {
     clearRepairWorkingState()
     setRepairVariant("auto")
     setRepairMode(true)
-    setRepairMessage("Vyberte model. Automatický režim vyhledá malé otevřené hranice, ruční režim dovolí označit problémovou oblast štětcem.")
+    setRepairMessage("Vyberte model. Auto najde opravitelné otevřené hranice a dovolí vybrat více děr najednou; spodní otevřenou část scanu automaticky ignorujeme.")
   }, [files, clearRepairWorkingState])
 
-  const selectRepairHole = useCallback(async (holeId, contextValue = repairContext, holesValue = repairHoles) => {
+  const selectRepairHole = useCallback((holeId, contextValue = repairContext, holesValue = repairHoles) => {
     if (repairBusy || !contextValue || !holeId) return
     const hole = holesValue.find((item) => item.id === holeId)
     if (!hole) return
 
-    setRepairSelectedHoleId(hole.id)
-    setRepairPreviewPatch(null)
-    setRepairStage("preview")
-    setRepairBusy(true)
-    setRepairMessage(`CGAL C1 + Dense225 počítá náhled ${hole.id.replace("hole-", "otvoru ")}…`)
-
-    try {
-      const patch = await prepareCGALRepairPatch(contextValue, hole, (progress) => {
-        const percent = Number(progress?.percent)
-        if (Number.isFinite(percent)) {
-          setRepairMessage(`CGAL C1 + Dense225 · ${Math.max(0, Math.min(100, Math.round(percent)))} % · připravuji náhled opravy…`)
-        }
-      })
-      setRepairPreviewPatch(patch)
-      setRepairMessage(`CGAL náhled ${hole.id.replace("hole-", "otvoru ")} je připravený. Zelená plocha je skutečný C1 + Dense225 patch.`)
-    } catch (error) {
-      console.error("CGAL repair preview error:", error)
+    // Výběr je okamžitý. CGAL se spustí až po explicitním potvrzení opravy.
+    if (repairVariant === "manual") {
+      setRepairSelectedHoleId(hole.id)
+      setRepairSelectedHoleIds([hole.id])
       setRepairPreviewPatch(null)
-      setRepairMessage(error?.message || "CGAL náhled opravy se nepodařilo vytvořit.")
-    } finally {
-      setRepairBusy(false)
+      setRepairStage("preview")
+      setRepairMessage("Otvor je vybraný. Jasně modrý obrys ve scéně označuje boundary, která se opraví po potvrzení.")
+      return
     }
-  }, [repairBusy, repairContext, repairHoles, prepareCGALRepairPatch])
+
+    const alreadySelected = repairSelectedHoleIds.includes(hole.id)
+    const next = alreadySelected
+      ? repairSelectedHoleIds.filter((id) => id !== hole.id)
+      : [...repairSelectedHoleIds, hole.id]
+
+    setRepairSelectedHoleIds(next)
+    setRepairSelectedHoleId(next.includes(hole.id) ? hole.id : (next[next.length - 1] || ""))
+    setRepairPreviewPatch(null)
+    setRepairStage(next.length ? "preview" : "detect")
+    setRepairMessage(next.length
+      ? `Vybráno ${next.length === 1 ? "1 místo" : `${next.length} míst`} k opravě. Jasně modrý obrys označuje vybrané díry.`
+      : "Vyberte jednu nebo více děr. CGAL se spustí až po kliknutí na Opravit vybrané.")
+  }, [repairBusy, repairContext, repairHoles, repairVariant, repairSelectedHoleIds])
+
 
   const selectRepairModel = useCallback((url) => {
     if (repairBusy || !url) return
@@ -8727,50 +8800,52 @@ export default function ClientPage() {
     setRepairMessage("Analyzuji otevřené hrany a topologii sítě…")
     repairPatchCacheRef.current.clear()
 
-    window.setTimeout(async () => {
+    window.setTimeout(() => {
       try {
         const context = buildTrimMeshContext(object)
-        const holes = findRepairBoundaryLoops(context)
+        const rawHoles = findRepairBoundaryLoops(context)
+        const classified = classifyRepairBoundaryLoops(context, rawHoles)
+        const holes = classified.visible
+
         setRepairSelection(url)
         setRepairContext(context)
         setRepairHoles(holes)
+        setRepairHiddenBottomBoundary(classified.hiddenBottom)
         setRepairPaintedTriangles(new Set())
         setRepairBrushCursor(null)
         setRepairSelectedHoleId("")
+        setRepairSelectedHoleIds([])
         setRepairPreviewPatch(null)
+
+        const ignoredText = classified.hiddenBottom
+          ? " Dominantní spodní otevřená boundary byla automaticky ignorována."
+          : ""
 
         if (repairVariant === "manual") {
           setRepairStage("paint")
           setRepairMessage(holes.length
-            ? `Našel jsem ${holes.length} uzavřených otevřených hranic. LMB štětcem označte oblast kolem problému a potom klikněte na Najít v označení.`
-            : "Automatická analýza nenašla uzavřenou boundary. Zkuste přesto označit problémovou oblast; pokud jde o otevřenou trhlinu napojenou na okraj scanu, budeme ji řešit v dalším kroku vývoje.")
+            ? `Našel jsem ${holes.length} opravovatelných otevřených hranic.${ignoredText} LMB štětcem označte oblast kolem problému a potom klikněte na Najít v označení.`
+            : `Automatická analýza nenašla opravovatelnou uzavřenou boundary.${ignoredText}`)
         } else {
-          const candidates = holes.filter((hole) => hole.likely)
-          const first = candidates[0] || holes[0]
-          setRepairStage(first ? "preview" : "detect")
-          if (first) {
-            setRepairSelectedHoleId(first.id)
-            setRepairMessage(`Nalezeno ${holes.length} otevřených smyček (${candidates.length} doporučených). CGAL C1 + Dense225 počítá skutečný náhled…`)
-            const patch = await prepareCGALRepairPatch(context, first, (progress) => {
-              const percent = Number(progress?.percent)
-              if (Number.isFinite(percent)) {
-                setRepairMessage(`CGAL C1 + Dense225 · ${Math.max(0, Math.min(100, Math.round(percent)))} % · připravuji náhled…`)
-              }
-            })
-            setRepairPreviewPatch(patch)
-            setRepairMessage(`Nalezeno ${holes.length} otevřených smyček (${candidates.length} doporučených). Zeleně vidíte skutečný CGAL C1 + Dense225 patch.`)
+          setRepairStage("detect")
+          if (holes.length) {
+            const likelyCount = holes.filter((hole) => hole.likely).length
+            setRepairMessage(
+              `Nalezeno ${holes.length} opravovatelných ${holes.length === 1 ? "otvor" : "otvorů"} (${likelyCount} doporučených).${ignoredText} Vyberte jednu, více nebo všechny díry; CGAL se spustí až při opravě.`
+            )
           } else {
-            setRepairMessage("Na tomto modelu jsem nenašel žádnou uzavřenou otevřenou hranu. Přepněte na Ručně a označte problémovou oblast.")
+            setRepairMessage(`Na tomto modelu jsem nenašel žádnou opravovatelnou uzavřenou otevřenou hranu.${ignoredText}`)
           }
         }
       } catch (error) {
-        console.error("Repair context / CGAL error:", error)
-        setRepairMessage(error?.message || "Síť modelu se nepodařilo analyzovat nebo CGAL engine není dostupný.")
+        console.error("Repair context error:", error)
+        setRepairMessage(error?.message || "Síť modelu se nepodařilo analyzovat.")
       } finally {
         setRepairBusy(false)
       }
     }, 20)
-  }, [repairBusy, repairVariant, prepareCGALRepairPatch])
+  }, [repairBusy, repairVariant])
+
 
   const changeRepairVariant = useCallback((variant) => {
     if (variant !== "auto" && variant !== "manual") return
@@ -8778,6 +8853,7 @@ export default function ClientPage() {
     setRepairPaintedTriangles(new Set())
     setRepairBrushCursor(null)
     setRepairSelectedHoleId("")
+    setRepairSelectedHoleIds([])
     setRepairPreviewPatch(null)
     if (!repairContext || !repairSelection) {
       setRepairStage("model")
@@ -8788,15 +8864,13 @@ export default function ClientPage() {
       setRepairStage("paint")
       setRepairMessage("LMB = malovat oblast · RMB = kamera · velikost štětce nastavíte posuvníkem. Označte okolí problému, nemusíte přesně obkreslovat hranu.")
     } else {
-      const candidates = repairHoles.filter((hole) => hole.likely)
-      const first = candidates[0] || repairHoles[0]
-      if (first) selectRepairHole(first.id)
-      else {
-        setRepairStage("detect")
-        setRepairMessage("Automatická analýza nenašla uzavřený otvor.")
-      }
+      setRepairStage("detect")
+      setRepairMessage(repairHoles.length
+        ? "Vyberte jednu nebo více děr. Jasně modrý obrys označí výběr; CGAL se spustí až po potvrzení."
+        : "Automatická analýza nenašla opravovatelný uzavřený otvor.")
     }
-  }, [repairContext, repairSelection, repairHoles, selectRepairHole])
+  }, [repairContext, repairSelection, repairHoles])
+
 
   const paintRepairHit = useCallback((hit) => {
     if (!repairContext || !hit) return
@@ -8874,6 +8948,7 @@ export default function ClientPage() {
     setRepairPaintedTriangles(new Set())
     setRepairBrushCursor(null)
     setRepairSelectedHoleId("")
+    setRepairSelectedHoleIds([])
     setRepairPreviewPatch(null)
     setRepairStage("paint")
     setRepairMessage("Označení bylo vymazáno. Zvýrazňovačem označte oblast kolem problému.")
@@ -8895,7 +8970,7 @@ export default function ClientPage() {
       setRepairMessage("V označené oblasti jsem nenašel uzavřenou otevřenou hranu. Rozšiřte paint přes samotný okraj díry/trhliny a zkuste to znovu.")
       return
     }
-    setRepairMessage("Otvor v označené oblasti byl nalezen. Připravuji skutečný CGAL C1 + Dense225 patch…")
+    setRepairMessage("Otvor v označené oblasti byl nalezen. Jasně modrý obrys ukáže boundary; CGAL se spustí až po potvrzení opravy.")
     selectRepairHole(best.hole.id)
   }, [repairContext, repairPaintedTriangles, repairHoles, selectRepairHole])
 
@@ -8904,6 +8979,7 @@ export default function ClientPage() {
     const selected = repairHoles.filter((hole) => holeIds.includes(hole.id))
     if (!selected.length) return
 
+    setRepairStage("preview")
     setRepairBusy(true)
     setRepairMessage(selected.length > 1
       ? `CGAL připravuje ${selected.length} oprav C1 + Dense225…`
@@ -8948,6 +9024,8 @@ export default function ClientPage() {
       setRepairContext(null)
       setRepairHoles([])
       setRepairSelectedHoleId("")
+      setRepairSelectedHoleIds([])
+      setRepairHiddenBottomBoundary(null)
       setRepairPreviewPatch(null)
       setRepairPaintedTriangles(new Set())
       setRepairBrushCursor(null)
@@ -8965,14 +9043,30 @@ export default function ClientPage() {
     if (repairSelectedHoleId) applyRepairHoles([repairSelectedHoleId])
   }, [repairSelectedHoleId, applyRepairHoles])
 
-  const repairAllLikelyHoles = useCallback(() => {
-    const likely = repairHoles.filter((hole) => hole.likely)
-    if (!likely.length) {
-      setRepairMessage("Nenašel jsem žádné malé otvory vhodné pro bezpečné Opravit vše. Vyberte konkrétní smyčku ručně.")
+  const repairSelectedAutoHoles = useCallback(() => {
+    if (!repairSelectedHoleIds.length) {
+      setRepairMessage("Nejdřív vyberte alespoň jednu díru.")
       return
     }
-    applyRepairHoles(likely.map((hole) => hole.id), "auto")
-  }, [repairHoles, applyRepairHoles])
+    applyRepairHoles(repairSelectedHoleIds, "auto")
+  }, [repairSelectedHoleIds, applyRepairHoles])
+
+  const selectAllRepairHoles = useCallback(() => {
+    if (!repairHoles.length) return
+    const ids = repairHoles.map((hole) => hole.id)
+    setRepairSelectedHoleIds(ids)
+    setRepairSelectedHoleId(ids[ids.length - 1] || "")
+    setRepairStage("preview")
+    setRepairMessage(`Vybráno všech ${ids.length} ${ids.length === 1 ? "místo" : "míst"} k opravě. Spodní otevřená boundary se do výběru nikdy nezařazuje.`)
+  }, [repairHoles])
+
+  const clearRepairHoleSelection = useCallback(() => {
+    setRepairSelectedHoleIds([])
+    setRepairSelectedHoleId("")
+    setRepairStage("detect")
+    setRepairMessage("Výběr byl zrušen. Kliknutím na čísla děr vyberte jednu nebo více oblastí.")
+  }, [])
+
 
   const continueRepair = useCallback(() => {
     const url = repairSelection
@@ -8980,6 +9074,8 @@ export default function ClientPage() {
     setRepairContext(null)
     setRepairHoles([])
     setRepairSelectedHoleId("")
+    setRepairSelectedHoleIds([])
+    setRepairHiddenBottomBoundary(null)
     setRepairPreviewPatch(null)
     setRepairPaintedTriangles(new Set())
     setRepairStage("model")
@@ -9007,6 +9103,8 @@ export default function ClientPage() {
     setRepairContext(null)
     setRepairHoles([])
     setRepairSelectedHoleId("")
+    setRepairSelectedHoleIds([])
+    setRepairHiddenBottomBoundary(null)
     setRepairPreviewPatch(null)
     setRepairPaintedTriangles(new Set())
     setRepairMessage("Poslední oprava byla vrácena. Vyberte model pro další práci.")
@@ -12516,6 +12614,8 @@ export default function ClientPage() {
 
   const repairSelectedFile = repairSelection ? files.find((file) => file.url === repairSelection) : null
   const repairLikelyHoles = repairHoles.filter((hole) => hole.likely)
+  const repairSelectedAutoCount = repairSelectedHoleIds.length
+  const repairAllVisibleSelected = repairHoles.length > 0 && repairSelectedAutoCount === repairHoles.length
   const repairWorkspace = repairMode && (
     <div style={{
       position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)", zIndex: 73,
@@ -12533,7 +12633,7 @@ export default function ClientPage() {
           </div>
           <div style={{ marginTop: 7, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
             {[
-              ["model", "Model"], ["work", repairVariant === "manual" ? "Oblast" : "Analýza"], ["preview", "Náhled"], ["result", "Výsledek"],
+              ["model", "Model"], ["work", repairVariant === "manual" ? "Oblast" : "Analýza"], ["preview", "Výběr"], ["result", "Výsledek"],
             ].map(([key, label], index) => {
               const active = key === "model" ? repairStage === "model" : key === "work" ? ["detect","paint"].includes(repairStage) : key === "preview" ? repairStage === "preview" : repairStage === "result"
               const done = key === "model" ? !!repairSelection : key === "work" ? (!!repairContext && repairStage !== "model") : key === "preview" ? (repairStage === "preview" || repairStage === "result") : repairStage === "result"
@@ -12567,24 +12667,44 @@ export default function ClientPage() {
 
       {repairVariant === "auto" && repairStage !== "model" && repairStage !== "result" && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-          <div style={{ minWidth: 0, flex: "1 1 300px" }}>
+          <div style={{ minWidth: 0, flex: "1 1 360px" }}>
             <div style={{ color: "#858585", fontSize: 9.2, marginBottom: 7 }}>
-              {repairHoles.length ? `Nalezeno ${repairHoles.length} uzavřených otevřených hranic · ${repairLikelyHoles.length} doporučených jako skutečné díry.` : "Nebyla nalezena žádná uzavřená otevřená hrana."}
+              {repairHoles.length
+                ? `Nalezeno ${repairHoles.length} opravovatelných ${repairHoles.length === 1 ? "otvor" : "otvorů"} · ${repairLikelyHoles.length} doporučených.${repairHiddenBottomBoundary ? " Spodní otevřená boundary byla skryta a nebude opravena." : ""}`
+                : `Nebyla nalezena žádná opravovatelná otevřená hrana.${repairHiddenBottomBoundary ? " Spodní otevřená boundary byla správně ignorována." : ""}`}
             </div>
             <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-              {repairHoles.slice(0, 12).map((hole, index) => (
-                <button key={hole.id} type="button" onClick={() => selectRepairHole(hole.id)}
-                  style={{ height: 29, padding: "0 9px", borderRadius: 8, border: repairSelectedHoleId === hole.id ? "1px solid rgba(96,165,250,.35)" : "1px solid rgba(255,255,255,.07)", background: repairSelectedHoleId === hole.id ? "rgba(59,130,246,.10)" : "rgba(255,255,255,.025)", color: repairSelectedHoleId === hole.id ? "#bfdbfe" : hole.likely ? "#b5b5b5" : "#676767", fontSize: 8.7, fontWeight: 680, cursor: "pointer" }}>
-                  {index + 1}. Ø {(hole.equivalentRadius * 2).toFixed(1)}{hole.likely ? "" : " · velká"}
-                </button>
-              ))}
+              {repairHoles.map((hole, index) => {
+                const selected = repairSelectedHoleIds.includes(hole.id)
+                return (
+                  <button key={hole.id} type="button" onClick={() => selectRepairHole(hole.id)} disabled={repairBusy}
+                    style={{
+                      height: 29, padding: "0 9px", borderRadius: 8,
+                      border: selected ? "1px solid rgba(125,211,252,.58)" : "1px solid rgba(255,255,255,.07)",
+                      background: selected ? "rgba(56,189,248,.13)" : "rgba(255,255,255,.025)",
+                      color: selected ? "#d7f3ff" : hole.likely ? "#b5b5b5" : "#777",
+                      boxShadow: selected ? "0 0 0 2px rgba(56,189,248,.055), 0 0 16px rgba(56,189,248,.10)" : "none",
+                      fontSize: 8.7, fontWeight: 680, cursor: repairBusy ? "wait" : "pointer",
+                    }}>
+                    {selected ? "✓ " : ""}{index + 1}. Ø {(hole.equivalentRadius * 2).toFixed(1)}{hole.likely ? "" : " · velká"}
+                  </button>
+                )
+              })}
             </div>
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            {repairSelectedHoleId && <button type="button" onClick={repairSelectedHole} disabled={repairBusy}
-              style={{ height: 31, padding: "0 11px", borderRadius: 8, border: "1px solid rgba(74,222,128,.20)", background: "rgba(34,197,94,.075)", color: "#bbf7d0", fontSize: 9, fontWeight: 720, cursor: repairBusy ? "wait" : "pointer" }}>Opravit vybraný</button>}
-            {repairLikelyHoles.length > 1 && <button type="button" onClick={repairAllLikelyHoles} disabled={repairBusy}
-              style={{ height: 31, padding: "0 11px", borderRadius: 8, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#d2d2d2", fontSize: 9, fontWeight: 700, cursor: repairBusy ? "wait" : "pointer" }}>Opravit vše ({repairLikelyHoles.length})</button>}
+            {repairHoles.length > 1 && (
+              <button type="button" onClick={repairAllVisibleSelected ? clearRepairHoleSelection : selectAllRepairHoles} disabled={repairBusy}
+                style={{ height: 31, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#bdbdbd", fontSize: 9, fontWeight: 690, cursor: repairBusy ? "wait" : "pointer" }}>
+                {repairAllVisibleSelected ? "Zrušit výběr" : `Vybrat vše (${repairHoles.length})`}
+              </button>
+            )}
+            {repairSelectedAutoCount > 0 && (
+              <button type="button" onClick={repairSelectedAutoHoles} disabled={repairBusy}
+                style={{ height: 31, padding: "0 11px", borderRadius: 8, border: "1px solid rgba(74,222,128,.20)", background: "rgba(34,197,94,.075)", color: "#bbf7d0", fontSize: 9, fontWeight: 720, cursor: repairBusy ? "wait" : "pointer" }}>
+                Opravit vybrané ({repairSelectedAutoCount})
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -12608,7 +12728,7 @@ export default function ClientPage() {
 
       {repairVariant === "manual" && repairStage === "preview" && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-          <div style={{ color: "#8b8b8b", fontSize: 9.2 }}>Zelená plocha je preview dopočítaného povrchu. Původní mesh se změní až po potvrzení.</div>
+          <div style={{ color: "#8b8b8b", fontSize: 9.2 }}>Jasně modrý obrys označuje boundary vybraného otvoru. CGAL se spustí až po potvrzení opravy.</div>
           <div style={{ display: "flex", gap: 6 }}>
             <button type="button" onClick={() => { setRepairStage("paint"); setRepairSelectedHoleId(""); setRepairPreviewPatch(null) }} style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 9, fontWeight: 680, cursor: "pointer" }}>Zpět k paintu</button>
             <button type="button" onClick={repairSelectedHole} disabled={!repairSelectedHoleId || repairBusy} style={{ height: 31, padding: "0 11px", borderRadius: 8, border: "1px solid rgba(74,222,128,.20)", background: "rgba(34,197,94,.075)", color: "#bbf7d0", fontSize: 9, fontWeight: 720, cursor: repairBusy ? "wait" : "pointer" }}>Opravit</button>
@@ -13826,10 +13946,9 @@ export default function ClientPage() {
               context={repairContext}
               modelMatrix={modelTransforms[repairSelection]}
               holes={repairVariant === "auto"
-                ? repairHoles.filter((hole) => hole.likely || hole.id === repairSelectedHoleId)
+                ? repairHoles
                 : (repairSelectedHoleId ? repairHoles.filter((hole) => hole.id === repairSelectedHoleId) : [])}
-              selectedHoleId={repairSelectedHoleId}
-              previewPatch={repairPreviewPatch}
+              selectedHoleIds={repairVariant === "auto" ? repairSelectedHoleIds : (repairSelectedHoleId ? [repairSelectedHoleId] : [])}
               paintedTriangles={repairPaintedTriangles}
               brushCursor={repairBrushCursor}
               brushRadius={repairContext.diagonal * repairBrushFactor}
