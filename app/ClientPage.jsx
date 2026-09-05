@@ -9285,7 +9285,7 @@ export default function ClientPage() {
     setRepairSelectedHoleIds(ids)
     setRepairSelectedHoleId(ids[ids.length - 1] || "")
     setRepairStage("preview")
-    setRepairMessage(`Vybráno všech ${ids.length} zbývajících ${ids.length === 1 ? "místo" : "míst"} k opravě. Spodní otevřená boundary se do výběru nikdy nezařazuje.`)
+    setRepairMessage(`Vybráno všech ${ids.length} zbývajících ${ids.length === 1 ? "místo" : "míst"} k opravě.`)
   }, [repairHoles, repairCompletedHoleIds])
 
   const clearRepairHoleSelection = useCallback(() => {
@@ -12940,8 +12940,104 @@ export default function ClientPage() {
           transition:width .32s cubic-bezier(.2,.75,.25,1);
           will-change:width;
         }
+
+        @property --artheticRepairBeamAngle {
+          syntax:"<angle>";
+          inherits:false;
+          initial-value:0deg;
+        }
+        @keyframes artheticRepairReadyBeam {
+          to { --artheticRepairBeamAngle:360deg; }
+        }
+        @keyframes artheticRepairReadyParticle {
+          0%   { offset-distance:0%; opacity:0; transform:scale(.45) translateY(0); }
+          7%   { opacity:.92; transform:scale(1) translateY(-1px); }
+          44%  { opacity:.58; transform:scale(.78) translateY(-2px); }
+          72%  { opacity:.16; transform:scale(.55) translateY(-4px); }
+          100% { offset-distance:100%; opacity:0; transform:scale(.35) translateY(-6px); }
+        }
+        .artheticRepairReadyAction {
+          position:relative;
+          isolation:isolate;
+          overflow:visible;
+          border:1px solid transparent !important;
+          background:transparent !important;
+          box-shadow:none !important;
+        }
+        .artheticRepairReadyAction::before {
+          content:"";
+          position:absolute;
+          inset:-2px;
+          padding:2px;
+          border-radius:12px;
+          pointer-events:none;
+          z-index:0;
+          background:conic-gradient(
+            from var(--artheticRepairBeamAngle),
+            rgba(74,222,128,0) 0deg 286deg,
+            rgba(74,222,128,.05) 301deg,
+            rgba(74,222,128,.42) 316deg,
+            rgba(187,247,208,.96) 328deg,
+            rgba(240,253,244,1) 334deg,
+            rgba(134,239,172,.72) 342deg,
+            rgba(74,222,128,.08) 353deg,
+            rgba(74,222,128,0) 360deg
+          );
+          -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+          -webkit-mask-composite:xor;
+          mask-composite:exclude;
+          filter:drop-shadow(0 0 2px rgba(134,239,172,.75)) drop-shadow(0 0 6px rgba(34,197,94,.35));
+          animation:artheticRepairReadyBeam 1.9s linear infinite;
+        }
+        .artheticRepairReadyAction::after {
+          content:"";
+          position:absolute;
+          inset:1px;
+          border-radius:8px;
+          z-index:1;
+          pointer-events:none;
+          background:rgba(18,42,27,.96);
+          box-shadow:inset 0 0 0 1px rgba(34,197,94,.12);
+        }
+        .artheticRepairReadyAction > * {
+          position:relative;
+          z-index:3;
+        }
+        .artheticRepairReadyParticles {
+          position:absolute !important;
+          inset:-7px;
+          z-index:2 !important;
+          pointer-events:none;
+          overflow:visible;
+        }
+        .artheticRepairReadyParticle {
+          position:absolute !important;
+          left:0;
+          top:0;
+          width:3px;
+          height:3px;
+          border-radius:50%;
+          background:rgba(187,247,208,.95);
+          box-shadow:0 0 3px rgba(134,239,172,.9), 0 0 7px rgba(34,197,94,.45);
+          offset-path:inset(7px round 10px);
+          offset-rotate:0deg;
+          opacity:0;
+          animation:artheticRepairReadyParticle 2.35s linear infinite;
+        }
+        .artheticRepairReadyParticle:nth-child(2) {
+          width:2px; height:2px; animation-delay:-.42s; animation-duration:2.7s; opacity:.72;
+        }
+        .artheticRepairReadyParticle:nth-child(3) {
+          width:2.5px; height:2.5px; animation-delay:-.96s; animation-duration:3.05s; opacity:.58;
+        }
+        .artheticRepairReadyParticle:nth-child(4) {
+          width:1.5px; height:1.5px; animation-delay:-1.48s; animation-duration:2.55s; opacity:.5;
+        }
+        .artheticRepairReadyParticle:nth-child(5) {
+          width:2px; height:2px; animation-delay:-1.82s; animation-duration:3.25s; opacity:.42;
+        }
         .artheticRepairSideActions {
-          position:absolute; top:10px; left:calc(50% + 420px); z-index:74; width:148px;
+          position:absolute; top:10px; left:calc(50% + 420px); z-index:74; width:158px;
           box-sizing:border-box; padding:8px; border-radius:13px;
           background:rgba(11,11,11,.955); border:1px solid rgba(255,255,255,.10);
           box-shadow:0 18px 58px rgba(0,0,0,.42); backdrop-filter:blur(22px); -webkit-backdrop-filter:blur(22px);
@@ -12979,8 +13075,6 @@ export default function ClientPage() {
                 style={{ height: 27, padding: "0 10px", borderRadius: 7, border: "none", background: repairVariant === key ? "rgba(96,165,250,.13)" : "transparent", color: repairVariant === key ? "#bfdbfe" : "#777", fontSize: 9, fontWeight: 720, cursor: repairBusy ? "wait" : "pointer" }}>{label}</button>
             ))}
           </div>
-          <button type="button" onClick={closeRepairMode} disabled={repairBusy}
-            style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#c8c8c8", cursor: repairBusy ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}>Hotovo / Zavřít</button>
         </div>
       </div>
 
@@ -12998,8 +13092,8 @@ export default function ClientPage() {
           <div style={{ minWidth: 0, flex: "1 1 360px" }}>
             <div style={{ color: "#858585", fontSize: 9.2, marginBottom: 7 }}>
               {repairHoles.length
-                ? `Nalezeno ${repairHoles.length} opravovatelných ${repairHoles.length === 1 ? "otvor" : "otvorů"} · ${repairLikelyHoles.length} doporučených${repairCompletedHoleIds.length ? ` · ${repairCompletedHoleIds.length} opraveno` : ""}.${repairHiddenBottomBoundary ? " Spodní otevřená boundary byla skryta a nebude opravena." : ""}`
-                : `Nebyla nalezena žádná opravovatelná otevřená hrana.${repairHiddenBottomBoundary ? " Spodní otevřená boundary byla správně ignorována." : ""}`}
+                ? `Nalezeno ${repairHoles.length} opravovatelných ${repairHoles.length === 1 ? "otvor" : "otvorů"} · ${repairLikelyHoles.length} doporučených${repairCompletedHoleIds.length ? ` · ${repairCompletedHoleIds.length} opraveno` : ""}.`
+                : "Nebyla nalezena žádná opravovatelná otevřená hrana."}
             </div>
             <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
               {repairHoles.map((hole, index) => {
@@ -13036,19 +13130,38 @@ export default function ClientPage() {
                   </button>
                 )
               })}
+              {repairPendingHoles.length > 1 && (
+                <>
+                  <div aria-hidden="true" style={{ width: 1, height: 20, margin: "4px 3px", alignSelf: "center", background: "rgba(255,255,255,.10)", flex: "0 0 auto" }} />
+                  <button
+                    type="button"
+                    onClick={repairAllVisibleSelected ? clearRepairHoleSelection : selectAllRepairHoles}
+                    disabled={repairBusy}
+                    style={{ height: 29, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#bdbdbd", fontSize: 8.7, fontWeight: 690, cursor: repairBusy ? "wait" : "pointer" }}
+                  >
+                    {repairAllVisibleSelected ? "Zrušit výběr" : "Vybrat vše"}
+                  </button>
+                </>
+              )}
             </div>
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            {repairPendingHoles.length > 1 && (
-              <button type="button" onClick={repairAllVisibleSelected ? clearRepairHoleSelection : selectAllRepairHoles} disabled={repairBusy}
-                style={{ height: 31, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#bdbdbd", fontSize: 9, fontWeight: 690, cursor: repairBusy ? "wait" : "pointer" }}>
-                {repairAllVisibleSelected ? "Zrušit výběr" : `Vybrat vše (${repairPendingHoles.length})`}
-              </button>
-            )}
             {repairSelectedAutoCount > 0 && (
-              <button type="button" onClick={repairSelectedAutoHoles} disabled={repairBusy}
-                style={{ height: 31, padding: "0 11px", borderRadius: 8, border: "1px solid rgba(74,222,128,.20)", background: "rgba(34,197,94,.075)", color: "#bbf7d0", fontSize: 9, fontWeight: 720, cursor: repairBusy ? "wait" : "pointer" }}>
-                Opravit vybrané ({repairSelectedAutoCount})
+              <button
+                className="artheticRepairReadyAction"
+                type="button"
+                onClick={repairSelectedAutoHoles}
+                disabled={repairBusy}
+                style={{ height: 31, padding: "0 11px", borderRadius: 8, color: "#bbf7d0", fontSize: 9, fontWeight: 720, cursor: repairBusy ? "wait" : "pointer", minWidth: 112 }}
+              >
+                <span className="artheticRepairReadyParticles" aria-hidden="true">
+                  <i className="artheticRepairReadyParticle" />
+                  <i className="artheticRepairReadyParticle" />
+                  <i className="artheticRepairReadyParticle" />
+                  <i className="artheticRepairReadyParticle" />
+                  <i className="artheticRepairReadyParticle" />
+                </span>
+                <span>Opravit vybrané</span>
               </button>
             )}
           </div>
@@ -13110,36 +13223,56 @@ export default function ClientPage() {
     </div>
   )
 
-  const repairActionsPanel = repairMode && repairSelection && repairedExportsByUrl[repairSelection] && (
+  const repairActionsPanel = repairMode && (
     <div className="artheticRepairSideActions">
-      <div style={{ padding: "1px 2px 7px", color: "#696969", fontSize: 8.1, fontWeight: 720, letterSpacing: ".035em", textTransform: "uppercase" }}>Výsledek</div>
       <div style={{ display: "grid", gap: 6 }}>
+        {repairSelection && repairedExportsByUrl[repairSelection] && (
+          <>
+            <button
+              type="button"
+              onClick={() => undoLastRepair(repairSelection)}
+              disabled={repairBusy}
+              style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: repairBusy ? "#555" : "#c8c8c8", cursor: repairBusy ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7 }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M9 7L4.5 11.5L9 16" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M5 11.5H14.2C17.4 11.5 19.5 13.2 19.5 16.4C19.5 17 19.43 17.55 19.28 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <span>Undo</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => downloadRepairedModel(repairSelection)}
+              disabled={repairBusy || repairExportBusyUrl === repairSelection}
+              style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: repairBusy || repairExportBusyUrl === repairSelection ? "#555" : "#c8c8c8", cursor: repairBusy || repairExportBusyUrl === repairSelection ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
+            >
+              {repairExportBusyUrl === repairSelection ? "Připravuji…" : "Stáhnout"}
+            </button>
+
+            {editorCapabilities.canSaveRepairedToCase && (
+              <button
+                type="button"
+                onClick={() => saveRepairedModelToCase(repairSelection)}
+                disabled={repairBusy || repairExportBusyUrl === repairSelection || !!repairedExportsByUrl[repairSelection]?.saveRequested}
+                style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: repairBusy || repairedExportsByUrl[repairSelection]?.saveRequested ? "#555" : "#c8c8c8", cursor: repairBusy || repairedExportsByUrl[repairSelection]?.saveRequested ? "default" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
+              >
+                {repairedExportsByUrl[repairSelection]?.saveRequested ? "Předáno" : "Uložit do zakázky"}
+              </button>
+            )}
+
+            <div aria-hidden="true" style={{ height: 1, margin: "1px 2px", background: "rgba(255,255,255,.075)" }} />
+          </>
+        )}
+
         <button
           type="button"
-          onClick={() => undoLastRepair(repairSelection)}
+          onClick={closeRepairMode}
           disabled={repairBusy}
           style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: repairBusy ? "#555" : "#c8c8c8", cursor: repairBusy ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
         >
-          Vrátit poslední
+          Hotovo / Zavřít
         </button>
-        <button
-          type="button"
-          onClick={() => downloadRepairedModel(repairSelection)}
-          disabled={repairBusy || repairExportBusyUrl === repairSelection}
-          style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: repairBusy || repairExportBusyUrl === repairSelection ? "#555" : "#c8c8c8", cursor: repairBusy || repairExportBusyUrl === repairSelection ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
-        >
-          {repairExportBusyUrl === repairSelection ? "Připravuji…" : "Stáhnout"}
-        </button>
-        {editorCapabilities.canSaveRepairedToCase && (
-          <button
-            type="button"
-            onClick={() => saveRepairedModelToCase(repairSelection)}
-            disabled={repairBusy || repairExportBusyUrl === repairSelection || !!repairedExportsByUrl[repairSelection]?.saveRequested}
-            style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: repairBusy || repairedExportsByUrl[repairSelection]?.saveRequested ? "#555" : "#c8c8c8", cursor: repairBusy || repairedExportsByUrl[repairSelection]?.saveRequested ? "default" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
-          >
-            {repairedExportsByUrl[repairSelection]?.saveRequested ? "Předáno" : "Uložit do zakázky"}
-          </button>
-        )}
       </div>
     </div>
   )
