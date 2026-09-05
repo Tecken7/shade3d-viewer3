@@ -8907,7 +8907,7 @@ function cadBuildIsotropicTransitionUV(rawLoop, bottomCount, transitionDepth, ta
 }
 
 
-// V17.2 – graded shape-locked transition strip.
+// V17.2 – graded shape-locked transition strip (legacy helper; V18 uses adaptive columns).
 // V17.1 už zabránil globálním Delaunay diagonálám přes celý arch, ale interní
 // řady byly řidší než finální seam profil. Tím vznikl nežádoucí density dip:
 // hustá scan boundary -> řídký střed -> znovu hustší seam, což vytvářelo velké
@@ -8982,6 +8982,110 @@ function cadBuildGradedTransitionRows(perimeter, sourceCount, targetCount, trans
   }
 }
 
+
+// V18 – adaptive physical transition columns.
+// Místo globálních horizontálních ringů rozdělujeme přechod po jednotlivých
+// sloupcích kolem archu podle skutečné 3D délky daného profilu. Krátká místa
+// tak dostanou méně segmentů a hlubší části více, bez dlouhých jehlových faces.
+function cadBuildAdaptiveTransitionColumns(evaluateSurface, count, firstV = 0.055, targetSpacing = 0.52) {
+  const columns = new Array(count)
+  let minSegments = Infinity
+  let maxSegments = 0
+  let totalInterior = 0
+  let maxColumnLength = 0
+  let minColumnLength = Infinity
+
+  const sampleCount = 18
+  for (let i = 0; i < count; i++) {
+    const u = i / count
+    const samples = []
+    const cumulative = [0]
+    let total = 0
+    let previous = evaluateSurface(u, firstV)
+    samples.push({ v: firstV, p: previous })
+
+    for (let k = 1; k <= sampleCount; k++) {
+      const v = THREE.MathUtils.lerp(firstV, 1, k / sampleCount)
+      const point = evaluateSurface(u, v)
+      total += point.distanceTo(previous)
+      cumulative.push(total)
+      samples.push({ v, p: point })
+      previous = point
+    }
+
+    const segments = Math.max(2, Math.min(18, Math.ceil(total / Math.max(0.34, targetSpacing))))
+    const levels = [firstV]
+    for (let k = 1; k < segments; k++) {
+      const wanted = (total * k) / segments
+      let seg = 0
+      while (seg + 1 < cumulative.length && cumulative[seg + 1] < wanted) seg++
+      const a = samples[seg]
+      const b = samples[Math.min(seg + 1, samples.length - 1)]
+      const da = cumulative[seg]
+      const db = cumulative[Math.min(seg + 1, cumulative.length - 1)]
+      const t = db > da ? THREE.MathUtils.clamp((wanted - da) / (db - da), 0, 1) : 0
+      levels.push(THREE.MathUtils.lerp(a.v, b.v, t))
+    }
+    levels.push(1)
+
+    columns[i] = { u, levels, length: total, segments }
+    minSegments = Math.min(minSegments, segments)
+    maxSegments = Math.max(maxSegments, segments)
+    totalInterior += Math.max(0, levels.length - 2)
+    maxColumnLength = Math.max(maxColumnLength, total)
+    minColumnLength = Math.min(minColumnLength, total)
+  }
+
+  return {
+    columns,
+    firstV,
+    targetSpacing,
+    minSegments: Number.isFinite(minSegments) ? minSegments : 0,
+    maxSegments,
+    totalInterior,
+    minColumnLength: Number.isFinite(minColumnLength) ? minColumnLength : 0,
+    maxColumnLength,
+  }
+}
+
+function cadStitchOpenTransitionColumns(indices, indicesA, levelsA, indicesB, levelsB, isUpper) {
+  if (!indicesA?.length || !indicesB?.length) return
+  const pushTri = (a, b, c) => {
+    if (isUpper) indices.push(a, c, b)
+    else indices.push(a, b, c)
+  }
+  const pushQuadLocal = (a, b, c, d) => {
+    pushTri(a, b, c)
+    pushTri(a, c, d)
+  }
+
+  let i = 0
+  let j = 0
+  const eps = 1e-7
+  while (i < indicesA.length - 1 || j < indicesB.length - 1) {
+    const aCurrent = indicesA[Math.min(i, indicesA.length - 1)]
+    const bCurrent = indicesB[Math.min(j, indicesB.length - 1)]
+    const nextA = i < indicesA.length - 1 ? levelsA[i + 1] : Infinity
+    const nextB = j < indicesB.length - 1 ? levelsB[j + 1] : Infinity
+
+    if (i < indicesA.length - 1 && j < indicesB.length - 1 && Math.abs(nextA - nextB) <= eps) {
+      const aNext = indicesA[i + 1]
+      const bNext = indicesB[j + 1]
+      pushQuadLocal(aCurrent, aNext, bNext, bCurrent)
+      i++
+      j++
+    } else if (i < indicesA.length - 1 && (j >= indicesB.length - 1 || nextA < nextB)) {
+      pushTri(aCurrent, indicesA[i + 1], bCurrent)
+      i++
+    } else if (j < indicesB.length - 1) {
+      pushTri(aCurrent, indicesB[j + 1], bCurrent)
+      j++
+    } else {
+      break
+    }
+  }
+}
+
 function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
   const collectedTrianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
   const boundaryData = cadExtractBoundaryLoopsRobust(collectedTrianglePositions)
@@ -9033,26 +9137,31 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const sampledRawLoop = cadResampleClosedLoop(rawLoop, profileTargetSpacing)
   let regularized = cadSmoothClosedLoop(sampledRawLoop, 30)
   regularized = cadSmoothClosedLoop(regularized, 10)
+  // V18: Medit drží ~0.39 mm až na HOTOVÉM Straight profilu. Předchozí verze
+  // určovala počet bodů ještě z delší raw boundary, takže po smoothingu zůstalo
+  // ~495 bodů na ~169 mm místo referenčních ~435. Resamplujeme proto znovu až
+  // po regularizaci a wall density tak odpovídá skutečnému finálnímu obvodu.
+  regularized = cadResampleClosedLoop(regularized, profileTargetSpacing)
 
   const boundaryMinY = Math.min(...rawLoop.map((p) => p.y))
   const boundaryMaxY = Math.max(...rawLoop.map((p) => p.y))
   const boundaryExtremeY = isUpper ? boundaryMaxY : boundaryMinY
   const availableBaseDepth = Math.max(0.6, isUpper ? baseCapY - boundaryExtremeY : boundaryExtremeY - baseCapY)
 
-  // Medit reference: změny původní geometrie končí přibližně kolem 1–1.25 mm.
-  // Samotný CAD bridge proto držíme typicky ~1.0–1.45 mm a nezávisle na Total Height.
-  const desiredTransitionDepth = Math.max(0.95, Math.min(1.45, boundaryData.diagonal * 0.0205))
-  const transitionDepth = Math.max(0.48, Math.min(desiredTransitionDepth, availableBaseDepth * 0.42))
+  // V18 – Medit-calibrated transition height. Přímé měření referenčního STL
+  // ukazuje, že pravidelná stěna začíná prakticky v rovině EXTREME trim boundary,
+  // ne o dalších ~1.0–1.4 mm směrem do báze. Předchozí posun dělal wall o ~1.2 mm
+  // kratší a přechod zbytečně vysoký. Držíme jen zanedbatelný 0.02mm offset.
+  const transitionEndOffset = Math.min(0.04, Math.max(0.015, boundaryData.diagonal * 0.00035))
+  const targetY = boundaryExtremeY + (isUpper ? transitionEndOffset : -transitionEndOffset)
+  const transitionDepth = transitionEndOffset
   const smoothstep = (t) => t * t * (3 - 2 * t)
   const profileEase = (t) => {
     const s = smoothstep(t)
     return s * s * (3 - 2 * s)
   }
 
-  // V17.2 – stejný shape-locked geometrický profil jako V12/V16. Surface je
-  // kontinuální; topologie používá graded lokální řady bez density dipu V17.1.
-  const targetCount = sampledRawLoop.length
-  const targetY = boundaryExtremeY + (isUpper ? transitionDepth : -transitionDepth)
+  const targetCount = regularized.length
   const capMargin = Math.min(0.45, Math.max(0.16, availableBaseDepth * 0.08))
   const rawArcTable = cadClosedLoopArcTable(rawLoop)
 
@@ -9077,13 +9186,17 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   // takže V17 nemění shape báze – mění pouze distribuci polygonů v přechodu.
   const transitionLoop = new Array(targetCount)
   for (let i = 0; i < targetCount; i++) transitionLoop[i] = evaluateTransitionSurface(i / targetCount, 1)
-  const transitionPatchSpacing = Math.max(0.37, Math.min(0.43, boundaryData.diagonal * 0.0072))
-  const transitionPatchRows = cadBuildGradedTransitionRows(
-    rawArcTable.total,
-    rawLoop.length,
+
+  // V18: počet vertikálních segmentů se neodvozuje od jednoho nominálního
+  // transitionDepth. Raw boundary má lokálně několikamilimetrové rozdíly Y, takže
+  // každá pozice kolem archu dostane vlastní počet segmentů podle skutečné 3D
+  // délky surface column. Tím mizí dlouhé jehly v hlubších částech trimu.
+  const transitionColumnSpacing = Math.max(0.46, Math.min(0.56, boundaryData.diagonal * 0.0092))
+  const transitionColumns = cadBuildAdaptiveTransitionColumns(
+    evaluateTransitionSurface,
     targetCount,
-    transitionDepth,
-    transitionPatchSpacing
+    0.055,
+    transitionColumnSpacing
   )
   const seamOffset = Math.min(0.10, Math.max(0.04, availableBaseDepth * 0.025))
   const seamY = isUpper
@@ -9148,44 +9261,53 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     }
   }
 
-  // V17.2 graded local transition. Počet bodů se mezi source boundary a seamem
-  // mění monotónně, takže nevzniká řídký střed ani následné vějíře. Každá face
-  // stále spojuje pouze lokálně sousední body kolem archu.
-  const transitionRowIndices = []
-  const transitionRowPoints = []
-  for (const row of transitionPatchRows.rows) {
-    const points = row.map(({ u, v }) => evaluateTransitionSurface(u, v))
-    transitionRowPoints.push(points)
-    transitionRowIndices.push(appendRing(points))
+  // V18 adaptive-column transition. První ring je jen 5.5 % dovnitř surface,
+  // takže bezpečně převezme přesnou scan boundary. Od něj k transition end už
+  // mesh vzniká po jednotlivých fyzicky adaptivních sloupcích.
+  const firstTransitionPoints = new Array(targetCount)
+  for (let i = 0; i < targetCount; i++) {
+    firstTransitionPoints[i] = evaluateTransitionSurface(i / targetCount, transitionColumns.firstV)
+  }
+  const firstTransitionIndices = appendRing(firstTransitionPoints)
+
+  cadStitchClosedRings(
+    indices,
+    exactBoundaryIndices, rawLoop,
+    firstTransitionIndices, firstTransitionPoints,
+    isUpper
+  )
+
+  const columnIndices = new Array(targetCount)
+  const columnLevels = new Array(targetCount)
+  let transitionInteriorVertices = 0
+
+  for (let i = 0; i < targetCount; i++) {
+    const spec = transitionColumns.columns[i]
+    const ids = [firstTransitionIndices[i]]
+    const levels = [transitionColumns.firstV]
+    for (let k = 1; k < spec.levels.length - 1; k++) {
+      const v = spec.levels[k]
+      const p = evaluateTransitionSurface(spec.u, v)
+      const idx = positions.length / 3
+      positions.push(p.x, p.y, p.z)
+      ids.push(idx)
+      levels.push(v)
+      transitionInteriorVertices++
+    }
+    ids.push(transitionEndIndices[i])
+    levels.push(1)
+    columnIndices[i] = ids
+    columnLevels[i] = levels
   }
 
-  if (transitionRowIndices.length) {
-    // Přesná scan boundary může mít výrazně více vertexů než první řada.
-    // Sešijeme je podle délkového parametru, nikoli fan triangulací.
-    cadStitchClosedRings(
+  for (let i = 0; i < targetCount; i++) {
+    const j = (i + 1) % targetCount
+    cadStitchOpenTransitionColumns(
       indices,
-      exactBoundaryIndices, rawLoop,
-      transitionRowIndices[0], transitionRowPoints[0],
+      columnIndices[i], columnLevels[i],
+      columnIndices[j], columnLevels[j],
       isUpper
     )
-
-    for (let r = 0; r < transitionRowIndices.length - 1; r++) {
-      cadStitchClosedRings(
-        indices,
-        transitionRowIndices[r], transitionRowPoints[r],
-        transitionRowIndices[r + 1], transitionRowPoints[r + 1],
-        isUpper
-      )
-    }
-
-    cadStitchClosedRings(
-      indices,
-      transitionRowIndices[transitionRowIndices.length - 1], transitionRowPoints[transitionRowPoints.length - 1],
-      transitionEndIndices, transitionLoop,
-      isUpper
-    )
-  } else {
-    cadStitchClosedRings(indices, exactBoundaryIndices, rawLoop, transitionEndIndices, transitionLoop, isUpper)
   }
 
   // Krátký 0.1mm seam – samostatný ring stejně jako v referenčním Medit STL.
@@ -9256,15 +9378,16 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       openBoundaryLoops: finalBoundary.loops.length,
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
-      transitionRings: transitionPatchRows.rows.length,
-      transitionMode: "graded-shape-locked-v17.2",
-      transitionPatchSpacing: transitionPatchRows.spacing,
-      transitionPatchSections: transitionPatchRows.sections,
-      transitionPatchCounts: transitionPatchRows.counts,
-      transitionPatchVLevels: transitionPatchRows.vLevels,
-      transitionPatchSourceCount: transitionPatchRows.sourceCount,
-      transitionPatchTargetCount: transitionPatchRows.targetCount,
-      transitionPatchVertices: transitionPatchRows.rows.reduce((sum, row) => sum + row.length, 0),
+      transitionEndOffset,
+      transitionMode: "adaptive-columns-medit-calibrated-v18",
+      transitionColumnSpacing: transitionColumns.targetSpacing,
+      transitionColumnMinSegments: transitionColumns.minSegments,
+      transitionColumnMaxSegments: transitionColumns.maxSegments,
+      transitionColumnMinLength: transitionColumns.minColumnLength,
+      transitionColumnMaxLength: transitionColumns.maxColumnLength,
+      transitionColumnInteriorVertices: transitionInteriorVertices,
+      transitionPatchSourceCount: rawLoop.length,
+      transitionPatchTargetCount: targetCount,
       seamOffset,
       profileTargetSpacing,
       profilePoints: seamLoop.length,
