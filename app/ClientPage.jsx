@@ -1135,7 +1135,11 @@ function TrimBoundaryTube({
   roughness = 0.32,
   metalness = 0.06,
   renderOrder = 1500,
+  pulse = false,
+  pulseStrength = 0.18,
 }) {
+  const materialRef = useRef(null)
+  const pulsePhaseRef = useRef(Math.random() * Math.PI * 2)
   const geometry = useMemo(() => {
     const curve = makeTrimPolylineCurve(points, closed)
     if (!curve) return null
@@ -1143,11 +1147,28 @@ function TrimBoundaryTube({
     return new THREE.TubeGeometry(curve, tubularSegments, radius, 12, !!closed)
   }, [points, radius, closed])
   useEffect(() => () => geometry?.dispose?.(), [geometry])
+  useEffect(() => {
+    const material = materialRef.current
+    if (!material || pulse) return
+    material.opacity = opacity
+    material.emissiveIntensity = 0
+  }, [pulse, opacity])
+  useFrame(({ clock }) => {
+    const material = materialRef.current
+    if (!material || !pulse) return
+    const wave = (Math.sin(clock.elapsedTime * 2.05 + pulsePhaseRef.current) + 1) * 0.5
+    const strength = Math.max(0, Math.min(0.4, pulseStrength))
+    material.opacity = Math.min(1, opacity * (0.86 + strength * 1.45 * wave))
+    material.emissiveIntensity = 0.025 + strength * (0.38 + 0.72 * wave)
+  })
   if (!geometry) return null
   return (
     <mesh geometry={geometry} renderOrder={renderOrder} raycast={() => null}>
       <meshStandardMaterial
+        ref={materialRef}
         color={color}
+        emissive={pulse ? color : "#000000"}
+        emissiveIntensity={pulse ? 0.025 : 0}
         roughness={roughness}
         metalness={metalness}
         transparent
@@ -2774,6 +2795,8 @@ function RepairOverlay({ context, modelMatrix, holes, selectedHoleIds, completed
               roughness={selected ? 0.20 : hovered ? 0.24 : completed ? 0.28 : 0.38}
               metalness={selected ? 0.18 : hovered ? 0.10 : completed ? 0.06 : 0.03}
               renderOrder={selected ? 1502 : hovered ? 1501 : completed ? 1500 : 1498}
+              pulse={!selected && !completed}
+              pulseStrength={hovered ? 0.08 : 0.16}
             />
             {selected && !completed && (
               <TrimBoundaryTube
@@ -8868,6 +8891,7 @@ export default function ClientPage() {
     setRepairBrushCursor(null)
     setRepairPainting(false)
     setRepairBusy(false)
+    setRepairReadyActionLeaving(false)
     setRepairMessage("")
     resetRepairProgress()
     repairPatchCacheRef.current.clear()
@@ -9266,6 +9290,9 @@ export default function ClientPage() {
       setRepairMessage(error?.message || "CGAL Oprava sítě se nepodařila.")
     } finally {
       setRepairBusy(false)
+      // Ready CTA zůstává po fade-outu skryté po celou dobu CGAL opravy.
+      // Po úspěchu už je výběr prázdný; při chybě se CTA znovu zpřístupní pro retry.
+      setRepairReadyActionLeaving(false)
     }
   }, [repairContext, repairSelection, repairBusy, repairHoles, repairVariant, repairCompletedHoleIds, invalidateComparisonResult, prepareCGALRepairPatch, startRepairProgress, updateRepairProgress, finishRepairProgress, resetRepairProgress])
 
@@ -9285,9 +9312,10 @@ export default function ClientPage() {
   const triggerRepairSelectedAutoHoles = useCallback(() => {
     if (!repairSelectedHoleIds.length || repairBusy || repairReadyActionLeaving) return
     setRepairReadyActionLeaving(true)
+    // Necháme doběhnout krátký fade-out a CTA už během samotné opravy nevracíme.
+    // repairReadyActionLeaving se resetuje až ve finally applyRepairHoles.
     window.setTimeout(() => {
       repairSelectedAutoHoles()
-      window.setTimeout(() => setRepairReadyActionLeaving(false), 260)
     }, 120)
   }, [repairSelectedHoleIds, repairBusy, repairReadyActionLeaving, repairSelectedAutoHoles])
 
