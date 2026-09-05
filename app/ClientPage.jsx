@@ -7868,7 +7868,7 @@ function cadOptimizeCapEdgeFlips(points, faces, boundaryCount, maxPasses = 10) {
   return { faces: result, flips: totalFlips }
 }
 
-function cadRelaxCapInterior(points, faces, boundaryCount, polygon, passes = 3, strength = 0.34) {
+function cadRelaxCapInterior(points, faces, boundaryCount, polygon, passes = 3, strength = 0.34, protectBoundaryDistance = 0) {
   const result = points.map((p) => p.clone())
   let moved = 0
   for (let pass = 0; pass < passes; pass++) {
@@ -7884,6 +7884,7 @@ function cadRelaxCapInterior(points, faces, boundaryCount, polygon, passes = 3, 
 
     const proposals = new Map()
     for (let i = boundaryCount; i < result.length; i++) {
+      if (protectBoundaryDistance > 0 && cadMinDistanceToPolygon2D(result[i], polygon) < protectBoundaryDistance) continue
       const list = [...neighbors[i]]
       if (list.length < 3) continue
       const average = new THREE.Vector2()
@@ -7948,14 +7949,16 @@ function cadOptimizeCapTriangulation(contour, refined, options = {}) {
 }
 
 
-// V13 – constrained Delaunay bottom cap.
+// V14 – boundary-aware constrained Delaunay bottom cap.
 // Místo dalšího dělení původního Earcut stromu vytvoříme skutečně novou síť:
 // 1) Earcut nám zachová přesnou konkávní boundary,
-// 2) dovnitř vložíme téměř hexagonální Steiner body s ~0.9mm roztečí,
-// 3) každý bod vložíme do existujícího face (boundary hrany se nikdy nemění),
-// 4) vnitřní hrany převedeme Delaunay incircle flipy,
-// 5) jeden velmi jemný relaxation pass + finální Delaunay recovery.
-// Výsledek proto nemá radiální „rodokmen“ původní earcut triangulace.
+// 2) těsně pod boundary vytvoříme samostatný inward Steiner ring,
+// 3) zbytek plochy vyplní jemnější téměř hexagonální síť (~0.8 mm),
+// 4) každý bod vložíme do existujícího face (boundary hrany se nikdy nemění),
+// 5) vnitřní hrany převedeme Delaunay incircle flipy,
+// 6) velmi jemný relaxation pass jen mimo boundary ring + finální Delaunay recovery.
+// Tím se síť přiblíží Medit capu i u konkávní vnitřní části U a nevznikají
+// dlouhé trojúhelníky natažené přímo z boundary.
 function cadDistancePointSegment2D(point, a, b) {
   const abx = b.x - a.x, aby = b.y - a.y
   const apx = point.x - a.x, apy = point.y - a.y
@@ -7975,16 +7978,18 @@ function cadMinDistanceToPolygon2D(point, polygon) {
   return best
 }
 
-function cadGenerateHexSteinerPoints(polygon, spacing = 0.92) {
+function cadGenerateHexSteinerPoints(polygon, spacing = 0.82, minBoundaryDistance = null) {
   if (!Array.isArray(polygon) || polygon.length < 3) return []
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
   for (const p of polygon) {
     minX = Math.min(minX, p.x); minY = Math.min(minY, p.y)
     maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y)
   }
-  const sx = Math.max(0.55, spacing)
+  const sx = Math.max(0.52, spacing)
   const sy = sx * Math.sqrt(3) * 0.5
-  const clearance = sx * 0.30
+  const clearance = Number.isFinite(minBoundaryDistance)
+    ? Math.max(sx * 0.25, minBoundaryDistance)
+    : sx * 0.30
   const result = []
   let row = 0
   for (let y = minY + sy * 0.55; y <= maxY - sy * 0.35; y += sy, row++) {
@@ -8003,6 +8008,95 @@ function cadGenerateHexSteinerPoints(polygon, spacing = 0.92) {
     const hb = Math.sin(b.x * 12.9898 + b.y * 78.233) * 43758.5453
     return (ha - Math.floor(ha)) - (hb - Math.floor(hb))
   })
+  return result
+}
+
+function cadSignedArea2D(points) {
+  let area = 0
+  for (let i = 0; i < (points?.length || 0); i++) {
+    const a = points[i], b = points[(i + 1) % points.length]
+    area += a.x * b.y - b.x * a.y
+  }
+  return area * 0.5
+}
+
+function cadClosedLoopPerimeter2D(points) {
+  let length = 0
+  for (let i = 0; i < (points?.length || 0); i++) length += points[i].distanceTo(points[(i + 1) % points.length])
+  return length
+}
+
+function cadResampleClosedLoop2D(points, targetSpacing = 0.8, minCount = 32, maxCount = 520) {
+  if (!Array.isArray(points) || points.length < 3) return (points || []).map((p) => p.clone())
+  const perimeter = cadClosedLoopPerimeter2D(points)
+  if (!Number.isFinite(perimeter) || perimeter <= 1e-7) return points.map((p) => p.clone())
+  const count = Math.max(minCount, Math.min(maxCount, Math.round(perimeter / Math.max(0.18, targetSpacing))))
+  const cumulative = [0]
+  for (let i = 0; i < points.length; i++) cumulative.push(cumulative[cumulative.length - 1] + points[i].distanceTo(points[(i + 1) % points.length]))
+  const total = cumulative[cumulative.length - 1]
+  const result = []
+  let edge = 0
+  for (let sample = 0; sample < count; sample++) {
+    const distance = (sample / count) * total
+    while (edge + 1 < cumulative.length - 1 && cumulative[edge + 1] < distance) edge++
+    const a = points[edge % points.length]
+    const b = points[(edge + 1) % points.length]
+    const edgeLength = Math.max(1e-9, cumulative[edge + 1] - cumulative[edge])
+    const t = Math.max(0, Math.min(1, (distance - cumulative[edge]) / edgeLength))
+    result.push(a.clone().lerp(b, t))
+  }
+  return result
+}
+
+function cadGenerateBoundaryAwareSteinerRing(polygon, spacing = 0.8, inset = 0.62) {
+  if (!Array.isArray(polygon) || polygon.length < 3) return []
+  const sampled = cadResampleClosedLoop2D(polygon, Math.max(spacing * 0.92, 0.55), 40, 480)
+  const ccw = cadSignedArea2D(polygon) >= 0
+  const ring = []
+  const minSeparation = Math.max(0.28, spacing * 0.48)
+
+  for (let i = 0; i < sampled.length; i++) {
+    const prev = sampled[(i - 1 + sampled.length) % sampled.length]
+    const point = sampled[i]
+    const next = sampled[(i + 1) % sampled.length]
+    const tx = next.x - prev.x
+    const ty = next.y - prev.y
+    const length = Math.hypot(tx, ty) || 1
+    // U CCW polygonu leží interiér vlevo od tangenty, u CW vpravo.
+    const nx = ccw ? -ty / length : ty / length
+    const ny = ccw ? tx / length : -tx / length
+
+    // V silně konkávních místech může plný inset skočit přes protější stěnu.
+    // Zkoušíme proto několik bezpečnějších hloubek, ale nikdy nepřidáváme bod,
+    // který není uvnitř nebo zůstane prakticky nalepený na boundary.
+    let accepted = null
+    for (const scale of [1, 0.82, 0.64, 0.48]) {
+      const candidate = new THREE.Vector2(point.x + nx * inset * scale, point.y + ny * inset * scale)
+      if (!cadPointInPolygon2D(candidate, polygon)) continue
+      const distance = cadMinDistanceToPolygon2D(candidate, polygon)
+      if (distance < Math.max(0.20, inset * scale * 0.46)) continue
+      accepted = candidate
+      break
+    }
+    if (!accepted) continue
+    if (ring.some((existing) => existing.distanceTo(accepted) < minSeparation)) continue
+    ring.push(accepted)
+  }
+  return ring
+}
+
+function cadMergeSteinerPointsUnique(groups, minDistance = 0.34) {
+  const result = []
+  const minDistanceSq = minDistance * minDistance
+  for (const group of groups || []) {
+    for (const point of group || []) {
+      let duplicate = false
+      for (const existing of result) {
+        if (existing.distanceToSquared(point) < minDistanceSq) { duplicate = true; break }
+      }
+      if (!duplicate) result.push(point.clone())
+    }
+  }
   return result
 }
 
@@ -8137,16 +8231,36 @@ function cadConstrainedDelaunayFlips(points, faces, boundaryCount, maxPasses = 2
   return { faces: result, flips: totalFlips }
 }
 
-function cadBuildConstrainedDelaunayCap(contour, targetSpacing = 0.92) {
+function cadBuildConstrainedDelaunayCap(contour, targetSpacing = 0.80) {
   const initialFaces = THREE.ShapeUtils.triangulateShape(contour, [])
   if (!initialFaces?.length) throw new Error("Spodní plochu báze se nepodařilo triangulovat.")
-  const steiner = cadGenerateHexSteinerPoints(contour, targetSpacing)
+
+  // V14: samostatný inward ring stabilizuje první řadu triangulace pod boundary.
+  // Hex grid proto může začít o něco hlouběji a Delaunay nemusí překlenovat
+  // konkávní U-obrys jedním dlouhým trojúhelníkem.
+  const ringInset = Math.max(0.52, Math.min(0.72, targetSpacing * 0.78))
+  const boundaryRing = cadGenerateBoundaryAwareSteinerRing(contour, targetSpacing, ringInset)
+  const hexClearance = ringInset + targetSpacing * 0.36
+  const hex = cadGenerateHexSteinerPoints(contour, targetSpacing, hexClearance)
+  const steiner = cadMergeSteinerPointsUnique([boundaryRing, hex], Math.max(0.28, targetSpacing * 0.38))
+
   const inserted = cadInsertSteinerPointsIntoTriangulation(contour, initialFaces, steiner)
-  const firstDelaunay = cadConstrainedDelaunayFlips(inserted.points, inserted.faces, contour.length, 34)
-  // Hex grid je už velmi pravidelný; pouze jeden slabý Laplacian pass pomůže
-  // hlavně řadě bodů sousedících s nepravidelnou konkávní boundary.
-  const relaxed = cadRelaxCapInterior(inserted.points, firstDelaunay.faces, contour.length, contour, 1, 0.18)
-  const secondDelaunay = cadConstrainedDelaunayFlips(relaxed.points, firstDelaunay.faces, contour.length, 24)
+  const firstDelaunay = cadConstrainedDelaunayFlips(inserted.points, inserted.faces, contour.length, 42)
+
+  // Body v první cca jedné vrstvě od boundary necháváme shape-locked; relaxujeme
+  // jen skutečné interior Steiner body. Tím zůstává obrys i jeho lokální hustota
+  // přesně stabilní a zlepšuje se pouze isotropie uprostřed capu.
+  const protectedBand = ringInset + targetSpacing * 0.24
+  const relaxed = cadRelaxCapInterior(
+    inserted.points,
+    firstDelaunay.faces,
+    contour.length,
+    contour,
+    1,
+    0.14,
+    protectedBand
+  )
+  const secondDelaunay = cadConstrainedDelaunayFlips(relaxed.points, firstDelaunay.faces, contour.length, 30)
   const quality = cadCapQualityStats(relaxed.points, secondDelaunay.faces)
   return {
     points: relaxed.points,
@@ -8154,6 +8268,9 @@ function cadBuildConstrainedDelaunayCap(contour, targetSpacing = 0.92) {
     steinerRequested: steiner.length,
     steinerInserted: inserted.inserted,
     steinerSkipped: inserted.skipped,
+    boundaryRingRequested: boundaryRing.length,
+    hexRequested: hex.length,
+    ringInset,
     flips: firstDelaunay.flips + secondDelaunay.flips,
     relaxedMoves: relaxed.moved,
     quality,
@@ -8410,7 +8527,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     return s * s * (3 - 2 * s)
   }
 
-  // V13 – Delaunay Bottom Cap.
+  // V14 – boundary-aware Delaunay Bottom Cap.
   // V11 zlepšil topologii tím, že počet bodů snižoval postupně, ale první ringy
   // znovu vzorkovaly přímo syrovou hustou boundary. Tím se do přechodu vrátila
   // vysokofrekvenční zubatost a báze mohla opticky působit zvlněně.
@@ -8565,12 +8682,12 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   }
   const bottomWallIndices = previousWallRing
 
-  // V13 bottom cap: skutečný constrained Delaunay remesh.
+  // V14 bottom cap: jemnější boundary-aware constrained Delaunay remesh.
   // Boundary posledního wall ringu zůstává 1:1 beze změny; uvnitř ale už
   // nerefinujeme Earcut trojúhelníky. Vložíme nový ~hexagonální bodový vzor a
   // topologii přestavíme Delaunay incircle flipy.
   const contour2D = bottomLoop.map((p) => new THREE.Vector2(p.x, p.z))
-  const capPointSpacing = Math.max(0.84, Math.min(1.02, boundaryData.diagonal * 0.0165))
+  const capPointSpacing = Math.max(0.75, Math.min(0.85, boundaryData.diagonal * 0.0155))
   const delaunayCap = cadBuildConstrainedDelaunayCap(contour2D, capPointSpacing)
   const capIndices = new Array(delaunayCap.points.length)
   for (let i = 0; i < delaunayCap.points.length; i++) {
