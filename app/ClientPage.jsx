@@ -7568,7 +7568,7 @@ function cadSignedAreaXZ(points) {
   return area * 0.5
 }
 
-// V8 – plynulé XZ normály uzavřeného profilu pro skutečný round-over/fillet.
+// Pomocné XZ normály profilu (ponecháno pro budoucí Curved / bottom-bevel nástroje).
 // U kladně orientovaného (CCW) loopu leží materiál vlevo od směru hrany,
 // takže vnější normála je pravá normála tangenty. Normály ještě lehce
 // low-passujeme po obvodu, aby bevel nekopíroval každý drobný zub boundary.
@@ -7639,9 +7639,11 @@ function cadRelaxClosedBoundaryGentle(points, diagonal) {
   const centerCorrection = originalCenter.clone().sub(smoothCenter)
   current.forEach((p) => p.add(centerCorrection))
 
-  // Na dentálním modelu chceme jen sub-milimetrové uklidnění samotného okraje.
-  const maxShift = Math.max(0.20, Math.min(0.62, Math.max(1, diagonal) * 0.0065))
-  const strength = 0.74
+  // V9: referenční Medit export ukazuje, že zásah do původního scanu je
+  // opravdu velmi lokální. Držíme proto boundary relaxaci konzervativněji:
+  // typicky několik desetin mm, nikdy ne široké "rozmazání" gingivy.
+  const maxShift = Math.max(0.16, Math.min(0.44, Math.max(1, diagonal) * 0.0048))
+  const strength = 0.68
   const relaxed = original.map((raw, i) => {
     const delta = current[i].clone().sub(raw).multiplyScalar(strength)
     const length = delta.length()
@@ -7669,9 +7671,10 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
   let maxBoundaryShift = 0
   for (const delta of displacements) maxBoundaryShift = Math.max(maxBoundaryShift, delta.length())
 
-  // Přibližně 1.6–3.0 mm široký pás podle velikosti scanu. Ve vnější části je
-  // feather už velmi slabý; prakticky viditelná změna zůstává hlavně u hrany.
-  const bandWidth = Math.max(1.6, Math.min(3.0, Math.max(1, diagonal) * 0.038))
+  // V9 / Medit-style: z referenčního input→output páru vychází většina změn
+  // do ~0.5 mm od řezu a téměř vše do ~1 mm. Feather pás proto držíme přibližně
+  // 0.8–1.2 mm; mimo něj je původní anatomie vertexově beze změny.
+  const bandWidth = Math.max(0.80, Math.min(1.20, Math.max(1, diagonal) * 0.0175))
   const cellSize = bandWidth
   const buckets = new Map()
   const cellKey = (x, y, z) => `${Math.floor(x / cellSize)}:${Math.floor(y / cellSize)}:${Math.floor(z / cellSize)}`
@@ -7777,68 +7780,79 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const trianglePositions = boundaryRelaxation.trianglePositions
   const rawLoop = boundaryRelaxation.boundary
 
-  // V6/V7: neextrudujeme rovnou jednu vyhlazenou křivku. Nejdřív vytvoříme
-  // opravdu klidný cílový profil a mezi přesnou trim hranicí a tímto profilem
-  // několik mezikružnic. První ring zůstává přesně na scanu, poslední už je
-  // pravidelný CAD profil. Smoothstep zajistí nulovější nástup i výstup změny.
-  let regularized = cadSmoothClosedLoop(rawLoop, 42)
-  regularized = cadSmoothClosedLoop(regularized, 18)
+  // V9 – Medit-style transition.
+  //
+  // Referenční Medit STL ukazuje tři důležité věci:
+  // 1) původní scan je změněn pouze v velmi úzkém pásu u boundary,
+  // 2) automatický přechod scan→báze není uživatelský "bevel"/round-over,
+  // 3) po přechodu už pokračuje jeden neměnný pravidelný profil; Total Height
+  //    pouze prodlužuje tuto rovnou část.
+  //
+  // Proto zde nepřidáváme žádný radiální offset. Z raw boundary vytvoříme
+  // regularizovaný Straight profil a během krátkého spline přechodu se k němu
+  // plynule přiblížíme. Potom profil zůstává beze změny až ke spodnímu capu.
+  let regularized = cadSmoothClosedLoop(rawLoop, 38)
+  regularized = cadSmoothClosedLoop(regularized, 14)
 
   const boundaryMinY = Math.min(...rawLoop.map((p) => p.y))
   const boundaryMaxY = Math.max(...rawLoop.map((p) => p.y))
-  const availableBaseDepth = Math.max(0.6, isUpper ? baseCapY - boundaryMaxY : boundaryMinY - baseCapY)
-  const desiredTransitionDepth = Math.max(1.55, Math.min(3.8, boundaryData.diagonal * 0.052))
-  // U velmi nízké báze nesmí transition band přestřelit spodní cap a obrátit stěnu zpět.
-  const transitionDepth = Math.max(0.55, Math.min(desiredTransitionDepth, availableBaseDepth * 0.72))
+  const boundaryExtremeY = isUpper ? boundaryMaxY : boundaryMinY
+  const availableBaseDepth = Math.max(0.6, isUpper ? baseCapY - boundaryExtremeY : boundaryExtremeY - baseCapY)
 
-  // V8 – skutečný round-over mezi scanem a pravidelnou stěnou báze.
-  // Pro typický dentální model vychází radius zhruba 0.8–1.0 mm.
-  // Radius se automaticky zmenší u nízké báze, takže nikdy nespotřebuje podstatnou
-  // část dostupné výšky. Osm segmentů přes 90° je pro tento rozměr už opticky
-  // velmi hladkých, ale stále přidává jen zanedbatelné množství polygonů.
-  const desiredBevelRadius = Math.max(0.55, Math.min(1.00, boundaryData.diagonal * 0.013))
-  const bevelRadius = Math.max(0.18, Math.min(
-    desiredBevelRadius,
-    availableBaseDepth * 0.28,
-    transitionDepth * 0.62
-  ))
-  const bevelSegments = bevelRadius >= 0.72 ? 8 : 6
-  const transitionSteps = bevelSegments
+  // Medit reference: změny původní geometrie končí přibližně kolem 1–1.25 mm.
+  // Samotný CAD bridge proto držíme typicky ~1.0–1.45 mm a nezávisle na Total Height.
+  const desiredTransitionDepth = Math.max(0.95, Math.min(1.45, boundaryData.diagonal * 0.0205))
+  const transitionDepth = Math.max(0.48, Math.min(desiredTransitionDepth, availableBaseDepth * 0.42))
+  const transitionSteps = transitionDepth >= 1.15 ? 6 : 5
   const transitionRings = [rawLoop.map((p) => p.clone())]
-  const outwardNormals = cadSmoothOutwardNormalsXZ(regularized)
+
   const smoothstep = (t) => t * t * (3 - 2 * t)
+  // Jemnější S-křivka pro XZ regularizaci: první část ještě velmi věrně kopíruje
+  // scan, poslední část už se rychle usadí na čistém profilu.
+  const profileEase = (t) => {
+    const s = smoothstep(t)
+    return s * s * (3 - 2 * s)
+  }
 
   for (let step = 1; step <= transitionSteps; step++) {
     const t = step / transitionSteps
-    const eased = smoothstep(t)
-    const theta = t * Math.PI * 0.5
-    // Čtvrtkružnice: nahoře má téměř horizontální tečnu do scanu, dole
-    // přechází do vertikální stěny. Zbytek transitionDepth je přidán smoothstepem,
-    // který má nulovou derivaci na obou koncích a round-over tak nerozbije.
-    const radialOffset = Math.sin(theta) * bevelRadius
-    const roundedDrop = bevelRadius * (1 - Math.cos(theta))
-    const extraDrop = Math.max(0, transitionDepth - bevelRadius) * eased
-    const verticalDrop = roundedDrop + extraDrop
+    const profileT = profileEase(t)
+    const verticalT = smoothstep(t)
+    const verticalDrop = transitionDepth * verticalT
 
     const ring = rawLoop.map((raw, i) => {
       const smooth = regularized[i] || raw
-      const outward = outwardNormals[i] || new THREE.Vector3()
-      const capMargin = Math.min(0.65, Math.max(0.22, availableBaseDepth * 0.12))
-      const requestedY = THREE.MathUtils.lerp(raw.y, smooth.y, eased) + (isUpper ? verticalDrop : -verticalDrop)
+      // Na konci přechodu sjednotíme Y do jedné pracovní roviny. Tím vznikne
+      // podobný "shoulder" jako v Meditu a od tohoto místa už je stěna čistě svislá.
+      const targetY = boundaryExtremeY + (isUpper ? transitionDepth : -transitionDepth)
+      const interpolatedY = THREE.MathUtils.lerp(raw.y, targetY, verticalT)
+      const capMargin = Math.min(0.45, Math.max(0.16, availableBaseDepth * 0.08))
       const y = isUpper
-        ? Math.min(requestedY, baseCapY - capMargin)
-        : Math.max(requestedY, baseCapY + capMargin)
+        ? Math.min(interpolatedY, baseCapY - capMargin)
+        : Math.max(interpolatedY, baseCapY + capMargin)
+
       return new THREE.Vector3(
-        THREE.MathUtils.lerp(raw.x, smooth.x, eased) + outward.x * radialOffset,
+        THREE.MathUtils.lerp(raw.x, smooth.x, profileT),
         y,
-        THREE.MathUtils.lerp(raw.z, smooth.z, eased) + outward.z * radialOffset
+        THREE.MathUtils.lerp(raw.z, smooth.z, profileT)
       )
     })
     transitionRings.push(ring)
   }
 
+  // Medit má těsně po prvním regularizovaném prstenci velmi krátkou (~0.1 mm)
+  // duplikovanou rovnou sekci. Pomáhá oddělit transition normals od dlouhé stěny
+  // a zároveň geometricky nic "nenafukuje".
   const transitionLoop = transitionRings[transitionRings.length - 1]
-  const bottomLoop = transitionLoop.map((p) => new THREE.Vector3(p.x, baseCapY, p.z))
+  const seamOffset = Math.min(0.10, Math.max(0.04, availableBaseDepth * 0.025))
+  const seamY = isUpper
+    ? Math.min(transitionLoop[0].y + seamOffset, baseCapY)
+    : Math.max(transitionLoop[0].y - seamOffset, baseCapY)
+  const seamLoop = transitionLoop.map((p) => new THREE.Vector3(p.x, seamY, p.z))
+  transitionRings.push(seamLoop)
+
+  const wallLoop = seamLoop
+  const bottomLoop = wallLoop.map((p) => new THREE.Vector3(p.x, baseCapY, p.z))
 
   // V7: source část je kopií scanu po velmi lokální boundary relaxation; mimo
   // feather pás zůstává vertexově totožná. Novou CAD část vytvoříme indexovaně.
@@ -7927,9 +7941,9 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       openBoundaryLoops: finalBoundary.loops.length,
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
-      transitionRings: transitionSteps,
-      bevelRadius,
-      bevelSegments,
+      transitionRings: transitionSteps + 1,
+      transitionMode: "medit-straight",
+      seamOffset,
       boundaryRelaxationBand: boundaryRelaxation.bandWidth,
       boundaryRelaxationMaxShift: boundaryRelaxation.maxBoundaryShift,
       boundaryRelaxationAffectedVertices: boundaryRelaxation.affectedVertices,
