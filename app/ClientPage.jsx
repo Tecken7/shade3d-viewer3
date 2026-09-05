@@ -7257,7 +7257,7 @@ function AlignmentTerminalTypedText({ text, speed = 15, enabled = true, delay = 
   return <>{safeText.slice(0, visibleLength)}</>
 }
 
-/* ---------- ARTHETIC CAD Tools · Model Builder V1 ---------- */
+/* ---------- ARTHETIC CAD Tools · Model Builder V10 ---------- */
 const CAD_SUPPORTED_EXTENSIONS = new Set(["stl", "ply", "obj"])
 
 function cadDisposeObjectUrl(url) {
@@ -7576,6 +7576,166 @@ function cadSignedAreaXZ(points) {
   return area * 0.5
 }
 
+
+// V10 – Medit-style meshing helpers.
+// Referenční Medit export používá na pravidelném profilu zhruba 0.4 mm sampling,
+// horizontální wall ringy po ~1.1 mm a výrazně hustší, rovnoměrnější bottom cap.
+function cadClosedLoopPerimeter(points) {
+  if (!Array.isArray(points) || points.length < 2) return 0
+  let perimeter = 0
+  for (let i = 0; i < points.length; i++) perimeter += points[i].distanceTo(points[(i + 1) % points.length])
+  return perimeter
+}
+
+function cadResampleClosedLoop(points, targetSpacing = 0.39, minCount = 48, maxCount = 820) {
+  if (!Array.isArray(points) || points.length < 4) return (points || []).map((p) => p.clone())
+  const perimeter = cadClosedLoopPerimeter(points)
+  if (!Number.isFinite(perimeter) || perimeter <= 1e-6) return points.map((p) => p.clone())
+  const count = Math.max(minCount, Math.min(maxCount, Math.round(perimeter / Math.max(0.08, targetSpacing))))
+  const cumulative = [0]
+  for (let i = 0; i < points.length; i++) cumulative.push(cumulative[cumulative.length - 1] + points[i].distanceTo(points[(i + 1) % points.length]))
+  const total = cumulative[cumulative.length - 1] || perimeter
+  const result = []
+  let edge = 0
+  for (let sample = 0; sample < count; sample++) {
+    const distance = (sample / count) * total
+    while (edge + 1 < cumulative.length - 1 && cumulative[edge + 1] < distance) edge++
+    const a = points[edge % points.length]
+    const b = points[(edge + 1) % points.length]
+    const start = cumulative[edge]
+    const end = cumulative[edge + 1]
+    const t = end > start ? THREE.MathUtils.clamp((distance - start) / (end - start), 0, 1) : 0
+    result.push(a.clone().lerp(b, t))
+  }
+  return result
+}
+
+function cadClosedLoopVertexFractions(points) {
+  const fractions = new Array(points.length + 1).fill(0)
+  if (!Array.isArray(points) || points.length < 2) return fractions
+  let total = 0
+  const lengths = new Array(points.length)
+  for (let i = 0; i < points.length; i++) {
+    lengths[i] = points[i].distanceTo(points[(i + 1) % points.length])
+    total += lengths[i]
+  }
+  if (total <= 1e-9) {
+    for (let i = 0; i <= points.length; i++) fractions[i] = i / Math.max(1, points.length)
+    return fractions
+  }
+  let running = 0
+  fractions[0] = 0
+  for (let i = 0; i < points.length; i++) {
+    running += lengths[i]
+    fractions[i + 1] = running / total
+  }
+  fractions[points.length] = 1
+  return fractions
+}
+
+// Sešije dvě stejně orientované uzavřené smyčky i při rozdílném počtu vertexů.
+// Díky tomu můžeme zachovat přesnou boundary scanu, ale už první pravidelný CAD
+// ring resamplovat na ~0.4 mm bez ztráty watertight napojení.
+function cadStitchClosedRings(indices, ringA, pointsA, ringB, pointsB, isUpper) {
+  if (!ringA?.length || !ringB?.length) return
+  const fractionsA = cadClosedLoopVertexFractions(pointsA)
+  const fractionsB = cadClosedLoopVertexFractions(pointsB)
+  const pushTri = (a, b, c) => {
+    if (isUpper) indices.push(a, c, b)
+    else indices.push(a, b, c)
+  }
+  const pushQuadLocal = (a, b, c, d) => {
+    pushTri(a, b, c)
+    pushTri(a, c, d)
+  }
+
+  let i = 0, j = 0
+  const nA = ringA.length, nB = ringB.length
+  const eps = 1e-7
+  while (i < nA || j < nB) {
+    const aCurrent = ringA[i % nA]
+    const bCurrent = ringB[j % nB]
+    const nextA = i < nA ? fractionsA[i + 1] : Infinity
+    const nextB = j < nB ? fractionsB[j + 1] : Infinity
+
+    if (i < nA && j < nB && Math.abs(nextA - nextB) <= eps) {
+      const aNext = ringA[(i + 1) % nA]
+      const bNext = ringB[(j + 1) % nB]
+      pushQuadLocal(aCurrent, aNext, bNext, bCurrent)
+      i++; j++
+    } else if (i < nA && (j >= nB || nextA < nextB)) {
+      const aNext = ringA[(i + 1) % nA]
+      pushTri(aCurrent, aNext, bCurrent)
+      i++
+    } else if (j < nB) {
+      const bNext = ringB[(j + 1) % nB]
+      pushTri(aCurrent, bNext, bCurrent)
+      j++
+    } else break
+  }
+}
+
+function cadEdgeKey(a, b) { return a < b ? `${a}:${b}` : `${b}:${a}` }
+
+// Adaptive conforming refinement: začínáme robustní earcut triangulací obrysu,
+// potom půlíme pouze dlouhé VNITŘNÍ hrany. Sdílený midpoint se používá na obou
+// sousedních trianglech, takže nevznikají T-junctions a boundary capu zůstává
+// přesně stejná jako spodní wall ring.
+function cadRefineCapTriangulation(contour, initialFaces, targetEdge = 1.85, maxIterations = 8) {
+  const points = contour.map((p) => p.clone())
+  let faces = (initialFaces || []).map((f) => [f[0], f[1], f[2]])
+  const boundaryEdges = new Set()
+  for (let i = 0; i < contour.length; i++) boundaryEdges.add(cadEdgeKey(i, (i + 1) % contour.length))
+
+  const edgeLength = (a, b) => points[a].distanceTo(points[b])
+  let iterations = 0
+  for (; iterations < maxIterations; iterations++) {
+    const marked = new Set()
+    for (const [a, b, c] of faces) {
+      for (const [u, v] of [[a,b],[b,c],[c,a]]) {
+        const key = cadEdgeKey(u, v)
+        if (boundaryEdges.has(key)) continue
+        if (edgeLength(u, v) > targetEdge) marked.add(key)
+      }
+    }
+    if (!marked.size) break
+
+    const midpoints = new Map()
+    const midpointFor = (a, b) => {
+      const key = cadEdgeKey(a, b)
+      if (!marked.has(key)) return -1
+      if (midpoints.has(key)) return midpoints.get(key)
+      const index = points.length
+      points.push(points[a].clone().add(points[b]).multiplyScalar(0.5))
+      midpoints.set(key, index)
+      return index
+    }
+
+    const nextFaces = []
+    for (const [a, b, c] of faces) {
+      const mAB = midpointFor(a, b)
+      const mBC = midpointFor(b, c)
+      const mCA = midpointFor(c, a)
+      const mask = (mAB >= 0 ? 1 : 0) | (mBC >= 0 ? 2 : 0) | (mCA >= 0 ? 4 : 0)
+      if (mask === 0) nextFaces.push([a,b,c])
+      else if (mask === 1) nextFaces.push([a,mAB,c],[mAB,b,c])
+      else if (mask === 2) nextFaces.push([a,b,mBC],[a,mBC,c])
+      else if (mask === 4) nextFaces.push([a,b,mCA],[mCA,b,c])
+      else if (mask === 3) nextFaces.push([mAB,b,mBC],[a,mAB,c],[mAB,mBC,c])
+      else if (mask === 6) nextFaces.push([mBC,c,mCA],[a,b,mBC],[a,mBC,mCA])
+      else if (mask === 5) nextFaces.push([mCA,a,mAB],[mAB,b,c],[mAB,c,mCA])
+      else nextFaces.push([a,mAB,mCA],[mAB,b,mBC],[mCA,mBC,c],[mAB,mBC,mCA])
+    }
+    faces = nextFaces
+  }
+
+  let maxEdge = 0
+  for (const [a,b,c] of faces) {
+    maxEdge = Math.max(maxEdge, edgeLength(a,b), edgeLength(b,c), edgeLength(c,a))
+  }
+  return { points, faces, iterations, maxEdge }
+}
+
 // Pomocné XZ normály profilu (ponecháno pro budoucí Curved / bottom-bevel nástroje).
 // U kladně orientovaného (CCW) loopu leží materiál vlevo od směru hrany,
 // takže vnější normála je pravá normála tangenty. Normály ještě lehce
@@ -7799,8 +7959,13 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   // Proto zde nepřidáváme žádný radiální offset. Z raw boundary vytvoříme
   // regularizovaný Straight profil a během krátkého spline přechodu se k němu
   // plynule přiblížíme. Potom profil zůstává beze změny až ke spodnímu capu.
-  let regularized = cadSmoothClosedLoop(rawLoop, 38)
-  regularized = cadSmoothClosedLoop(regularized, 14)
+  // V10: přesná source boundary zůstává nedotčená pro samotné napojení na scan,
+  // ale pracovní Straight profil už nepřebírá její přehnaně hustý sampling.
+  // Medit reference ~169 mm / 435 segmentů => ~0.39 mm na segment.
+  const profileTargetSpacing = 0.39
+  const sampledRawLoop = cadResampleClosedLoop(rawLoop, profileTargetSpacing)
+  let regularized = cadSmoothClosedLoop(sampledRawLoop, 30)
+  regularized = cadSmoothClosedLoop(regularized, 10)
 
   const boundaryMinY = Math.min(...rawLoop.map((p) => p.y))
   const boundaryMaxY = Math.max(...rawLoop.map((p) => p.y))
@@ -7812,33 +7977,28 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const desiredTransitionDepth = Math.max(0.95, Math.min(1.45, boundaryData.diagonal * 0.0205))
   const transitionDepth = Math.max(0.48, Math.min(desiredTransitionDepth, availableBaseDepth * 0.42))
   const transitionSteps = transitionDepth >= 1.15 ? 6 : 5
-  const transitionRings = [rawLoop.map((p) => p.clone())]
+  const transitionRings = []
 
   const smoothstep = (t) => t * t * (3 - 2 * t)
-  // Jemnější S-křivka pro XZ regularizaci: první část ještě velmi věrně kopíruje
-  // scan, poslední část už se rychle usadí na čistém profilu.
   const profileEase = (t) => {
     const s = smoothstep(t)
     return s * s * (3 - 2 * s)
   }
 
+  // První CAD ring už má Medit-like ~0.4 mm sampling; přesná hustá boundary scanu
+  // se k němu později sešije zipper stripem.
   for (let step = 1; step <= transitionSteps; step++) {
     const t = step / transitionSteps
     const profileT = profileEase(t)
     const verticalT = smoothstep(t)
-    const verticalDrop = transitionDepth * verticalT
-
-    const ring = rawLoop.map((raw, i) => {
+    const ring = sampledRawLoop.map((raw, i) => {
       const smooth = regularized[i] || raw
-      // Na konci přechodu sjednotíme Y do jedné pracovní roviny. Tím vznikne
-      // podobný "shoulder" jako v Meditu a od tohoto místa už je stěna čistě svislá.
       const targetY = boundaryExtremeY + (isUpper ? transitionDepth : -transitionDepth)
       const interpolatedY = THREE.MathUtils.lerp(raw.y, targetY, verticalT)
       const capMargin = Math.min(0.45, Math.max(0.16, availableBaseDepth * 0.08))
       const y = isUpper
         ? Math.min(interpolatedY, baseCapY - capMargin)
         : Math.max(interpolatedY, baseCapY + capMargin)
-
       return new THREE.Vector3(
         THREE.MathUtils.lerp(raw.x, smooth.x, profileT),
         y,
@@ -7848,19 +8008,26 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     transitionRings.push(ring)
   }
 
-  // Medit má těsně po prvním regularizovaném prstenci velmi krátkou (~0.1 mm)
-  // duplikovanou rovnou sekci. Pomáhá oddělit transition normals od dlouhé stěny
-  // a zároveň geometricky nic "nenafukuje".
   const transitionLoop = transitionRings[transitionRings.length - 1]
   const seamOffset = Math.min(0.10, Math.max(0.04, availableBaseDepth * 0.025))
   const seamY = isUpper
     ? Math.min(transitionLoop[0].y + seamOffset, baseCapY)
     : Math.max(transitionLoop[0].y - seamOffset, baseCapY)
   const seamLoop = transitionLoop.map((p) => new THREE.Vector3(p.x, seamY, p.z))
-  transitionRings.push(seamLoop)
 
+  // V10: pravidelná stěna dostává horizontální ringy po ~1.08 mm (Medit reference).
+  // Total Height tak pouze přidává/ubírá počet stejných wall sekcí a nemění transition.
+  const wallTargetSpacing = 1.08
+  const wallDepth = Math.max(0, Math.abs(baseCapY - seamY))
+  const wallSections = Math.max(1, Math.ceil(wallDepth / wallTargetSpacing))
+  const wallRings = [seamLoop]
+  for (let section = 1; section <= wallSections; section++) {
+    const t = section / wallSections
+    const y = THREE.MathUtils.lerp(seamY, baseCapY, t)
+    wallRings.push(seamLoop.map((p) => new THREE.Vector3(p.x, y, p.z)))
+  }
   const wallLoop = seamLoop
-  const bottomLoop = wallLoop.map((p) => new THREE.Vector3(p.x, baseCapY, p.z))
+  const bottomLoop = wallRings[wallRings.length - 1]
 
   // V7: source část je kopií scanu po velmi lokální boundary relaxation; mimo
   // feather pás zůstává vertexově totožná. Novou CAD část vytvoříme indexovaně.
@@ -7882,41 +8049,72 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     return ringIndices
   }
 
-  const ringIndices = transitionRings.map(appendRing)
-  const bottomWallIndices = appendRing(bottomLoop)
+  const exactBoundaryIndices = appendRing(rawLoop)
+  const transitionRingIndices = transitionRings.map(appendRing)
+  const seamIndices = appendRing(seamLoop)
+  const wallRingIndices = wallRings.slice(1).map(appendRing)
 
+  const pushTri = (a, b, c) => {
+    if (isUpper) indices.push(a, c, b)
+    else indices.push(a, b, c)
+  }
   const pushQuad = (a, b, c, d) => {
-    if (isUpper) indices.push(a, c, b, a, d, c)
-    else indices.push(a, b, c, a, c, d)
+    pushTri(a, b, c)
+    pushTri(a, c, d)
   }
 
-  // Přesná trim hranice -> několik plynule regularizovaných ringů.
-  for (let ring = 0; ring < ringIndices.length - 1; ring++) {
-    const upperRing = ringIndices[ring]
-    const lowerRing = ringIndices[ring + 1]
+  // Přesná hustá source boundary -> první ~0.4mm CAD ring.
+  cadStitchClosedRings(
+    indices,
+    exactBoundaryIndices,
+    rawLoop,
+    transitionRingIndices[0],
+    transitionRings[0],
+    isUpper
+  )
+
+  // Zbytek transition ringů má shodný, pravidelný sampling.
+  for (let ring = 0; ring < transitionRingIndices.length - 1; ring++) {
+    const upperRing = transitionRingIndices[ring]
+    const lowerRing = transitionRingIndices[ring + 1]
     for (let i = 0; i < upperRing.length; i++) {
       const j = (i + 1) % upperRing.length
       pushQuad(upperRing[i], upperRing[j], lowerRing[j], lowerRing[i])
     }
   }
 
-  // Finální regularizovaný profil -> rovná stěna až ke spodní rovině.
-  const wallTopIndices = ringIndices[ringIndices.length - 1]
-  for (let i = 0; i < wallTopIndices.length; i++) {
-    const j = (i + 1) % wallTopIndices.length
-    pushQuad(wallTopIndices[i], wallTopIndices[j], bottomWallIndices[j], bottomWallIndices[i])
+  // Krátký 0.1mm seam – samostatný ring stejně jako v referenčním Medit STL.
+  const lastTransitionIndices = transitionRingIndices[transitionRingIndices.length - 1]
+  for (let i = 0; i < lastTransitionIndices.length; i++) {
+    const j = (i + 1) % lastTransitionIndices.length
+    pushQuad(lastTransitionIndices[i], lastTransitionIndices[j], seamIndices[j], seamIndices[i])
   }
 
-  // Spodní cap používá vlastní kopii ringů. Díky tomu zůstane spodní hrana
-  // opticky čistá/ostřejší a smooth normals ze stěny se do ní nepřelévají.
-  const capIndices = appendRing(bottomLoop)
+  // V10: horizontálně subdividovaná stěna místo jednoho dlouhého quad stripu.
+  let previousWallRing = seamIndices
+  for (const nextWallRing of wallRingIndices) {
+    for (let i = 0; i < previousWallRing.length; i++) {
+      const j = (i + 1) % previousWallRing.length
+      pushQuad(previousWallRing[i], previousWallRing[j], nextWallRing[j], nextWallRing[i])
+    }
+    previousWallRing = nextWallRing
+  }
+  const bottomWallIndices = previousWallRing
+
+  // Spodní cap: boundary zůstává identická s posledním wall ringem, ale samotná
+  // plocha dostane adaptivní interior refinement. Tím zmizí dlouhé 20–30mm vějíře.
   const contour2D = bottomLoop.map((p) => new THREE.Vector2(p.x, p.z))
-  const faces = THREE.ShapeUtils.triangulateShape(contour2D, [])
-  if (!faces?.length) throw new Error("Spodní plochu báze se nepodařilo triangulovat.")
-  faces.forEach(([a, b, c]) => {
-    if (isUpper) indices.push(capIndices[a], capIndices[c], capIndices[b])
-    else indices.push(capIndices[a], capIndices[b], capIndices[c])
-  })
+  const initialFaces = THREE.ShapeUtils.triangulateShape(contour2D, [])
+  if (!initialFaces?.length) throw new Error("Spodní plochu báze se nepodařilo triangulovat.")
+  const capTargetEdge = Math.max(1.55, Math.min(1.95, boundaryData.diagonal * 0.035))
+  const refinedCap = cadRefineCapTriangulation(contour2D, initialFaces, capTargetEdge, 8)
+  const capIndices = new Array(refinedCap.points.length)
+  for (let i = 0; i < refinedCap.points.length; i++) {
+    const point = refinedCap.points[i]
+    capIndices[i] = positions.length / 3
+    positions.push(point.x, baseCapY, point.y)
+  }
+  refinedCap.faces.forEach(([a, b, c]) => pushTri(capIndices[a], capIndices[b], capIndices[c]))
 
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3))
@@ -7949,9 +8147,18 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       openBoundaryLoops: finalBoundary.loops.length,
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
-      transitionRings: transitionSteps + 1,
-      transitionMode: "medit-straight",
+      transitionRings: transitionSteps,
+      transitionMode: "medit-straight-v10",
       seamOffset,
+      profileTargetSpacing,
+      profilePoints: seamLoop.length,
+      wallTargetSpacing,
+      wallSections,
+      capVertices: refinedCap.points.length,
+      capTriangles: refinedCap.faces.length,
+      capTargetEdge,
+      capMaxEdge: refinedCap.maxEdge,
+      capRefineIterations: refinedCap.iterations,
       boundaryRelaxationBand: boundaryRelaxation.bandWidth,
       boundaryRelaxationMaxShift: boundaryRelaxation.maxBoundaryShift,
       boundaryRelaxationAffectedVertices: boundaryRelaxation.affectedVertices,
@@ -8006,6 +8213,7 @@ function CadOrientationReferencePlane({ center = [0, 0, 0], y = 0, size = 80, co
 
 function CadOrientationMiniModel({ sourceObject, modelMatrix }) {
   const clone = useMemo(() => sourceObject?.clone?.(true) || null, [sourceObject])
+  const { invalidate } = useThree()
 
   useEffect(() => {
     if (!clone) return
@@ -8014,14 +8222,15 @@ function CadOrientationMiniModel({ sourceObject, modelMatrix }) {
     else clone.matrix.identity()
     clone.matrixWorldNeedsUpdate = true
     clone.updateMatrixWorld(true)
-  }, [clone, modelMatrix])
+    invalidate()
+  }, [clone, modelMatrix, invalidate])
 
   if (!clone) return null
   return <primitive object={clone} />
 }
 
 function CadOrientationMiniCamera({ rootRef, view, modelMatrix }) {
-  const { camera, size: canvasSize } = useThree()
+  const { camera, size: canvasSize, invalidate } = useThree()
 
   useEffect(() => {
     let raf = 0
@@ -8070,10 +8279,11 @@ function CadOrientationMiniCamera({ rootRef, view, modelMatrix }) {
       camera.far = distance * 12 + 100
       camera.lookAt(center)
       camera.updateProjectionMatrix()
+      invalidate()
     }
     raf = requestAnimationFrame(frame)
     return () => cancelAnimationFrame(raf)
-  }, [camera, canvasSize.width, canvasSize.height, view, modelMatrix, rootRef])
+  }, [camera, canvasSize.width, canvasSize.height, view, modelMatrix, rootRef, invalidate])
 
   return null
 }
@@ -8116,7 +8326,14 @@ function CadOrientationMiniView({ label, view, sourceObject, modelMatrix, planeC
       border:"1px solid rgba(255,255,255,.09)", background:"rgba(10,10,10,.94)",
       boxShadow:"0 16px 42px rgba(0,0,0,.32)", userSelect:"none",
     }}>
-      <Canvas orthographic camera={{ position:[0,0,100], near:0.01, far:100000, zoom:1 }} gl={{ antialias:true }} style={{ position:"absolute", inset:0, pointerEvents:"none" }}>
+      <Canvas
+        orthographic
+        camera={{ position:[0,0,100], near:0.01, far:100000, zoom:1 }}
+        dpr={1}
+        frameloop="demand"
+        gl={{ antialias:false, alpha:false, powerPreference:"low-power", preserveDrawingBuffer:false }}
+        style={{ position:"absolute", inset:0, pointerEvents:"none" }}
+      >
         <color attach="background" args={["#0b0b0b"]} />
         {/* Stejný light rig jako v hlavní Shade3D scéně. Mini pohled už není
             nasvícen jedním dominantním světlem a materiál se čte stejně jako
@@ -8149,6 +8366,22 @@ function CadOrientationMiniView({ label, view, sourceObject, modelMatrix, planeC
   )
 }
 
+
+function CadOrientationMiniPlaceholder({ label }) {
+  return (
+    <div style={{
+      position:"relative", width:"100%", height:"clamp(150px, 18vh, 205px)", borderRadius:14,
+      border:"1px solid rgba(255,255,255,.07)", background:"rgba(10,10,10,.90)", overflow:"hidden",
+      display:"grid", placeItems:"center", color:"#525252", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif",
+    }}>
+      <div style={{ position:"absolute", left:8, top:7, padding:"4px 6px", borderRadius:7, background:"rgba(0,0,0,.45)", color:"#777", fontSize:8.1, fontWeight:760 }}>{label}</div>
+      <div style={{ display:"flex", alignItems:"center", gap:7, fontSize:8.2 }}>
+        <span style={{ width:10, height:10, borderRadius:"50%", border:"1.5px solid rgba(255,255,255,.10)", borderTopColor:"#777", animation:"artheticCadSpin .8s linear infinite" }} />
+        připravuji pohled…
+      </div>
+    </div>
+  )
+}
 
 export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = false } = {}) {
   const hideSidebar = getParam("hideSidebar") === "1";
@@ -8518,7 +8751,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     catch (error) { console.warn("Trim boundary plan failed:", error); return null }
   }, [trimClosed, trimContext, trimSegments])
 
-  // -- ARTHETIC CAD Tools · Model Builder V1 --
+  // -- ARTHETIC CAD Tools · Model Builder V10 --
   const [cadStage, setCadStage] = useState("scan") // scan | repair | orient | trim | base | result
   // Upper/Lower nejsou jen názvy souborů. Typ čelisti je součást CAD workflow,
   // protože určuje stranu okluzní roviny při orientaci a později i směr báze.
@@ -8538,6 +8771,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadOrientationPlaneCenter, setCadOrientationPlaneCenter] = useState([0, 0, 0])
   const [cadOrientationPlaneSize, setCadOrientationPlaneSize] = useState(80)
   const [cadOrientationAdjust, setCadOrientationAdjust] = useState({ x: 0, y: 0, z: 0 })
+  // Mini-view WebGL canvasy se po třetím bodu mountují postupně. Tři nové renderery
+  // nad hustým STL už tak nevzniknou ve stejném frame jako auto-orientace.
+  const [cadOrientationMiniCount, setCadOrientationMiniCount] = useState(0)
   const [cadBusy, setCadBusy] = useState(false)
   const [cadMessage, setCadMessage] = useState("Nahrajte Upper a/nebo Lower scan.")
   const [cadNaturalHeight, setCadNaturalHeight] = useState(20)
@@ -8555,6 +8791,20 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     cadDisposeObjectUrl(cadObjectUrlsRef.current.upper)
     cadDisposeObjectUrl(cadObjectUrlsRef.current.lower)
   }, [])
+
+  useEffect(() => {
+    if (!(cadStandalone && cadStage === "orient" && cadOrientationPrepared)) {
+      setCadOrientationMiniCount(0)
+      return undefined
+    }
+    setCadOrientationMiniCount(0)
+    const timers = [
+      window.setTimeout(() => setCadOrientationMiniCount(1), 70),
+      window.setTimeout(() => setCadOrientationMiniCount(2), 165),
+      window.setTimeout(() => setCadOrientationMiniCount(3), 280),
+    ]
+    return () => timers.forEach((timer) => window.clearTimeout(timer))
+  }, [cadStandalone, cadStage, cadOrientationPrepared, cadFileUrl])
 
   // -- OPRAVA SÍTĚ --
   const [repairMode, setRepairMode] = useState(false)
@@ -9973,6 +10223,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadOrientationPlaneCenter([0, 0, 0])
     setCadOrientationPlaneSize(80)
     setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
+    setCadOrientationMiniCount(0)
     setCadStage("scan")
     setCadBusy(false)
     setCadMessage("Nahrajte Upper a/nebo Lower scan.")
@@ -10017,13 +10268,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setCadOrientationPlaneCenter([0, 0, 0])
       setCadOrientationPlaneSize(80)
       setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
+      setCadOrientationMiniCount(0)
     }
     setCadPreviewActive(false)
     setCadPreviewStats(null)
     setCadTrimBoundaryPoints([])
     setCadPreviewGeometry((previous) => { previous?.dispose?.(); return null })
-    setDidInitialFrame(false)
-    setInitialCameraState(null)
+    // V10: při přepnutí CAD kroku/archu zachováme aktuální pracovní kameru.
+    // Reframe děláme pouze při skutečném uploadu/novém modelu.
     return true
   }, [cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName])
 
@@ -10031,7 +10283,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     if (!file || cadBusy || (arch !== "upper" && arch !== "lower")) return
     const ext = inferExt(file.name)
     if (!CAD_SUPPORTED_EXTENSIONS.has(ext)) {
-      setCadMessage("Model Builder V1 podporuje STL, PLY a OBJ.")
+      setCadMessage("Model Builder podporuje STL, PLY a OBJ.")
       return
     }
 
@@ -10206,6 +10458,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadOrientationPrepared(false)
     setCadOrientationBaseMatrix(null)
     setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
+    setCadOrientationMiniCount(0)
     setCadMessage("Orientace · klikněte znovu na levý zadní bod, pravý zadní bod a potom na střed fronty.")
   }, [cadBusy, cadFileUrl, applyModelTransform])
 
@@ -10571,9 +10824,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadOrientationPlaneSize(80)
     setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
     setCadStage("orient")
+    setCadOrientationMiniCount(0)
     setCadMessage(`Orientace · ${arch === "upper" ? "Upper" : "Lower"}. Klikněte na levý zadní bod, pravý zadní bod a potom na střed fronty.`)
-    setDidInitialFrame(false)
-    setInitialCameraState(null)
+    // Kamera z Opravy zůstává přesně tam, kde ji uživatel nechal.
   }, [cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName, cadActiveArch, cadArchRepairDone, clearRepairWorkingState])
 
   const changeRepairVariant = useCallback((variant) => {
@@ -14859,9 +15112,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           <div style={{ padding:"0 3px 3px", color:"#666", fontSize:8.4, lineHeight:1.4 }}>
             Kontrolní pohledy · levý bok, fronta a pravý bok · tažením model jemně dolaďte vůči rovině
           </div>
-          <CadOrientationMiniView label="Levý bok" view="side-left" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} />
-          <CadOrientationMiniView label="Frontální" view="front" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} />
-          <CadOrientationMiniView label="Pravý bok" view="side-right" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} />
+          {cadOrientationMiniCount >= 1 ? <CadOrientationMiniView label="Levý bok" view="side-left" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Levý bok" />}
+          {cadOrientationMiniCount >= 2 ? <CadOrientationMiniView label="Frontální" view="front" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Frontální" />}
+          {cadOrientationMiniCount >= 3 ? <CadOrientationMiniView label="Pravý bok" view="side-right" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Pravý bok" />}
         </div>
       )}
     </>
