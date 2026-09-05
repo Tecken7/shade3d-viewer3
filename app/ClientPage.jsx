@@ -245,6 +245,14 @@ const trimPointKey = (point) => `${point[0].toFixed(6)}|${point[1].toFixed(6)}|$
 const trimVec = (point) => Array.isArray(point) ? new THREE.Vector3(point[0], point[1], point[2]) : point.clone()
 const trimArr = (point) => [point.x, point.y, point.z]
 
+const repairWaitForBusyPaint = () => new Promise((resolve) => {
+  if (typeof requestAnimationFrame !== "function") {
+    setTimeout(resolve, 0)
+    return
+  }
+  requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 0)))
+})
+
 function buildTrimMeshContext(sourceObject) {
   if (!sourceObject) throw new Error("Model není připravený pro Ořez.")
   sourceObject.updateMatrixWorld(true)
@@ -2687,7 +2695,7 @@ function createRepairPaintGeometry(context, triangleSet) {
   return geometry
 }
 
-function RepairOverlay({ context, modelMatrix, holes, selectedHoleIds, paintedTriangles, brushCursor, brushRadius }) {
+function RepairOverlay({ context, modelMatrix, holes, selectedHoleIds, completedHoleIds, paintedTriangles, brushCursor, brushRadius }) {
   const groupRef = useRef(null)
   useEffect(() => {
     const group = groupRef.current
@@ -2701,26 +2709,28 @@ function RepairOverlay({ context, modelMatrix, holes, selectedHoleIds, paintedTr
   const paintGeometry = useMemo(() => createRepairPaintGeometry(context, paintedTriangles), [context, paintedTriangles])
   useEffect(() => () => { paintGeometry?.dispose?.() }, [paintGeometry])
   const selectedSet = useMemo(() => new Set(selectedHoleIds || []), [selectedHoleIds])
+  const completedSet = useMemo(() => new Set(completedHoleIds || []), [completedHoleIds])
   if (!context) return null
   const lineRadius = Math.max(0.025, Math.min(0.22, context.diagonal * 0.00105))
   return (
     <group ref={groupRef} matrixAutoUpdate={false}>
       {(holes || []).slice(0, 64).map((hole) => {
         const selected = selectedSet.has(hole.id)
+        const completed = completedSet.has(hole.id)
         const points = hole.points.map(trimArr)
         return (
           <group key={hole.id}>
             <TrimBoundaryTube
               points={points}
-              radius={selected ? lineRadius * 1.45 : lineRadius * 0.78}
+              radius={selected ? lineRadius * 1.45 : completed ? lineRadius * 0.86 : lineRadius * 0.78}
               closed
-              color={selected ? "#7dd3fc" : "#6f7f8a"}
-              opacity={selected ? 0.98 : 0.34}
-              roughness={selected ? 0.20 : 0.38}
-              metalness={selected ? 0.18 : 0.03}
-              renderOrder={selected ? 1502 : 1498}
+              color={selected ? "#7dd3fc" : completed ? "#86efac" : "#6f7f8a"}
+              opacity={selected ? 0.98 : completed ? 0.42 : 0.34}
+              roughness={selected ? 0.20 : completed ? 0.28 : 0.38}
+              metalness={selected ? 0.18 : completed ? 0.06 : 0.03}
+              renderOrder={selected ? 1502 : completed ? 1500 : 1498}
             />
-            {selected && (
+            {selected && !completed && (
               <TrimBoundaryTube
                 points={points}
                 radius={lineRadius * 2.35}
@@ -7475,6 +7485,7 @@ export default function ClientPage() {
   const [repairHoles, setRepairHoles] = useState([])
   const [repairSelectedHoleId, setRepairSelectedHoleId] = useState("")
   const [repairSelectedHoleIds, setRepairSelectedHoleIds] = useState([])
+  const [repairCompletedHoleIds, setRepairCompletedHoleIds] = useState([])
   const [repairHiddenBottomBoundary, setRepairHiddenBottomBoundary] = useState(null)
   const [repairPreviewPatch, setRepairPreviewPatch] = useState(null)
   const [repairPaintedTriangles, setRepairPaintedTriangles] = useState(() => new Set())
@@ -8721,6 +8732,7 @@ export default function ClientPage() {
     setRepairHoles([])
     setRepairSelectedHoleId("")
     setRepairSelectedHoleIds([])
+    setRepairCompletedHoleIds([])
     setRepairHiddenBottomBoundary(null)
     setRepairPreviewPatch(null)
     setRepairPaintedTriangles(new Set())
@@ -8762,6 +8774,10 @@ export default function ClientPage() {
     if (repairBusy || !contextValue || !holeId) return
     const hole = holesValue.find((item) => item.id === holeId)
     if (!hole) return
+    if (repairCompletedHoleIds.includes(hole.id)) {
+      setRepairMessage("Tento otvor už byl v aktuální session opravený.")
+      return
+    }
 
     // Výběr je okamžitý. CGAL se spustí až po explicitním potvrzení opravy.
     if (repairVariant === "manual") {
@@ -8785,10 +8801,10 @@ export default function ClientPage() {
     setRepairMessage(next.length
       ? `Vybráno ${next.length === 1 ? "1 místo" : `${next.length} míst`} k opravě. Jasně modrý obrys označuje vybrané díry.`
       : "Vyberte jednu nebo více děr. CGAL se spustí až po kliknutí na Opravit vybrané.")
-  }, [repairBusy, repairContext, repairHoles, repairVariant, repairSelectedHoleIds])
+  }, [repairBusy, repairContext, repairHoles, repairVariant, repairSelectedHoleIds, repairCompletedHoleIds])
 
 
-  const selectRepairModel = useCallback((url) => {
+  const selectRepairModel = useCallback(async (url) => {
     if (repairBusy || !url) return
     const object = modelObjectsRef.current[url]
     if (!object) {
@@ -8797,53 +8813,55 @@ export default function ClientPage() {
     }
 
     setRepairBusy(true)
-    setRepairMessage("Analyzuji otevřené hrany a topologii sítě…")
+    setRepairMessage("Analyzuji model · připravuji topologii…")
     repairPatchCacheRef.current.clear()
 
-    window.setTimeout(() => {
-      try {
-        const context = buildTrimMeshContext(object)
-        const rawHoles = findRepairBoundaryLoops(context)
-        const classified = classifyRepairBoundaryLoops(context, rawHoles)
-        const holes = classified.visible
+    try {
+      // Dvě RAF + macrotask zajistí, že se spinner/indeterminate bar opravdu
+      // vykreslí a přesune na compositor ještě před těžkou synchronní analýzou.
+      await repairWaitForBusyPaint()
 
-        setRepairSelection(url)
-        setRepairContext(context)
-        setRepairHoles(holes)
-        setRepairHiddenBottomBoundary(classified.hiddenBottom)
-        setRepairPaintedTriangles(new Set())
-        setRepairBrushCursor(null)
-        setRepairSelectedHoleId("")
-        setRepairSelectedHoleIds([])
-        setRepairPreviewPatch(null)
+      const context = buildTrimMeshContext(object)
 
-        const ignoredText = classified.hiddenBottom
-          ? " Dominantní spodní otevřená boundary byla automaticky ignorována."
-          : ""
+      setRepairMessage("Analyzuji model · hledám otevřené boundary…")
+      await repairWaitForBusyPaint()
 
-        if (repairVariant === "manual") {
-          setRepairStage("paint")
-          setRepairMessage(holes.length
-            ? `Našel jsem ${holes.length} opravovatelných otevřených hranic.${ignoredText} LMB štětcem označte oblast kolem problému a potom klikněte na Najít v označení.`
-            : `Automatická analýza nenašla opravovatelnou uzavřenou boundary.${ignoredText}`)
-        } else {
-          setRepairStage("detect")
-          if (holes.length) {
-            const likelyCount = holes.filter((hole) => hole.likely).length
-            setRepairMessage(
-              `Nalezeno ${holes.length} opravovatelných ${holes.length === 1 ? "otvor" : "otvorů"} (${likelyCount} doporučených).${ignoredText} Vyberte jednu, více nebo všechny díry; CGAL se spustí až při opravě.`
-            )
-          } else {
-            setRepairMessage(`Na tomto modelu jsem nenašel žádnou opravovatelnou uzavřenou otevřenou hranu.${ignoredText}`)
-          }
-        }
-      } catch (error) {
-        console.error("Repair context error:", error)
-        setRepairMessage(error?.message || "Síť modelu se nepodařilo analyzovat.")
-      } finally {
-        setRepairBusy(false)
+      const rawHoles = findRepairBoundaryLoops(context)
+      const classified = classifyRepairBoundaryLoops(context, rawHoles)
+      const holes = classified.visible
+
+      setRepairSelection(url)
+      setRepairContext(context)
+      setRepairHoles(holes)
+      setRepairCompletedHoleIds([])
+      setRepairHiddenBottomBoundary(classified.hiddenBottom)
+      setRepairPaintedTriangles(new Set())
+      setRepairBrushCursor(null)
+      setRepairSelectedHoleId("")
+      setRepairSelectedHoleIds([])
+      setRepairPreviewPatch(null)
+
+      const ignoredText = classified.hiddenBottom
+        ? " Dominantní spodní otevřená boundary byla automaticky ignorována."
+        : ""
+
+      if (repairVariant === "manual") {
+        setRepairStage("paint")
+        setRepairMessage(holes.length
+          ? `Našel jsem ${holes.length} opravovatelných otevřených hranic.${ignoredText} LMB štětcem označte oblast kolem problému a potom klikněte na Najít v označení.`
+          : `Automatická analýza nenašla opravovatelnou uzavřenou boundary.${ignoredText}`)
+      } else {
+        setRepairStage("detect")
+        // Výsledek analýzy už je zobrazený v horním summary řádku.
+        // Nedublujeme stejnou informaci v dolním status boxu.
+        setRepairMessage("")
       }
-    }, 20)
+    } catch (error) {
+      console.error("Repair context error:", error)
+      setRepairMessage(error?.message || "Síť modelu se nepodařilo analyzovat.")
+    } finally {
+      setRepairBusy(false)
+    }
   }, [repairBusy, repairVariant])
 
 
@@ -8976,7 +8994,9 @@ export default function ClientPage() {
 
   const applyRepairHoles = useCallback(async (holeIds, mode = repairVariant) => {
     if (!repairContext || !repairSelection || repairBusy) return
-    const selected = repairHoles.filter((hole) => holeIds.includes(hole.id))
+    const selected = repairHoles.filter(
+      (hole) => holeIds.includes(hole.id) && !repairCompletedHoleIds.includes(hole.id)
+    )
     if (!selected.length) return
 
     setRepairStage("preview")
@@ -8987,11 +9007,14 @@ export default function ClientPage() {
 
     try {
       const patches = []
+      const patchedHoleIds = []
+
       for (let index = 0; index < selected.length; index++) {
         const hole = selected[index]
         setRepairMessage(selected.length > 1
           ? `CGAL C1 + Dense225 · otvor ${index + 1}/${selected.length}…`
           : "CGAL C1 + Dense225 · dokončuji opravu…")
+
         const patch = await prepareCGALRepairPatch(repairContext, hole, (progress) => {
           const percent = Number(progress?.percent)
           if (!Number.isFinite(percent)) return
@@ -8999,7 +9022,11 @@ export default function ClientPage() {
             ? `CGAL C1 + Dense225 · otvor ${index + 1}/${selected.length} · ${Math.round(percent)} %`
             : `CGAL C1 + Dense225 · ${Math.round(percent)} %`)
         })
-        if (patch) patches.push(patch)
+
+        if (patch) {
+          patches.push(patch)
+          patchedHoleIds.push(hole.id)
+        }
       }
 
       if (!patches.length) throw new Error("CGAL nevytvořil žádný patch.")
@@ -9020,24 +9047,42 @@ export default function ClientPage() {
       }))
 
       invalidateComparisonResult()
-      repairPatchCacheRef.current.clear()
-      setRepairContext(null)
-      setRepairHoles([])
+
+      // ZÁSADNÍ UX změna v12.2:
+      // původní analýzu necháváme živou. Opravené díry jen označíme jako hotové,
+      // takže uživatel může bez dalšího scanování pokračovat na zbylé boundary.
+      const completedSet = new Set([...repairCompletedHoleIds, ...patchedHoleIds])
+      const completedIds = [...completedSet]
+      const remaining = repairHoles.filter((hole) => !completedSet.has(hole.id))
+
+      setRepairCompletedHoleIds(completedIds)
       setRepairSelectedHoleId("")
       setRepairSelectedHoleIds([])
-      setRepairHiddenBottomBoundary(null)
       setRepairPreviewPatch(null)
       setRepairPaintedTriangles(new Set())
       setRepairBrushCursor(null)
-      setRepairStage("result")
-      setRepairMessage(`Oprava je hotová · CGAL C1 + Dense225 · ${patches.length === 1 ? "1 otvor" : `${patches.length} otvorů`}. Vertex colors/UV jsou harmonicky dopočítané z boundary.`)
+
+      if (remaining.length && mode === "auto") {
+        setRepairStage("detect")
+        setRepairMessage(
+          `Oprava hotová · ${patches.length === 1 ? "1 otvor" : `${patches.length} otvorů`} doplněno. ` +
+          `Zbývá ${remaining.length === 1 ? "1 nalezený otvor" : `${remaining.length} nalezené otvory`} – můžete pokračovat bez nové analýzy.`
+        )
+      } else if (remaining.length && mode === "manual") {
+        setRepairStage("paint")
+        setRepairMessage("Oprava hotová. Původní analýza zůstává zachovaná; můžete označit další nalezenou boundary.")
+      } else {
+        setRepairStage("result")
+        setRepairMessage(`Oprava je hotová · CGAL C1 + Dense225 · ${completedIds.length === 1 ? "1 otvor" : `${completedIds.length} otvorů`} opraveno.`)
+      }
     } catch (error) {
       console.error("CGAL repair apply error:", error)
       setRepairMessage(error?.message || "CGAL Oprava sítě se nepodařila.")
     } finally {
       setRepairBusy(false)
     }
-  }, [repairContext, repairSelection, repairBusy, repairHoles, repairVariant, invalidateComparisonResult, prepareCGALRepairPatch])
+  }, [repairContext, repairSelection, repairBusy, repairHoles, repairVariant, repairCompletedHoleIds, invalidateComparisonResult, prepareCGALRepairPatch])
+
 
   const repairSelectedHole = useCallback(() => {
     if (repairSelectedHoleId) applyRepairHoles([repairSelectedHoleId])
@@ -9052,13 +9097,15 @@ export default function ClientPage() {
   }, [repairSelectedHoleIds, applyRepairHoles])
 
   const selectAllRepairHoles = useCallback(() => {
-    if (!repairHoles.length) return
-    const ids = repairHoles.map((hole) => hole.id)
+    const ids = repairHoles
+      .filter((hole) => !repairCompletedHoleIds.includes(hole.id))
+      .map((hole) => hole.id)
+    if (!ids.length) return
     setRepairSelectedHoleIds(ids)
     setRepairSelectedHoleId(ids[ids.length - 1] || "")
     setRepairStage("preview")
-    setRepairMessage(`Vybráno všech ${ids.length} ${ids.length === 1 ? "místo" : "míst"} k opravě. Spodní otevřená boundary se do výběru nikdy nezařazuje.`)
-  }, [repairHoles])
+    setRepairMessage(`Vybráno všech ${ids.length} zbývajících ${ids.length === 1 ? "místo" : "míst"} k opravě. Spodní otevřená boundary se do výběru nikdy nezařazuje.`)
+  }, [repairHoles, repairCompletedHoleIds])
 
   const clearRepairHoleSelection = useCallback(() => {
     setRepairSelectedHoleIds([])
@@ -9104,6 +9151,7 @@ export default function ClientPage() {
     setRepairHoles([])
     setRepairSelectedHoleId("")
     setRepairSelectedHoleIds([])
+    setRepairCompletedHoleIds([])
     setRepairHiddenBottomBoundary(null)
     setRepairPreviewPatch(null)
     setRepairPaintedTriangles(new Set())
@@ -12535,6 +12583,42 @@ export default function ClientPage() {
       color: "#f3f3f3", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
       animation: "artheticAlignMenuIn .24s ease-out both",
     }}>
+      <style>{`
+        @keyframes artheticRepairSpinnerSpin {
+          from { transform: translateZ(0) rotate(0deg); }
+          to { transform: translateZ(0) rotate(360deg); }
+        }
+        @keyframes artheticRepairBusySlide {
+          0% { transform: translate3d(-115%,0,0) scaleX(.42); opacity:.22; }
+          45% { opacity:.9; }
+          100% { transform: translate3d(235%,0,0) scaleX(.72); opacity:.18; }
+        }
+        .artheticRepairSpinner {
+          display:inline-block;
+          width:10px;
+          height:10px;
+          box-sizing:border-box;
+          border:1.6px solid rgba(255,255,255,.18);
+          border-top-color:#e5e7eb;
+          border-right-color:rgba(125,211,252,.72);
+          border-radius:50%;
+          animation:artheticRepairSpinnerSpin .68s linear infinite;
+          transform-origin:50% 50%;
+          will-change:transform;
+          backface-visibility:hidden;
+          contain:paint;
+        }
+        .artheticRepairBusySlider {
+          width:34%;
+          height:100%;
+          border-radius:999px;
+          background:linear-gradient(90deg, rgba(56,189,248,.05), rgba(125,211,252,.92), rgba(255,255,255,.72), rgba(56,189,248,.05));
+          animation:artheticRepairBusySlide 1.05s cubic-bezier(.35,.05,.35,.95) infinite;
+          will-change:transform, opacity;
+          transform:translate3d(-115%,0,0);
+          backface-visibility:hidden;
+        }
+      `}</style>
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
         <div style={{ minWidth: 0, flex: "1 1 auto" }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
@@ -12613,9 +12697,11 @@ export default function ClientPage() {
   )
 
   const repairSelectedFile = repairSelection ? files.find((file) => file.url === repairSelection) : null
+  const repairCompletedHoleSet = new Set(repairCompletedHoleIds)
+  const repairPendingHoles = repairHoles.filter((hole) => !repairCompletedHoleSet.has(hole.id))
   const repairLikelyHoles = repairHoles.filter((hole) => hole.likely)
-  const repairSelectedAutoCount = repairSelectedHoleIds.length
-  const repairAllVisibleSelected = repairHoles.length > 0 && repairSelectedAutoCount === repairHoles.length
+  const repairSelectedAutoCount = repairSelectedHoleIds.filter((id) => !repairCompletedHoleSet.has(id)).length
+  const repairAllVisibleSelected = repairPendingHoles.length > 0 && repairSelectedAutoCount === repairPendingHoles.length
   const repairWorkspace = repairMode && (
     <div style={{
       position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)", zIndex: 73,
@@ -12670,39 +12756,79 @@ export default function ClientPage() {
           <div style={{ minWidth: 0, flex: "1 1 360px" }}>
             <div style={{ color: "#858585", fontSize: 9.2, marginBottom: 7 }}>
               {repairHoles.length
-                ? `Nalezeno ${repairHoles.length} opravovatelných ${repairHoles.length === 1 ? "otvor" : "otvorů"} · ${repairLikelyHoles.length} doporučených.${repairHiddenBottomBoundary ? " Spodní otevřená boundary byla skryta a nebude opravena." : ""}`
+                ? `Nalezeno ${repairHoles.length} opravovatelných ${repairHoles.length === 1 ? "otvor" : "otvorů"} · ${repairLikelyHoles.length} doporučených${repairCompletedHoleIds.length ? ` · ${repairCompletedHoleIds.length} opraveno` : ""}.${repairHiddenBottomBoundary ? " Spodní otevřená boundary byla skryta a nebude opravena." : ""}`
                 : `Nebyla nalezena žádná opravovatelná otevřená hrana.${repairHiddenBottomBoundary ? " Spodní otevřená boundary byla správně ignorována." : ""}`}
             </div>
             <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
               {repairHoles.map((hole, index) => {
                 const selected = repairSelectedHoleIds.includes(hole.id)
+                const completed = repairCompletedHoleSet.has(hole.id)
                 return (
-                  <button key={hole.id} type="button" onClick={() => selectRepairHole(hole.id)} disabled={repairBusy}
+                  <button
+                    key={hole.id}
+                    type="button"
+                    onClick={() => selectRepairHole(hole.id)}
+                    disabled={repairBusy || completed}
                     style={{
                       height: 29, padding: "0 9px", borderRadius: 8,
-                      border: selected ? "1px solid rgba(125,211,252,.58)" : "1px solid rgba(255,255,255,.07)",
-                      background: selected ? "rgba(56,189,248,.13)" : "rgba(255,255,255,.025)",
-                      color: selected ? "#d7f3ff" : hole.likely ? "#b5b5b5" : "#777",
+                      border: selected
+                        ? "1px solid rgba(125,211,252,.58)"
+                        : completed
+                          ? "1px solid rgba(134,239,172,.24)"
+                          : "1px solid rgba(255,255,255,.07)",
+                      background: selected
+                        ? "rgba(56,189,248,.13)"
+                        : completed
+                          ? "rgba(34,197,94,.055)"
+                          : "rgba(255,255,255,.025)",
+                      color: selected ? "#d7f3ff" : completed ? "#9ad9ad" : hole.likely ? "#b5b5b5" : "#777",
                       boxShadow: selected ? "0 0 0 2px rgba(56,189,248,.055), 0 0 16px rgba(56,189,248,.10)" : "none",
-                      fontSize: 8.7, fontWeight: 680, cursor: repairBusy ? "wait" : "pointer",
-                    }}>
-                    {selected ? "✓ " : ""}{index + 1}. Ø {(hole.equivalentRadius * 2).toFixed(1)}{hole.likely ? "" : " · velká"}
+                      opacity: completed ? 0.72 : 1,
+                      fontSize: 8.7, fontWeight: 680,
+                      cursor: repairBusy ? "wait" : completed ? "default" : "pointer",
+                    }}
+                  >
+                    {completed ? "✓ " : selected ? "● " : ""}
+                    {index + 1}. Ø {(hole.equivalentRadius * 2).toFixed(1)}
+                    {completed ? " · opraveno" : hole.likely ? "" : " · velká"}
                   </button>
                 )
               })}
             </div>
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            {repairHoles.length > 1 && (
+            {repairPendingHoles.length > 1 && (
               <button type="button" onClick={repairAllVisibleSelected ? clearRepairHoleSelection : selectAllRepairHoles} disabled={repairBusy}
                 style={{ height: 31, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#bdbdbd", fontSize: 9, fontWeight: 690, cursor: repairBusy ? "wait" : "pointer" }}>
-                {repairAllVisibleSelected ? "Zrušit výběr" : `Vybrat vše (${repairHoles.length})`}
+                {repairAllVisibleSelected ? "Zrušit výběr" : `Vybrat vše (${repairPendingHoles.length})`}
               </button>
             )}
             {repairSelectedAutoCount > 0 && (
               <button type="button" onClick={repairSelectedAutoHoles} disabled={repairBusy}
                 style={{ height: 31, padding: "0 11px", borderRadius: 8, border: "1px solid rgba(74,222,128,.20)", background: "rgba(34,197,94,.075)", color: "#bbf7d0", fontSize: 9, fontWeight: 720, cursor: repairBusy ? "wait" : "pointer" }}>
                 Opravit vybrané ({repairSelectedAutoCount})
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {repairSelection && repairedExportsByUrl[repairSelection] && repairStage !== "result" && (
+        <div style={{ marginTop: 9, paddingTop: 9, borderTop: "1px solid rgba(255,255,255,.055)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ color: "#707070", fontSize: 8.9 }}>
+            V této session opraveno {Number(repairedExportsByUrl[repairSelection]?.count) || 0} {Number(repairedExportsByUrl[repairSelection]?.count) === 1 ? "místo" : "míst"}. Nalezené zbývající díry zůstávají připravené bez nové analýzy.
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <button type="button" onClick={() => undoLastRepair(repairSelection)} disabled={repairBusy}
+              style={{ height: 28, padding: "0 8px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#999", fontSize: 8.6, fontWeight: 680, cursor: repairBusy ? "wait" : "pointer" }}>Vrátit poslední</button>
+            <button type="button" onClick={() => downloadRepairedModel(repairSelection)} disabled={repairBusy || repairExportBusyUrl === repairSelection}
+              style={{ height: 28, padding: "0 8px", borderRadius: 8, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#d8d8d8", fontSize: 8.6, fontWeight: 690, cursor: repairBusy || repairExportBusyUrl === repairSelection ? "wait" : "pointer" }}>
+              {repairExportBusyUrl === repairSelection ? "Připravuji…" : "Stáhnout"}
+            </button>
+            {editorCapabilities.canSaveRepairedToCase && (
+              <button type="button" onClick={() => saveRepairedModelToCase(repairSelection)} disabled={repairBusy || repairExportBusyUrl === repairSelection || !!repairedExportsByUrl[repairSelection]?.saveRequested}
+                style={{ height: 28, padding: "0 8px", borderRadius: 8, border: "1px solid rgba(74,222,128,.16)", background: "rgba(34,197,94,.055)", color: repairedExportsByUrl[repairSelection]?.saveRequested ? "#647568" : "#b8edc6", fontSize: 8.6, fontWeight: 700, cursor: repairBusy || repairedExportsByUrl[repairSelection]?.saveRequested ? "default" : "pointer" }}>
+                {repairedExportsByUrl[repairSelection]?.saveRequested ? "Předáno" : "Uložit do zakázky"}
               </button>
             )}
           </div>
@@ -12749,9 +12875,16 @@ export default function ClientPage() {
       )}
 
       {(repairMessage || repairBusy) && (
-        <div style={{ marginTop: 9, padding: "7px 9px", borderRadius: 9, background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.055)", color: repairBusy ? "#cfcfcf" : "#787878", fontSize: 8.8, lineHeight: 1.45 }}>
-          {repairBusy && <span style={{ display: "inline-block", width: 9, height: 9, marginRight: 7, border: "1.5px solid rgba(255,255,255,.18)", borderTopColor: "#d7d7d7", borderRadius: "50%", animation: "artheticAnalysisSpin .8s linear infinite", verticalAlign: "-1px" }} />}
-          {repairMessage}
+        <div style={{ position: "relative", overflow: "hidden", marginTop: 9, padding: repairBusy ? "7px 9px 9px" : "7px 9px", borderRadius: 9, background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.055)", color: repairBusy ? "#cfcfcf" : "#787878", fontSize: 8.8, lineHeight: 1.45 }}>
+          <span style={{ display: "inline-flex", alignItems: "center", minHeight: 12 }}>
+            {repairBusy && <span className="artheticRepairSpinner" style={{ marginRight: 7, flex: "0 0 auto" }} aria-hidden="true" />}
+            <span>{repairMessage || "Pracuji…"}</span>
+          </span>
+          {repairBusy && (
+            <span aria-hidden="true" style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 1.5, overflow: "hidden", background: "rgba(255,255,255,.025)" }}>
+              <span className="artheticRepairBusySlider" />
+            </span>
+          )}
         </div>
       )}
     </div>
@@ -13949,6 +14082,7 @@ export default function ClientPage() {
                 ? repairHoles
                 : (repairSelectedHoleId ? repairHoles.filter((hole) => hole.id === repairSelectedHoleId) : [])}
               selectedHoleIds={repairVariant === "auto" ? repairSelectedHoleIds : (repairSelectedHoleId ? [repairSelectedHoleId] : [])}
+              completedHoleIds={repairCompletedHoleIds}
               paintedTriangles={repairPaintedTriangles}
               brushCursor={repairBrushCursor}
               brushRadius={repairContext.diagonal * repairBrushFactor}
