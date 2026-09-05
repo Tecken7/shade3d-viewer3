@@ -7563,6 +7563,7 @@ export default function ClientPage() {
   const [repairProgressLeaving, setRepairProgressLeaving] = useState(false)
   const [repairProgressPercent, setRepairProgressPercent] = useState(0)
   const [repairProgressLabel, setRepairProgressLabel] = useState("")
+  const [repairReadyActionLeaving, setRepairReadyActionLeaving] = useState(false)
   const [repairedExportsByUrl, setRepairedExportsByUrl] = useState({})
   const [repairExportBusyUrl, setRepairExportBusyUrl] = useState("")
   const repairHistoryByUrlRef = useRef({})
@@ -8411,7 +8412,7 @@ export default function ClientPage() {
     }
   }, [createAlignedExport])
 
-  const saveAlignedModelToCase = useCallback(async (url) => {
+  const saveAlignedModelToCase = useCallback(async (url, options = {}) => {
     if (!editorCapabilities.canSaveAlignedToCase || !window.parent || window.parent === window) return
     try {
       const result = await createAlignedExport(url)
@@ -8429,15 +8430,17 @@ export default function ClientPage() {
           alignmentRms: result.alignmentRms,
           alignmentP95: result.alignmentP95,
           createdAt: new Date().toISOString(),
+          saveContext: options?.saveContext || null,
         },
       }, "*", [buffer])
       setAlignedExportsByUrl((previous) => previous[url]
         ? { ...previous, [url]: { ...previous[url], saveRequested: true } }
         : previous)
-      setAlignmentMessage("Zarovnaný model byl předán k uložení do zakázky.")
+      if (!options?.silent) setAlignmentMessage("Zarovnaný model byl předán k uložení do zakázky.")
     } catch (error) {
       console.error("Aligned export save error:", error)
-      setAlignmentMessage(error?.message || "Zarovnaný model se nepodařilo připravit k uložení.")
+      if (!options?.silent) setAlignmentMessage(error?.message || "Zarovnaný model se nepodařilo připravit k uložení.")
+      throw error
     }
   }, [createAlignedExport, editorCapabilities.canSaveAlignedToCase])
 
@@ -8606,7 +8609,7 @@ export default function ClientPage() {
         setTrimStage("result")
         setTrimKeepComponent(null)
         setTrimHoverComponent(null)
-        setTrimMessage("Ořez je hotový. Hrana je vytvořená skrz faces modelu; výsledek můžete stáhnout, uložit do zakázky nebo vrátit.")
+        setTrimMessage("Ořez je hotový. Hrana je vytvořená skrz faces modelu; výsledek můžete stáhnout nebo vrátit. Při uložení scény se změněný model uloží automaticky.")
       } catch (error) {
         console.error("Trim apply error:", error)
         setTrimMessage(error?.message || "Ořez se nepodařilo aplikovat.")
@@ -8821,7 +8824,7 @@ export default function ClientPage() {
     }
   }, [createTrimmedExport])
 
-  const saveTrimmedModelToCase = useCallback(async (url) => {
+  const saveTrimmedModelToCase = useCallback(async (url, options = {}) => {
     if (!editorCapabilities.canSaveTrimmedToCase || !window.parent || window.parent === window) return
     try {
       const result = await createTrimmedExport(url)
@@ -8836,15 +8839,17 @@ export default function ClientPage() {
           derivedFrom: result.derivedFrom,
           trimPointCount: result.pointCount,
           createdAt: new Date().toISOString(),
+          saveContext: options?.saveContext || null,
         },
       }, "*", [buffer])
       setTrimmedExportsByUrl((previous) => previous[url]
         ? { ...previous, [url]: { ...previous[url], saveRequested: true } }
         : previous)
-      setTrimMessage("Ořezaný model byl předán k uložení do zakázky.")
+      if (!options?.silent) setTrimMessage("Ořezaný model byl předán k uložení do zakázky.")
     } catch (error) {
       console.error("Trim export save error:", error)
-      setTrimMessage(error?.message || "Ořezaný model se nepodařilo připravit k uložení.")
+      if (!options?.silent) setTrimMessage(error?.message || "Ořezaný model se nepodařilo připravit k uložení.")
+      throw error
     }
   }, [createTrimmedExport, editorCapabilities.canSaveTrimmedToCase])
 
@@ -9277,6 +9282,15 @@ export default function ClientPage() {
     applyRepairHoles(repairSelectedHoleIds, "auto")
   }, [repairSelectedHoleIds, applyRepairHoles])
 
+  const triggerRepairSelectedAutoHoles = useCallback(() => {
+    if (!repairSelectedHoleIds.length || repairBusy || repairReadyActionLeaving) return
+    setRepairReadyActionLeaving(true)
+    window.setTimeout(() => {
+      repairSelectedAutoHoles()
+      window.setTimeout(() => setRepairReadyActionLeaving(false), 260)
+    }, 120)
+  }, [repairSelectedHoleIds, repairBusy, repairReadyActionLeaving, repairSelectedAutoHoles])
+
   const selectAllRepairHoles = useCallback(() => {
     const ids = repairHoles
       .filter((hole) => !repairCompletedHoleIds.includes(hole.id))
@@ -9431,7 +9445,7 @@ export default function ClientPage() {
     }
   }, [createRepairedExport])
 
-  const saveRepairedModelToCase = useCallback(async (url) => {
+  const saveRepairedModelToCase = useCallback(async (url, options = {}) => {
     if (!editorCapabilities.canSaveRepairedToCase || !window.parent || window.parent === window) return
     try {
       const result = await createRepairedExport(url)
@@ -9448,15 +9462,105 @@ export default function ClientPage() {
           repairMode: result.repairMode,
           repairEngine: result.repairEngine,
           createdAt: new Date().toISOString(),
+          saveContext: options?.saveContext || null,
         },
       }, "*", [buffer])
       setRepairedExportsByUrl((previous) => previous[url] ? { ...previous, [url]: { ...previous[url], saveRequested: true } } : previous)
-      setRepairMessage("Opravený model byl předán k uložení do zakázky.")
+      if (!options?.silent) setRepairMessage("Opravený model byl předán k uložení do zakázky.")
     } catch (error) {
       console.error("Repair export save error:", error)
-      setRepairMessage(error?.message || "Opravený model se nepodařilo připravit k uložení.")
+      if (!options?.silent) setRepairMessage(error?.message || "Opravený model se nepodařilo připravit k uložení.")
+      throw error
     }
   }, [createRepairedExport, editorCapabilities.canSaveRepairedToCase])
+
+  const flushPendingDerivedModelsForScene = useCallback(async () => {
+    if (!window.parent || window.parent === window) return 0
+
+    const urls = new Set([
+      ...Object.keys(alignedExportsByUrl || {}),
+      ...Object.keys(trimmedExportsByUrl || {}),
+      ...Object.keys(repairedExportsByUrl || {}),
+    ])
+
+    const asTime = (value) => {
+      const numeric = Number(value)
+      if (Number.isFinite(numeric) && numeric > 0) return numeric
+      const parsed = Date.parse(String(value || ""))
+      return Number.isFinite(parsed) ? parsed : 0
+    }
+
+    let savedCount = 0
+
+    for (const url of urls) {
+      const candidates = []
+      const aligned = alignedExportsByUrl?.[url]
+      const trimmed = trimmedExportsByUrl?.[url]
+      const repaired = repairedExportsByUrl?.[url]
+
+      if (aligned && !aligned.saveRequested && editorCapabilities.canSaveAlignedToCase) {
+        candidates.push({ type: "alignment", createdAt: asTime(aligned.createdAt), save: () => saveAlignedModelToCase(url, { silent: true, saveContext: "scene" }) })
+      }
+      if (trimmed && !trimmed.saveRequested && editorCapabilities.canSaveTrimmedToCase) {
+        candidates.push({ type: "trim", createdAt: asTime(trimmed.createdAt), save: () => saveTrimmedModelToCase(url, { silent: true, saveContext: "scene" }) })
+      }
+      if (repaired && !repaired.saveRequested && editorCapabilities.canSaveRepairedToCase) {
+        candidates.push({ type: "repair", createdAt: asTime(repaired.createdAt), save: () => saveRepairedModelToCase(url, { silent: true, saveContext: "scene" }) })
+      }
+
+      if (!candidates.length) continue
+
+      // Jeden source model = jeden finální odvozený soubor. Pokud uživatel udělal
+      // několik operací za sebou, uložíme nejnovější výsledný stav geometrie.
+      candidates.sort((a, b) => b.createdAt - a.createdAt)
+      await candidates[0].save()
+      savedCount += 1
+    }
+
+    return savedCount
+  }, [
+    alignedExportsByUrl,
+    trimmedExportsByUrl,
+    repairedExportsByUrl,
+    editorCapabilities.canSaveAlignedToCase,
+    editorCapabilities.canSaveTrimmedToCase,
+    editorCapabilities.canSaveRepairedToCase,
+    saveAlignedModelToCase,
+    saveTrimmedModelToCase,
+    saveRepairedModelToCase,
+  ])
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.parent || window.parent === window) return
+
+    const handler = (event) => {
+      if (event.source !== window.parent) return
+      if (event.data?.type !== "ARTHETIC_REQUEST_PENDING_DERIVED_MODELS") return
+
+      const requestId = String(event.data?.requestId || "")
+      Promise.resolve()
+        .then(() => flushPendingDerivedModelsForScene())
+        .then((count) => {
+          window.parent.postMessage({
+            type: "ARTHETIC_PENDING_DERIVED_MODELS_READY",
+            requestId,
+            payload: { count },
+          }, "*")
+        })
+        .catch((error) => {
+          console.error("Scene derived-model flush failed:", error)
+          window.parent.postMessage({
+            type: "ARTHETIC_PENDING_DERIVED_MODELS_READY",
+            requestId,
+            payload: { count: 0, error: error?.message || "Změněné modely se nepodařilo připravit." },
+          }, "*")
+        })
+    }
+
+    window.addEventListener("message", handler)
+    return () => window.removeEventListener("message", handler)
+  }, [flushPendingDerivedModelsForScene])
+
 
   const getAlignmentPair = useCallback(() => {
     if (alignmentSelection.length !== 2) return { aUrl: null, bUrl: null, fileA: null, fileB: null }
@@ -11472,12 +11576,6 @@ export default function ClientPage() {
                     style={{ height: 25, padding: "0 8px", borderRadius: 7, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#d5d5d5", fontSize: 8.3, fontWeight: 680, cursor: trimExportBusyUrl === f.url ? "wait" : "pointer" }}>
                     {trimExportBusyUrl === f.url ? "Připravuji…" : "Stáhnout"}
                   </button>
-                  {editorCapabilities.canSaveTrimmedToCase && (
-                    <button type="button" onClick={() => saveTrimmedModelToCase(f.url)} disabled={trimExportBusyUrl === f.url || !!trimmedInfo.saveRequested}
-                      style={{ height: 25, padding: "0 8px", borderRadius: 7, border: "1px solid rgba(251,191,36,.17)", background: "rgba(245,158,11,.06)", color: trimmedInfo.saveRequested ? "#978764" : "#fde68a", fontSize: 8.3, fontWeight: 700, cursor: trimmedInfo.saveRequested ? "default" : "pointer" }}>
-                      {trimmedInfo.saveRequested ? "Předáno" : "Uložit do zakázky"}
-                    </button>
-                  )}
                 </div>
               </div>
             )}
@@ -11497,12 +11595,6 @@ export default function ClientPage() {
                     style={{ height: 25, padding: "0 8px", borderRadius: 7, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#d5d5d5", fontSize: 8.3, fontWeight: 680, cursor: repairExportBusyUrl === f.url ? "wait" : "pointer" }}>
                     {repairExportBusyUrl === f.url ? "Připravuji…" : "Stáhnout"}
                   </button>
-                  {editorCapabilities.canSaveRepairedToCase && (
-                    <button type="button" onClick={() => saveRepairedModelToCase(f.url)} disabled={repairExportBusyUrl === f.url || !!repairedInfo.saveRequested}
-                      style={{ height: 25, padding: "0 8px", borderRadius: 7, border: "1px solid rgba(96,165,250,.17)", background: "rgba(59,130,246,.06)", color: repairedInfo.saveRequested ? "#64788f" : "#bfdbfe", fontSize: 8.3, fontWeight: 700, cursor: repairedInfo.saveRequested ? "default" : "pointer" }}>
-                      {repairedInfo.saveRequested ? "Předáno" : "Uložit do zakázky"}
-                    </button>
-                  )}
                 </div>
               </div>
             )}
@@ -12855,7 +12947,7 @@ export default function ClientPage() {
             {trimStage === "boundary" && !trimClosed && <>LMB klik = nový bod · přetažení kuličky = oprava bodu · dvojklik na první žlutý bod = uzavřít.</>}
             {trimStage === "boundary" && trimClosed && <>Smyčka je uzavřená. Body můžete dál přetahovat. Najeďte myší na jednu stranu pro náhled; kliknutím na zelenou oblast se Ořez rovnou provede.</>}
             {trimStage === "region" && <>Potvrzuji vybranou oblast a provádím Ořez…</>}
-            {trimStage === "result" && <>Ořez je aplikovaný na geometrii v této session. Výsledek lze stáhnout nebo interně uložit k zakázce.</>}
+            {trimStage === "result" && <>Ořez je aplikovaný na geometrii v této session. Výsledek lze stáhnout; při uložení scény se změněný model uloží automaticky.</>}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
             {trimStage === "boundary" && !trimClosed && trimControlNodes.length > 0 && (
@@ -12872,10 +12964,6 @@ export default function ClientPage() {
                 <button type="button" onClick={() => undoLastTrim(trimSelection)} style={{ height: 31, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 9, fontWeight: 680, cursor: "pointer" }}>Vrátit ořez</button>
                 <button type="button" onClick={() => downloadTrimmedModel(trimSelection)} disabled={trimExportBusyUrl === trimSelection}
                   style={{ height: 31, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,.10)", background: "rgba(255,255,255,.04)", color: "#e1e1e1", fontSize: 9, fontWeight: 700, cursor: trimExportBusyUrl === trimSelection ? "wait" : "pointer" }}>{trimExportBusyUrl === trimSelection ? "Připravuji…" : "Stáhnout"}</button>
-                {editorCapabilities.canSaveTrimmedToCase && (
-                  <button type="button" onClick={() => saveTrimmedModelToCase(trimSelection)} disabled={trimExportBusyUrl === trimSelection || !!trimmedExportsByUrl[trimSelection]?.saveRequested}
-                    style={{ height: 31, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(251,191,36,.17)", background: "rgba(245,158,11,.06)", color: trimmedExportsByUrl[trimSelection]?.saveRequested ? "#978764" : "#fde68a", fontSize: 9, fontWeight: 710, cursor: trimmedExportsByUrl[trimSelection]?.saveRequested ? "default" : "pointer" }}>{trimmedExportsByUrl[trimSelection]?.saveRequested ? "Předáno" : "Uložit do zakázky"}</button>
-                )}
               </>
             )}
           </div>
@@ -13002,6 +13090,15 @@ export default function ClientPage() {
         .artheticRepairReadyAction > * {
           position:relative;
           z-index:3;
+        }
+        .artheticRepairReadyAction {
+          transition:opacity .13s ease-out, transform .16s cubic-bezier(.22,.75,.35,1), filter .14s ease-out;
+        }
+        .artheticRepairReadyAction.isLeaving {
+          opacity:0;
+          transform:translateY(2px) scale(.955);
+          filter:blur(1px);
+          pointer-events:none;
         }
         .artheticRepairReadyParticles {
           position:absolute !important;
@@ -13148,9 +13245,9 @@ export default function ClientPage() {
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
             {repairSelectedAutoCount > 0 && (
               <button
-                className="artheticRepairReadyAction"
+                className={`artheticRepairReadyAction${repairReadyActionLeaving ? " isLeaving" : ""}`}
                 type="button"
-                onClick={repairSelectedAutoHoles}
+                onClick={triggerRepairSelectedAutoHoles}
                 disabled={repairBusy}
                 style={{ height: 31, padding: "0 11px", borderRadius: 8, color: "#bbf7d0", fontSize: 9, fontWeight: 720, cursor: repairBusy ? "wait" : "pointer", minWidth: 112 }}
               >
@@ -13249,17 +13346,6 @@ export default function ClientPage() {
             >
               {repairExportBusyUrl === repairSelection ? "Připravuji…" : "Stáhnout"}
             </button>
-
-            {editorCapabilities.canSaveRepairedToCase && (
-              <button
-                type="button"
-                onClick={() => saveRepairedModelToCase(repairSelection)}
-                disabled={repairBusy || repairExportBusyUrl === repairSelection || !!repairedExportsByUrl[repairSelection]?.saveRequested}
-                style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: repairBusy || repairedExportsByUrl[repairSelection]?.saveRequested ? "#555" : "#c8c8c8", cursor: repairBusy || repairedExportsByUrl[repairSelection]?.saveRequested ? "default" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
-              >
-                {repairedExportsByUrl[repairSelection]?.saveRequested ? "Předáno" : "Uložit do zakázky"}
-              </button>
-            )}
 
             <div aria-hidden="true" style={{ height: 1, margin: "1px 2px", background: "rgba(255,255,255,.075)" }} />
           </>
@@ -13496,12 +13582,6 @@ export default function ClientPage() {
                 {[
                   { label: "Odchylka", onClick: showAlignmentDeviation, disabled: !alignmentStats, delay: ".06s" },
                   { label: alignedExportBusyUrl === alignmentPair.bUrl ? "Připravuji…" : "Stáhnout B", onClick: () => downloadAlignedModel(alignmentPair.bUrl), disabled: !alignedExportsByUrl[alignmentPair.bUrl] || alignedExportBusyUrl === alignmentPair.bUrl, delay: ".14s" },
-                  ...(editorCapabilities.canSaveAlignedToCase ? [{
-                    label: alignedExportsByUrl[alignmentPair.bUrl]?.saveRequested ? "B předáno" : "Uložit B",
-                    onClick: () => saveAlignedModelToCase(alignmentPair.bUrl),
-                    disabled: !alignedExportsByUrl[alignmentPair.bUrl] || alignedExportBusyUrl === alignmentPair.bUrl || !!alignedExportsByUrl[alignmentPair.bUrl]?.saveRequested,
-                    delay: ".21s",
-                  }] : []),
                   { label: "Reset polohy", onClick: resetAlignmentTransform, disabled: false, delay: ".29s" },
                   { label: "Hotovo", onClick: closeAlignmentMode, disabled: false, delay: ".37s" },
                 ].map((action) => (
