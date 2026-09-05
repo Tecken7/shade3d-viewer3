@@ -7703,6 +7703,28 @@ function cadStitchClosedRings(indices, ringA, pointsA, ringB, pointsB, isUpper) 
 
 function cadEdgeKey(a, b) { return a < b ? `${a}:${b}` : `${b}:${a}` }
 
+// Shared edge -> adjacent-face lookup used by the V15 Delaunay/refinement passes.
+// Keeping this as one helper avoids rebuilding the same map logic in several
+// algorithms and, importantly, guarantees the helper exists at runtime.
+function cadBuildEdgeFaceMap(faces) {
+  const edgeMap = new Map()
+  for (let fi = 0; fi < (faces?.length || 0); fi++) {
+    const face = faces[fi]
+    if (!face || face.length < 3) continue
+    const [a, b, c] = face
+    for (const [u, v] of [[a, b], [b, c], [c, a]]) {
+      const key = cadEdgeKey(u, v)
+      let adjacent = edgeMap.get(key)
+      if (!adjacent) {
+        adjacent = []
+        edgeMap.set(key, adjacent)
+      }
+      adjacent.push(fi)
+    }
+  }
+  return edgeMap
+}
+
 // Adaptive conforming refinement: začínáme robustní earcut triangulací obrysu,
 // potom půlíme pouze dlouhé VNITŘNÍ hrany. Sdílený midpoint se používá na obou
 // sousedních trianglech, takže nevznikají T-junctions a boundary capu zůstává
