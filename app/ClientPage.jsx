@@ -7947,6 +7947,219 @@ function cadOptimizeCapTriangulation(contour, refined, options = {}) {
   }
 }
 
+
+// V13 – constrained Delaunay bottom cap.
+// Místo dalšího dělení původního Earcut stromu vytvoříme skutečně novou síť:
+// 1) Earcut nám zachová přesnou konkávní boundary,
+// 2) dovnitř vložíme téměř hexagonální Steiner body s ~0.9mm roztečí,
+// 3) každý bod vložíme do existujícího face (boundary hrany se nikdy nemění),
+// 4) vnitřní hrany převedeme Delaunay incircle flipy,
+// 5) jeden velmi jemný relaxation pass + finální Delaunay recovery.
+// Výsledek proto nemá radiální „rodokmen“ původní earcut triangulace.
+function cadDistancePointSegment2D(point, a, b) {
+  const abx = b.x - a.x, aby = b.y - a.y
+  const apx = point.x - a.x, apy = point.y - a.y
+  const denom = abx * abx + aby * aby
+  if (denom <= 1e-14) return Math.hypot(apx, apy)
+  const t = Math.max(0, Math.min(1, (apx * abx + apy * aby) / denom))
+  const dx = point.x - (a.x + abx * t)
+  const dy = point.y - (a.y + aby * t)
+  return Math.hypot(dx, dy)
+}
+
+function cadMinDistanceToPolygon2D(point, polygon) {
+  let best = Infinity
+  for (let i = 0; i < polygon.length; i++) {
+    best = Math.min(best, cadDistancePointSegment2D(point, polygon[i], polygon[(i + 1) % polygon.length]))
+  }
+  return best
+}
+
+function cadGenerateHexSteinerPoints(polygon, spacing = 0.92) {
+  if (!Array.isArray(polygon) || polygon.length < 3) return []
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const p of polygon) {
+    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y)
+    maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y)
+  }
+  const sx = Math.max(0.55, spacing)
+  const sy = sx * Math.sqrt(3) * 0.5
+  const clearance = sx * 0.30
+  const result = []
+  let row = 0
+  for (let y = minY + sy * 0.55; y <= maxY - sy * 0.35; y += sy, row++) {
+    const offset = (row & 1) ? sx * 0.5 : 0
+    for (let x = minX + sx * 0.45 + offset; x <= maxX - sx * 0.35; x += sx) {
+      const p = new THREE.Vector2(x, y)
+      if (!cadPointInPolygon2D(p, polygon)) continue
+      if (cadMinDistanceToPolygon2D(p, polygon) < clearance) continue
+      result.push(p)
+    }
+  }
+  // Deterministické rozptýlení pořadí vkládání – omezuje dlouhé lokální řetězce
+  // vznikající při vkládání bodů po jednotlivých řádcích gridu.
+  result.sort((a, b) => {
+    const ha = Math.sin(a.x * 12.9898 + a.y * 78.233) * 43758.5453
+    const hb = Math.sin(b.x * 12.9898 + b.y * 78.233) * 43758.5453
+    return (ha - Math.floor(ha)) - (hb - Math.floor(hb))
+  })
+  return result
+}
+
+function cadPointInTriangleStrict2D(p, a, b, c, eps = 1e-8) {
+  const o1 = cadOrient2D(a, b, p)
+  const o2 = cadOrient2D(b, c, p)
+  const o3 = cadOrient2D(c, a, p)
+  const hasPos = o1 > eps || o2 > eps || o3 > eps
+  const hasNeg = o1 < -eps || o2 < -eps || o3 < -eps
+  if (hasPos && hasNeg) return false
+  return Math.min(Math.abs(o1), Math.abs(o2), Math.abs(o3)) > eps
+}
+
+function cadInsertSteinerPointsIntoTriangulation(contour, initialFaces, steinerPoints) {
+  const points = contour.map((p) => p.clone())
+  const faces = (initialFaces || []).map((f) => [f[0], f[1], f[2]])
+  let inserted = 0
+  let skipped = 0
+  for (const point of steinerPoints || []) {
+    let faceIndex = -1
+    for (let fi = 0; fi < faces.length; fi++) {
+      const [a, b, c] = faces[fi]
+      if (cadPointInTriangleStrict2D(point, points[a], points[b], points[c], 1e-8)) {
+        faceIndex = fi
+        break
+      }
+    }
+    if (faceIndex < 0) { skipped++; continue }
+    const [a, b, c] = faces[faceIndex]
+    const sign = Math.sign(cadOrient2D(points[a], points[b], points[c])) || 1
+    const index = points.length
+    points.push(point.clone())
+    const orientFace = (u, v, w) => {
+      const orientation = cadOrient2D(points[u], points[v], points[w])
+      return ((sign >= 0 && orientation >= 0) || (sign < 0 && orientation < 0)) ? [u, v, w] : [u, w, v]
+    }
+    faces[faceIndex] = orientFace(a, b, index)
+    faces.push(orientFace(b, c, index), orientFace(c, a, index))
+    inserted++
+  }
+  return { points, faces, inserted, skipped }
+}
+
+function cadInCircleScore2D(a, b, c, d) {
+  const ax = a.x - d.x, ay = a.y - d.y
+  const bx = b.x - d.x, by = b.y - d.y
+  const cx = c.x - d.x, cy = c.y - d.y
+  const det = (ax * ax + ay * ay) * (bx * cy - by * cx)
+    - (bx * bx + by * by) * (ax * cy - ay * cx)
+    + (cx * cx + cy * cy) * (ax * by - ay * bx)
+  const orientation = cadOrient2D(a, b, c)
+  return orientation >= 0 ? det : -det
+}
+
+function cadConstrainedDelaunayFlips(points, faces, boundaryCount, maxPasses = 28) {
+  const result = faces.map((f) => [f[0], f[1], f[2]])
+  const boundaryEdges = new Set()
+  for (let i = 0; i < boundaryCount; i++) boundaryEdges.add(cadEdgeKey(i, (i + 1) % boundaryCount))
+  let totalFlips = 0
+
+  const orientedFace = (a, b, c, sign) => {
+    const current = cadOrient2D(points[a], points[b], points[c])
+    if ((sign >= 0 && current >= 0) || (sign < 0 && current < 0)) return [a, b, c]
+    return [a, c, b]
+  }
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const edgeMap = new Map()
+    for (let fi = 0; fi < result.length; fi++) {
+      const [a, b, c] = result[fi]
+      for (const [u, v] of [[a,b],[b,c],[c,a]]) {
+        const key = cadEdgeKey(u, v)
+        let list = edgeMap.get(key)
+        if (!list) { list = []; edgeMap.set(key, list) }
+        list.push(fi)
+      }
+    }
+
+    const candidates = []
+    for (const [key, adjacent] of edgeMap.entries()) {
+      if (adjacent.length !== 2 || boundaryEdges.has(key)) continue
+      const [fa, fb] = adjacent
+      const faceA = result[fa], faceB = result[fb]
+      const [uText, vText] = key.split(':')
+      const u = Number(uText), v = Number(vText)
+      const a = faceA.find((x) => x !== u && x !== v)
+      const b = faceB.find((x) => x !== u && x !== v)
+      if (a == null || b == null || a === b) continue
+      const replacementKey = cadEdgeKey(a, b)
+      if (edgeMap.has(replacementKey)) continue
+
+      const oldArea = Math.abs(cadOrient2D(points[faceA[0]], points[faceA[1]], points[faceA[2]]))
+        + Math.abs(cadOrient2D(points[faceB[0]], points[faceB[1]], points[faceB[2]]))
+      const newAreaA = Math.abs(cadOrient2D(points[a], points[b], points[u]))
+      const newAreaB = Math.abs(cadOrient2D(points[b], points[a], points[v]))
+      if (oldArea <= 1e-10 || newAreaA <= 1e-10 || newAreaB <= 1e-10) continue
+      if (Math.abs((newAreaA + newAreaB) - oldArea) / oldArea > 2e-4) continue
+
+      const circleScore = cadInCircleScore2D(points[u], points[v], points[a], points[b])
+      if (circleScore <= 1e-7) continue
+
+      // Delaunay flip by neměl zhoršit minimální úhel; tato pojistka chrání
+      // numericky skoro-kolineární quad oblasti na velmi jemné boundary.
+      const oldQuality = Math.min(
+        cadTriangleQuality2D(points[faceA[0]], points[faceA[1]], points[faceA[2]]),
+        cadTriangleQuality2D(points[faceB[0]], points[faceB[1]], points[faceB[2]])
+      )
+      const newQuality = Math.min(
+        cadTriangleQuality2D(points[a], points[b], points[u]),
+        cadTriangleQuality2D(points[b], points[a], points[v])
+      )
+      if (newQuality + 1e-6 < oldQuality) continue
+      candidates.push({ fa, fb, u, v, a, b, score: circleScore })
+    }
+
+    if (!candidates.length) break
+    candidates.sort((x, y) => y.score - x.score)
+    const usedFaces = new Set()
+    let passFlips = 0
+    for (const candidate of candidates) {
+      const { fa, fb, u, v, a, b } = candidate
+      if (usedFaces.has(fa) || usedFaces.has(fb)) continue
+      const signA = Math.sign(cadOrient2D(points[result[fa][0]], points[result[fa][1]], points[result[fa][2]])) || 1
+      const signB = Math.sign(cadOrient2D(points[result[fb][0]], points[result[fb][1]], points[result[fb][2]])) || 1
+      result[fa] = orientedFace(a, b, u, signA)
+      result[fb] = orientedFace(b, a, v, signB)
+      usedFaces.add(fa); usedFaces.add(fb)
+      passFlips++; totalFlips++
+    }
+    if (!passFlips) break
+  }
+  return { faces: result, flips: totalFlips }
+}
+
+function cadBuildConstrainedDelaunayCap(contour, targetSpacing = 0.92) {
+  const initialFaces = THREE.ShapeUtils.triangulateShape(contour, [])
+  if (!initialFaces?.length) throw new Error("Spodní plochu báze se nepodařilo triangulovat.")
+  const steiner = cadGenerateHexSteinerPoints(contour, targetSpacing)
+  const inserted = cadInsertSteinerPointsIntoTriangulation(contour, initialFaces, steiner)
+  const firstDelaunay = cadConstrainedDelaunayFlips(inserted.points, inserted.faces, contour.length, 34)
+  // Hex grid je už velmi pravidelný; pouze jeden slabý Laplacian pass pomůže
+  // hlavně řadě bodů sousedících s nepravidelnou konkávní boundary.
+  const relaxed = cadRelaxCapInterior(inserted.points, firstDelaunay.faces, contour.length, contour, 1, 0.18)
+  const secondDelaunay = cadConstrainedDelaunayFlips(relaxed.points, firstDelaunay.faces, contour.length, 24)
+  const quality = cadCapQualityStats(relaxed.points, secondDelaunay.faces)
+  return {
+    points: relaxed.points,
+    faces: secondDelaunay.faces,
+    steinerRequested: steiner.length,
+    steinerInserted: inserted.inserted,
+    steinerSkipped: inserted.skipped,
+    flips: firstDelaunay.flips + secondDelaunay.flips,
+    relaxedMoves: relaxed.moved,
+    quality,
+  }
+}
+
 // Pomocné XZ normály profilu (ponecháno pro budoucí Curved / bottom-bevel nástroje).
 // U kladně orientovaného (CCW) loopu leží materiál vlevo od směru hrany,
 // takže vnější normála je pravá normála tangenty. Normály ještě lehce
@@ -8197,7 +8410,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     return s * s * (3 - 2 * s)
   }
 
-  // V12 – Shape-Locked Remesh.
+  // V13 – Delaunay Bottom Cap.
   // V11 zlepšil topologii tím, že počet bodů snižoval postupně, ale první ringy
   // znovu vzorkovaly přímo syrovou hustou boundary. Tím se do přechodu vrátila
   // vysokofrekvenční zubatost a báze mohla opticky působit zvlněně.
@@ -8352,22 +8565,20 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   }
   const bottomWallIndices = previousWallRing
 
-  // V11 bottom cap: jemnější conforming refinement + isotropic edge flips a
-  // relaxation vnitřních bodů. Boundary se nikdy neposune, takže cap zůstane přesně
-  // napojený na poslední wall ring, ale uvnitř zmizí radiální „vějířové“ švy.
+  // V13 bottom cap: skutečný constrained Delaunay remesh.
+  // Boundary posledního wall ringu zůstává 1:1 beze změny; uvnitř ale už
+  // nerefinujeme Earcut trojúhelníky. Vložíme nový ~hexagonální bodový vzor a
+  // topologii přestavíme Delaunay incircle flipy.
   const contour2D = bottomLoop.map((p) => new THREE.Vector2(p.x, p.z))
-  const initialFaces = THREE.ShapeUtils.triangulateShape(contour2D, [])
-  if (!initialFaces?.length) throw new Error("Spodní plochu báze se nepodařilo triangulovat.")
-  const capTargetEdge = Math.max(1.05, Math.min(1.45, boundaryData.diagonal * 0.024))
-  const refinedCap = cadRefineCapTriangulation(contour2D, initialFaces, capTargetEdge, 10)
-  const optimizedCap = cadOptimizeCapTriangulation(contour2D, refinedCap, { flipPasses: 14, smoothPasses: 4 })
-  const capIndices = new Array(optimizedCap.points.length)
-  for (let i = 0; i < optimizedCap.points.length; i++) {
-    const point = optimizedCap.points[i]
+  const capPointSpacing = Math.max(0.84, Math.min(1.02, boundaryData.diagonal * 0.0165))
+  const delaunayCap = cadBuildConstrainedDelaunayCap(contour2D, capPointSpacing)
+  const capIndices = new Array(delaunayCap.points.length)
+  for (let i = 0; i < delaunayCap.points.length; i++) {
+    const point = delaunayCap.points[i]
     capIndices[i] = positions.length / 3
     positions.push(point.x, baseCapY, point.y)
   }
-  optimizedCap.faces.forEach(([a, b, c]) => pushTri(capIndices[a], capIndices[b], capIndices[c]))
+  delaunayCap.faces.forEach(([a, b, c]) => pushTri(capIndices[a], capIndices[b], capIndices[c]))
 
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3))
@@ -8401,23 +8612,26 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionRings: transitionSteps,
-      transitionMode: "medit-shape-locked-v12",
+      transitionMode: "medit-shape-locked-v13",
       transitionRingCounts,
       seamOffset,
       profileTargetSpacing,
       profilePoints: seamLoop.length,
       wallTargetSpacing,
       wallSections,
-      capVertices: optimizedCap.points.length,
-      capTriangles: optimizedCap.faces.length,
-      capEdgeFlips: optimizedCap.flips,
-      capRelaxMoves: optimizedCap.relaxedMoves,
-      capMinQuality: optimizedCap.quality.minQuality,
-      capMeanQuality: optimizedCap.quality.meanQuality,
-      capSkinnyTriangles: optimizedCap.quality.skinny,
-      capTargetEdge,
-      capMaxEdge: optimizedCap.quality.maxEdge,
-      capRefineIterations: refinedCap.iterations,
+      capMethod: "constrained-delaunay-v13",
+      capVertices: delaunayCap.points.length,
+      capTriangles: delaunayCap.faces.length,
+      capSteinerRequested: delaunayCap.steinerRequested,
+      capSteinerInserted: delaunayCap.steinerInserted,
+      capSteinerSkipped: delaunayCap.steinerSkipped,
+      capEdgeFlips: delaunayCap.flips,
+      capRelaxMoves: delaunayCap.relaxedMoves,
+      capMinQuality: delaunayCap.quality.minQuality,
+      capMeanQuality: delaunayCap.quality.meanQuality,
+      capSkinnyTriangles: delaunayCap.quality.skinny,
+      capPointSpacing,
+      capMaxEdge: delaunayCap.quality.maxEdge,
       boundaryRelaxationBand: boundaryRelaxation.bandWidth,
       boundaryRelaxationMaxShift: boundaryRelaxation.maxBoundaryShift,
       boundaryRelaxationAffectedVertices: boundaryRelaxation.affectedVertices,
@@ -9010,7 +9224,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     catch (error) { console.warn("Trim boundary plan failed:", error); return null }
   }, [trimClosed, trimContext, trimSegments])
 
-  // -- ARTHETIC CAD Tools · Model Builder V10 --
+  // -- ARTHETIC CAD Tools · Model Builder V13 --
   const [cadStage, setCadStage] = useState("scan") // scan | repair | orient | trim | base | result
   // Upper/Lower nejsou jen názvy souborů. Typ čelisti je součást CAD workflow,
   // protože určuje stranu okluzní roviny při orientaci a později i směr báze.
@@ -9037,6 +9251,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadMessage, setCadMessage] = useState("Nahrajte Upper a/nebo Lower scan.")
   const [cadNaturalHeight, setCadNaturalHeight] = useState(20)
   const [cadTotalHeight, setCadTotalHeight] = useState(30)
+  const [cadHeightDraft, setCadHeightDraft] = useState("30.0")
   const [cadPreviewActive, setCadPreviewActive] = useState(false)
   const [cadPreviewGeometry, setCadPreviewGeometry] = useState(null)
   const [cadPreviewStats, setCadPreviewStats] = useState(null)
@@ -9064,6 +9279,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     ]
     return () => timers.forEach((timer) => window.clearTimeout(timer))
   }, [cadStandalone, cadStage, cadOrientationPrepared, cadFileUrl])
+
+  useEffect(() => {
+    const rounded = Math.round((Number(cadTotalHeight) || 0) * 100) / 100
+    setCadHeightDraft(rounded.toFixed(2).replace(/0$/, ""))
+  }, [cadTotalHeight])
 
   // -- OPRAVA SÍTĚ --
   const [repairMode, setRepairMode] = useState(false)
@@ -10783,10 +11003,24 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const handleCadTotalHeightChange = useCallback((value) => {
     const min = Math.max(1, cadNaturalHeight + 1.5)
     const max = Math.max(min + 4, cadNaturalHeight + 35)
-    const next = Math.max(min, Math.min(max, Number(value) || min))
+    const parsed = Number(String(value).replace(",", "."))
+    const safe = Number.isFinite(parsed) ? parsed : min
+    const next = Math.round(Math.max(min, Math.min(max, safe)) * 100) / 100
+    if (Math.abs(next - cadTotalHeight) <= 1e-6) return
     setCadTotalHeight(next)
     invalidateCadPreview()
-  }, [cadNaturalHeight, invalidateCadPreview])
+  }, [cadNaturalHeight, cadTotalHeight, invalidateCadPreview])
+
+  const commitCadHeightInput = useCallback((rawValue) => {
+    const normalized = String(rawValue ?? "").trim().replace(",", ".")
+    const parsed = Number(normalized)
+    if (!Number.isFinite(parsed)) {
+      const rounded = Math.round((Number(cadTotalHeight) || 0) * 100) / 100
+      setCadHeightDraft(rounded.toFixed(2).replace(/0$/, ""))
+      return
+    }
+    handleCadTotalHeightChange(parsed)
+  }, [cadTotalHeight, handleCadTotalHeightChange])
 
   const toggleCadPreview = useCallback(() => {
     if (cadStage !== "base" || cadBusy || !cadFileUrl) return
@@ -15179,6 +15413,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         .artheticCadPrimary:hover:not(:disabled) { transform:translateY(-1px); }
         .artheticCadReady { animation:artheticCadReadyPulse 2.1s ease-in-out infinite; }
         .artheticCadRange { accent-color:#f1f1f1; }
+        .artheticCadNumber:focus { border-color:rgba(255,255,255,.22) !important; background:rgba(255,255,255,.055) !important; box-shadow:0 0 0 2px rgba(255,255,255,.035); }
         .artheticCadUpload:hover { border-color:rgba(255,255,255,.20) !important; background:rgba(255,255,255,.045) !important; transform:translateY(-1px); }
         .artheticCadOrthoViews { width:min(250px, 22vw); }
         @media (max-width:1100px) { .artheticCadOrthoViews { width:205px !important; } .artheticCadOrthoView { height:112px !important; } }
@@ -15302,13 +15537,36 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
         {cadStage === "base" && (
           <div style={{ display:"grid", gridTemplateColumns:"minmax(0,1fr) auto", gap:14, alignItems:"center" }}>
-            <div style={{ display:"grid", gridTemplateColumns:"110px minmax(180px,1fr) 62px", gap:9, alignItems:"center", minWidth:0 }}>
+            <div style={{ display:"grid", gridTemplateColumns:"110px minmax(180px,1fr) 76px", gap:9, alignItems:"center", minWidth:0 }}>
               <div>
                 <div style={{ color:"#d1d1d1", fontSize:9.4, fontWeight:730 }}>Celková výška</div>
                 <div style={{ color:"#575757", fontSize:8.1, marginTop:2 }}>Solid base · mm</div>
               </div>
-              <input className="artheticCadRange" type="range" min={cadMinHeight} max={cadMaxHeight} step="0.5" value={cadTotalHeight} onChange={(e) => handleCadTotalHeightChange(e.target.value)} />
-              <div style={{ height:29, borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#d8d8d8", display:"grid", placeItems:"center", fontSize:9.2, fontWeight:720, fontVariantNumeric:"tabular-nums" }}>{cadTotalHeight.toFixed(1)}</div>
+              <input className="artheticCadRange" type="range" min={cadMinHeight} max={cadMaxHeight} step="0.1" value={cadTotalHeight} onChange={(e) => handleCadTotalHeightChange(e.target.value)} />
+              <div style={{ position:"relative", height:29 }} title={`Přesná celková výška · ${cadMinHeight.toFixed(2)}–${cadMaxHeight.toFixed(2)} mm`}>
+                <input
+                  className="artheticCadNumber"
+                  type="text"
+                  inputMode="decimal"
+                  value={cadHeightDraft}
+                  onChange={(e) => setCadHeightDraft(e.target.value)}
+                  onBlur={(e) => commitCadHeightInput(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur() }
+                    if (e.key === "Escape") {
+                      e.preventDefault()
+                      const rounded = Math.round((Number(cadTotalHeight) || 0) * 100) / 100
+                      const reset = rounded.toFixed(2).replace(/0$/, "")
+                      setCadHeightDraft(reset)
+                      e.currentTarget.value = reset
+                      e.currentTarget.blur()
+                    }
+                  }}
+                  aria-label="Přesná celková výška modelu v milimetrech"
+                  style={{ width:"100%", height:"100%", boxSizing:"border-box", padding:"0 22px 0 7px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", outline:"none", background:"rgba(255,255,255,.03)", color:"#e4e4e4", fontSize:9.2, fontWeight:720, fontVariantNumeric:"tabular-nums", textAlign:"right" }}
+                />
+                <span style={{ position:"absolute", right:6, top:"50%", transform:"translateY(-50%)", color:"#666", fontSize:7.6, fontWeight:700, pointerEvents:"none" }}>mm</span>
+              </div>
             </div>
             <div style={{ display:"flex", alignItems:"center", gap:7 }}>
               <button type="button" onClick={toggleCadPreview} disabled={cadBusy} title={cadPreviewActive ? "Ukončit Preview" : "Zobrazit Preview"} style={{
