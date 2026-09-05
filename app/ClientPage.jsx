@@ -8197,11 +8197,19 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     return s * s * (3 - 2 * s)
   }
 
-  // V11: místo jediného zipper skoku 900+ -> ~430 vertexů počet bodů ubývá
-  // postupně přes několik ringů. Každý ring si znovu vzorkuje RAW i smooth profil
-  // stejným počtem bodů, takže délka hran zůstává v transition pásu mnohem vyrovnanější.
+  // V12 – Shape-Locked Remesh.
+  // V11 zlepšil topologii tím, že počet bodů snižoval postupně, ale první ringy
+  // znovu vzorkovaly přímo syrovou hustou boundary. Tím se do přechodu vrátila
+  // vysokofrekvenční zubatost a báze mohla opticky působit zvlněně.
+  //
+  // V12 proto nejdřív vytvoří KAŽDÝ geometrický ring přesně stejným způsobem jako
+  // hladký V10 profil (~0.39 mm sampling). Teprve hotovou křivku pak případně
+  // převzorkuje na vyšší počet bodů pro lepší triangulaci. Nové body tedy leží
+  // přímo na V10 polyline a nemohou změnit její tvar – mění se jen topologie.
   const sourceCount = rawLoop.length
   const targetCount = sampledRawLoop.length
+  const targetY = boundaryExtremeY + (isUpper ? transitionDepth : -transitionDepth)
+  const capMargin = Math.min(0.45, Math.max(0.16, availableBaseDepth * 0.08))
   for (let step = 1; step <= transitionSteps; step++) {
     const t = step / transitionSteps
     const profileT = profileEase(t)
@@ -8209,15 +8217,12 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     const countEase = smoothstep(Math.min(1, t * 1.04))
     const ringCount = step === transitionSteps
       ? targetCount
-      : Math.max(24, Math.round(THREE.MathUtils.lerp(sourceCount, targetCount, countEase)))
+      : Math.max(targetCount, Math.round(THREE.MathUtils.lerp(sourceCount, targetCount, countEase)))
     transitionRingCounts.push(ringCount)
 
-    const rawSample = cadResampleClosedLoopCount(rawLoop, ringCount)
-    const smoothSample = cadResampleClosedLoopCount(regularized, ringCount)
-    const targetY = boundaryExtremeY + (isUpper ? transitionDepth : -transitionDepth)
-    const capMargin = Math.min(0.45, Math.max(0.16, availableBaseDepth * 0.08))
-    const ring = rawSample.map((raw, i) => {
-      const smooth = smoothSample[i] || raw
+    // Canonical V10 geometry – vždy stejný targetCount a stejná parametrizace.
+    const canonicalRing = sampledRawLoop.map((raw, i) => {
+      const smooth = regularized[i] || raw
       const interpolatedY = THREE.MathUtils.lerp(raw.y, targetY, verticalT)
       const y = isUpper
         ? Math.min(interpolatedY, baseCapY - capMargin)
@@ -8228,6 +8233,12 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
         THREE.MathUtils.lerp(raw.z, smooth.z, profileT)
       )
     })
+
+    // Upsampling probíhá až na hotové canonical polyline. Proto přidává vertexy,
+    // ale nevrací do modelu detail původní raw boundary ani neposouvá profil.
+    const ring = ringCount === targetCount
+      ? canonicalRing
+      : cadResampleClosedLoopCount(canonicalRing, ringCount)
     transitionRings.push(ring)
   }
 
@@ -8390,7 +8401,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionRings: transitionSteps,
-      transitionMode: "medit-isotropic-v11",
+      transitionMode: "medit-shape-locked-v12",
       transitionRingCounts,
       seamOffset,
       profileTargetSpacing,
