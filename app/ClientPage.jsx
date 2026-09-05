@@ -7971,7 +7971,7 @@ function cadOptimizeCapTriangulation(contour, refined, options = {}) {
 }
 
 
-// V15 – adaptive boundary strip + local Delaunay refinement.
+// V15/V16 – adaptive boundary strip; V16 replaces midpoint refinement with quality-aware Delaunay refinement.
 //
 // V14 už trefila celkovou hustotu Medit capu velmi dobře, ale analýza ukázala
 // dva lokální problémy:
@@ -8301,54 +8301,212 @@ function cadBuildMatchedBoundaryStripFaces(outer, inner) {
   return faces
 }
 
-function cadSplitLongInteriorEdges(points, faces, boundaryCount, targetMaxEdge = 1.92, maxSplits = 180) {
-  const resultPoints = points.map((p) => p.clone())
-  const resultFaces = faces.map((f) => [f[0], f[1], f[2]])
-  const boundaryEdges = new Set()
-  for (let i = 0; i < boundaryCount; i++) boundaryEdges.add(cadEdgeKey(i, (i + 1) % boundaryCount))
-  let splits = 0
+function cadTriangleAnglesDeg2D(a, b, c) {
+  const ab = Math.max(1e-12, a.distanceTo(b))
+  const bc = Math.max(1e-12, b.distanceTo(c))
+  const ca = Math.max(1e-12, c.distanceTo(a))
+  const clamp = (v) => Math.max(-1, Math.min(1, v))
+  const angleA = Math.acos(clamp((ab * ab + ca * ca - bc * bc) / (2 * ab * ca))) * 180 / Math.PI
+  const angleB = Math.acos(clamp((ab * ab + bc * bc - ca * ca) / (2 * ab * bc))) * 180 / Math.PI
+  const angleC = Math.max(0, 180 - angleA - angleB)
+  return [angleA, angleB, angleC]
+}
 
-  const orientFace = (a, b, c, sign) => {
-    const orientation = cadOrient2D(resultPoints[a], resultPoints[b], resultPoints[c])
-    return ((sign >= 0 && orientation >= 0) || (sign < 0 && orientation < 0)) ? [a, b, c] : [a, c, b]
-  }
+function cadTriangleMinAngleDeg2D(a, b, c) {
+  const angles = cadTriangleAnglesDeg2D(a, b, c)
+  return Math.min(angles[0], angles[1], angles[2])
+}
 
-  while (splits < maxSplits) {
-    const edgeMap = cadBuildEdgeFaceMap(resultFaces)
-    let best = null
-    for (const [key, adjacent] of edgeMap.entries()) {
-      if (adjacent.length !== 2 || boundaryEdges.has(key)) continue
-      const [uStr, vStr] = key.split(':')
-      const u = Number(uStr), v = Number(vStr)
-      const length = resultPoints[u].distanceTo(resultPoints[v])
-      if (length <= targetMaxEdge + 1e-7) continue
-      if (!best || length > best.length) best = { key, adjacent, u, v, length }
+function cadTriangleMaxEdge2D(a, b, c) {
+  return Math.max(a.distanceTo(b), b.distanceTo(c), c.distanceTo(a))
+}
+
+function cadTriangleCircumcenter2D(a, b, c) {
+  const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y))
+  if (!Number.isFinite(d) || Math.abs(d) < 1e-10) return null
+  const aa = a.x * a.x + a.y * a.y
+  const bb = b.x * b.x + b.y * b.y
+  const cc = c.x * c.x + c.y * c.y
+  const ux = (aa * (b.y - c.y) + bb * (c.y - a.y) + cc * (a.y - b.y)) / d
+  const uy = (aa * (c.x - b.x) + bb * (a.x - c.x) + cc * (b.x - a.x)) / d
+  if (!Number.isFinite(ux) || !Number.isFinite(uy)) return null
+  return new THREE.Vector2(ux, uy)
+}
+
+function cadMinDistanceToPointSet2D(point, points) {
+  let bestSq = Infinity
+  for (const other of points || []) bestSq = Math.min(bestSq, point.distanceToSquared(other))
+  return Math.sqrt(bestSq)
+}
+
+function cadInsertSteinerPointsIntoExistingTriangulation(points, faces, steinerPoints) {
+  const resultPoints = (points || []).map((p) => p.clone())
+  const resultFaces = (faces || []).map((f) => [f[0], f[1], f[2]])
+  let inserted = 0
+  let skipped = 0
+
+  for (const point of steinerPoints || []) {
+    let faceIndex = -1
+    for (let fi = 0; fi < resultFaces.length; fi++) {
+      const [a, b, c] = resultFaces[fi]
+      if (cadPointInTriangleStrict2D(point, resultPoints[a], resultPoints[b], resultPoints[c], 1e-8)) {
+        faceIndex = fi
+        break
+      }
     }
-    if (!best) break
+    if (faceIndex < 0) { skipped++; continue }
 
-    const [fa, fb] = best.adjacent
-    const faceA = resultFaces[fa]
-    const faceB = resultFaces[fb]
-    const a = faceA.find((x) => x !== best.u && x !== best.v)
-    const b = faceB.find((x) => x !== best.u && x !== best.v)
-    if (a == null || b == null || a === b) break
-
-    const midpoint = resultPoints[best.u].clone().add(resultPoints[best.v]).multiplyScalar(0.5)
-    const m = resultPoints.length
-    resultPoints.push(midpoint)
-    const signA = Math.sign(cadOrient2D(resultPoints[faceA[0]], resultPoints[faceA[1]], resultPoints[faceA[2]])) || 1
-    const signB = Math.sign(cadOrient2D(resultPoints[faceB[0]], resultPoints[faceB[1]], resultPoints[faceB[2]])) || 1
-
-    const a1 = orientFace(best.u, m, a, signA)
-    const a2 = orientFace(m, best.v, a, signA)
-    const b1 = orientFace(best.v, m, b, signB)
-    const b2 = orientFace(m, best.u, b, signB)
-    resultFaces[fa] = a1
-    resultFaces[fb] = b1
-    resultFaces.push(a2, b2)
-    splits++
+    const [a, b, c] = resultFaces[faceIndex]
+    const sign = Math.sign(cadOrient2D(resultPoints[a], resultPoints[b], resultPoints[c])) || 1
+    const index = resultPoints.length
+    resultPoints.push(point.clone())
+    const orientFace = (u, v, w) => {
+      const orientation = cadOrient2D(resultPoints[u], resultPoints[v], resultPoints[w])
+      return ((sign >= 0 && orientation >= 0) || (sign < 0 && orientation < 0)) ? [u, v, w] : [u, w, v]
+    }
+    resultFaces[faceIndex] = orientFace(a, b, index)
+    resultFaces.push(orientFace(b, c, index), orientFace(c, a, index))
+    inserted++
   }
-  return { points: resultPoints, faces: resultFaces, splits }
+  return { points: resultPoints, faces: resultFaces, inserted, skipped }
+}
+
+// V16 – quality-aware Delaunay refinement.
+//
+// V15 odstranila dlouhé hrany midpoint splitem, ale právě midpointy občas
+// přistály příliš blízko již existujícího vertexu a vytvořily malé skinny
+// klíny. V16 proto nevynucuje délku hrany za každou cenu. Refinement je řízený
+// kvalitou: prioritou je nízký minimální úhel a až potom opravdu příliš velký
+// triangle. Kandidát je circumcenter / off-center bod a smí se vložit pouze
+// pokud má bezpečný odstup od všech existujících bodů i constrained boundary.
+function cadQualityAwareDelaunayRefinement(points, faces, boundaryCount, polygon, options = {}) {
+  let resultPoints = (points || []).map((p) => p.clone())
+  let resultFaces = (faces || []).map((f) => [f[0], f[1], f[2]])
+
+  const targetMinAngle = Math.max(22, Math.min(32, Number(options.targetMinAngle) || 27.5))
+  const maxEdgeTarget = Math.max(1.92, Math.min(2.12, Number(options.maxEdgeTarget) || 2.04))
+  const minPointGap = Math.max(0.42, Math.min(0.62, Number(options.minPointGap) || 0.50))
+  const minBoundaryGap = Math.max(0.16, Math.min(0.34, Number(options.minBoundaryGap) || 0.24))
+  const maxPasses = Math.max(1, Math.min(5, Number(options.maxPasses) || 3))
+  const maxInsertions = Math.max(0, Math.min(160, Number(options.maxInsertions) || 84))
+  const maxPerPass = Math.max(4, Math.min(48, Number(options.maxPerPass) || 28))
+
+  let requested = 0
+  let insertedTotal = 0
+  let skippedGap = 0
+  let skippedBoundary = 0
+  let skippedGeometry = 0
+  let flips = 0
+
+  const candidateForFace = (face) => {
+    const [ia, ib, ic] = face
+    const a = resultPoints[ia], b = resultPoints[ib], c = resultPoints[ic]
+    const minAngle = cadTriangleMinAngleDeg2D(a, b, c)
+    const maxEdge = cadTriangleMaxEdge2D(a, b, c)
+    const quality = cadTriangleQuality2D(a, b, c)
+
+    // Neštěpíme malé skinny trojúhelníky jen kvůli číslu úhlu. Ty se mají řešit
+    // Delaunay flipem; nový bod má smysl teprve u dostatečně velké lokální dutiny.
+    const angleBad = minAngle < targetMinAngle && maxEdge > Math.max(1.22, maxEdgeTarget * 0.64)
+    const sizeBad = maxEdge > maxEdgeTarget
+    if (!angleBad && !sizeBad) return null
+
+    const centroid = a.clone().add(b).add(c).multiplyScalar(1 / 3)
+    const circumcenter = cadTriangleCircumcenter2D(a, b, c)
+    const options = []
+    if (circumcenter) {
+      options.push(circumcenter)
+      // U tupého trojúhelníku leží circumcenter mimo face. Postupným posunem
+      // směrem k centroidu získáme klasický off-center kandidát bez midpoint artefaktu.
+      options.push(circumcenter.clone().lerp(centroid, 0.32))
+      options.push(circumcenter.clone().lerp(centroid, 0.55))
+      options.push(circumcenter.clone().lerp(centroid, 0.76))
+    }
+    options.push(centroid)
+
+    let best = null
+    for (const candidate of options) {
+      if (!cadPointInTriangleStrict2D(candidate, a, b, c, 1e-8)) continue
+      if (!cadPointInPolygon2D(candidate, polygon)) continue
+      const boundaryDistance = cadMinDistanceToPolygon2D(candidate, polygon)
+      if (boundaryDistance < minBoundaryGap) continue
+      const pointGap = cadMinDistanceToPointSet2D(candidate, resultPoints)
+      if (pointGap < minPointGap) continue
+
+      // Preferujeme kandidáta s největší prázdnou koulí. Tím se přirozeně
+      // vyhýbáme vkládání bodu těsně vedle existujícího vertexu.
+      const candidateScore = pointGap + Math.min(0.5, boundaryDistance) * 0.18
+      if (!best || candidateScore > best.candidateScore) {
+        best = { point: candidate.clone(), pointGap, boundaryDistance, candidateScore }
+      }
+    }
+    if (!best) return { rejected: true, minAngle, maxEdge, quality, angleBad, sizeBad }
+
+    // Low-angle triangles mají prioritu, ale size-only triangle dostane prioritu
+    // až když opravdu přesáhne referenční ~2.0 mm rozsah Meditu.
+    const anglePenalty = angleBad ? (targetMinAngle - minAngle) * 2.4 : 0
+    const sizePenalty = sizeBad ? (maxEdge - maxEdgeTarget) * 12 : 0
+    const score = anglePenalty + sizePenalty + (1 - quality) * 1.5
+    return { ...best, minAngle, maxEdge, quality, angleBad, sizeBad, score }
+  }
+
+  for (let pass = 0; pass < maxPasses && insertedTotal < maxInsertions; pass++) {
+    const candidates = []
+    for (const face of resultFaces) {
+      const candidate = candidateForFace(face)
+      if (!candidate) continue
+      requested++
+      if (candidate.rejected) { skippedGeometry++; continue }
+      candidates.push(candidate)
+    }
+    if (!candidates.length) break
+    candidates.sort((a, b) => b.score - a.score)
+
+    const selected = []
+    const batchLimit = Math.min(maxPerPass, maxInsertions - insertedTotal)
+    for (const candidate of candidates) {
+      if (selected.length >= batchLimit) break
+      let tooClose = false
+      for (const accepted of selected) {
+        if (candidate.point.distanceTo(accepted) < minPointGap * 1.06) { tooClose = true; break }
+      }
+      if (tooClose) { skippedGap++; continue }
+      selected.push(candidate.point)
+    }
+    if (!selected.length) break
+
+    const inserted = cadInsertSteinerPointsIntoExistingTriangulation(resultPoints, resultFaces, selected)
+    resultPoints = inserted.points
+    resultFaces = inserted.faces
+    insertedTotal += inserted.inserted
+    skippedGeometry += inserted.skipped
+    if (!inserted.inserted) break
+
+    const delaunay = cadConstrainedDelaunayFlips(resultPoints, resultFaces, boundaryCount, 34)
+    resultFaces = delaunay.faces
+    flips += delaunay.flips
+  }
+
+  // Finální čistící pass bez dalších bodů. Důležité: žádná relaxation zde už
+  // není – po V12 shape-locku nechceme kvalitu získávat posunem profilu.
+  const finalDelaunay = cadConstrainedDelaunayFlips(resultPoints, resultFaces, boundaryCount, 30)
+  resultFaces = finalDelaunay.faces
+  flips += finalDelaunay.flips
+
+  return {
+    points: resultPoints,
+    faces: resultFaces,
+    requested,
+    inserted: insertedTotal,
+    skippedGap,
+    skippedBoundary,
+    skippedGeometry,
+    flips,
+    targetMinAngle,
+    maxEdgeTarget,
+    minPointGap,
+    minBoundaryGap,
+  }
 }
 
 function cadBuildConstrainedDelaunayCap(contour, targetSpacing = 0.80) {
@@ -8381,33 +8539,31 @@ function cadBuildConstrainedDelaunayCap(contour, targetSpacing = 0.80) {
   )
   const secondDelaunay = cadConstrainedDelaunayFlips(relaxed.points, firstDelaunay.faces, innerRing.length, 32)
 
-  // 3) Lokální refinement pouze pro dlouhé interior hrany. Nezvyšujeme hustotu
-  // celé plochy; split proběhne jen tam, kde Delaunay nechal >~1.9 mm edge.
-  const longEdgeTarget = Math.max(1.88, Math.min(1.98, targetSpacing * 2.38))
-  const refined = cadSplitLongInteriorEdges(
+  // 3) V16 quality-aware refinement. Žádné midpoint splity: nové Steiner
+  // body vzniknou jen v lokálně nekvalitním / opravdu velkém trojúhelníku a
+  // pouze pokud mají bezpečný odstup od existujících vertexů i inner boundary.
+  const qualityRefined = cadQualityAwareDelaunayRefinement(
     relaxed.points,
     secondDelaunay.faces,
     innerRing.length,
-    longEdgeTarget,
-    180
+    innerRing,
+    {
+      targetMinAngle: 27.5,
+      maxEdgeTarget: 2.04,
+      minPointGap: Math.max(0.48, Math.min(0.54, targetSpacing * 0.62)),
+      minBoundaryGap: Math.max(0.20, Math.min(0.27, targetSpacing * 0.30)),
+      maxPasses: 3,
+      maxInsertions: 84,
+      maxPerPass: 28,
+    }
   )
-  const thirdDelaunay = cadConstrainedDelaunayFlips(refined.points, refined.faces, innerRing.length, 34)
-  // Krátký druhý safety pass zachytí případnou delší náhradní diagonálu po flipu.
-  const refinedAgain = cadSplitLongInteriorEdges(
-    refined.points,
-    thirdDelaunay.faces,
-    innerRing.length,
-    Math.min(2.02, longEdgeTarget + 0.06),
-    72
-  )
-  const finalDelaunay = cadConstrainedDelaunayFlips(refinedAgain.points, refinedAgain.faces, innerRing.length, 26)
 
   // 4) Spojíme outer strip a vnitřní triangulaci do jedné point/index sady.
   const outerCount = contour.length
   const points = contour.map((p) => p.clone())
-  for (const point of refinedAgain.points) points.push(point.clone())
+  for (const point of qualityRefined.points) points.push(point.clone())
   const faces = stripFaces.map((f) => [f[0], f[1], f[2]])
-  for (const face of finalDelaunay.faces) faces.push(face.map((index) => outerCount + index))
+  for (const face of qualityRefined.faces) faces.push(face.map((index) => outerCount + index))
 
   const quality = cadCapQualityStats(points, faces)
   const insetMin = adaptiveRing.insets.length ? Math.min(...adaptiveRing.insets) : 0
@@ -8427,9 +8583,15 @@ function cadBuildConstrainedDelaunayCap(contour, targetSpacing = 0.80) {
     ringInset: insetMean,
     ringInsetMin: insetMin,
     ringInsetMax: insetMax,
-    longEdgeTarget,
-    longEdgeSplits: refined.splits + refinedAgain.splits,
-    flips: firstDelaunay.flips + secondDelaunay.flips + thirdDelaunay.flips + finalDelaunay.flips,
+    longEdgeTarget: qualityRefined.maxEdgeTarget,
+    longEdgeSplits: 0,
+    qualityRefineRequested: qualityRefined.requested,
+    qualityRefineInserted: qualityRefined.inserted,
+    qualityRefineSkippedGap: qualityRefined.skippedGap,
+    qualityRefineSkippedGeometry: qualityRefined.skippedGeometry,
+    qualityTargetMinAngle: qualityRefined.targetMinAngle,
+    qualityMinPointGap: qualityRefined.minPointGap,
+    flips: firstDelaunay.flips + secondDelaunay.flips + qualityRefined.flips,
     relaxedMoves: relaxed.moved,
     quality,
   }
@@ -8840,10 +9002,10 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   }
   const bottomWallIndices = previousWallRing
 
-  // V15 bottom cap: explicitní matched boundary strip + lokálně refined Delaunay.
+  // V16 bottom cap: matched boundary strip + quality-aware Delaunay refinement.
   // Boundary posledního wall ringu zůstává 1:1 beze změny; první pás je nyní
-  // geometricky kontrolovaný a vnitřní síť se zahušťuje pouze tam, kde zůstane
-  // hrana delší než cílových ~1.9–2.0 mm.
+  // geometricky kontrolovaný a nové body se vkládají pouze tam, kde skutečně
+  // zlepší lokální kvalitu bez vytvoření krátkých skinny hran.
   const contour2D = bottomLoop.map((p) => new THREE.Vector2(p.x, p.z))
   const capPointSpacing = Math.max(0.75, Math.min(0.85, boundaryData.diagonal * 0.0155))
   const delaunayCap = cadBuildConstrainedDelaunayCap(contour2D, capPointSpacing)
@@ -8894,7 +9056,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       profilePoints: seamLoop.length,
       wallTargetSpacing,
       wallSections,
-      capMethod: "adaptive-boundary-delaunay-v15",
+      capMethod: "quality-aware-delaunay-v16",
       capVertices: delaunayCap.points.length,
       capTriangles: delaunayCap.faces.length,
       capSteinerRequested: delaunayCap.steinerRequested,
@@ -8906,6 +9068,12 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       capBoundaryInsetMax: delaunayCap.ringInsetMax,
       capLongEdgeTarget: delaunayCap.longEdgeTarget,
       capLongEdgeSplits: delaunayCap.longEdgeSplits,
+      capQualityRefineRequested: delaunayCap.qualityRefineRequested,
+      capQualityRefineInserted: delaunayCap.qualityRefineInserted,
+      capQualityRefineSkippedGap: delaunayCap.qualityRefineSkippedGap,
+      capQualityRefineSkippedGeometry: delaunayCap.qualityRefineSkippedGeometry,
+      capQualityTargetMinAngle: delaunayCap.qualityTargetMinAngle,
+      capQualityMinPointGap: delaunayCap.qualityMinPointGap,
       capEdgeFlips: delaunayCap.flips,
       capRelaxMoves: delaunayCap.relaxedMoves,
       capMinQuality: delaunayCap.quality.minQuality,
