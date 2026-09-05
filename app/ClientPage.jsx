@@ -9089,7 +9089,15 @@ export default function ClientPage() {
       if (!backup.length) throw new Error("Opravu se nepodařilo aplikovat na geometrii.")
 
       const stack = repairHistoryByUrlRef.current[repairSelection] || []
-      repairHistoryByUrlRef.current[repairSelection] = [...stack, backup]
+      repairHistoryByUrlRef.current[repairSelection] = [
+        ...stack,
+        {
+          backup,
+          holeIds: [...patchedHoleIds],
+          patchCount: patches.length,
+          createdAt: Date.now(),
+        },
+      ]
       setRepairedExportsByUrl((previous) => ({
         ...previous,
         [repairSelection]: {
@@ -9178,31 +9186,81 @@ export default function ClientPage() {
   const undoLastRepair = useCallback((url = repairSelection) => {
     if (!url) return
     const stack = repairHistoryByUrlRef.current[url] || []
-    const backup = stack[stack.length - 1]
-    if (!backup) {
+    const entry = stack[stack.length - 1]
+    if (!entry) {
       setRepairMessage("Pro tento model není v aktuální session žádná oprava k vrácení.")
       return
     }
+
+    // v12.4 ukládá do history také IDs opravených děr.
+    // Array fallback zachovává kompatibilitu se starším session formátem.
+    const backup = Array.isArray(entry) ? entry : entry?.backup
+    const undoneHoleIds = Array.isArray(entry?.holeIds) ? entry.holeIds : []
+    const undoneCount = Math.max(
+      1,
+      Number(entry?.patchCount) || undoneHoleIds.length || 1
+    )
+
+    if (!backup) {
+      setRepairMessage("Poslední opravu se nepodařilo načíst z historie.")
+      return
+    }
+
     restoreTrimBackup(backup)
     const nextStack = stack.slice(0, -1)
     repairHistoryByUrlRef.current[url] = nextStack
-    if (!nextStack.length) {
-      setRepairedExportsByUrl((previous) => { const next = { ...previous }; delete next[url]; return next })
-    } else {
-      setRepairedExportsByUrl((previous) => previous[url] ? { ...previous, [url]: { ...previous[url], saveRequested: false } } : previous)
-    }
-    setRepairStage("model")
-    setRepairSelection("")
-    setRepairContext(null)
-    setRepairHoles([])
-    setRepairSelectedHoleId("")
-    setRepairSelectedHoleIds([])
-    setRepairCompletedHoleIds([])
-    setRepairHiddenBottomBoundary(null)
+
+    setRepairedExportsByUrl((previous) => {
+      const current = previous[url]
+      if (!current) return previous
+
+      const nextCount = Math.max(0, (Number(current.count) || 0) - undoneCount)
+      if (!nextCount) {
+        const next = { ...previous }
+        delete next[url]
+        return next
+      }
+
+      return {
+        ...previous,
+        [url]: {
+          ...current,
+          count: nextCount,
+          saveRequested: false,
+          createdAt: Date.now(),
+        },
+      }
+    })
+
+    // Nevracíme uživatele na krok Model.
+    // Stejný model, jeho detekce i ostatní nalezené boundary zůstávají aktivní.
+    setRepairSelection(url)
     setRepairPreviewPatch(null)
     setRepairPaintedTriangles(new Set())
-    setRepairMessage("Poslední oprava byla vrácena. Vyberte model pro další práci.")
-  }, [repairSelection])
+    setRepairBrushCursor(null)
+    setRepairSelectedHoleId("")
+    setRepairSelectedHoleIds([])
+
+    if (undoneHoleIds.length) {
+      const undoneSet = new Set(undoneHoleIds)
+      setRepairCompletedHoleIds((previous) =>
+        previous.filter((id) => !undoneSet.has(id))
+      )
+      setRepairStage(repairVariant === "manual" ? "paint" : "detect")
+      setRepairMessage("")
+    } else {
+      // Legacy history bez hole IDs: model zůstává vybraný a jeho aktuální
+      // geometrie se automaticky znovu zanalyzuje, bez ručního výběru modelu.
+      setRepairContext(null)
+      setRepairHoles([])
+      setRepairCompletedHoleIds([])
+      setRepairHiddenBottomBoundary(null)
+      setRepairStage("model")
+      setRepairMessage("")
+      window.setTimeout(() => selectRepairModel(url), 20)
+    }
+  }, [repairSelection, repairVariant, selectRepairModel])
+
 
   const createRepairedExport = useCallback(async (url) => {
     const info = repairedExportsByUrl[url]
@@ -12736,7 +12794,7 @@ export default function ClientPage() {
         .artheticRepairSpinner {
           display:inline-block; width:11px; height:11px; box-sizing:border-box;
           border:1.7px solid rgba(255,255,255,.16);
-          border-top-color:#f5f5f5; border-right-color:rgba(125,211,252,.82);
+          border-top-color:#f2f2f2; border-right-color:rgba(255,255,255,.34);
           border-radius:50%; animation:artheticRepairSpinnerSpin .66s linear infinite;
           transform-origin:50% 50%; will-change:transform; backface-visibility:hidden; contain:paint;
         }
@@ -12750,8 +12808,8 @@ export default function ClientPage() {
         }
         .artheticRepairProgressFill {
           height:100%; border-radius:999px;
-          background:linear-gradient(90deg, rgba(56,189,248,.72), rgba(125,211,252,.98), rgba(255,255,255,.88));
-          box-shadow:0 0 16px rgba(56,189,248,.20);
+          background:linear-gradient(90deg, rgba(255,255,255,.62), rgba(255,255,255,.96));
+          box-shadow:0 0 14px rgba(255,255,255,.075);
           transition:width .32s cubic-bezier(.2,.75,.25,1);
           will-change:width;
         }
@@ -12876,7 +12934,7 @@ export default function ClientPage() {
             <div style={{ color: "#8b8b8b", fontSize: 9.2, lineHeight: 1.45 }}>LMB táhnout = zvýrazňovač · RMB = kamera. Přejeďte přes okolí problému; stačí, když modrá oblast zasáhne otevřený okraj.</div>
             <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "82px minmax(120px,1fr) 48px", alignItems: "center", gap: 8 }}>
               <span style={{ color: "#777", fontSize: 8.8 }}>Velikost štětce</span>
-              <input type="range" min={0.012} max={0.10} step={0.002} value={repairBrushFactor} onChange={(event) => setRepairBrushFactor(Number(event.target.value))} style={{ width: "100%", accentColor: "#60a5fa" }} />
+              <input type="range" min={0.012} max={0.10} step={0.002} value={repairBrushFactor} onChange={(event) => setRepairBrushFactor(Number(event.target.value))} style={{ width: "100%", accentColor: "#f2f2f2" }} />
               <span style={{ color: "#9a9a9a", fontSize: 8.7, textAlign: "right" }}>{repairContext ? (repairContext.diagonal * repairBrushFactor).toFixed(1) : "–"}</span>
             </div>
           </div>
