@@ -8935,8 +8935,18 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setTrimmedExportsByUrl({})
     setTrimExportBusyUrl("")
     trimHistoryByUrlRef.current = {}
-    meshesRef.current = {}
-    modelObjectsRef.current = {}
+
+    // Při změně seznamu souborů nemažeme registry živých Three.js objektů celé.
+    // Pokud např. nejdřív načteme A a potom přidáme B, komponent A zůstane mounted
+    // a onObjectReady/onMeshReady se už znovu nespustí. Úplný reset by proto
+    // nechal Best Fit bez reference na A. Zachováme refs pro URL, které stále existují.
+    const liveUrls = new Set(files.map((file) => file?.url).filter(Boolean))
+    for (const url of Object.keys(meshesRef.current || {})) {
+      if (!liveUrls.has(url)) delete meshesRef.current[url]
+    }
+    for (const url of Object.keys(modelObjectsRef.current || {})) {
+      if (!liveUrls.has(url)) delete modelObjectsRef.current[url]
+    }
   }, [analysisFilesKey])
   
   const detectObjectTextureData = useCallback((object) => {
@@ -8957,10 +8967,16 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [])
 
   const handleMeshReady = useCallback((mesh, url) => {
+    if (!mesh || !url) return
+    mesh.userData = mesh.userData || {}
+    mesh.userData._artheticSourceUrl = url
     meshesRef.current[url] = mesh
   }, [])
 
   const handleObjectReady = useCallback((object, url) => {
+    if (!object || !url) return
+    object.userData = object.userData || {}
+    object.userData._artheticSourceUrl = url
     modelObjectsRef.current[url] = object
     const matrix = modelTransforms[url]
     object.matrixAutoUpdate = false
@@ -8981,6 +8997,51 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       ))
     }
   }, [modelTransforms, files, detectObjectTextureData])
+
+  // Robustní resolver pro Align/Comparison. Registry refs jsou nejrychlejší cesta,
+  // ale pokud je React/R3F po změně seznamu modelů nepřepsal, umíme živý root/mesh
+  // obnovit přímo z hlavní scény.
+  const resolveLiveModelRefs = useCallback((url) => {
+    if (!url) return { root: null, mesh: null }
+
+    let root = modelObjectsRef.current[url] || null
+    let mesh = meshesRef.current[url] || null
+    const sceneRoot = rootGroupRef.current || null
+
+    if (!root && sceneRoot) {
+      root = (sceneRoot.children || []).find((child) => child?.userData?._artheticSourceUrl === url) || null
+      if (!root) {
+        sceneRoot.traverse((child) => {
+          if (!root && child?.userData?._artheticSourceUrl === url) root = child
+        })
+      }
+    }
+
+    if (!root && mesh) {
+      let candidate = mesh
+      while (candidate?.parent && candidate.parent !== sceneRoot) candidate = candidate.parent
+      if (candidate) root = candidate
+    }
+
+    if (root && !mesh) {
+      root.traverse((child) => {
+        if (!mesh && child?.isMesh && child.geometry?.getAttribute?.("position")?.count) mesh = child
+      })
+    }
+
+    if (root) {
+      root.userData = root.userData || {}
+      root.userData._artheticSourceUrl = url
+      modelObjectsRef.current[url] = root
+    }
+    if (mesh) {
+      mesh.userData = mesh.userData || {}
+      mesh.userData._artheticSourceUrl = url
+      meshesRef.current[url] = mesh
+    }
+
+    return { root, mesh }
+  }, [])
 
   // Report the *real* texture capability/state back to embedding editors.
   // This keeps LabCaseDetail / New Case controls in sync with what the loaded
@@ -11139,12 +11200,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const refreshAlignmentMetrics = useCallback(async (aUrl, bUrl, onProgress = null) => {
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))
     rootGroupRef.current?.updateMatrixWorld(true)
-    meshesRef.current[aUrl]?.updateMatrixWorld(true)
-    meshesRef.current[bUrl]?.updateMatrixWorld(true)
-    const stats = await computeAlignmentMetrics(meshesRef.current[aUrl], meshesRef.current[bUrl], 0.25, 8000, onProgress)
+    const refsA = resolveLiveModelRefs(aUrl)
+    const refsB = resolveLiveModelRefs(bUrl)
+    refsA.mesh?.updateMatrixWorld(true)
+    refsB.mesh?.updateMatrixWorld(true)
+    const stats = await computeAlignmentMetrics(refsA.mesh, refsB.mesh, 0.25, 8000, onProgress)
     setAlignmentStats(stats)
     return stats
-  }, [])
+  }, [resolveLiveModelRefs])
 
   const goToAlignmentStep = useCallback(async (step) => {
     if (alignmentBusy || !alignmentMode) return
@@ -11209,7 +11272,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     // Body ve spodních A/B oknech jsou uložené v lokálním prostoru rootu modelu.
     // B chceme převést přímo do společného parent-space. A proto převedeme jeho
     // landmarky aktuální skutečnou maticí reference (ne pouze případně opožděným state).
-    const referenceRoot = modelObjectsRef.current[aUrl]
+    const referenceRoot = resolveLiveModelRefs(aUrl).root
     referenceRoot?.updateMatrixWorld(true)
     const matrixA = referenceRoot?.matrix?.elements?.length === 16
       ? referenceRoot.matrix.clone()
@@ -11237,16 +11300,37 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setAlignmentMessage(`Předzarovnání z ${pairCount} párů dokončeno · Landmark RMS ${landmarkRms.toFixed(3)} mm. Teď spusťte Best Fit.`)
     setAlignmentProgress({ label: "Landmark fit", rms: landmarkRms })
     await refreshAlignmentMetrics(aUrl, bUrl)
-  }, [getAlignmentPair, alignmentPointsA, alignmentPointsB, modelTransforms, applyModelTransform, refreshAlignmentMetrics])
+  }, [getAlignmentPair, alignmentPointsA, alignmentPointsB, modelTransforms, applyModelTransform, refreshAlignmentMetrics, resolveLiveModelRefs])
 
   const handleAlignmentBestFit = useCallback(async () => {
     const { aUrl, bUrl } = getAlignmentPair()
-    const sourceMesh = meshesRef.current[bUrl]
-    const targetMesh = meshesRef.current[aUrl]
-    const sourceRoot = modelObjectsRef.current[bUrl]
-    const targetRoot = modelObjectsRef.current[aUrl]
-    if (!aUrl || !bUrl || !sourceMesh || !targetMesh || !sourceRoot || !targetRoot) {
-      setAlignmentMessage("Vybrané modely ještě nejsou připravené.")
+    if (!aUrl || !bUrl) {
+      setAlignmentMessage("Vyberte Reference A a Moving B.")
+      return
+    }
+
+    // Pokud některý registry ref chybí, zkusíme jej obnovit z živé hlavní scény.
+    // Dáme R3F ještě dva framy na připojení modelu, pokud byl předtím skrytý.
+    let refsA = resolveLiveModelRefs(aUrl)
+    let refsB = resolveLiveModelRefs(bUrl)
+    if (!refsA.root || !refsA.mesh || !refsB.root || !refsB.mesh) {
+      await alignmentPaintYield()
+      rootGroupRef.current?.updateMatrixWorld(true)
+      refsA = resolveLiveModelRefs(aUrl)
+      refsB = resolveLiveModelRefs(bUrl)
+    }
+
+    const targetRoot = refsA.root
+    const targetMesh = refsA.mesh
+    const sourceRoot = refsB.root
+    const sourceMesh = refsB.mesh
+
+    if (!sourceMesh || !targetMesh || !sourceRoot || !targetRoot) {
+      const missing = [
+        !targetRoot || !targetMesh ? "Reference A" : null,
+        !sourceRoot || !sourceMesh ? "Moving B" : null,
+      ].filter(Boolean).join(" + ")
+      setAlignmentMessage(`Model ${missing || "pro Best Fit"} není připojený k hlavní scéně. Vraťte se na Vybrat modely a zvolte jej znovu.`)
       return
     }
 
@@ -11381,7 +11465,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setAlignmentProgress(null)
       setAlignmentOperation(null)
     }
-  }, [getAlignmentPair, modelTransforms, alignmentPointsA.length, alignmentPointsB.length, applyModelTransform, refreshAlignmentMetrics, runAlignmentWorkerBestFit, alignmentDemoStandalone])
+  }, [getAlignmentPair, modelTransforms, alignmentPointsA.length, alignmentPointsB.length, applyModelTransform, refreshAlignmentMetrics, runAlignmentWorkerBestFit, alignmentDemoStandalone, resolveLiveModelRefs])
 
   const resetAlignmentTransform = useCallback(async () => {
     const { aUrl, bUrl } = getAlignmentPair()
