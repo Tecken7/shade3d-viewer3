@@ -7568,9 +7568,151 @@ function cadSignedAreaXZ(points) {
   return area * 0.5
 }
 
+// V7 – Boundary Relaxation
+//
+// V6 uklidnil samotnou CAD bázi, ale první milimetry nad napojením stále nesly
+// vysokofrekvenční zubatost přesné trim hranice. Tady proto jemně relaxujeme jen
+// úzký pás PŮVODNÍHO scanu kolem řezu. Nejde o globální smoothing anatomie:
+// - boundary dostane velmi mírný Taubin-like low-pass,
+// - posun každého bodu boundary je tvrdě omezený,
+// - stejný posun se přenese do okolní mesh pouze v úzkém feather pásu,
+// - vliv rychle klesá na nulu, takže zuby a vzdálenější gingiva zůstanou beze změny.
+function cadRelaxClosedBoundaryGentle(points, diagonal) {
+  if (!Array.isArray(points) || points.length < 4) return (points || []).map((p) => p.clone())
+  const original = points.map((p) => p.clone())
+  let current = original.map((p) => p.clone())
+
+  const laplacePass = (source, factor) => source.map((point, i) => {
+    const prev = source[(i - 1 + source.length) % source.length]
+    const next = source[(i + 1) % source.length]
+    const prev2 = source[(i - 2 + source.length) % source.length]
+    const next2 = source[(i + 2) % source.length]
+    const target = prev.clone().add(next).multiplyScalar(0.36)
+      .add(prev2.clone().add(next2).multiplyScalar(0.14))
+    const lap = target.sub(point)
+    return point.clone().addScaledVector(lap, factor)
+  })
+
+  // Krátký Taubin-like cyklus odstraní hlavně high-frequency zuby bez výrazného shrinku.
+  for (let i = 0; i < 11; i++) {
+    current = laplacePass(current, 0.30)
+    current = laplacePass(current, -0.305)
+  }
+
+  // Nedovolíme celému loopu "odplout".
+  const originalCenter = original.reduce((acc, p) => acc.add(p), new THREE.Vector3()).multiplyScalar(1 / original.length)
+  const smoothCenter = current.reduce((acc, p) => acc.add(p), new THREE.Vector3()).multiplyScalar(1 / current.length)
+  const centerCorrection = originalCenter.clone().sub(smoothCenter)
+  current.forEach((p) => p.add(centerCorrection))
+
+  // Na dentálním modelu chceme jen sub-milimetrové uklidnění samotného okraje.
+  const maxShift = Math.max(0.20, Math.min(0.62, Math.max(1, diagonal) * 0.0065))
+  const strength = 0.74
+  const relaxed = original.map((raw, i) => {
+    const delta = current[i].clone().sub(raw).multiplyScalar(strength)
+    const length = delta.length()
+    if (length > maxShift) delta.multiplyScalar(maxShift / length)
+    return raw.clone().add(delta)
+  })
+
+  return relaxed
+}
+
+function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
+  const source = Array.isArray(trianglePositions) ? trianglePositions : []
+  if (source.length < 9 || !Array.isArray(rawLoop) || rawLoop.length < 4) {
+    return {
+      trianglePositions: source.slice(),
+      boundary: (rawLoop || []).map((p) => p.clone()),
+      bandWidth: 0,
+      maxBoundaryShift: 0,
+      affectedVertices: 0,
+    }
+  }
+
+  const relaxedLoop = cadRelaxClosedBoundaryGentle(rawLoop, diagonal)
+  const displacements = relaxedLoop.map((point, i) => point.clone().sub(rawLoop[i]))
+  let maxBoundaryShift = 0
+  for (const delta of displacements) maxBoundaryShift = Math.max(maxBoundaryShift, delta.length())
+
+  // Přibližně 1.6–3.0 mm široký pás podle velikosti scanu. Ve vnější části je
+  // feather už velmi slabý; prakticky viditelná změna zůstává hlavně u hrany.
+  const bandWidth = Math.max(1.6, Math.min(3.0, Math.max(1, diagonal) * 0.038))
+  const cellSize = bandWidth
+  const buckets = new Map()
+  const cellKey = (x, y, z) => `${Math.floor(x / cellSize)}:${Math.floor(y / cellSize)}:${Math.floor(z / cellSize)}`
+
+  for (let i = 0; i < rawLoop.length; i++) {
+    const p = rawLoop[i]
+    const key = cellKey(p.x, p.y, p.z)
+    let bucket = buckets.get(key)
+    if (!bucket) {
+      bucket = []
+      buckets.set(key, bucket)
+    }
+    bucket.push(i)
+  }
+
+  const result = source.slice()
+  const smoothstep = (t) => t * t * (3 - 2 * t)
+  const bandWidthSq = bandWidth * bandWidth
+  let affectedVertices = 0
+
+  for (let offset = 0; offset + 2 < result.length; offset += 3) {
+    const x = result[offset]
+    const y = result[offset + 1]
+    const z = result[offset + 2]
+    const cx = Math.floor(x / cellSize)
+    const cy = Math.floor(y / cellSize)
+    const cz = Math.floor(z / cellSize)
+    let bestIndex = -1
+    let bestDistanceSq = bandWidthSq
+
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const bucket = buckets.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
+          if (!bucket) continue
+          for (const boundaryIndex of bucket) {
+            const bp = rawLoop[boundaryIndex]
+            const ddx = x - bp.x
+            const ddy = y - bp.y
+            const ddz = z - bp.z
+            const distanceSq = ddx * ddx + ddy * ddy + ddz * ddz
+            if (distanceSq < bestDistanceSq) {
+              bestDistanceSq = distanceSq
+              bestIndex = boundaryIndex
+            }
+          }
+        }
+      }
+    }
+
+    if (bestIndex < 0) continue
+    const distance = Math.sqrt(bestDistanceSq)
+    const normalized = Math.max(0, Math.min(1, 1 - distance / bandWidth))
+    // Druhá mocnina drží většinu změny těsně u řezu a velmi rychle ji utlumí.
+    const weight = Math.pow(smoothstep(normalized), 2)
+    if (weight < 0.002) continue
+    const delta = displacements[bestIndex]
+    result[offset] += delta.x * weight
+    result[offset + 1] += delta.y * weight
+    result[offset + 2] += delta.z * weight
+    affectedVertices++
+  }
+
+  return {
+    trianglePositions: result,
+    boundary: relaxedLoop,
+    bandWidth,
+    maxBoundaryShift,
+    affectedVertices,
+  }
+}
+
 function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
-  const trianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
-  const boundaryData = cadExtractBoundaryLoopsRobust(trianglePositions)
+  const collectedTrianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
+  const boundaryData = cadExtractBoundaryLoopsRobust(collectedTrianglePositions)
   viewerRoot.updateMatrixWorld(true)
   sourceObject.updateMatrixWorld(true)
   const sourceToRoot = viewerRoot.matrixWorld.clone().invert().multiply(sourceObject.matrixWorld)
@@ -7592,9 +7734,16 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   // Lower se staví směrem do -Y, Upper zrcadlově do +Y.
   const baseCapY = isUpper ? box.min.y + requestedHeight : box.max.y - requestedHeight
 
-  const rawLoop = cadSignedAreaXZ(boundary) < 0 ? boundary.slice().reverse() : boundary.slice()
+  const exactRawLoop = cadSignedAreaXZ(boundary) < 0 ? boundary.slice().reverse() : boundary.slice()
 
-  // V6: neextrudujeme rovnou jednu vyhlazenou křivku. Nejdřív vytvoříme
+  // V7: ještě před tvorbou báze jemně zklidníme jen několik prvních milimetrů
+  // původní mesh nad trim hranou. Samotný loop i okolní source triangles dostanou
+  // stejný lokální displacement field, takže přechod zůstává geometricky souvislý.
+  const boundaryRelaxation = cadRelaxTrimBoundaryBand(collectedTrianglePositions, exactRawLoop, boundaryData.diagonal)
+  const trianglePositions = boundaryRelaxation.trianglePositions
+  const rawLoop = boundaryRelaxation.boundary
+
+  // V6/V7: neextrudujeme rovnou jednu vyhlazenou křivku. Nejdřív vytvoříme
   // opravdu klidný cílový profil a mezi přesnou trim hranicí a tímto profilem
   // několik mezikružnic. První ring zůstává přesně na scanu, poslední už je
   // pravidelný CAD profil. Smoothstep zajistí nulovější nástup i výstup změny.
@@ -7633,8 +7782,9 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const transitionLoop = transitionRings[transitionRings.length - 1]
   const bottomLoop = transitionLoop.map((p) => new THREE.Vector3(p.x, baseCapY, p.z))
 
-  // V6: zdrojový scan ponecháme vertexově přesně tak, jak je. Novou CAD část
-  // ale vytvoříme indexovaně. Vertikální stěna i transition band tak sdílejí
+  // V7: source část je kopií scanu po velmi lokální boundary relaxation; mimo
+  // feather pás zůstává vertexově totožná. Novou CAD část vytvoříme indexovaně.
+  // Vertikální stěna i transition band tak sdílejí
   // vertexy a computeVertexNormals může vytvořit skutečně hladké normály místo
   // facetovaných svislých pruhů po každém trojúhelníku.
   const positions = trianglePositions.slice()
@@ -7720,6 +7870,9 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionRings: transitionSteps,
+      boundaryRelaxationBand: boundaryRelaxation.bandWidth,
+      boundaryRelaxationMaxShift: boundaryRelaxation.maxBoundaryShift,
+      boundaryRelaxationAffectedVertices: boundaryRelaxation.affectedVertices,
     },
   }
 }
