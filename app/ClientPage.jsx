@@ -7589,6 +7589,7 @@ export default function ClientPage() {
   const [trimDraggingPoint, setTrimDraggingPoint] = useState(null)
   const [trimBusy, setTrimBusy] = useState(false)
   const [trimMessage, setTrimMessage] = useState("")
+  const [trimReadyActionLeaving, setTrimReadyActionLeaving] = useState(false)
   const [trimmedExportsByUrl, setTrimmedExportsByUrl] = useState({})
   const [trimExportBusyUrl, setTrimExportBusyUrl] = useState("")
   const trimHistoryByUrlRef = useRef({})
@@ -8519,6 +8520,7 @@ export default function ClientPage() {
     setTrimDraggingPoint(null)
     setTrimBusy(false)
     setTrimMessage("")
+    setTrimReadyActionLeaving(false)
     if (trackballRef.current) trackballRef.current.enabled = !sliceOverlayInteracting && !alignmentBusy
   }, [sliceOverlayInteracting, alignmentBusy])
 
@@ -8562,6 +8564,7 @@ export default function ClientPage() {
         setTrimClosed(false)
         setTrimKeepComponent(null)
         setTrimHoverComponent(null)
+        setTrimReadyActionLeaving(false)
         setTrimStage("boundary")
         setTrimMessage("Klikáním umístěte body hranice. Kuličku můžete kdykoliv přetáhnout po povrchu; první žlutou kuličku dvojklikem uzavřete.")
       } catch (error) {
@@ -8591,7 +8594,8 @@ export default function ClientPage() {
       setTrimStage("boundary")
       trimSuppressClickUntilRef.current = (typeof performance !== "undefined" ? performance.now() : Date.now()) + 180
       setTrackballResetNonce((value) => value + 1)
-      setTrimMessage("Hranice je uzavřená. Body můžete dál posouvat. Najeďte na část modelu pro náhled a kliknutím potvrďte oblast, kterou chcete zachovat.")
+      setTrimReadyActionLeaving(false)
+      setTrimMessage("Hranice je uzavřená. Body můžete dál posouvat. Najeďte na část modelu pro náhled a kliknutím vyberte oblast, kterou chcete zachovat.")
     } catch (error) {
       console.error("Trim smooth close error:", error)
       setTrimMessage(error?.message || "Hladkou hranici Ořezu se nepodařilo uzavřít.")
@@ -8629,6 +8633,7 @@ export default function ClientPage() {
       setTrimControlNodes(points)
       setTrimKeepComponent(null)
       setTrimHoverComponent(null)
+      setTrimReadyActionLeaving(false)
       setTrimStage("boundary")
       return
     }
@@ -8677,6 +8682,7 @@ export default function ClientPage() {
         setTrimMessage(error?.message || "Ořez se nepodařilo aplikovat.")
       } finally {
         setTrimBusy(false)
+        setTrimReadyActionLeaving(false)
       }
     }, 30)
   }, [trimContext, trimBoundaryPlan, trimSelection, trimBusy, trimControlNodes.length, invalidateComparisonResult])
@@ -8711,9 +8717,10 @@ export default function ClientPage() {
     }
     setTrimKeepComponent(component)
     setTrimHoverComponent(null)
+    setTrimReadyActionLeaving(false)
     setTrimStage("region")
-    applyTrimComponent(component)
-  }, [trimMode, trimContext, trimSelection, trimBusy, trimDraggingPoint, trimClosed, trimBoundaryPlan, trimHoverComponent, addTrimControlNode, applyTrimComponent])
+    setTrimMessage("Oblast je vybraná. Zkontrolujte zelený náhled a klikněte na Oříznout.")
+  }, [trimMode, trimContext, trimSelection, trimBusy, trimDraggingPoint, trimClosed, trimBoundaryPlan, trimHoverComponent, addTrimControlNode])
 
   const handleTrimSurfaceMove = useCallback((url, event) => {
     if (!trimMode || !trimContext || url !== trimSelection || trimBusy) return
@@ -8770,7 +8777,7 @@ export default function ClientPage() {
         try {
           const smoothSegments = buildTrimSurfaceSplineSegments(trimContext, finalPoints, true, 4)
           if (smoothSegments.length) setTrimSegments(smoothSegments)
-          setTrimMessage("Hranice byla upravena. Najeďte na požadovanou část pro nový náhled a kliknutím ji potvrďte.")
+          setTrimMessage("Hranice byla upravena. Najeďte na požadovanou část pro nový náhled a kliknutím ji vyberte.")
         } catch (error) {
           console.warn("Trim smooth drag finalize failed:", error)
           setTrimMessage("Bod byl přesunut, ale hranici se nepodařilo kompletně přepočítat. Zkuste bod posunout o kousek blíž.")
@@ -8783,6 +8790,7 @@ export default function ClientPage() {
       setTrimDraggingPoint(null)
       setTrimKeepComponent(null)
       setTrimHoverComponent(null)
+      setTrimReadyActionLeaving(false)
       trimSuppressClickUntilRef.current = (typeof performance !== "undefined" ? performance.now() : Date.now()) + 160
       setTrackballResetNonce((value) => value + 1)
     }
@@ -8810,14 +8818,19 @@ export default function ClientPage() {
     setTrimClosed(false)
     setTrimKeepComponent(null)
     setTrimHoverComponent(null)
+    setTrimReadyActionLeaving(false)
     setTrimStage("boundary")
     setTrimMessage("Klikáním umístěte novou hranici Ořezu.")
   }, [])
 
   const applyTrimResult = useCallback(() => {
-    if (trimKeepComponent == null) return
-    applyTrimComponent(trimKeepComponent)
-  }, [trimKeepComponent, applyTrimComponent])
+    if (trimKeepComponent == null || trimBusy || trimReadyActionLeaving) return
+    setTrimReadyActionLeaving(true)
+    const componentId = trimKeepComponent
+    window.setTimeout(() => {
+      applyTrimComponent(componentId)
+    }, 120)
+  }, [trimKeepComponent, trimBusy, trimReadyActionLeaving, applyTrimComponent])
 
   const undoLastTrim = useCallback((url = trimSelection) => {
     if (!url) return
@@ -8841,6 +8854,7 @@ export default function ClientPage() {
     }
     setTrimContext(null)
     setTrimControlNodes([]); setTrimSegments([]); setTrimClosed(false); setTrimKeepComponent(null); setTrimHoverComponent(null)
+    setTrimReadyActionLeaving(false)
     setTrimStage("model")
     setTrimSelection("")
     setTrimMessage("Poslední Ořez byl vrácen. Vyberte model pro další úpravu.")
@@ -12978,55 +12992,157 @@ export default function ClientPage() {
       color: "#f3f3f3", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
       animation: "artheticAlignMenuIn .24s ease-out both",
     }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, minWidth: 0 }}>
-        <div style={{ minWidth: 0, flex: "1 1 auto" }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-            <span style={{ display: "inline-flex", alignItems: "baseline", gap: 0, fontSize: 13 }}><span style={{ fontWeight: 850 }}>ART</span><span style={{ fontWeight: 300 }}>HETIC</span></span>
-            <span style={{ color: "#d7d7d7", fontSize: 13, fontWeight: 340 }}>Ořez</span>
-            {trimSelectedFile && <span style={{ marginLeft: 4, color: "#777", fontSize: 9.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stripExt(trimSelectedFile.rawName || trimSelectedFile.name)}</span>}
-          </div>
+      <style>{`
+        @property --artheticTrimBeamAngle {
+          syntax:"<angle>";
+          inherits:false;
+          initial-value:0deg;
+        }
+        @keyframes artheticTrimReadyBeam {
+          to { --artheticTrimBeamAngle:360deg; }
+        }
+        @keyframes artheticTrimReadyParticle {
+          0%   { offset-distance:0%; opacity:0; transform:scale(.45) translateY(0); }
+          7%   { opacity:.92; transform:scale(1) translateY(-1px); }
+          44%  { opacity:.58; transform:scale(.78) translateY(-2px); }
+          72%  { opacity:.16; transform:scale(.55) translateY(-4px); }
+          100% { offset-distance:100%; opacity:0; transform:scale(.35) translateY(-6px); }
+        }
+        .artheticTrimReadyAction {
+          position:relative;
+          isolation:isolate;
+          overflow:visible;
+          border:1px solid transparent !important;
+          background:transparent !important;
+          box-shadow:none !important;
+          transition:opacity .13s ease-out, transform .16s cubic-bezier(.22,.75,.35,1), filter .14s ease-out;
+        }
+        .artheticTrimReadyAction::before {
+          content:"";
+          position:absolute;
+          inset:-2px;
+          padding:2px;
+          border-radius:12px;
+          pointer-events:none;
+          z-index:0;
+          background:conic-gradient(
+            from var(--artheticTrimBeamAngle),
+            rgba(74,222,128,0) 0deg 286deg,
+            rgba(74,222,128,.05) 301deg,
+            rgba(74,222,128,.42) 316deg,
+            rgba(187,247,208,.96) 328deg,
+            rgba(240,253,244,1) 334deg,
+            rgba(134,239,172,.72) 342deg,
+            rgba(74,222,128,.08) 353deg,
+            rgba(74,222,128,0) 360deg
+          );
+          -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+          -webkit-mask-composite:xor;
+          mask-composite:exclude;
+          filter:drop-shadow(0 0 2px rgba(134,239,172,.75)) drop-shadow(0 0 6px rgba(34,197,94,.35));
+          animation:artheticTrimReadyBeam 1.9s linear infinite;
+        }
+        .artheticTrimReadyAction::after {
+          content:"";
+          position:absolute;
+          inset:1px;
+          border-radius:8px;
+          z-index:1;
+          pointer-events:none;
+          background:rgba(18,42,27,.96);
+          box-shadow:inset 0 0 0 1px rgba(34,197,94,.12);
+        }
+        .artheticTrimReadyAction > * {
+          position:relative;
+          z-index:3;
+        }
+        .artheticTrimReadyAction.isLeaving {
+          opacity:0;
+          transform:translateY(2px) scale(.955);
+          filter:blur(1px);
+          pointer-events:none;
+        }
+        .artheticTrimReadyParticles {
+          position:absolute !important;
+          inset:-7px;
+          z-index:2 !important;
+          pointer-events:none;
+          overflow:visible;
+        }
+        .artheticTrimReadyParticle {
+          position:absolute !important;
+          left:0;
+          top:0;
+          width:3px;
+          height:3px;
+          border-radius:50%;
+          background:rgba(187,247,208,.95);
+          box-shadow:0 0 3px rgba(134,239,172,.9), 0 0 7px rgba(34,197,94,.45);
+          offset-path:inset(7px round 10px);
+          offset-rotate:0deg;
+          opacity:0;
+          animation:artheticTrimReadyParticle 2.35s linear infinite;
+        }
+        .artheticTrimReadyParticle:nth-child(2) {
+          width:2px; height:2px; animation-delay:-.42s; animation-duration:2.7s; opacity:.72;
+        }
+        .artheticTrimReadyParticle:nth-child(3) {
+          width:2.5px; height:2.5px; animation-delay:-.96s; animation-duration:3.05s; opacity:.58;
+        }
+        .artheticTrimReadyParticle:nth-child(4) {
+          width:1.5px; height:1.5px; animation-delay:-1.48s; animation-duration:2.55s; opacity:.5;
+        }
+        .artheticTrimReadyParticle:nth-child(5) {
+          width:2px; height:2px; animation-delay:-1.82s; animation-duration:3.25s; opacity:.42;
+        }
+        .artheticTrimSideActions {
+          position:absolute; top:10px; left:calc(50% + 390px); z-index:74; width:158px;
+          box-sizing:border-box; padding:8px; border-radius:13px;
+          background:rgba(11,11,11,.955); border:1px solid rgba(255,255,255,.10);
+          box-shadow:0 18px 58px rgba(0,0,0,.42); backdrop-filter:blur(22px); -webkit-backdrop-filter:blur(22px);
+          animation:artheticAlignMenuIn .24s ease-out both;
+          font-family:Inter,ui-sans-serif,system-ui,sans-serif;
+        }
+        @media (max-width: 1100px) {
+          .artheticTrimSideActions { top:178px; left:auto; right:10px; }
+        }
+      `}</style>
 
-          <div style={{ marginTop: 7, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", minWidth: 0 }}>
-              {[
-                ["model", "Model"], ["boundary", "Hranice"], ["region", "Oblast"], ["result", "Výsledek"],
-              ].map(([key, label], index) => {
-                const done = trimStepDone[key]
-                const active = (key === "model" && trimStage === "model") || (key === "boundary" && trimStage === "boundary") || (key === "region" && trimStage === "region") || (key === "result" && trimStage === "result")
-                return <React.Fragment key={key}>
-                  <div style={analysisStepChipStyle(active, done)}>{done && <span style={{ color: "#86efac" }}>✓</span>}<span>{label}</span></div>
-                  {index < 3 && <div style={{ width: 12, height: 1, background: "rgba(255,255,255,.07)" }} />}
-                </React.Fragment>
-              })}
-            </div>
-
-            {trimStage !== "model" && trimSelectedFile && (
-              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginLeft: "auto" }}>
-                {trimStage === "boundary" && !trimClosed && trimControlNodes.length > 0 && (
-                  <button type="button" onClick={removeLastTrimPoint} style={{ height: 29, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 8.8, fontWeight: 680, cursor: "pointer" }}>Smazat poslední</button>
-                )}
-                {(trimStage === "boundary" || trimStage === "region") && (
-                  <button type="button" onClick={resetTrimBoundary} style={{ height: 29, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 8.8, fontWeight: 680, cursor: "pointer" }}>Reset hranice</button>
-                )}
-                {trimStage === "boundary" && !trimClosed && trimControlNodes.length >= 3 && (
-                  <button type="button" onClick={closeTrimLoop} style={{ height: 29, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(251,191,36,.18)", background: "rgba(245,158,11,.065)", color: "#fde68a", fontSize: 8.8, fontWeight: 710, cursor: "pointer" }}>Uzavřít hranici</button>
-                )}
-                {trimStage === "result" && (
-                  <>
-                    <button type="button" onClick={() => undoLastTrim(trimSelection)} style={{ height: 29, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 8.8, fontWeight: 680, cursor: "pointer" }}>Vrátit ořez</button>
-                    <button type="button" onClick={() => downloadTrimmedModel(trimSelection)} disabled={trimExportBusyUrl === trimSelection}
-                      style={{ height: 29, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,.10)", background: "rgba(255,255,255,.04)", color: "#e1e1e1", fontSize: 8.8, fontWeight: 700, cursor: trimExportBusyUrl === trimSelection ? "wait" : "pointer" }}>{trimExportBusyUrl === trimSelection ? "Připravuji…" : "Stáhnout"}</button>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+          <span style={{ display: "inline-flex", alignItems: "baseline", gap: 0, fontSize: 13 }}><span style={{ fontWeight: 850 }}>ART</span><span style={{ fontWeight: 300 }}>HETIC</span></span>
+          <span style={{ color: "#d7d7d7", fontSize: 13, fontWeight: 340 }}>Ořez</span>
+          {trimSelectedFile && <span style={{ marginLeft: 4, color: "#777", fontSize: 9.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stripExt(trimSelectedFile.rawName || trimSelectedFile.name)}</span>}
         </div>
 
-        <button type="button" onClick={closeTrimMode} disabled={trimBusy}
-          style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: "#c8c8c8", cursor: trimBusy ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690, flex: "0 0 auto" }}>
-          Zavřít
-        </button>
+        <div style={{ marginTop: 7, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", minWidth: 0 }}>
+            {[
+              ["model", "Model"], ["boundary", "Hranice"], ["region", "Oblast"], ["result", "Výsledek"],
+            ].map(([key, label], index) => {
+              const done = trimStepDone[key]
+              const active = (key === "model" && trimStage === "model") || (key === "boundary" && trimStage === "boundary") || (key === "region" && trimStage === "region") || (key === "result" && trimStage === "result")
+              return <React.Fragment key={key}>
+                <div style={analysisStepChipStyle(active, done)}>{done && <span style={{ color: "#86efac" }}>✓</span>}<span>{label}</span></div>
+                {index < 3 && <div style={{ width: 12, height: 1, background: "rgba(255,255,255,.07)" }} />}
+              </React.Fragment>
+            })}
+          </div>
+
+          {trimStage !== "model" && trimSelectedFile && trimStage !== "result" && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginLeft: "auto" }}>
+              {trimStage === "boundary" && !trimClosed && trimControlNodes.length > 0 && (
+                <button type="button" onClick={removeLastTrimPoint} style={{ height: 29, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 8.8, fontWeight: 680, cursor: "pointer" }}>Smazat poslední</button>
+              )}
+              {(trimStage === "boundary" || trimStage === "region") && (
+                <button type="button" onClick={resetTrimBoundary} style={{ height: 29, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 8.8, fontWeight: 680, cursor: "pointer" }}>Reset hranice</button>
+              )}
+              {trimStage === "boundary" && !trimClosed && trimControlNodes.length >= 3 && (
+                <button type="button" onClick={closeTrimLoop} style={{ height: 29, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(251,191,36,.18)", background: "rgba(245,158,11,.065)", color: "#fde68a", fontSize: 8.8, fontWeight: 710, cursor: "pointer" }}>Uzavřít hranici</button>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       <div style={{ height: 1, margin: "9px 0", background: "rgba(255,255,255,.065)" }} />
@@ -13039,11 +13155,33 @@ export default function ClientPage() {
       )}
 
       {trimStage !== "model" && trimSelectedFile && (
-        <div style={{ minWidth: 0, color: "#8b8b8b", fontSize: 9.3, lineHeight: 1.45 }}>
-          {trimStage === "boundary" && !trimClosed && <>LMB klik = nový bod · přetažení kuličky = oprava bodu · dvojklik na první žlutý bod = uzavřít.</>}
-          {trimStage === "boundary" && trimClosed && <>Smyčka je uzavřená. Body můžete dál přetahovat. Najeďte myší na jednu stranu pro náhled; kliknutím na zelenou oblast se Ořez rovnou provede.</>}
-          {trimStage === "region" && <>Potvrzuji vybranou oblast a provádím Ořez…</>}
-          {trimStage === "result" && <>Ořez je aplikovaný na geometrii v této session. Výsledek lze stáhnout; při uložení scény se změněný model uloží automaticky.</>}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, minWidth: 0 }}>
+          <div style={{ minWidth: 0, flex: "1 1 auto", color: "#8b8b8b", fontSize: 9.3, lineHeight: 1.45 }}>
+            {trimStage === "boundary" && !trimClosed && <>LMB klik = nový bod · přetažení kuličky = oprava bodu · dvojklik na první žlutý bod = uzavřít.</>}
+            {trimStage === "boundary" && trimClosed && <>Smyčka je uzavřená. Najeďte myší na jednu stranu pro náhled a kliknutím vyberte zelenou oblast, kterou chcete zachovat.</>}
+            {trimStage === "region" && !trimBusy && <>Oblast je vybraná. Zkontrolujte zelený náhled a klikněte na Oříznout.</>}
+            {trimStage === "region" && trimBusy && <>Ořezávám vybranou oblast…</>}
+            {trimStage === "result" && <>Ořez je aplikovaný na geometrii v této session. Výsledek lze stáhnout; při uložení scény se změněný model uloží automaticky.</>}
+          </div>
+
+          {trimStage === "region" && trimKeepComponent != null && !trimBusy && (
+            <button
+              className={`artheticTrimReadyAction${trimReadyActionLeaving ? " isLeaving" : ""}`}
+              type="button"
+              onClick={applyTrimResult}
+              disabled={trimBusy}
+              style={{ height: 31, padding: "0 13px", borderRadius: 8, color: "#bbf7d0", fontSize: 9, fontWeight: 720, cursor: trimBusy ? "wait" : "pointer", minWidth: 96, flex: "0 0 auto" }}
+            >
+              <span className="artheticTrimReadyParticles" aria-hidden="true">
+                <i className="artheticTrimReadyParticle" />
+                <i className="artheticTrimReadyParticle" />
+                <i className="artheticTrimReadyParticle" />
+                <i className="artheticTrimReadyParticle" />
+                <i className="artheticTrimReadyParticle" />
+              </span>
+              <span>Oříznout</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -13053,6 +13191,49 @@ export default function ClientPage() {
           {trimMessage}
         </div>
       )}
+    </div>
+  )
+
+  const trimActionsPanel = trimMode && (
+    <div className="artheticTrimSideActions">
+      <div style={{ display: "grid", gap: 6 }}>
+        {trimSelection && trimmedExportsByUrl[trimSelection] && (
+          <>
+            <button
+              type="button"
+              onClick={() => undoLastTrim(trimSelection)}
+              disabled={trimBusy}
+              style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: trimBusy ? "#555" : "#c8c8c8", cursor: trimBusy ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7 }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M9 7L4.5 11.5L9 16" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M5 11.5H14.2C17.4 11.5 19.5 13.2 19.5 16.4C19.5 17 19.43 17.55 19.28 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <span>Undo</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => downloadTrimmedModel(trimSelection)}
+              disabled={trimBusy || trimExportBusyUrl === trimSelection}
+              style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: trimBusy || trimExportBusyUrl === trimSelection ? "#555" : "#c8c8c8", cursor: trimBusy || trimExportBusyUrl === trimSelection ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
+            >
+              {trimExportBusyUrl === trimSelection ? "Připravuji…" : "Stáhnout"}
+            </button>
+
+            <div aria-hidden="true" style={{ height: 1, margin: "1px 2px", background: "rgba(255,255,255,.075)" }} />
+          </>
+        )}
+
+        <button
+          type="button"
+          onClick={closeTrimMode}
+          disabled={trimBusy}
+          style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: trimBusy ? "#555" : "#c8c8c8", cursor: trimBusy ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
+        >
+          Zavřít
+        </button>
+      </div>
     </div>
   )
 
@@ -14130,6 +14311,7 @@ export default function ClientPage() {
       )}
 
       {trimWorkspace}
+      {trimActionsPanel}
       {repairWorkspace}
       {repairActionsPanel}
       {alignmentWorkspace}
