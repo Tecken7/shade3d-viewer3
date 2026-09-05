@@ -7378,7 +7378,7 @@ function cadCollectTrianglesInRoot(sourceObject, viewerRoot) {
   return positions
 }
 
-function cadExtractBoundaryLoops(trianglePositions) {
+function cadExtractBoundaryLoops(trianglePositions, toleranceFactor = 1e-5) {
   const box = new THREE.Box3()
   const temp = new THREE.Vector3()
   for (let i = 0; i < trianglePositions.length; i += 3) {
@@ -7387,7 +7387,7 @@ function cadExtractBoundaryLoops(trianglePositions) {
   }
   const size = box.getSize(new THREE.Vector3())
   const diagonal = Math.max(1e-6, size.length())
-  const tolerance = Math.max(1e-5, diagonal * 1e-5)
+  const tolerance = Math.max(1e-5, diagonal * Math.max(1e-7, Number(toleranceFactor) || 1e-5))
 
   const vertexIdByKey = new Map()
   const vertices = []
@@ -7476,6 +7476,44 @@ function cadExtractBoundaryLoops(trianglePositions) {
   return { loops, box, diagonal, boundaryEdgeCount: boundaryEdges.length }
 }
 
+// Trim generuje neindexovanou geometrii a body na sousedních face mohou mít
+// nepatrně odlišné float souřadnice. Proto boundary zkoušíme svařit v několika
+// stále bezpečných tolerancích. Na dentálním modelu jde typicky o tisíciny až
+// setiny milimetru, nikoli o viditelnou změnu geometrie.
+function cadExtractBoundaryLoopsRobust(trianglePositions) {
+  const factors = [1e-5, 3e-5, 8e-5, 1.8e-4]
+  let best = null
+  for (const factor of factors) {
+    const result = cadExtractBoundaryLoops(trianglePositions, factor)
+    if (!best || result.loops.length > best.loops.length || (result.loops[0]?.perimeter || 0) > (best.loops[0]?.perimeter || 0)) best = result
+    if (result.loops.length && (result.loops[0]?.points?.length || 0) >= 4) return result
+  }
+  return best || cadExtractBoundaryLoops(trianglePositions)
+}
+
+// V CAD workflow máme po Ořezu ještě lepší zdroj: samotnou surface spline,
+// kterou uživatel nakreslil. Tyto body jsou přesně stejné body, které trim engine
+// používá při dělení jednotlivých faces, takže jsou ideální horní hranou báze.
+function cadBoundaryFromTrimSegments(segments) {
+  const points = []
+  const pushPoint = (value) => {
+    if (!value) return
+    const point = trimVec(value)
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) return
+    const last = points[points.length - 1]
+    if (!last || last.distanceToSquared(point) > 1e-10) points.push(point.clone())
+  }
+  for (const segment of segments || []) {
+    const pieces = segment?.pieces || []
+    for (const piece of pieces) {
+      pushPoint(piece?.a)
+      pushPoint(piece?.b)
+    }
+  }
+  if (points.length > 2 && points[0].distanceToSquared(points[points.length - 1]) < 1e-8) points.pop()
+  return points
+}
+
 function cadSmoothClosedLoop(points, iterations = 28) {
   if (!Array.isArray(points) || points.length < 4) return (points || []).map((p) => p.clone())
   let current = points.map((p) => p.clone())
@@ -7530,11 +7568,21 @@ function cadSignedAreaXZ(points) {
   return area * 0.5
 }
 
-function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower") {
+function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
   const trianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
-  const boundaryData = cadExtractBoundaryLoops(trianglePositions)
-  const boundary = boundaryData.loops[0]?.points
-  if (!boundary || boundary.length < 4) throw new Error("Po Ořezu nebyla nalezena hlavní uzavřená hranice modelu.")
+  const boundaryData = cadExtractBoundaryLoopsRobust(trianglePositions)
+  viewerRoot.updateMatrixWorld(true)
+  sourceObject.updateMatrixWorld(true)
+  const sourceToRoot = viewerRoot.matrixWorld.clone().invert().multiply(sourceObject.matrixWorld)
+  const override = Array.isArray(boundaryOverride)
+    ? boundaryOverride
+        .map((point) => trimVec(point).applyMatrix4(sourceToRoot))
+        .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.z))
+    : []
+  // Primárně používáme boundary uloženou přímo z Ořezu. Fallback je robustní
+  // detekce otevřené hrany z výsledné mesh, aby fungovaly i starší session.
+  const boundary = override.length >= 4 ? override : boundaryData.loops[0]?.points
+  if (!boundary || boundary.length < 4) throw new Error("Po Ořezu se nepodařilo obnovit uzavřenou hranici. Vraťte se o krok zpět a znovu potvrďte Ořez.")
 
   const box = boundaryData.box
   const naturalHeight = Math.max(0.01, box.max.y - box.min.y)
@@ -7589,7 +7637,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   geometry.computeBoundingBox()
   geometry.computeBoundingSphere()
 
-  const finalBoundary = cadExtractBoundaryLoops(output)
+  const finalBoundary = cadExtractBoundaryLoopsRobust(output)
   return {
     geometry,
     stats: {
@@ -7598,6 +7646,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       bottomY: baseCapY,
       boundaryPoints: rawLoop.length,
       sourceBoundaryLoops: boundaryData.loops.length,
+      boundarySource: override.length >= 4 ? "trim" : "mesh",
       openBoundaryLoops: finalBoundary.loops.length,
       triangles: Math.floor(output.length / 9),
     },
@@ -7609,7 +7658,7 @@ function CadPreviewMesh({ geometry }) {
   if (!geometry) return null
   return (
     <mesh geometry={geometry} renderOrder={50}>
-      <meshStandardMaterial color="#dad7d1" roughness={0.24} metalness={0.08} side={THREE.DoubleSide} />
+      <meshStandardMaterial color="#AAA08E" roughness={0.24} metalness={0.08} side={THREE.DoubleSide} />
     </mesh>
   )
 }
@@ -8173,6 +8222,10 @@ export default function ClientPage({ forceCadMode = false } = {}) {
   const [cadPreviewActive, setCadPreviewActive] = useState(false)
   const [cadPreviewGeometry, setCadPreviewGeometry] = useState(null)
   const [cadPreviewStats, setCadPreviewStats] = useState(null)
+  // Přesná uzavřená křivka z CAD Ořezu. Base Generator ji používá jako primární
+  // horní hranu báze, takže není odkázaný jen na opětovné skládání boundary
+  // z neindexovaných trojúhelníků po trimu.
+  const [cadTrimBoundaryPoints, setCadTrimBoundaryPoints] = useState([])
   const cadObjectUrlsRef = useRef({ upper: "", lower: "" })
 
   useEffect(() => () => {
@@ -9238,6 +9291,10 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     window.setTimeout(() => {
       try {
         const backup = applyTrimRegionToObject(trimContext, trimBoundaryPlan, componentId)
+        if (cadStandalone) {
+          const cadBoundary = cadBoundaryFromTrimSegments(trimSegments)
+          setCadTrimBoundaryPoints(cadBoundary.map((point) => point.toArray()))
+        }
         const stack = trimHistoryByUrlRef.current[trimSelection] || []
         trimHistoryByUrlRef.current[trimSelection] = [...stack, backup]
         setTrimmedExportsByUrl((previous) => ({
@@ -9262,7 +9319,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
         setTrimReadyActionLeaving(false)
       }
     }, 30)
-  }, [trimContext, trimBoundaryPlan, trimSelection, trimBusy, trimControlNodes.length, invalidateComparisonResult])
+  }, [trimContext, trimBoundaryPlan, trimSelection, trimBusy, trimControlNodes.length, invalidateComparisonResult, cadStandalone, trimSegments])
 
   const handleTrimSurfaceClick = useCallback((url, event) => {
     if (!trimMode || !trimContext || url !== trimSelection || trimBusy || trimDraggingPoint != null) return
@@ -9535,6 +9592,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     setCadTotalHeight(30)
     setCadPreviewActive(false)
     setCadPreviewStats(null)
+    setCadTrimBoundaryPoints([])
     setCadPreviewGeometry((previous) => { previous?.dispose?.(); return null })
     setRepairSelection("")
     setRepairContext(null)
@@ -9574,6 +9632,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     }
     setCadPreviewActive(false)
     setCadPreviewStats(null)
+    setCadTrimBoundaryPoints([])
     setCadPreviewGeometry((previous) => { previous?.dispose?.(); return null })
     setDidInitialFrame(false)
     setInitialCameraState(null)
@@ -9607,12 +9666,12 @@ export default function ClientPage({ forceCadMode = false } = {}) {
       name: stripExt(file.name) || (arch === "upper" ? "Upper" : "Lower"),
       rawName: file.name,
       cadArch: arch,
-      c: "#dad7d1", o: 1, v: true, r: 0.24, m: 0.08, vc: false, km: false, wf: false, gh: false,
+      c: "#AAA08E", o: 1, v: true, r: 0.24, m: 0.08, vc: false, km: false, wf: false, gh: false,
     }
     const withoutArch = files.filter((item) => item.cadArch !== arch && item.url !== previousUrl)
     const nextFiles = [...withoutArch, nextFile].sort((a, b) => (a.cadArch === "upper" ? -1 : 1) - (b.cadArch === "upper" ? -1 : 1))
     setFiles(nextFiles)
-    setColors(nextFiles.map(() => "#dad7d1"))
+    setColors(nextFiles.map(() => "#AAA08E"))
     setOpacities(nextFiles.map(() => 1))
     setVisibles(nextFiles.map(() => true))
     setRoughnesses(nextFiles.map(() => 0.24))
@@ -9804,7 +9863,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
     setCadMessage("Generuji Preview hladké solid báze…")
     window.setTimeout(() => {
       try {
-        const result = cadBuildSolidBaseGeometry(sourceObject, rootGroupRef.current, cadTotalHeight, cadActiveArch)
+        const result = cadBuildSolidBaseGeometry(sourceObject, rootGroupRef.current, cadTotalHeight, cadActiveArch, cadTrimBoundaryPoints)
         setCadPreviewGeometry((previous) => { previous?.dispose?.(); return result.geometry })
         setCadPreviewStats(result.stats)
         setCadPreviewActive(true)
@@ -9819,7 +9878,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
         setCadBusy(false)
       }
     }, 35)
-  }, [cadStage, cadBusy, cadFileUrl, cadPreviewActive, cadTotalHeight, cadActiveArch])
+  }, [cadStage, cadBusy, cadFileUrl, cadPreviewActive, cadTotalHeight, cadActiveArch, cadTrimBoundaryPoints])
 
   const applyCadBase = useCallback(() => {
     if (cadStage !== "base" || !cadPreviewActive || !cadPreviewGeometry || cadBusy) return
@@ -14067,7 +14126,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
             <div style={{ minWidth:0 }}>
               <div style={{ color:"#858585", fontSize:9.35, lineHeight:1.45 }}>
-                Před dalšími CAD kroky musí být scan bez opravovatelných děr. Vyberte čelist a dokončete její kontrolu v panelu Oprava sítě níže.
+                Před dalšími CAD kroky musí být scan bez opravovatelných děr. Vyberte čelist a dokončete její kontrolu v panelu Oprava sítě vpravo.
               </div>
               <div style={{ marginTop:7, display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
                 {cadUpperUrl && <button type="button" onClick={() => startCadRepairForArch("upper")} disabled={repairBusy} style={{ height:28, padding:"0 10px", borderRadius:8, border:cadActiveArch==="upper"?"1px solid rgba(96,165,250,.28)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="upper"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadArchRepairDone.upper?"#9ad9ad":cadActiveArch==="upper"?"#bfdbfe":"#999", fontSize:8.8, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{cadArchRepairDone.upper?"✓ ":""}Upper</button>}
@@ -14472,7 +14531,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
   const repairLikelyHoles = repairHoles.filter((hole) => hole.likely)
   const repairSelectedAutoCount = repairSelectedHoleIds.filter((id) => !repairCompletedHoleSet.has(id)).length
   const repairAllVisibleSelected = repairPendingHoles.length > 0 && repairSelectedAutoCount === repairPendingHoles.length
-  const repairWorkspace = repairMode && (
+  const repairWorkspace = repairMode && !(cadStandalone && cadStage === "repair") && (
     <div style={{
       position: "absolute", top: cadStandalone && cadStage === "repair" ? 146 : 10, left: "50%", transform: "translateX(-50%)", zIndex: cadStandalone && cadStage === "repair" ? 85 : 73,
       width: cadStandalone && cadStage === "repair" ? "min(850px, calc(100vw - 34px))" : "min(820px, calc(100vw - 32px))", boxSizing: "border-box", padding: "11px 12px",
@@ -14818,6 +14877,134 @@ export default function ClientPage({ forceCadMode = false } = {}) {
         <div style={{ marginTop: 9, padding: "7px 9px", borderRadius: 9, background: "rgba(239,68,68,.045)", border: "1px solid rgba(248,113,113,.11)", color: "#ba8585", fontSize: 8.8, lineHeight: 1.45 }}>
           {repairMessage}
         </div>
+      )}
+    </div>
+  )
+
+
+  // V Model Builderu je Oprava sítě pracovní nástroj na pravém okraji. Hlavní
+  // CAD krok zůstává nahoře a samotný scan tak má maximum prostoru ve scéně.
+  const cadRepairWorkspace = repairMode && cadStandalone && cadStage === "repair" && (
+    <div style={{
+      position:"absolute", top:132, right:16, zIndex:90,
+      width:"min(332px, calc(100vw - 32px))", maxHeight:"calc(100vh - 150px)", overflowY:"auto", overflowX:"hidden",
+      boxSizing:"border-box", padding:"12px", borderRadius:16,
+      background:"rgba(10,10,10,.965)", border:"1px solid rgba(255,255,255,.10)",
+      boxShadow:"0 24px 72px rgba(0,0,0,.50)", backdropFilter:"blur(24px)", WebkitBackdropFilter:"blur(24px)",
+      color:"#f2f2f2", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif",
+      animation:"artheticAlignMenuIn .24s ease-out both",
+    }}>
+      <style>{`
+        .artheticCadRepairScroll::-webkit-scrollbar{width:5px}
+        .artheticCadRepairScroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:999px}
+        @keyframes artheticCadRepairSpin{to{transform:rotate(360deg)}}
+        .artheticCadRepairSpinner{width:11px;height:11px;border-radius:50%;border:1.7px solid rgba(255,255,255,.15);border-top-color:#f4f4f5;display:inline-block;animation:artheticCadRepairSpin .68s linear infinite}
+        @keyframes artheticCadRepairReadyPulse{0%,100%{box-shadow:0 0 0 1px rgba(74,222,128,.05),0 8px 24px rgba(34,197,94,.03)}50%{box-shadow:0 0 0 1px rgba(134,239,172,.22),0 8px 30px rgba(34,197,94,.12)}}
+        .artheticCadRepairPrimary{animation:artheticCadRepairReadyPulse 1.8s ease-in-out infinite}
+      `}</style>
+
+      <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:10 }}>
+        <div style={{ minWidth:0 }}>
+          <div style={{ display:"flex", alignItems:"baseline", gap:6, minWidth:0 }}>
+            <span style={{ display:"inline-flex", alignItems:"baseline", fontSize:12.5 }}><span style={{ fontWeight:850 }}>ART</span><span style={{ fontWeight:300 }}>HETIC</span></span>
+            <span style={{ color:"#d7d7d7", fontSize:12.5, fontWeight:350 }}>Oprava sítě</span>
+          </div>
+          {repairSelectedFile && <div style={{ marginTop:3, color:"#666", fontSize:8.4, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{stripExt(repairSelectedFile.rawName || repairSelectedFile.name)}</div>}
+        </div>
+        <div style={{ display:"inline-flex", padding:3, borderRadius:9, background:"rgba(255,255,255,.025)", border:"1px solid rgba(255,255,255,.07)", flex:"0 0 auto" }}>
+          {[['auto','Auto'],['manual','Ručně']].map(([key,label]) => (
+            <button key={key} type="button" onClick={() => changeRepairVariant(key)} disabled={repairBusy}
+              style={{ height:26, padding:"0 8px", borderRadius:7, border:"none", background:repairVariant===key?"rgba(96,165,250,.13)":"transparent", color:repairVariant===key?"#bfdbfe":"#6f6f6f", fontSize:8.5, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ height:1, margin:"10px 0", background:"rgba(255,255,255,.065)" }} />
+
+      {repairVariant === "auto" && repairStage !== "model" && repairStage !== "result" && (
+        <div>
+          <div style={{ color:"#858585", fontSize:9, lineHeight:1.45 }}>
+            {repairHoles.length
+              ? <>Nalezeno <span style={{ color:"#d3d3d3", fontWeight:720 }}>{repairHoles.length}</span> opravovatelných {repairHoles.length===1?"otvor":"otvorů"}{repairCompletedHoleIds.length?<> · <span style={{ color:"#86efac" }}>{repairCompletedHoleIds.length} opraveno</span></>:null}.</>
+              : <span style={{ color:"#9ad9ad" }}>✓ Nebyla nalezena žádná opravovatelná díra.</span>}
+          </div>
+
+          {repairHoles.length > 0 && (
+            <div className="artheticCadRepairScroll" style={{ marginTop:9, display:"grid", gap:5, maxHeight:"min(330px, 42vh)", overflowY:"auto", paddingRight:2 }}>
+              {repairHoles.map((hole,index) => {
+                const selected=repairSelectedHoleIds.includes(hole.id)
+                const completed=repairCompletedHoleSet.has(hole.id)
+                return (
+                  <button key={hole.id} type="button" onClick={() => selectRepairHole(hole.id)} disabled={repairBusy||completed}
+                    style={{ minHeight:34, width:"100%", padding:"7px 9px", borderRadius:9, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between", gap:8,
+                      border:selected?"1px solid rgba(125,211,252,.52)":completed?"1px solid rgba(134,239,172,.22)":"1px solid rgba(255,255,255,.07)",
+                      background:selected?"rgba(56,189,248,.12)":completed?"rgba(34,197,94,.05)":"rgba(255,255,255,.024)",
+                      color:selected?"#d7f3ff":completed?"#9ad9ad":"#aaa", opacity:completed ? 0.72 : 1, cursor:repairBusy?"wait":completed?"default":"pointer" }}>
+                    <span style={{ minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", fontSize:8.8, fontWeight:690 }}>{completed?"✓ ":selected?"● ":""}{index+1}. otvor</span>
+                    <span style={{ flex:"0 0 auto", color:completed?"#79b98b":selected?"#bfe9fb":"#707070", fontSize:8.3, fontVariantNumeric:"tabular-nums" }}>Ø {(hole.equivalentRadius*2).toFixed(1)}</span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+
+          {repairPendingHoles.length > 1 && (
+            <button type="button" onClick={repairAllVisibleSelected?clearRepairHoleSelection:selectAllRepairHoles} disabled={repairBusy}
+              style={{ marginTop:7, width:"100%", height:30, borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#9d9d9d", fontSize:8.7, fontWeight:690, cursor:repairBusy?"wait":"pointer" }}>
+              {repairAllVisibleSelected?"Zrušit výběr":"Vybrat vše"}
+            </button>
+          )}
+
+          {repairSelectedAutoCount > 0 && (
+            <button className="artheticCadRepairPrimary" type="button" onClick={triggerRepairSelectedAutoHoles} disabled={repairBusy||repairReadyActionLeaving}
+              style={{ marginTop:8, width:"100%", height:36, borderRadius:9, border:"1px solid rgba(74,222,128,.26)", background:"rgba(34,197,94,.10)", color:"#bbf7d0", fontSize:9.2, fontWeight:760, cursor:repairBusy?"wait":"pointer", opacity:repairReadyActionLeaving?0:1, transition:"opacity .16s ease-out, transform .18s ease-out", transform:repairReadyActionLeaving?"translateY(2px) scale(.98)":"none" }}>
+              Opravit vybrané
+            </button>
+          )}
+        </div>
+      )}
+
+      {repairVariant === "manual" && repairStage === "paint" && (
+        <div>
+          <div style={{ color:"#858585", fontSize:8.9, lineHeight:1.5 }}>LMB táhnout = označit oblast · RMB = kamera. Označte okolí problematické otevřené hrany.</div>
+          <div style={{ marginTop:9 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", gap:8, color:"#737373", fontSize:8.4 }}><span>Velikost štětce</span><span>{repairContext?(repairContext.diagonal*repairBrushFactor).toFixed(1):"–"}</span></div>
+            <input type="range" min={0.012} max={0.10} step={0.002} value={repairBrushFactor} onChange={(event)=>setRepairBrushFactor(Number(event.target.value))} style={{ width:"100%", marginTop:5, accentColor:"#f2f2f2" }} />
+          </div>
+          <div style={{ marginTop:8, display:"grid", gridTemplateColumns:"1fr 1fr", gap:6 }}>
+            <button type="button" onClick={clearRepairPaint} disabled={!repairPaintedTriangles.size} style={{ height:31, borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:repairPaintedTriangles.size?"#aaa":"#555", fontSize:8.6, fontWeight:680 }}>Vymazat</button>
+            <button type="button" onClick={findRepairInPaint} disabled={!repairPaintedTriangles.size||repairBusy} style={{ height:31, borderRadius:8, border:"1px solid rgba(96,165,250,.20)", background:"rgba(59,130,246,.075)", color:repairPaintedTriangles.size?"#bfdbfe":"#607087", fontSize:8.6, fontWeight:710 }}>Najít otvor</button>
+          </div>
+        </div>
+      )}
+
+      {repairVariant === "manual" && repairStage === "preview" && (
+        <div>
+          <div style={{ color:"#858585", fontSize:8.9, lineHeight:1.5 }}>Klikněte na zvýrazněnou boundary ve scéně a potvrďte opravu.</div>
+          <div style={{ marginTop:8, display:"grid", gridTemplateColumns:"1fr 1fr", gap:6 }}>
+            <button type="button" onClick={() => { setRepairStage("paint"); setRepairSelectedHoleId(""); setRepairPreviewPatch(null) }} style={{ height:31, borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:8.6, fontWeight:680 }}>Zpět</button>
+            <button type="button" onClick={repairSelectedHole} disabled={!repairSelectedHoleId||repairBusy} style={{ height:31, borderRadius:8, border:"1px solid rgba(74,222,128,.20)", background:"rgba(34,197,94,.075)", color:"#bbf7d0", fontSize:8.6, fontWeight:720 }}>Opravit</button>
+          </div>
+        </div>
+      )}
+
+      {repairStage === "result" && !repairProgressVisible && (
+        <div style={{ padding:"9px 10px", borderRadius:10, border:"1px solid rgba(134,239,172,.13)", background:"rgba(34,197,94,.045)", color:"#9ad9ad", fontSize:8.9, lineHeight:1.45 }}>✓ Oprava vybraných otvorů je hotová. Pokud už nezůstává žádná další díra, můžete pokračovat k orientaci.</div>
+      )}
+
+      {repairProgressVisible && (
+        <div style={{ marginTop:repairHoles.length?9:0, padding:"9px", borderRadius:10, background:"rgba(255,255,255,.026)", border:"1px solid rgba(255,255,255,.065)" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+            <span className="artheticCadRepairSpinner" aria-hidden="true" />
+            <span style={{ minWidth:0, flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", color:"#d1d1d1", fontSize:8.6 }}>{repairProgressLabel||"Pracuji…"}</span>
+            <span style={{ flex:"0 0 auto", minWidth:32, textAlign:"right", color:"#f4f4f5", fontSize:8.7, fontWeight:760, fontVariantNumeric:"tabular-nums" }}>{Math.round(repairProgressPercent)} %</span>
+          </div>
+          <div style={{ marginTop:7, height:2, borderRadius:999, overflow:"hidden", background:"rgba(255,255,255,.055)" }}><div style={{ height:"100%", width:`${Math.max(1.5,repairProgressPercent)}%`, borderRadius:999, background:"rgba(255,255,255,.88)", transition:"width .3s ease-out" }} /></div>
+        </div>
+      )}
+
+      {!repairProgressVisible && repairMessage && /nepodař|nenaš|potřeba|není načten|selhal|chyba/i.test(repairMessage) && (
+        <div style={{ marginTop:9, padding:"8px 9px", borderRadius:9, background:"rgba(239,68,68,.045)", border:"1px solid rgba(248,113,113,.11)", color:"#ba8585", fontSize:8.6, lineHeight:1.45 }}>{repairMessage}</div>
       )}
     </div>
   )
@@ -15543,6 +15730,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
       {trimWorkspace}
       {trimActionsPanel}
       {repairWorkspace}
+      {cadRepairWorkspace}
       {repairActionsPanel}
       {alignmentWorkspace}
 
@@ -15980,7 +16168,7 @@ export default function ClientPage({ forceCadMode = false } = {}) {
                 key={`${f.url}-${i}`}
                 name={f.rawName || f.name}
                 url={f.url}
-                color={colors[i] ?? "#ffffff"}
+                color={cadStandalone ? "#AAA08E" : (colors[i] ?? "#ffffff")}
                 opacity={opacities[i] ?? 1}
                 visible={cadStandalone && (cadPreviewActive || cadStage === "result")
                   ? false
