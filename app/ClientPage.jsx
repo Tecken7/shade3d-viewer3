@@ -1137,9 +1137,19 @@ function TrimBoundaryTube({
   renderOrder = 1500,
   pulse = false,
   pulseStrength = 0.18,
+  pulseSpeed = 1.08,
+  pulseMinOpacity = null,
+  pulseMaxOpacity = null,
+  pulseToColor = "#ffffff",
+  pulseEmissiveColor = "#ffffff",
+  pulseEmissiveMin = 0.015,
+  pulseEmissiveMax = 0.82,
 }) {
   const materialRef = useRef(null)
   const pulsePhaseRef = useRef(Math.random() * Math.PI * 2)
+  const pulseBaseColorRef = useRef(new THREE.Color(color))
+  const pulseTargetColorRef = useRef(new THREE.Color(pulseToColor))
+  const pulseEmissiveColorRef = useRef(new THREE.Color(pulseEmissiveColor))
   const geometry = useMemo(() => {
     const curve = makeTrimPolylineCurve(points, closed)
     if (!curve) return null
@@ -1148,18 +1158,40 @@ function TrimBoundaryTube({
   }, [points, radius, closed])
   useEffect(() => () => geometry?.dispose?.(), [geometry])
   useEffect(() => {
+    pulseBaseColorRef.current.set(color)
+    pulseTargetColorRef.current.set(pulseToColor)
+    pulseEmissiveColorRef.current.set(pulseEmissiveColor)
+
     const material = materialRef.current
-    if (!material || pulse) return
-    material.opacity = opacity
-    material.emissiveIntensity = 0
-  }, [pulse, opacity])
+    if (!material) return
+    if (!pulse) {
+      material.color.set(color)
+      material.emissive.set("#000000")
+      material.opacity = opacity
+      material.emissiveIntensity = 0
+    }
+  }, [pulse, color, opacity, pulseToColor, pulseEmissiveColor])
   useFrame(({ clock }) => {
     const material = materialRef.current
     if (!material || !pulse) return
-    const wave = (Math.sin(clock.elapsedTime * 2.05 + pulsePhaseRef.current) + 1) * 0.5
-    const strength = Math.max(0, Math.min(0.4, pulseStrength))
-    material.opacity = Math.min(1, opacity * (0.86 + strength * 1.45 * wave))
-    material.emissiveIntensity = 0.025 + strength * (0.38 + 0.72 * wave)
+
+    // Pomalý „breathing“ pulse. Smoothstep zjemní oba krajní body, takže
+    // hranice chvíli spočine téměř průhledná a potom plynule vystoupá do bílé.
+    const rawWave = (Math.sin(clock.elapsedTime * pulseSpeed + pulsePhaseRef.current) + 1) * 0.5
+    const wave = rawWave * rawWave * (3 - 2 * rawWave)
+    const strength = Math.max(0, Math.min(1, Number(pulseStrength) || 0))
+    const minOpacity = pulseMinOpacity != null && Number.isFinite(Number(pulseMinOpacity)) ? Number(pulseMinOpacity) : Math.max(0.02, opacity * 0.30)
+    const maxOpacity = pulseMaxOpacity != null && Number.isFinite(Number(pulseMaxOpacity)) ? Number(pulseMaxOpacity) : Math.min(1, opacity * (1.25 + strength))
+    const colorMix = Math.min(1, wave * (0.72 + strength * 0.28))
+
+    material.opacity = THREE.MathUtils.lerp(minOpacity, maxOpacity, wave)
+    material.color.copy(pulseBaseColorRef.current).lerp(pulseTargetColorRef.current, colorMix)
+    material.emissive.copy(pulseEmissiveColorRef.current)
+    material.emissiveIntensity = THREE.MathUtils.lerp(
+      Math.max(0, Number(pulseEmissiveMin) || 0),
+      Math.max(0, Number(pulseEmissiveMax) || 0),
+      wave
+    )
   })
   if (!geometry) return null
   return (
@@ -1167,8 +1199,8 @@ function TrimBoundaryTube({
       <meshStandardMaterial
         ref={materialRef}
         color={color}
-        emissive={pulse ? color : "#000000"}
-        emissiveIntensity={pulse ? 0.025 : 0}
+        emissive={pulse ? pulseEmissiveColor : "#000000"}
+        emissiveIntensity={pulse ? pulseEmissiveMin : 0}
         roughness={roughness}
         metalness={metalness}
         transparent
@@ -2788,15 +2820,22 @@ function RepairOverlay({ context, modelMatrix, holes, selectedHoleIds, completed
           <group key={hole.id}>
             <TrimBoundaryTube
               points={points}
-              radius={selected ? lineRadius * 1.45 : hovered ? lineRadius * 1.12 : completed ? lineRadius * 0.86 : lineRadius * 0.78}
+              radius={selected ? lineRadius * 1.45 : hovered ? lineRadius * 1.12 : completed ? lineRadius * 0.86 : lineRadius * 0.80}
               closed
-              color={selected ? "#7dd3fc" : hovered ? "#ededed" : completed ? "#86efac" : "#6f7f8a"}
-              opacity={selected ? 0.98 : hovered ? 0.84 : completed ? 0.42 : 0.34}
-              roughness={selected ? 0.20 : hovered ? 0.24 : completed ? 0.28 : 0.38}
-              metalness={selected ? 0.18 : hovered ? 0.10 : completed ? 0.06 : 0.03}
+              color={selected ? "#7dd3fc" : hovered ? "#f5f5f5" : completed ? "#86efac" : "#6f7f8a"}
+              opacity={selected ? 0.98 : hovered ? 0.90 : completed ? 0.42 : 0.10}
+              roughness={selected ? 0.20 : hovered ? 0.20 : completed ? 0.28 : 0.34}
+              metalness={selected ? 0.18 : hovered ? 0.08 : completed ? 0.06 : 0.02}
               renderOrder={selected ? 1502 : hovered ? 1501 : completed ? 1500 : 1498}
-              pulse={!selected && !completed}
-              pulseStrength={hovered ? 0.08 : 0.16}
+              pulse={!selected && !completed && !hovered}
+              pulseStrength={0.82}
+              pulseSpeed={1.02}
+              pulseMinOpacity={0.055}
+              pulseMaxOpacity={0.78}
+              pulseToColor="#ffffff"
+              pulseEmissiveColor="#ffffff"
+              pulseEmissiveMin={0.01}
+              pulseEmissiveMax={1.05}
             />
             {selected && !completed && (
               <TrimBoundaryTube
@@ -7637,7 +7676,7 @@ export default function ClientPage() {
         setRepairProgressLeaving(false)
         setRepairProgressLabel("")
         setRepairProgressPercent(0)
-      }, 680)
+      }, 760)
     }, 260)
   }, [clearRepairProgressTimers])
 
@@ -13027,12 +13066,24 @@ export default function ClientPage() {
           to { transform: translateZ(0) rotate(360deg); }
         }
         @keyframes artheticRepairProgressIn {
-          from { opacity:0; transform:translate3d(0,7px,0) scale(.988); filter:blur(4px); }
-          to { opacity:1; transform:translate3d(0,0,0) scale(1); filter:blur(0); }
+          from {
+            opacity:0; transform:translate3d(0,7px,0) scale(.988); filter:blur(4px);
+            max-height:0; margin-top:0; padding-top:0; padding-bottom:0; border-width:0;
+          }
+          to {
+            opacity:1; transform:translate3d(0,0,0) scale(1); filter:blur(0);
+            max-height:64px; margin-top:9px; padding-top:8px; padding-bottom:9px; border-width:1px;
+          }
         }
         @keyframes artheticRepairProgressOut {
-          0% { opacity:1; transform:translate3d(0,0,0) scale(1); filter:blur(0); }
-          100% { opacity:0; transform:translate3d(0,-5px,0) scale(.992); filter:blur(4px); }
+          0% {
+            opacity:1; transform:translate3d(0,0,0) scale(1); filter:blur(0);
+            max-height:64px; margin-top:9px; padding-top:8px; padding-bottom:9px; border-width:1px;
+          }
+          100% {
+            opacity:0; transform:translate3d(0,-4px,0) scale(.994); filter:blur(3px);
+            max-height:0; margin-top:0; padding-top:0; padding-bottom:0; border-width:0;
+          }
         }
         .artheticRepairSpinner {
           display:inline-block; width:11px; height:11px; box-sizing:border-box;
@@ -13042,11 +13093,14 @@ export default function ClientPage() {
           transform-origin:50% 50%; will-change:transform; backface-visibility:hidden; contain:paint;
         }
         .artheticRepairProgressPanel {
-          animation:artheticRepairProgressIn .30s cubic-bezier(.16,.84,.44,1) both;
-          will-change:transform,opacity,filter;
+          box-sizing:border-box;
+          overflow:hidden;
+          max-height:64px;
+          animation:artheticRepairProgressIn .34s cubic-bezier(.16,1,.3,1) both;
+          will-change:transform,opacity,filter,max-height,margin,padding;
         }
         .artheticRepairProgressPanel.isLeaving {
-          animation:artheticRepairProgressOut .66s cubic-bezier(.16,.84,.44,1) forwards;
+          animation:artheticRepairProgressOut .72s cubic-bezier(.16,1,.3,1) forwards;
           pointer-events:none;
         }
         .artheticRepairProgressFill {
@@ -13385,7 +13439,7 @@ export default function ClientPage() {
           disabled={repairBusy}
           style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: repairBusy ? "#555" : "#c8c8c8", cursor: repairBusy ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
         >
-          Hotovo / Zavřít
+          Zavřít
         </button>
       </div>
     </div>
