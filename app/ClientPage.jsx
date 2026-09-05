@@ -7579,8 +7579,9 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
         .map((point) => trimVec(point).applyMatrix4(sourceToRoot))
         .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.z))
     : []
-  // Primárně používáme boundary uloženou přímo z Ořezu. Fallback je robustní
-  // detekce otevřené hrany z výsledné mesh, aby fungovaly i starší session.
+
+  // Primárně používáme přesnou křivku uloženou přímo z CAD Ořezu. Fallback
+  // zůstává robustní detekce otevřené hrany z výsledné mesh.
   const boundary = override.length >= 4 ? override : boundaryData.loops[0]?.points
   if (!boundary || boundary.length < 4) throw new Error("Po Ořezu se nepodařilo obnovit uzavřenou hranici. Vraťte se o krok zpět a znovu potvrďte Ořez.")
 
@@ -7592,52 +7593,120 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const baseCapY = isUpper ? box.min.y + requestedHeight : box.max.y - requestedHeight
 
   const rawLoop = cadSignedAreaXZ(boundary) < 0 ? boundary.slice().reverse() : boundary.slice()
-  const smoothed = cadSmoothClosedLoop(rawLoop, 30)
-  const transitionDrop = Math.max(0.65, Math.min(1.6, boundaryData.diagonal * 0.025))
-  const transitionLoop = smoothed.map((p, i) => new THREE.Vector3(
-    p.x,
-    isUpper
-      ? Math.max(p.y + transitionDrop, rawLoop[i].y + transitionDrop * 0.55)
-      : Math.min(p.y - transitionDrop, rawLoop[i].y - transitionDrop * 0.55),
-    p.z
-  ))
+
+  // V6: neextrudujeme rovnou jednu vyhlazenou křivku. Nejdřív vytvoříme
+  // opravdu klidný cílový profil a mezi přesnou trim hranicí a tímto profilem
+  // několik mezikružnic. První ring zůstává přesně na scanu, poslední už je
+  // pravidelný CAD profil. Smoothstep zajistí nulovější nástup i výstup změny.
+  let regularized = cadSmoothClosedLoop(rawLoop, 42)
+  regularized = cadSmoothClosedLoop(regularized, 18)
+
+  const boundaryMinY = Math.min(...rawLoop.map((p) => p.y))
+  const boundaryMaxY = Math.max(...rawLoop.map((p) => p.y))
+  const availableBaseDepth = Math.max(0.6, isUpper ? baseCapY - boundaryMaxY : boundaryMinY - baseCapY)
+  const desiredTransitionDepth = Math.max(1.55, Math.min(3.8, boundaryData.diagonal * 0.052))
+  // U velmi nízké báze nesmí transition band přestřelit spodní cap a obrátit stěnu zpět.
+  const transitionDepth = Math.max(0.55, Math.min(desiredTransitionDepth, availableBaseDepth * 0.72))
+  const transitionSteps = 6
+  const transitionRings = [rawLoop.map((p) => p.clone())]
+  const smoothstep = (t) => t * t * (3 - 2 * t)
+
+  for (let step = 1; step <= transitionSteps; step++) {
+    const t = step / transitionSteps
+    const eased = smoothstep(t)
+    const ring = rawLoop.map((raw, i) => {
+      const smooth = regularized[i] || raw
+      const requestedTargetY = smooth.y + (isUpper ? transitionDepth : -transitionDepth)
+      const capMargin = Math.min(0.65, Math.max(0.22, availableBaseDepth * 0.12))
+      const targetY = isUpper
+        ? Math.min(requestedTargetY, baseCapY - capMargin)
+        : Math.max(requestedTargetY, baseCapY + capMargin)
+      return new THREE.Vector3(
+        THREE.MathUtils.lerp(raw.x, smooth.x, eased),
+        THREE.MathUtils.lerp(raw.y, targetY, eased),
+        THREE.MathUtils.lerp(raw.z, smooth.z, eased)
+      )
+    })
+    transitionRings.push(ring)
+  }
+
+  const transitionLoop = transitionRings[transitionRings.length - 1]
   const bottomLoop = transitionLoop.map((p) => new THREE.Vector3(p.x, baseCapY, p.z))
 
-  const output = trianglePositions.slice()
-  const pushTri = (a, b, c) => output.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z)
+  // V6: zdrojový scan ponecháme vertexově přesně tak, jak je. Novou CAD část
+  // ale vytvoříme indexovaně. Vertikální stěna i transition band tak sdílejí
+  // vertexy a computeVertexNormals může vytvořit skutečně hladké normály místo
+  // facetovaných svislých pruhů po každém trojúhelníku.
+  const positions = trianglePositions.slice()
+  const sourceVertexCount = Math.floor(positions.length / 3)
+  const indices = new Array(sourceVertexCount)
+  for (let i = 0; i < sourceVertexCount; i++) indices[i] = i
 
-  // Hladký přechod ze skutečné trim boundary do regularizovaného profilu.
-  for (let i = 0; i < rawLoop.length; i++) {
-    const j = (i + 1) % rawLoop.length
-    const a = rawLoop[i], b = rawLoop[j], c = transitionLoop[j], d = transitionLoop[i]
-    if (isUpper) { pushTri(a, c, b); pushTri(a, d, c) }
-    else { pushTri(a, b, c); pushTri(a, c, d) }
+  const appendRing = (points) => {
+    const ringIndices = new Array(points.length)
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i]
+      ringIndices[i] = positions.length / 3
+      positions.push(p.x, p.y, p.z)
+    }
+    return ringIndices
   }
 
-  // Pravidelná téměř svislá stěna základny.
-  for (let i = 0; i < transitionLoop.length; i++) {
-    const j = (i + 1) % transitionLoop.length
-    const a = transitionLoop[i], b = transitionLoop[j], c = bottomLoop[j], d = bottomLoop[i]
-    if (isUpper) { pushTri(a, c, b); pushTri(a, d, c) }
-    else { pushTri(a, b, c); pushTri(a, c, d) }
+  const ringIndices = transitionRings.map(appendRing)
+  const bottomWallIndices = appendRing(bottomLoop)
+
+  const pushQuad = (a, b, c, d) => {
+    if (isUpper) indices.push(a, c, b, a, d, c)
+    else indices.push(a, b, c, a, c, d)
   }
 
+  // Přesná trim hranice -> několik plynule regularizovaných ringů.
+  for (let ring = 0; ring < ringIndices.length - 1; ring++) {
+    const upperRing = ringIndices[ring]
+    const lowerRing = ringIndices[ring + 1]
+    for (let i = 0; i < upperRing.length; i++) {
+      const j = (i + 1) % upperRing.length
+      pushQuad(upperRing[i], upperRing[j], lowerRing[j], lowerRing[i])
+    }
+  }
+
+  // Finální regularizovaný profil -> rovná stěna až ke spodní rovině.
+  const wallTopIndices = ringIndices[ringIndices.length - 1]
+  for (let i = 0; i < wallTopIndices.length; i++) {
+    const j = (i + 1) % wallTopIndices.length
+    pushQuad(wallTopIndices[i], wallTopIndices[j], bottomWallIndices[j], bottomWallIndices[i])
+  }
+
+  // Spodní cap používá vlastní kopii ringů. Díky tomu zůstane spodní hrana
+  // opticky čistá/ostřejší a smooth normals ze stěny se do ní nepřelévají.
+  const capIndices = appendRing(bottomLoop)
   const contour2D = bottomLoop.map((p) => new THREE.Vector2(p.x, p.z))
-  let faces = THREE.ShapeUtils.triangulateShape(contour2D, [])
+  const faces = THREE.ShapeUtils.triangulateShape(contour2D, [])
   if (!faces?.length) throw new Error("Spodní plochu báze se nepodařilo triangulovat.")
-  // Koncová plocha míří ven: Lower -Y, Upper +Y.
   faces.forEach(([a, b, c]) => {
-    if (isUpper) pushTri(bottomLoop[a], bottomLoop[c], bottomLoop[b])
-    else pushTri(bottomLoop[a], bottomLoop[b], bottomLoop[c])
+    if (isUpper) indices.push(capIndices[a], capIndices[c], capIndices[b])
+    else indices.push(capIndices[a], capIndices[b], capIndices[c])
   })
 
   const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(output, 3))
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3))
+  geometry.setIndex(indices)
   geometry.computeVertexNormals()
   geometry.computeBoundingBox()
   geometry.computeBoundingSphere()
 
-  const finalBoundary = cadExtractBoundaryLoopsRobust(output)
+  // Pro kontrolu watertightness použijeme stejnou robustní boundary analýzu jako
+  // dřív, jen si indexovanou geometrii rozbalíme do triangle soup až zde.
+  const flatForBoundary = new Array(indices.length * 3)
+  const positionAttribute = geometry.getAttribute("position")
+  for (let i = 0; i < indices.length; i++) {
+    const vertexIndex = indices[i]
+    flatForBoundary[i * 3] = positionAttribute.getX(vertexIndex)
+    flatForBoundary[i * 3 + 1] = positionAttribute.getY(vertexIndex)
+    flatForBoundary[i * 3 + 2] = positionAttribute.getZ(vertexIndex)
+  }
+  const finalBoundary = cadExtractBoundaryLoopsRobust(flatForBoundary)
+
   return {
     geometry,
     stats: {
@@ -7648,7 +7717,9 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       sourceBoundaryLoops: boundaryData.loops.length,
       boundarySource: override.length >= 4 ? "trim" : "mesh",
       openBoundaryLoops: finalBoundary.loops.length,
-      triangles: Math.floor(output.length / 9),
+      triangles: Math.floor(indices.length / 3),
+      transitionDepth,
+      transitionRings: transitionSteps,
     },
   }
 }
