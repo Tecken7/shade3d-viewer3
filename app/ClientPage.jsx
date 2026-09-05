@@ -7671,7 +7671,7 @@ function CadOrientationMiniCamera({ rootRef, view, modelMatrix }) {
       if (view === "top") {
         screenWidth = dims.x
         screenHeight = dims.z
-      } else if (view === "side") {
+      } else if (view === "side-left" || view === "side-right" || view === "side") {
         screenWidth = dims.z
         screenHeight = dims.y
       }
@@ -7686,7 +7686,12 @@ function CadOrientationMiniCamera({ rootRef, view, modelMatrix }) {
       if (view === "top") {
         camera.position.set(center.x, center.y + distance, center.z)
         camera.up.set(0, 0, -1)
-      } else if (view === "side") {
+      } else if (view === "side-left") {
+        // Pohled z pacientovy levé strany (-X).
+        camera.position.set(center.x - distance, center.y, center.z)
+        camera.up.set(0, 1, 0)
+      } else if (view === "side-right" || view === "side") {
+        // Pohled z pacientovy pravé strany (+X).
         camera.position.set(center.x + distance, center.y, center.z)
         camera.up.set(0, 1, 0)
       } else {
@@ -7739,9 +7744,9 @@ function CadOrientationMiniView({ label, view, sourceObject, modelMatrix, planeC
 
   return (
     <div className="artheticCadOrthoView" style={{
-      position:"relative", height:126, borderRadius:12, overflow:"hidden",
+      position:"relative", width:"100%", height:"clamp(150px, 18vh, 205px)", borderRadius:14, overflow:"hidden",
       border:"1px solid rgba(255,255,255,.09)", background:"rgba(10,10,10,.94)",
-      boxShadow:"0 12px 34px rgba(0,0,0,.28)", userSelect:"none",
+      boxShadow:"0 16px 42px rgba(0,0,0,.32)", userSelect:"none",
     }}>
       <Canvas orthographic camera={{ position:[0,0,100], near:0.01, far:100000, zoom:1 }} gl={{ antialias:true }} style={{ position:"absolute", inset:0, pointerEvents:"none" }}>
         <color attach="background" args={["#0b0b0b"]} />
@@ -7756,7 +7761,7 @@ function CadOrientationMiniView({ label, view, sourceObject, modelMatrix, planeC
       </Canvas>
       <div style={{ position:"absolute", left:8, top:7, zIndex:4, padding:"4px 6px", borderRadius:7, background:"rgba(0,0,0,.54)", border:"1px solid rgba(255,255,255,.06)", color:"#d7d7d7", fontSize:8.1, fontWeight:760, letterSpacing:".015em", pointerEvents:"none" }}>{label}</div>
       <div style={{ position:"absolute", left:8, right:8, bottom:7, zIndex:4, display:"flex", justifyContent:"space-between", alignItems:"center", color:"#606060", fontSize:7.4, pointerEvents:"none" }}>
-        <span>tažením doladit</span><span style={{ color:"#8c8c8c" }}>{view === "top" ? "Y" : view === "front" ? "Z" : "X"}</span>
+        <span>tažením doladit</span><span style={{ color:"#8c8c8c" }}>{view === "top" ? "Y" : view === "front" ? "Z" : view === "side-left" ? "−X" : "+X"}</span>
       </div>
       <div
         onPointerDown={beginDrag}
@@ -9638,7 +9643,8 @@ export default function ClientPage({ forceCadMode = false } = {}) {
       const next = { ...previous }
       if (view === "top") next.y += dx * speed
       else if (view === "front") next.z -= dx * speed
-      else if (view === "side") next.x += dx * speed
+      else if (view === "side-left") next.x -= dx * speed
+      else if (view === "side-right" || view === "side") next.x += dx * speed
       return next
     })
   }, [cadOrientationPrepared, cadBusy, cadStage])
@@ -13965,15 +13971,16 @@ export default function ClientPage({ forceCadMode = false } = {}) {
 
       {cadStage === "orient" && cadOrientationPrepared && (
         <div className="artheticCadOrthoViews" style={{
-          position:"absolute", right:16, top:146, zIndex:84,
-          display:"grid", gap:8, fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif",
+          position:"absolute", right:20, top:132, zIndex:84,
+          width:"clamp(300px, 22vw, 380px)",
+          display:"grid", gap:10, fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif",
         }}>
-          <div style={{ padding:"0 2px 2px", color:"#666", fontSize:8.1, lineHeight:1.35 }}>
-            Kontrolní pohledy · tažením model jemně natočíte vůči rovině
+          <div style={{ padding:"0 3px 3px", color:"#666", fontSize:8.4, lineHeight:1.4 }}>
+            Kontrolní pohledy · levý bok, fronta a pravý bok · tažením model jemně dolaďte vůči rovině
           </div>
-          <CadOrientationMiniView label="Okluzní" view="top" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} />
+          <CadOrientationMiniView label="Levý bok" view="side-left" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} />
           <CadOrientationMiniView label="Frontální" view="front" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} />
-          <CadOrientationMiniView label="Boční" view="side" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} />
+          <CadOrientationMiniView label="Pravý bok" view="side-right" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} />
         </div>
       )}
     </>
