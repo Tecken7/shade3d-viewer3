@@ -9820,17 +9820,14 @@ function cadOptimizeTransitionEdgeFlips(indices, positions, startIndex, endIndex
   return { flips, passes }
 }
 
-// V30 EXPERIMENT: Direct Bridge + constrained local fairing/remesh.
+// V31: Direct Bridge + circumferential shoulder guide + anisotropic constrained fairing.
 //
-// V25–V29 taught us that the robust part of the model is already the Straight base.
-// Instead of inventing the shoulder first and then fighting its topology, V30 does
-// the Blender/PMP-style operation in the safer order:
-//   conditioned scan edge -> direct bridge to the finished Straight profile ->
-//   local edge flips + constrained fairing -> vertical wall.
-//
-// The bridge is NEVER allowed to overshoot the XZ envelope between scan and base.
-// Its last ~25 % is already locked to the Straight profile, so fairing naturally
-// rounds a compact shoulder instead of propagating a soft fillet deep into the wall.
+// V30 established the robust shape pipeline: conditioned scan edge -> direct bridge
+// to the finished Straight profile -> local edge flips + constrained fairing -> wall.
+// V31 intentionally keeps that geometry and only removes the residual circumferential
+// waviness seen in Builder 25. A virtual, shift-limited guide smooths only the first
+// shoulder rows around the horseshoe, while anisotropic fairing is stronger around
+// the arch than across scan->wall. Both end loops remain hard constraints.
 function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
   const collectedTrianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
   const boundaryData = cadExtractBoundaryLoopsRobust(collectedTrianglePositions)
@@ -9908,6 +9905,47 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const capMargin = Math.min(0.45, Math.max(0.16, availableBaseDepth * 0.08))
   const rawArcTable = cadClosedLoopArcTable(rawLoop)
   const rawParams = cadClosedLoopVertexFractions(rawLoop).slice(0, rawLoop.length)
+
+  // V31 circumferential shoulder guide. The actual scan boundary remains fixed; this
+  // virtual loop is used only by the first rows of the NEW bridge so small saw-tooth
+  // fluctuations in the raw trim edge do not propagate as vertical waves down the wall.
+  // The displacement is deliberately tiny and hard-clamped.
+  const shoulderGuideMaxShift = Math.max(0.12, Math.min(0.22, boundaryData.diagonal * 0.0028))
+  const shoulderGuideMaxYShift = Math.max(0.045, Math.min(0.085, shoulderGuideMaxShift * 0.42))
+  const shoulderGuideRadius = Math.max(2, Math.min(7, Math.round(rawLoop.length / 170)))
+  let shoulderGuideLoop = rawLoop.map((point, i) => {
+    const sum = new THREE.Vector3()
+    let weightSum = 0
+    for (let offset = -shoulderGuideRadius; offset <= shoulderGuideRadius; offset++) {
+      const idx = (i + offset + rawLoop.length) % rawLoop.length
+      const d = Math.abs(offset)
+      const w = shoulderGuideRadius + 1 - d
+      sum.addScaledVector(rawLoop[idx], w)
+      weightSum += w
+    }
+    const filtered = sum.multiplyScalar(1 / Math.max(1, weightSum))
+    const delta = filtered.sub(point)
+    delta.y = THREE.MathUtils.clamp(delta.y, -shoulderGuideMaxYShift, shoulderGuideMaxYShift)
+    if (delta.length() > shoulderGuideMaxShift) delta.setLength(shoulderGuideMaxShift)
+    return point.clone().add(delta)
+  })
+  // One restrained Taubin-like pass removes alternating high-frequency kinks without
+  // shrinking the dental arch. Clamp again to the raw boundary afterwards.
+  for (let pass = 0; pass < 2; pass++) {
+    const source = shoulderGuideLoop.map((p) => p.clone())
+    shoulderGuideLoop = source.map((point, i) => {
+      const prev = source[(i - 1 + source.length) % source.length]
+      const next = source[(i + 1) % source.length]
+      const candidate = point.clone().lerp(prev.clone().add(next).multiplyScalar(0.5), 0.26)
+      const raw = rawLoop[i]
+      const delta = candidate.sub(raw)
+      delta.y = THREE.MathUtils.clamp(delta.y, -shoulderGuideMaxYShift, shoulderGuideMaxYShift)
+      if (delta.length() > shoulderGuideMaxShift) delta.setLength(shoulderGuideMaxShift)
+      return raw.clone().add(delta)
+    })
+  }
+  const shoulderGuideArcTable = cadClosedLoopArcTable(shoulderGuideLoop)
+
   const targetParams = new Array(targetCount)
   for (let i = 0; i < targetCount; i++) targetParams[i] = i / targetCount
 
@@ -9931,6 +9969,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     const uu = ((u % 1) + 1) % 1
     const tt = THREE.MathUtils.clamp(t, 0, 1)
     const raw = cadSampleClosedLoopArc(rawLoop, rawArcTable, uu)
+    const guide = cadSampleClosedLoopArc(shoulderGuideLoop, shoulderGuideArcTable, uu)
     const smooth = cadSampleClosedLoopUniform(regularized, uu)
 
     const profileT = tt < wallAcquireStart
@@ -9938,10 +9977,16 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       : 1
     const yT = tt
 
+    // Boundary itself is exact (guideWeight=0 at t=0). Within the first ~35 % of the
+    // new shoulder, the start anchor progressively becomes the smooth circumferential
+    // guide. This damps waves without touching a single source-scan vertex.
+    const guideWeight = smootherstep(THREE.MathUtils.clamp(tt / 0.34, 0, 1))
+    const start = raw.clone().lerp(guide, guideWeight)
+
     const point = new THREE.Vector3(
-      THREE.MathUtils.lerp(raw.x, smooth.x, profileT),
+      THREE.MathUtils.lerp(start.x, smooth.x, profileT),
       THREE.MathUtils.lerp(raw.y, targetY, yT),
-      THREE.MathUtils.lerp(raw.z, smooth.z, profileT)
+      THREE.MathUtils.lerp(start.z, smooth.z, profileT)
     )
 
     if (transitionDirection > 0) point.y = THREE.MathUtils.clamp(point.y, raw.y, targetY)
@@ -10029,6 +10074,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const sourceVertexCount = Math.floor(positions.length / 3)
   const indices = new Array(sourceVertexCount)
   for (let i = 0; i < sourceVertexCount; i++) indices[i] = i
+  const sourceIndexCount = indices.length
 
   const appendRing = (points) => {
     const ringIndices = new Array(points.length)
@@ -10098,6 +10144,16 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     for (let i = 0; i < ring.length; i++) movableMeta.set(ring[i], row.metadata[i])
   }
 
+  // Metadata for the two fixed end rings lets V31 distinguish circumferential edges
+  // from scan->wall edges during anisotropic fairing.
+  const transitionVertexMeta = new Map(movableMeta)
+  for (let i = 0; i < exactBoundaryIndices.length; i++) {
+    transitionVertexMeta.set(exactBoundaryIndices[i], { u: rawParams[i], t: 0, fixed: true })
+  }
+  for (let i = 0; i < transitionEndIndices.length; i++) {
+    transitionVertexMeta.set(transitionEndIndices[i], { u: targetParams[i], t: 1, fixed: true })
+  }
+
   const pointAtIndex = (id) => {
     const o = id * 3
     return new THREE.Vector3(positions[o], positions[o + 1], positions[o + 2])
@@ -10131,10 +10187,13 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     indices, positions, transitionIndexStart, transitionIndexEnd, 5
   )
 
-  const fairingIterations = 6
-  const fairingLambda = 0.24
+  const fairingIterations = 8
+  const fairingCircumferentialLambda = 0.31
+  const fairingCrossLambda = 0.105
   let fairingMovedVertices = 0
   let fairingMaxMove = 0
+  let fairingCircumferentialSamples = 0
+  let fairingCrossSamples = 0
 
   for (let iteration = 0; iteration < fairingIterations; iteration++) {
     const adjacency = buildTransitionAdjacency()
@@ -10144,15 +10203,42 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       const neighbors = adjacency.get(id)
       if (!neighbors || neighbors.size < 3) continue
       const current = pointAtIndex(id)
-      const average = new THREE.Vector3()
-      let neighborCount = 0
+      const circumAverage = new THREE.Vector3()
+      const crossAverage = new THREE.Vector3()
+      let circumCount = 0
+      let crossCount = 0
+
       for (const neighbor of neighbors) {
-        average.add(pointAtIndex(neighbor))
-        neighborCount++
+        const neighborMeta = transitionVertexMeta.get(neighbor)
+        if (!neighborMeta) continue
+        const point = pointAtIndex(neighbor)
+        if (Math.abs((neighborMeta.t ?? 0) - meta.t) < 1e-7) {
+          circumAverage.add(point)
+          circumCount++
+        } else {
+          crossAverage.add(point)
+          crossCount++
+        }
       }
-      if (!neighborCount) continue
-      average.multiplyScalar(1 / neighborCount)
-      const candidate = current.clone().lerp(average, fairingLambda)
+
+      const shoulderWeight = Math.pow(Math.max(0, Math.sin(Math.PI * meta.t)), 0.82)
+      const candidate = current.clone()
+      if (circumCount > 0) {
+        circumAverage.multiplyScalar(1 / circumCount)
+        candidate.addScaledVector(
+          circumAverage.clone().sub(current),
+          fairingCircumferentialLambda * shoulderWeight
+        )
+        fairingCircumferentialSamples++
+      }
+      if (crossCount > 0) {
+        crossAverage.multiplyScalar(1 / crossCount)
+        candidate.addScaledVector(
+          crossAverage.clone().sub(current),
+          fairingCrossLambda * shoulderWeight
+        )
+        fairingCrossSamples++
+      }
 
       const raw = cadSampleClosedLoopArc(rawLoop, rawArcTable, meta.u)
       const smooth = cadSampleClosedLoopUniform(regularized, meta.u)
@@ -10243,6 +10329,31 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   }
   delaunayCap.faces.forEach(([a, b, c]) => pushTri(capIndices[a], capIndices[b], capIndices[c]))
 
+  // Builder 25 exposed nine exact duplicate CAD triangles (the main body itself was
+  // watertight). Remove only geometrically identical GENERATED faces; source scan
+  // triangles are intentionally left byte-for-byte untouched.
+  let duplicateCadFacesRemoved = 0
+  if (indices.length > sourceIndexCount) {
+    const quant = 1e5
+    const vertexKey = (id) => {
+      const o = id * 3
+      return `${Math.round(positions[o] * quant)},${Math.round(positions[o + 1] * quant)},${Math.round(positions[o + 2] * quant)}`
+    }
+    const seenCadFaces = new Set()
+    const cleanedCad = []
+    for (let offset = sourceIndexCount; offset + 2 < indices.length; offset += 3) {
+      const a = indices[offset], b = indices[offset + 1], c = indices[offset + 2]
+      if (a === b || b === c || c === a) { duplicateCadFacesRemoved++; continue }
+      const key = [vertexKey(a), vertexKey(b), vertexKey(c)].sort().join("|")
+      if (seenCadFaces.has(key)) { duplicateCadFacesRemoved++; continue }
+      seenCadFaces.add(key)
+      cleanedCad.push(a, b, c)
+    }
+    if (duplicateCadFacesRemoved > 0) {
+      indices.splice(sourceIndexCount, indices.length - sourceIndexCount, ...cleanedCad)
+    }
+  }
+
   const geometry = new THREE.BufferGeometry()
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3))
   geometry.setIndex(indices)
@@ -10273,9 +10384,9 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionEndOffset,
-      transitionMode: "direct-bridge-constrained-fairing-v30-experiment",
+      transitionMode: "direct-bridge-circumferential-fairing-v31",
       transitionRemeshEnabled: true,
-      transitionRemeshMethod: "local-edge-flip-plus-constrained-fairing",
+      transitionRemeshMethod: "local-edge-flip-plus-anisotropic-circumferential-fairing",
       wallAcquireStart,
       bridgeIntervals,
       bridgeTargetRowSpacing,
@@ -10290,7 +10401,13 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       transitionPreFairingFlips: preFlipStats.flips,
       transitionPostFairingFlips: postFlipStats.flips,
       fairingIterations,
-      fairingLambda,
+      fairingCircumferentialLambda,
+      fairingCrossLambda,
+      fairingCircumferentialSamples,
+      fairingCrossSamples,
+      shoulderGuideMaxShift,
+      shoulderGuideMaxYShift,
+      shoulderGuideRadius,
       fairingMovedVertices,
       fairingMaxMove,
       edgeConditioningBandWidth: boundaryRelaxation.bandWidth,
@@ -10307,6 +10424,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       profilePoints: seamLoop.length,
       wallTargetSpacing,
       wallSections,
+      duplicateCadFacesRemoved,
       capMethod: "quality-aware-delaunay-v16",
       capVertices: delaunayCap.points.length,
       capTriangles: delaunayCap.faces.length,
