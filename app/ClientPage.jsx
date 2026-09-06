@@ -9820,7 +9820,17 @@ function cadOptimizeTransitionEdgeFlips(indices, positions, startIndex, endIndex
   return { flips, passes }
 }
 
-// V29 EXPERIMENT: Segmented Local Shoulder Remesh on top of the V27 target surface.
+// V30 EXPERIMENT: Direct Bridge + constrained local fairing/remesh.
+//
+// V25–V29 taught us that the robust part of the model is already the Straight base.
+// Instead of inventing the shoulder first and then fighting its topology, V30 does
+// the Blender/PMP-style operation in the safer order:
+//   conditioned scan edge -> direct bridge to the finished Straight profile ->
+//   local edge flips + constrained fairing -> vertical wall.
+//
+// The bridge is NEVER allowed to overshoot the XZ envelope between scan and base.
+// Its last ~25 % is already locked to the Straight profile, so fairing naturally
+// rounds a compact shoulder instead of propagating a soft fillet deep into the wall.
 function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
   const collectedTrianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
   const boundaryData = cadExtractBoundaryLoopsRobust(collectedTrianglePositions)
@@ -9833,35 +9843,23 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
         .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.z))
     : []
 
-  // Primárně používáme přesnou křivku uloženou přímo z CAD Ořezu. Fallback
-  // zůstává robustní detekce otevřené hrany z výsledné mesh.
   const boundary = override.length >= 4 ? override : boundaryData.loops[0]?.points
-  if (!boundary || boundary.length < 4) throw new Error("Nepodařilo se obnovit hlavní otevřenou hranici modelu. Vraťte se do kroku Ořez a vytvořte hranici, nebo použijte Nechat vše u předem oříznutého scanu.")
+  if (!boundary || boundary.length < 4) {
+    throw new Error("Nepodařilo se obnovit hlavní otevřenou hranici modelu. Vraťte se do kroku Ořez a vytvořte hranici, nebo použijte Nechat vše u předem oříznutého scanu.")
+  }
 
   const box = boundaryData.box
   const naturalHeight = Math.max(0.01, box.max.y - box.min.y)
   const requestedHeight = Math.max(naturalHeight + 1.5, Number(totalHeight) || naturalHeight + 8)
   const isUpper = arch === "upper"
-  // Lower se staví směrem do -Y, Upper zrcadlově do +Y.
+  const transitionDirection = isUpper ? 1 : -1
   const baseCapY = isUpper ? box.min.y + requestedHeight : box.max.y - requestedHeight
 
   const exactRawLoop = cadSignedAreaXZ(boundary) < 0 ? boundary.slice().reverse() : boundary.slice()
 
-  // V27 Edge Conditioning + Support Ring.
-  //
-  // V25 ukázala, že vynucovat G1 tangent přímo z raw IOS normals je na členité
-  // trim hraně příliš agresivní: lokálně může vzniknout folded/fan patch. Medit
-  // reference naopak naznačuje, že poslední velmi úzký pás scanu nejprve jemně
-  // "uklidí" a teprve potom z něj pokračuje CAD transition.
-  //
-  // Proto znovu dovolíme POUZE lokální feather zásah v cca posledním 1 mm scanu:
-  // - boundary se lehce regularizuje,
-  // - stejný malý displacement se plynule utlumí do nuly směrem do anatomie,
-  // - mimo band zůstávají source vertexy přesně beze změny.
-  //
-  // Na takto připravený seam už nenavazujeme raw-normal G1 correction. Collar je
-  // řízen jen bezpečným monotónním profilem mezi conditioned boundary a Straight
-  // profilem, takže se nemůže lokálně překlopit proti cílovému směru.
+  // Keep the proven narrow edge conditioning from V26+. Only roughly the last
+  // millimetre of the scan may move; the clinical anatomy outside that feather band
+  // remains byte-for-byte geometrically unchanged.
   const boundaryConditioning = cadRelaxTrimBoundaryBand(
     collectedTrianglePositions,
     exactRawLoop,
@@ -9871,54 +9869,23 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const rawLoop = boundaryConditioning.boundary
   const boundaryRelaxation = boundaryConditioning
 
-  // V27: reconstruct a virtual support ring from the ORIGINAL one-ring topology.
-  // It gives us the incoming direction of the scan without reintroducing V25's
-  // noisy face-normal tangent driver. The support ring is only a guide; no support
-  // vertex is written into the source anatomy.
-  const supportRing = cadBuildBoundarySupportRing(
-    collectedTrianglePositions,
-    exactRawLoop,
-    rawLoop,
-    isUpper,
-    boundaryData.diagonal
-  )
-
-  // V9 – Medit-style transition.
-  //
-  // Referenční Medit STL ukazuje tři důležité věci:
-  // 1) původní scan je změněn pouze v velmi úzkém pásu u boundary,
-  // 2) automatický přechod scan→báze není uživatelský "bevel"/round-over,
-  // 3) po přechodu už pokračuje jeden neměnný pravidelný profil; Total Height
-  //    pouze prodlužuje tuto rovnou část.
-  //
-  // Proto zde nepřidáváme žádný radiální offset. Z raw boundary vytvoříme
-  // regularizovaný Straight profil a během krátkého spline přechodu se k němu
-  // plynule přiblížíme. Potom profil zůstává beze změny až ke spodnímu capu.
-  // V10: přesná source boundary zůstává nedotčená pro samotné napojení na scan,
-  // ale pracovní Straight profil už nepřebírá její přehnaně hustý sampling.
-  // Medit reference ~169 mm / 435 segmentů => ~0.39 mm na segment.
+  // Finished Straight profile – this part of the engine has consistently looked good
+  // and is therefore treated as a hard target rather than another variable to blend.
   const profileTargetSpacing = 0.388
   const sampledRawLoop = cadResampleClosedLoop(rawLoop, profileTargetSpacing)
   let regularized = cadSmoothClosedLoop(sampledRawLoop, 30)
   regularized = cadSmoothClosedLoop(regularized, 10)
-  // V18: Medit drží ~0.39 mm až na HOTOVÉM Straight profilu. Předchozí verze
-  // určovala počet bodů ještě z delší raw boundary, takže po smoothingu zůstalo
-  // ~495 bodů na ~169 mm místo referenčních ~435. Resamplujeme proto znovu až
-  // po regularizaci a wall density tak odpovídá skutečnému finálnímu obvodu.
   regularized = cadResampleClosedLoopXZ(regularized, profileTargetSpacing)
 
   const boundaryMinY = Math.min(...rawLoop.map((p) => p.y))
   const boundaryMaxY = Math.max(...rawLoop.map((p) => p.y))
   const boundaryExtremeY = isUpper ? boundaryMaxY : boundaryMinY
-  const availableBaseDepth = Math.max(0.6, isUpper ? baseCapY - boundaryExtremeY : boundaryExtremeY - baseCapY)
+  const availableBaseDepth = Math.max(
+    0.6,
+    isUpper ? baseCapY - boundaryExtremeY : boundaryExtremeY - baseCapY
+  )
 
-  // V20 – přímá kalibrace podle referenčního Medit STL.
-  // Z reálného Rogers páru lze vyčíst pravidelný CAD úsek:
-  // transition-end -> seam = přesně 0.10 mm a následné wall ringy = přesně 1.08 mm.
-  // Nejprve zvolíme nominální konec přechodu (~0.20 mm za extreme boundary) a pak
-  // jej smíme jemně posunout tak, aby se zbytek stěny skládal z celých 1.08mm kroků.
-  // Snap je omezený na 0.28 mm, takže nikdy nemůže dramaticky změnit scan→base blend.
-  const transitionDirection = isUpper ? 1 : -1
+  // Freeze the same Medit-calibrated wall layout used by the stable previous builds.
   const nominalTransitionEndOffset = Math.min(0.22, Math.max(0.18, boundaryData.diagonal * 0.0033))
   const nominalTargetY = boundaryExtremeY + transitionDirection * nominalTransitionEndOffset
   const seamOffset = 0.10
@@ -9936,284 +9903,68 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     : targetY + transitionDirection * seamOffset
   const transitionEndOffset = Math.abs(targetY - boundaryExtremeY)
   const transitionDepth = transitionEndOffset
-  const smoothstep = (t) => t * t * (3 - 2 * t)
-
-  // V27 – compact Medit-like rounded shoulder.
-  //
-  // The cross-sections of the 25 mm Medit reference show a short rounded shoulder
-  // directly below the conditioned scan and then a technically clean Straight wall.
-  // Therefore XZ regularization is no longer spread through the whole deep loft.
-  // It is completed in a compact ~0.8–1.15 mm shoulder; any remaining depth then
-  // continues almost vertically with the already-regularized Straight profile.
-  const transitionShoulderLength = Math.max(0.82, Math.min(1.12, boundaryData.diagonal * 0.0155))
-  const transitionShoulderMin = 0.68
-  const transitionShoulderMax = 1.28
-  const transitionShoulderXZGain = 0.24
-  const transitionStartHandleFactor = 0.52
-  const transitionEndHandleFactor = 0.42
-  const transitionSupportMinAlignment = 0.18
-  const transitionPerpClamp = Math.max(0.20, Math.min(0.34, boundaryData.diagonal * 0.0048))
 
   const targetCount = regularized.length
   const capMargin = Math.min(0.45, Math.max(0.16, availableBaseDepth * 0.08))
   const rawArcTable = cadClosedLoopArcTable(rawLoop)
-  const supportPoints = supportRing.supportPoints
+  const rawParams = cadClosedLoopVertexFractions(rawLoop).slice(0, rawLoop.length)
+  const targetParams = new Array(targetCount)
+  for (let i = 0; i < targetCount; i++) targetParams[i] = i / targetCount
 
-  const cubicBezierPoint = (p0, p1, p2, p3, t) => {
+  const smoothstep = (t) => {
     const x = THREE.MathUtils.clamp(t, 0, 1)
-    const inv = 1 - x
-    const b0 = inv * inv * inv
-    const b1 = 3 * inv * inv * x
-    const b2 = 3 * inv * x * x
-    const b3 = x * x * x
-    return new THREE.Vector3(
-      p0.x * b0 + p1.x * b1 + p2.x * b2 + p3.x * b3,
-      p0.y * b0 + p1.y * b1 + p2.y * b2 + p3.y * b3,
-      p0.z * b0 + p1.z * b1 + p2.z * b2 + p3.z * b3
-    )
+    return x * x * (3 - 2 * x)
+  }
+  const smootherstep = (t) => {
+    const x = THREE.MathUtils.clamp(t, 0, 1)
+    return x * x * x * (x * (x * 6 - 15) + 10)
   }
 
-  const evaluateTransitionSurface = (u, v) => {
-    const vv = THREE.MathUtils.clamp(v, 0, 1)
-    const raw = cadSampleClosedLoopArc(rawLoop, rawArcTable, u)
-    const support = cadSampleClosedLoopArc(supportPoints, rawArcTable, u)
-    const smooth = cadSampleClosedLoopUniform(regularized, u)
-    const finalPoint = new THREE.Vector3(smooth.x, targetY, smooth.z)
+  // The compact shoulder is now defined by one extremely simple rule:
+  // XZ reaches the final Straight profile before Y reaches the transition plane.
+  // The remaining travel is therefore vertical. A constrained fairing pass rounds
+  // the bend between these two regimes, much like smoothing a manually bridged strip.
+  const wallAcquireStart = 0.74
+  const bridgeEnvelopeTolerance = Math.max(0.08, Math.min(0.15, boundaryData.diagonal * 0.0019))
 
-    const totalVerticalDepth = Math.max(1e-6, Math.abs(targetY - raw.y))
-    const xzDistance = Math.hypot(smooth.x - raw.x, smooth.z - raw.z)
-    const localShoulderDepth = Math.min(
-      totalVerticalDepth,
-      THREE.MathUtils.clamp(
-        transitionShoulderLength + xzDistance * transitionShoulderXZGain,
-        transitionShoulderMin,
-        transitionShoulderMax
-      )
-    )
-    const shoulderFraction = THREE.MathUtils.clamp(localShoulderDepth / totalVerticalDepth, 0, 1)
-    const shoulderEndY = raw.y + transitionDirection * localShoulderDepth
-    const shoulderEnd = new THREE.Vector3(smooth.x, shoulderEndY, smooth.z)
+  const evaluateDirectBridge = (u, t) => {
+    const uu = ((u % 1) + 1) % 1
+    const tt = THREE.MathUtils.clamp(t, 0, 1)
+    const raw = cadSampleClosedLoopArc(rawLoop, rawArcTable, uu)
+    const smooth = cadSampleClosedLoopUniform(regularized, uu)
 
-    // Incoming tangent = continuation from the virtual support ring toward the seam.
-    // If the topology-derived guide points too far away from the final CAD profile,
-    // softly rotate it toward the safe raw→shoulder vector. This keeps V25-style
-    // folds impossible while preserving the actual arrival direction of the scan.
-    const incoming = raw.clone().sub(support)
-    const safeDirection = shoulderEnd.clone().sub(raw)
-    if (safeDirection.lengthSq() < 1e-12) safeDirection.set(0, transitionDirection, 0)
-    safeDirection.normalize()
-    if (incoming.lengthSq() < 1e-12) incoming.copy(safeDirection)
-    else incoming.normalize()
+    const profileT = tt < wallAcquireStart
+      ? smootherstep(tt / wallAcquireStart)
+      : 1
+    const yT = tt
 
-    let alignment = incoming.dot(safeDirection)
-    if (alignment < transitionSupportMinAlignment) {
-      const blend = THREE.MathUtils.clamp(
-        (transitionSupportMinAlignment - alignment) / Math.max(1e-6, 1 - alignment),
-        0,
-        1
-      )
-      incoming.lerp(safeDirection, Math.max(0.34, blend)).normalize()
-      alignment = incoming.dot(safeDirection)
-      if (alignment < 0.02) incoming.copy(safeDirection)
-    }
-
-    const shoulderChord = Math.max(1e-6, raw.distanceTo(shoulderEnd))
-    const startHandle = Math.min(
-      0.64,
-      Math.max(0.20, shoulderChord * transitionStartHandleFactor)
-    )
-    const endHandle = Math.min(
-      0.52,
-      Math.max(0.18, localShoulderDepth * transitionEndHandleFactor)
-    )
-    const p1 = raw.clone().addScaledVector(incoming, startHandle)
-    // End derivative is exactly along the future Straight wall.
-    const p2 = shoulderEnd.clone().addScaledVector(
-      new THREE.Vector3(0, -transitionDirection, 0),
-      endHandle
+    const point = new THREE.Vector3(
+      THREE.MathUtils.lerp(raw.x, smooth.x, profileT),
+      THREE.MathUtils.lerp(raw.y, targetY, yT),
+      THREE.MathUtils.lerp(raw.z, smooth.z, profileT)
     )
 
-    let point
-    if (vv <= shoulderFraction || shoulderFraction >= 0.999999) {
-      const localT = shoulderFraction > 1e-9 ? vv / shoulderFraction : 1
-      point = cubicBezierPoint(raw, p1, p2, shoulderEnd, localT)
-
-      // Conservative XZ guard. The Bézier may bend slightly away from the straight
-      // raw→smooth chord to form the rounded shoulder, but never far enough to create
-      // a folded fan or a local hook. Keep only a small perpendicular component.
-      const chordXZ = new THREE.Vector2(smooth.x - raw.x, smooth.z - raw.z)
-      const chordLenSq = chordXZ.lengthSq()
-      if (chordLenSq > 1e-10) {
-        const pointXZ = new THREE.Vector2(point.x - raw.x, point.z - raw.z)
-        let progress = pointXZ.dot(chordXZ) / chordLenSq
-        progress = THREE.MathUtils.clamp(progress, -0.06, 1.02)
-        const baseXZ = chordXZ.clone().multiplyScalar(progress)
-        const perp = pointXZ.clone().sub(baseXZ)
-        if (perp.length() > transitionPerpClamp) perp.setLength(transitionPerpClamp)
-        const guarded = baseXZ.add(perp)
-        point.x = raw.x + guarded.x
-        point.z = raw.z + guarded.y
-      } else {
-        const radial = new THREE.Vector2(point.x - raw.x, point.z - raw.z)
-        if (radial.length() > transitionPerpClamp) radial.setLength(transitionPerpClamp)
-        point.x = raw.x + radial.x
-        point.z = raw.z + radial.y
-      }
-    } else {
-      // Once the rounded shoulder is complete, keep XZ fully regularized and only
-      // descend/ascend vertically to the transition-end plane. This is the key
-      // V27 difference visible in Medit cross-sections.
-      const tailT = (vv - shoulderFraction) / Math.max(1e-9, 1 - shoulderFraction)
-      point = new THREE.Vector3(
-        smooth.x,
-        THREE.MathUtils.lerp(shoulderEndY, targetY, tailT),
-        smooth.z
-      )
-    }
-
-    // Hard monotonic Y guard: no transition vertex may cross back through the scan
-    // or overshoot beyond the target plane.
     if (transitionDirection > 0) point.y = THREE.MathUtils.clamp(point.y, raw.y, targetY)
     else point.y = THREE.MathUtils.clamp(point.y, targetY, raw.y)
-
-    // Keep the same cap safety used by the stable V26 implementation.
     if (isUpper) point.y = Math.min(point.y, baseCapY - capMargin)
     else point.y = Math.max(point.y, baseCapY + capMargin)
     return point
   }
 
-  // Spodní hrana transition patchu je stále přesně ten samý regularizovaný profil,
-  // takže V17 nemění shape báze – mění pouze distribuci polygonů v přechodu.
   const transitionLoop = new Array(targetCount)
-  for (let i = 0; i < targetCount; i++) transitionLoop[i] = evaluateTransitionSurface(i / targetCount, 1)
-
-  // V23 – mm-locked Medit fairing on top of the safe parametric advancing-front.
-  //
-  // Z V20 exportu jsme naměřili, že topologie je sice manifold, ale v transition
-  // vznikají tisíce příliš dlouhých hran (> 1.5 mm). Hlavní příčina není shape,
-  // ale rozjezd parametrizace: každý meziring byl znovu resamplovaný podle svého
-  // vlastního 3D oblouku. Tady proto používáme jeden společný kanonický parametr U
-  // od raw boundary až po Straight profil a hustotu snižujeme po menších krocích.
-  const rawTransitionParams = cadClosedLoopVertexFractions(rawLoop).slice(0, rawLoop.length)
-  const transitionEndParams = new Array(targetCount)
-  for (let i = 0; i < targetCount; i++) transitionEndParams[i] = i / targetCount
-
-  // V24 – fyzicky kalibrovaný postup frontu (navazuje na V23).
-  // Uniformní V kroky nejsou na této loft ploše uniformní v milimetrech, protože
-  // raw boundary má lokálně velmi rozdílnou výšku a profileEase je nelineární.
-  // Nejprve proto změříme medián 3D arc-length průběhu několika U generátorů a
-  // později inverzí této křivky zvolíme V jednotlivých frontů. Počet frontů se
-  // nemění – mění se jen jejich fyzické rozmístění.
-  const transitionArcUProbes = Math.max(28, Math.min(52, Math.round(targetCount / 10)))
-  const transitionArcVSteps = 72
-  const transitionArcSamples = Array.from({ length: transitionArcVSteps + 1 }, () => [])
-  for (let ui = 0; ui < transitionArcUProbes; ui++) {
-    const u = (ui + 0.5) / transitionArcUProbes
-    let previous = evaluateTransitionSurface(u, 0)
-    let cumulative = 0
-    transitionArcSamples[0].push(0)
-    for (let step = 1; step <= transitionArcVSteps; step++) {
-      const v = step / transitionArcVSteps
-      const current = evaluateTransitionSurface(u, v)
-      cumulative += current.distanceTo(previous)
-      transitionArcSamples[step].push(cumulative)
-      previous = current
-    }
-  }
-  const transitionMedianArc = transitionArcSamples.map((samples) => {
-    const sorted = samples.slice().sort((a, b) => a - b)
-    if (!sorted.length) return 0
-    const mid = Math.floor(sorted.length / 2)
-    return sorted.length & 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) * 0.5
-  })
-  for (let i = 1; i < transitionMedianArc.length; i++) {
-    if (transitionMedianArc[i] < transitionMedianArc[i - 1]) transitionMedianArc[i] = transitionMedianArc[i - 1]
-  }
-  const transitionMedianArcTotal = transitionMedianArc[transitionMedianArc.length - 1] || 0
-  const transitionVForArcFraction = (fraction) => {
-    const f = THREE.MathUtils.clamp(fraction, 0, 1)
-    if (transitionMedianArcTotal <= 1e-8) return f
-    const target = transitionMedianArcTotal * f
-    let hi = 1
-    while (hi < transitionMedianArc.length && transitionMedianArc[hi] < target) hi++
-    if (hi >= transitionMedianArc.length) return 1
-    const lo = Math.max(0, hi - 1)
-    const a = transitionMedianArc[lo]
-    const b = transitionMedianArc[hi]
-    const local = b > a + 1e-9 ? (target - a) / (b - a) : 0
-    return (lo + THREE.MathUtils.clamp(local, 0, 1)) / transitionArcVSteps
+  for (let i = 0; i < targetCount; i++) {
+    const smooth = regularized[i]
+    transitionLoop[i] = new THREE.Vector3(smooth.x, targetY, smooth.z)
   }
 
-  // V29 EXPERIMENT – segmented local remesh ONLY in the narrow rounded shoulder.
-  //
-  // V28 remeshed the entire horseshoe in one periodic UV rectangle and produced
-  // giant cross-arch triangles. V29 keeps exactly the same V27 target surface, but
-  // divides the shoulder into short 4–7 mm open patches. No patch knows about points
-  // outside its local arc span, therefore a triangle cannot jump across the palate.
-  const transitionRemeshTargetLength = 1.05
-  const transitionRemeshArcFraction = transitionMedianArcTotal > 1e-8
-    ? THREE.MathUtils.clamp(transitionRemeshTargetLength / transitionMedianArcTotal, 0.20, 0.72)
-    : 0.45
-  const transitionRemeshEndV = transitionVForArcFraction(transitionRemeshArcFraction)
-  const transitionRemeshPhysicalDepth = Math.max(0.42, transitionMedianArcTotal * transitionRemeshArcFraction)
-  const transitionRemeshSpacing = 0.38
-  const transitionRemeshPatchTargetLength = 4.4
-
-  // The remesh-end loop deliberately keeps the same canonical U samples as the
-  // conditioned scan boundary. This makes every local patch a clean topological
-  // quadrilateral and lets neighboring patches share their side seam vertices 1:1.
-  const transitionRemeshEndCount = rawLoop.length
-  const transitionRemeshEndLoop = new Array(transitionRemeshEndCount)
-  const transitionRemeshEndParams = new Array(transitionRemeshEndCount)
-  for (let i = 0; i < transitionRemeshEndCount; i++) {
-    const u = i / transitionRemeshEndCount
-    transitionRemeshEndParams[i] = u
-    transitionRemeshEndLoop[i] = evaluateTransitionSurface(u, transitionRemeshEndV)
-  }
-
-  // Equal-arc segmentation along the real conditioned boundary. Boundaries are
-  // snapped to existing rawLoop vertices so the top edge remains exact. We also
-  // enforce at least 3 source edges per patch to avoid degenerate slivers.
-  const transitionRemeshRawArc = cadClosedLoopArcTable(rawLoop)
-  const transitionRemeshRawPerimeter = Math.max(1e-6, transitionRemeshRawArc.total)
-  const transitionRemeshMaxPatches = Math.max(1, Math.floor(rawLoop.length / 3))
-  const transitionRemeshDesiredPatches = Math.max(4,
-    Math.round(transitionRemeshRawPerimeter / transitionRemeshPatchTargetLength)
-  )
-  const transitionRemeshPatchCount = Math.max(1, Math.min(
-    transitionRemeshMaxPatches,
-    transitionRemeshDesiredPatches
-  ))
-  const transitionRemeshPatchBreaks = [0]
-  let previousBreak = 0
-  for (let patch = 1; patch < transitionRemeshPatchCount; patch++) {
-    const targetDistance = transitionRemeshRawPerimeter * patch / transitionRemeshPatchCount
-    let lo = previousBreak + 3
-    const remainingPatches = transitionRemeshPatchCount - patch
-    let hi = rawLoop.length - remainingPatches * 3
-    if (hi < lo) hi = lo
-    let best = lo
-    let bestError = Infinity
-    for (let candidate = lo; candidate <= hi; candidate++) {
-      const error = Math.abs(transitionRemeshRawArc.cumulative[candidate] - targetDistance)
-      if (error < bestError) { bestError = error; best = candidate }
-      if (transitionRemeshRawArc.cumulative[candidate] > targetDistance && error > bestError) break
-    }
-    transitionRemeshPatchBreaks.push(best)
-    previousBreak = best
-  }
-  transitionRemeshPatchBreaks.push(rawLoop.length)
-
-  // Odhad fyzické šířky transition surface. Počet intervalů musí splnit dva cíle:
-  // 1) žádný globální krok přes surface není zbytečně dlouhý,
-  // 2) počet vertexů neklesne v jednom kroku o více než cca 20 %.
+  // Measure the actual 3D bridge width and choose enough rows that the INITIAL
+  // triangulation never needs long cross-shoulder triangles. This is not a global UV
+  // remesh: every triangle starts from local neighboring rings only.
   const transitionSpanProbeCount = Math.max(96, Math.min(420, Math.round(targetCount * 0.9)))
   const transitionSpans = []
   for (let i = 0; i < transitionSpanProbeCount; i++) {
     const u = i / transitionSpanProbeCount
-    transitionSpans.push(
-      evaluateTransitionSurface(u, 0).distanceTo(evaluateTransitionSurface(u, 1))
-    )
+    transitionSpans.push(evaluateDirectBridge(u, 0).distanceTo(evaluateDirectBridge(u, 1)))
   }
   const sortedTransitionSpans = transitionSpans.slice().sort((a, b) => a - b)
   const transitionSpan95 = sortedTransitionSpans.length
@@ -10223,112 +9974,45 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     ? sortedTransitionSpans[sortedTransitionSpans.length - 1]
     : 0
 
-  // V24 – Medit-density sparse advancing front.
-  //
-  // Přesné A/B měření V23 proti referenčnímu Medit Rogers STL ukázalo velmi
-  // důležitou věc: první ~0.6–0.8 mm od původního scanu už máme hustotou i
-  // geometrií téměř shodné. Rozdíl vzniká až potom – naše fronty zůstávaly
-  // příliš husté a V23 tak vytvářela výrazně více transition vertexů/faces než
-  // Medit. Navíc tangenciální phase-stagger už po mm-fairingu mohl spojit
-  // canonical U s fyzicky posunutým bodem a lokálně vytvořit 2–3mm diagonály.
-  //
-  // V24 proto:
-  //   1) drží jen 5–7 fyzických intervalů (typicky 6 u Rogers scanu),
-  //   2) fronty zahušťuje blízko scanu a rychleji je rozestupuje směrem k bázi,
-  //   3) počet bodů snižuje logaritmicky – skoro vůbec v prvním kroku, výrazněji
-  //      až po ~0.6 mm,
-  //   4) phase-stagger vypíná; topology se řídí skutečným canonical U.
-  //
-  // V29 keeps this sparse-front logic only BELOW the segmented locally remeshed shoulder.
-  // The upper ~1 mm is handled by an isotropic/Delaunay patch instead.
-  const transitionFrontExponent = 1.82
-  const transitionPhysicalTarget = 1.12
-  const physicalIntervals = Math.ceil(
-    Math.max(transitionSpan95, transitionSpanMax * 0.70) / transitionPhysicalTarget
-  )
-  const transitionIntervals = Math.max(7, Math.min(9, physicalIntervals))
-  const transitionVLevels = new Array(transitionIntervals + 1)
-  const transitionArcFractions = new Array(transitionIntervals + 1)
-  transitionVLevels[0] = 0
-  transitionArcFractions[0] = 0
-  transitionVLevels[transitionIntervals] = 1
-  transitionArcFractions[transitionIntervals] = 1
-  for (let layer = 1; layer < transitionIntervals; layer++) {
-    const normalizedLayer = layer / transitionIntervals
-    const arcFraction = Math.pow(normalizedLayer, transitionFrontExponent)
-    transitionArcFractions[layer] = arcFraction
-    transitionVLevels[layer] = transitionVForArcFraction(arcFraction)
-  }
+  const bridgeTargetRowSpacing = 0.42
+  const bridgeIntervals = Math.max(6, Math.min(
+    15,
+    Math.ceil(Math.max(transitionSpan95, transitionSpanMax * 0.72) / bridgeTargetRowSpacing)
+  ))
 
-  const transitionBridgeRings = []
-  let previousTransitionCount = transitionRemeshEndCount
+  // Keep dense connectivity next to the scan, then reduce vertex count gently toward
+  // the ~0.39 mm Straight profile. This is only an initial topology; local flips and
+  // fairing below are what remove the obvious structured-strip character.
   const sourceLogCount = Math.log(Math.max(3, rawLoop.length))
   const targetLogCount = Math.log(Math.max(3, targetCount))
+  const bridgeRows = []
+  let previousCount = rawLoop.length
 
-  for (let layer = 1; layer < transitionIntervals; layer++) {
-    const arcFraction = transitionArcFractions[layer]
-    if (arcFraction <= transitionRemeshArcFraction + 1e-6) continue
-    const v = transitionVLevels[layer]
-    const probeCount = Math.max(320, Math.min(1200, Math.max(previousTransitionCount, targetCount * 2)))
-    const probe = new Array(probeCount)
-    for (let i = 0; i < probeCount; i++) {
-      probe[i] = evaluateTransitionSurface(i / probeCount, v)
-    }
-
-    const perimeter = cadClosedLoopPerimeter(probe)
-
-    // Medit-like count schedule: interpolujeme v log(count), ale redukci necháme
-    // nabíhat přes smoothstep. První front tedy zůstává skoro stejně hustý jako
-    // raw boundary; teprve další fronty začnou count výrazněji slučovat.
-    // V27: první dva fyzické fronty jsou stále součástí "landing zone" shoulderu.
-    // Tam hustotu raw scan boundary prakticky nesnižujeme. Redukce začne až po
-    // cca 18 % fyzické dráhy a pak plynule doběhne k regularized wall profilu.
-    const reductionT = THREE.MathUtils.clamp((arcFraction - 0.18) / 0.82, 0, 1)
+  for (let layer = 1; layer < bridgeIntervals; layer++) {
+    const t = layer / bridgeIntervals
+    const reductionT = THREE.MathUtils.clamp((t - 0.38) / 0.62, 0, 1)
     const countProgress = smoothstep(reductionT)
-    const scheduledCount = Math.round(Math.exp(
+    let desiredCount = Math.round(Math.exp(
       THREE.MathUtils.lerp(sourceLogCount, targetLogCount, countProgress)
     ))
-
-    // Jemnější safety floor u horních frontů brání dlouhým vějířům právě v místě,
-    // kde je shoulder ve shaded view nejcitlivější. Níž může mesh přejít k ~0.44 mm.
-    const safetySpacing = THREE.MathUtils.lerp(0.245, 0.44, smoothstep(reductionT))
-    const spacingCount = Math.max(targetCount, Math.ceil(perimeter / safetySpacing))
-
-    let desiredCount = Math.max(targetCount, scheduledCount, spacingCount)
-    desiredCount = Math.min(previousTransitionCount, desiredCount)
+    if (layer <= 2) desiredCount = rawLoop.length
+    desiredCount = Math.max(targetCount, Math.min(previousCount, desiredCount))
 
     const points = new Array(desiredCount)
     const params = new Array(desiredCount)
-
-    // V24: žádný tangenciální phase offset. V23 po fyzickém fairingu ukázala,
-    // že posunutý sampleU + neposunutý canonical param může v prudké křivosti
-    // vytvořit dlouhé diagonály. Kratší cross-diagonálu už volí samotný stitcher.
-    const phaseCells = 0
-
+    const metadata = new Array(desiredCount)
+    const preserveRawSampling = desiredCount === rawLoop.length && layer <= 2
     for (let i = 0; i < desiredCount; i++) {
-      const u = i / desiredCount
+      const u = preserveRawSampling ? rawParams[i] : i / desiredCount
       params[i] = u
-      points[i] = evaluateTransitionSurface(u, v)
+      points[i] = evaluateDirectBridge(u, t)
+      metadata[i] = { u, t }
     }
-
-    transitionBridgeRings.push({
-      v,
-      arcFraction,
-      spacing: safetySpacing,
-      perimeter,
-      points,
-      params,
-      count: desiredCount,
-      phaseCells,
-    })
-    previousTransitionCount = desiredCount
+    bridgeRows.push({ t, points, params, metadata, count: desiredCount })
+    previousCount = desiredCount
   }
 
   const seamLoop = transitionLoop.map((p) => new THREE.Vector3(p.x, seamY, p.z))
-
-  // Medit reference: po 0.10mm seamu pokračují přesně 1.08mm kroky.
-  // Pokud se použil wall snap výše, jsou ringy skutečně po 1.08 mm; fallback
-  // zachová původní bezpečné rovnoměrné rozdělení.
   const wallDepth = Math.max(0, Math.abs(baseCapY - seamY))
   const wallRings = [seamLoop]
   for (let section = 1; section <= wallSections; section++) {
@@ -10337,14 +10021,10 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       : THREE.MathUtils.lerp(seamY, baseCapY, section / wallSections)
     wallRings.push(seamLoop.map((p) => new THREE.Vector3(p.x, y, p.z)))
   }
-  const wallLoop = seamLoop
   const bottomLoop = wallRings[wallRings.length - 1]
 
-  // V27: source část je kopií scanu po velmi lokálním edge conditioningu; mimo
-  // feather pás zůstává vertexově totožná. Novou CAD část vytvoříme indexovaně.
-  // Vertikální stěna i transition band tak sdílejí
-  // vertexy a computeVertexNormals může vytvořit skutečně hladké normály místo
-  // facetovaných svislých pruhů po každém trojúhelníku.
+  // Source remains a triangle soup so its exact scan topology is untouched. New CAD
+  // geometry is indexed and can therefore be locally optimized without affecting scan.
   const positions = trianglePositions.slice()
   const sourceVertexCount = Math.floor(positions.length / 3)
   const indices = new Array(sourceVertexCount)
@@ -10361,7 +10041,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   }
 
   const exactBoundaryIndices = appendRing(rawLoop)
-  const transitionRemeshEndIndices = appendRing(transitionRemeshEndLoop)
+  const bridgeRowIndices = bridgeRows.map((row) => appendRing(row.points))
   const transitionEndIndices = appendRing(transitionLoop)
   const seamIndices = appendRing(seamLoop)
   const wallRingIndices = wallRings.slice(1).map(appendRing)
@@ -10369,10 +10049,6 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const pushTri = (a, b, c) => {
     if (isUpper) indices.push(a, c, b)
     else indices.push(a, b, c)
-  }
-  const pushQuad = (a, b, c, d) => {
-    pushTri(a, b, c)
-    pushTri(a, c, d)
   }
   const pushQuadAlternating = (a, b, c, d, flip = false) => {
     if (flip) {
@@ -10384,158 +10060,164 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     }
   }
 
-  // V29 EXPERIMENT – segmented local isotropic shoulder remesh.
-  // Each short patch is triangulated independently. Neighboring patches share the
-  // exact same side-seam vertex indices at every depth level, so the union remains
-  // watertight while connectivity is prevented from crossing patch boundaries.
+  // Build the simplest valid bridge first.
   const transitionIndexStart = indices.length
-  const remeshSharedSideIndices = new Map()
-  let transitionRemeshInteriorVertices = 0
-  let transitionRemeshUVVertices = 0
-  let transitionRemeshUVFaces = 0
-  let transitionRemeshSteinerRequested = 0
-  let transitionRemeshSteinerInserted = 0
-  let transitionRemeshPlanarFlips = 0
-  let transitionRemeshIntrinsicFlips = 0
-  let transitionRemeshIntrinsicPasses = 0
-  const transitionRemeshPatchStats = []
+  let previousIndices = exactBoundaryIndices
+  let previousPoints = rawLoop
+  let previousParams = rawParams
 
-  const remeshActualV = (normalizedDepth) => {
-    const local = THREE.MathUtils.clamp(normalizedDepth, 0, 1)
-    return transitionVForArcFraction(local * transitionRemeshArcFraction)
-  }
-
-  for (let patchIndex = 0; patchIndex < transitionRemeshPatchBreaks.length - 1; patchIndex++) {
-    const startVertex = transitionRemeshPatchBreaks[patchIndex]
-    const endVertex = transitionRemeshPatchBreaks[patchIndex + 1]
-    const segmentCount = Math.max(1, endVertex - startVertex)
-    const patchBoundaryCount = segmentCount + 1
-    const patchWidth = Math.max(0.5,
-      transitionRemeshRawArc.cumulative[endVertex] - transitionRemeshRawArc.cumulative[startVertex]
-    )
-    const patchUV = cadBuildIsotropicTransitionPatchUV(
-      patchBoundaryCount,
-      patchBoundaryCount,
-      patchWidth,
-      transitionRemeshPhysicalDepth,
-      transitionRemeshSpacing
-    )
-    const patchVertexMap = new Array(patchUV.points.length).fill(-1)
-
-    const globalBoundaryIndexForLocal = (localIndex) => (startVertex + localIndex) % rawLoop.length
-    const patchGlobalU = (localU) => {
-      let u = (startVertex + THREE.MathUtils.clamp(localU, 0, 1) * segmentCount) / rawLoop.length
-      if (u >= 1) u -= 1
-      return u
-    }
-
-    for (let i = 0; i < patchUV.boundaryCount; i++) {
-      const meta = patchUV.boundaryMeta[i]
-      if (!meta) continue
-      if (meta.kind === "top") {
-        patchVertexMap[i] = exactBoundaryIndices[globalBoundaryIndexForLocal(meta.index)]
-      } else if (meta.kind === "bottom") {
-        patchVertexMap[i] = transitionRemeshEndIndices[globalBoundaryIndexForLocal(meta.index)]
-      } else if (meta.kind === "side") {
-        const boundaryVertex = meta.side === "left" ? startVertex : endVertex
-        const globalBoundaryIndex = boundaryVertex % rawLoop.length
-        const key = `${globalBoundaryIndex}:${meta.level}`
-        let shared = remeshSharedSideIndices.get(key)
-        if (!Number.isInteger(shared)) {
-          const actualV = remeshActualV(meta.v)
-          const u = globalBoundaryIndex / rawLoop.length
-          const point = evaluateTransitionSurface(u, actualV)
-          shared = positions.length / 3
-          positions.push(point.x, point.y, point.z)
-          remeshSharedSideIndices.set(key, shared)
-          transitionRemeshInteriorVertices++
-        }
-        patchVertexMap[i] = shared
-      }
-    }
-
-    for (let i = patchUV.boundaryCount; i < patchUV.points.length; i++) {
-      const uv = patchUV.points[i]
-      const localU = patchUV.width > 1e-9 ? uv.x / patchUV.width : 0
-      const normalizedDepth = patchUV.depth > 1e-9 ? uv.y / patchUV.depth : 0
-      const actualV = remeshActualV(normalizedDepth)
-      const point = evaluateTransitionSurface(patchGlobalU(localU), actualV)
-      patchVertexMap[i] = positions.length / 3
-      positions.push(point.x, point.y, point.z)
-      transitionRemeshInteriorVertices++
-    }
-
-    const patchIndexStart = indices.length
-    for (const face of patchUV.faces) {
-      const a = patchVertexMap[face[0]]
-      const b = patchVertexMap[face[1]]
-      const c = patchVertexMap[face[2]]
-      if (!Number.isInteger(a) || !Number.isInteger(b) || !Number.isInteger(c)) continue
-      if (a === b || b === c || c === a) continue
-      pushTri(a, b, c)
-    }
-    const patchIndexEnd = indices.length
-
-    // Intrinsic flips are deliberately limited to this single patch. The side seams
-    // therefore remain constrained and can never be replaced by a cross-patch edge.
-    const intrinsic = cadOptimizeTransitionEdgeFlips(
-      indices, positions, patchIndexStart, patchIndexEnd, 3
-    )
-
-    transitionRemeshUVVertices += patchUV.points.length
-    transitionRemeshUVFaces += patchUV.faces.length
-    transitionRemeshSteinerRequested += patchUV.steinerRequested
-    transitionRemeshSteinerInserted += patchUV.steinerInserted
-    transitionRemeshPlanarFlips += patchUV.flips
-    transitionRemeshIntrinsicFlips += intrinsic.flips
-    transitionRemeshIntrinsicPasses += intrinsic.passes
-    transitionRemeshPatchStats.push({
-      startVertex,
-      endVertex,
-      width: patchWidth,
-      topCount: patchBoundaryCount,
-      vertices: patchUV.points.length,
-      faces: patchUV.faces.length,
-      intrinsicFlips: intrinsic.flips,
-    })
-  }
-
-  let previousTransitionIndices = transitionRemeshEndIndices
-  let previousTransitionPoints = transitionRemeshEndLoop
-  let previousTransitionParams = transitionRemeshEndParams
-  let transitionInteriorVertices = transitionRemeshInteriorVertices
-
-  for (const ring of transitionBridgeRings) {
-    const ringIndices = appendRing(ring.points)
+  for (let rowIndex = 0; rowIndex < bridgeRows.length; rowIndex++) {
+    const row = bridgeRows[rowIndex]
+    const ringIndices = bridgeRowIndices[rowIndex]
     cadStitchClosedRingsParametric(
       indices,
-      previousTransitionIndices, previousTransitionPoints, previousTransitionParams,
-      ringIndices, ring.points, ring.params,
+      previousIndices, previousPoints, previousParams,
+      ringIndices, row.points, row.params,
       isUpper
     )
-    previousTransitionIndices = ringIndices
-    previousTransitionPoints = ring.points
-    previousTransitionParams = ring.params
-    transitionInteriorVertices += ring.points.length
+    previousIndices = ringIndices
+    previousPoints = row.points
+    previousParams = row.params
   }
 
   cadStitchClosedRingsParametric(
     indices,
-    previousTransitionIndices, previousTransitionPoints, previousTransitionParams,
-    transitionEndIndices, transitionLoop, transitionEndParams,
+    previousIndices, previousPoints, previousParams,
+    transitionEndIndices, transitionLoop, targetParams,
     isUpper
   )
-  const transitionIndexEnd = indices.length
-  const transitionTriangles = Math.max(0, Math.floor((transitionIndexEnd - transitionIndexStart) / 3))
+  let transitionIndexEnd = indices.length
 
-  // Krátký 0.1mm seam – samostatný ring stejně jako v referenčním Medit STL.
-  for (let i = 0; i < transitionEndIndices.length; i++) {
-    const j = (i + 1) % transitionEndIndices.length
-    pushQuad(transitionEndIndices[i], transitionEndIndices[j], seamIndices[j], seamIndices[i])
+  // Metadata for movable bridge vertices. The scan boundary and final Straight ring are
+  // hard constraints. Every fairing update is clamped back inside the scan->base XZ
+  // envelope, so the shoulder can NEVER become wider than the base as in V27/V29.
+  const movableMeta = new Map()
+  for (let rowIndex = 0; rowIndex < bridgeRows.length; rowIndex++) {
+    const row = bridgeRows[rowIndex]
+    const ring = bridgeRowIndices[rowIndex]
+    for (let i = 0; i < ring.length; i++) movableMeta.set(ring[i], row.metadata[i])
   }
 
-  // V11: wall ringy zůstávají pravidelné, ale diagonálu střídáme checkerboardově,
-  // aby se nevytvářel jeden viditelný šikmý směr přes celou stěnu.
+  const pointAtIndex = (id) => {
+    const o = id * 3
+    return new THREE.Vector3(positions[o], positions[o + 1], positions[o + 2])
+  }
+  const writePoint = (id, p) => {
+    const o = id * 3
+    positions[o] = p.x
+    positions[o + 1] = p.y
+    positions[o + 2] = p.z
+  }
+
+  const buildTransitionAdjacency = () => {
+    const adjacency = new Map()
+    const add = (a, b) => {
+      let set = adjacency.get(a)
+      if (!set) { set = new Set(); adjacency.set(a, set) }
+      set.add(b)
+    }
+    for (let offset = transitionIndexStart; offset + 2 < transitionIndexEnd; offset += 3) {
+      const a = indices[offset], b = indices[offset + 1], c = indices[offset + 2]
+      add(a, b); add(a, c)
+      add(b, a); add(b, c)
+      add(c, a); add(c, b)
+    }
+    return adjacency
+  }
+
+  // First local Delaunay/quality pass. Unlike V28/V29 this can only flip an existing
+  // LOCAL diagonal; it cannot invent a connection across the horseshoe.
+  const preFlipStats = cadOptimizeTransitionEdgeFlips(
+    indices, positions, transitionIndexStart, transitionIndexEnd, 5
+  )
+
+  const fairingIterations = 6
+  const fairingLambda = 0.24
+  let fairingMovedVertices = 0
+  let fairingMaxMove = 0
+
+  for (let iteration = 0; iteration < fairingIterations; iteration++) {
+    const adjacency = buildTransitionAdjacency()
+    const updates = new Map()
+
+    for (const [id, meta] of movableMeta.entries()) {
+      const neighbors = adjacency.get(id)
+      if (!neighbors || neighbors.size < 3) continue
+      const current = pointAtIndex(id)
+      const average = new THREE.Vector3()
+      let neighborCount = 0
+      for (const neighbor of neighbors) {
+        average.add(pointAtIndex(neighbor))
+        neighborCount++
+      }
+      if (!neighborCount) continue
+      average.multiplyScalar(1 / neighborCount)
+      const candidate = current.clone().lerp(average, fairingLambda)
+
+      const raw = cadSampleClosedLoopArc(rawLoop, rawArcTable, meta.u)
+      const smooth = cadSampleClosedLoopUniform(regularized, meta.u)
+      const reference = evaluateDirectBridge(meta.u, meta.t)
+
+      // Keep fairing local to the intended direct-bridge surface.
+      const delta = candidate.clone().sub(reference)
+      if (delta.length() > bridgeEnvelopeTolerance) delta.setLength(bridgeEnvelopeTolerance)
+      candidate.copy(reference).add(delta)
+
+      // Hard XZ envelope clamp: project onto the raw->Straight chord and permit only a
+      // tiny perpendicular fairing allowance. No point may pass beyond the base profile.
+      const chordXZ = new THREE.Vector2(smooth.x - raw.x, smooth.z - raw.z)
+      const chordLenSq = chordXZ.lengthSq()
+      if (chordLenSq > 1e-10) {
+        const rel = new THREE.Vector2(candidate.x - raw.x, candidate.z - raw.z)
+        const progress = THREE.MathUtils.clamp(rel.dot(chordXZ) / chordLenSq, 0, 1)
+        const onChord = chordXZ.clone().multiplyScalar(progress)
+        const perpendicular = rel.clone().sub(onChord)
+        if (perpendicular.length() > bridgeEnvelopeTolerance) perpendicular.setLength(bridgeEnvelopeTolerance)
+        const guarded = onChord.add(perpendicular)
+        candidate.x = raw.x + guarded.x
+        candidate.z = raw.z + guarded.y
+      } else {
+        candidate.x = raw.x
+        candidate.z = raw.z
+      }
+
+      // Keep Y ordered between the scan and the target plane.
+      if (transitionDirection > 0) candidate.y = THREE.MathUtils.clamp(candidate.y, raw.y, targetY)
+      else candidate.y = THREE.MathUtils.clamp(candidate.y, targetY, raw.y)
+      if (isUpper) candidate.y = Math.min(candidate.y, baseCapY - capMargin)
+      else candidate.y = Math.max(candidate.y, baseCapY + capMargin)
+
+      const move = candidate.distanceTo(current)
+      if (move > 1e-6) {
+        updates.set(id, candidate)
+        fairingMovedVertices++
+        fairingMaxMove = Math.max(fairingMaxMove, move)
+      }
+    }
+
+    for (const [id, point] of updates.entries()) writePoint(id, point)
+  }
+
+  // Re-optimize diagonals after fairing. This is the lightweight JS equivalent of the
+  // flip/relax part of an isotropic remesher; if the shape test succeeds we can later
+  // replace this block with the full PMP/WASM split-collapse-flip implementation.
+  const postFlipStats = cadOptimizeTransitionEdgeFlips(
+    indices, positions, transitionIndexStart, transitionIndexEnd, 6
+  )
+  transitionIndexEnd = indices.length
+
+  const transitionTriangles = Math.max(0, Math.floor((transitionIndexEnd - transitionIndexStart) / 3))
+  const transitionInteriorVertices = bridgeRowIndices.reduce((sum, ring) => sum + ring.length, 0)
+
+  // 0.10 mm seam followed by the frozen Straight wall.
+  for (let i = 0; i < transitionEndIndices.length; i++) {
+    const j = (i + 1) % transitionEndIndices.length
+    pushQuadAlternating(
+      transitionEndIndices[i], transitionEndIndices[j], seamIndices[j], seamIndices[i],
+      (i & 1) === 1
+    )
+  }
+
   let previousWallRing = seamIndices
   for (let wallRing = 0; wallRing < wallRingIndices.length; wallRing++) {
     const nextWallRing = wallRingIndices[wallRing]
@@ -10548,12 +10230,8 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     }
     previousWallRing = nextWallRing
   }
-  const bottomWallIndices = previousWallRing
 
-  // V16 bottom cap (frozen in V17): matched boundary strip + quality-aware Delaunay refinement.
-  // Boundary posledního wall ringu zůstává 1:1 beze změny; první pás je nyní
-  // geometricky kontrolovaný a nové body se vkládají pouze tam, kde skutečně
-  // zlepší lokální kvalitu bez vytvoření krátkých skinny hran.
+  // Keep the proven V16 Delaunay bottom cap unchanged.
   const contour2D = bottomLoop.map((p) => new THREE.Vector2(p.x, p.z))
   const capPointSpacing = Math.max(0.75, Math.min(0.85, boundaryData.diagonal * 0.0155))
   const delaunayCap = cadBuildConstrainedDelaunayCap(contour2D, capPointSpacing)
@@ -10572,8 +10250,6 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   geometry.computeBoundingBox()
   geometry.computeBoundingSphere()
 
-  // Pro kontrolu watertightness použijeme stejnou robustní boundary analýzu jako
-  // dřív, jen si indexovanou geometrii rozbalíme do triangle soup až zde.
   const flatForBoundary = new Array(indices.length * 3)
   const positionAttribute = geometry.getAttribute("position")
   for (let i = 0; i < indices.length; i++) {
@@ -10597,57 +10273,31 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionEndOffset,
-      transitionMode: "segmented-local-shoulder-remesh-v29-experiment",
+      transitionMode: "direct-bridge-constrained-fairing-v30-experiment",
       transitionRemeshEnabled: true,
-      transitionRemeshTargetLength,
-      transitionRemeshArcFraction,
-      transitionRemeshEndV,
-      transitionRemeshPhysicalDepth,
-      transitionRemeshSpacing,
-      transitionRemeshEndCount,
-      transitionRemeshUVVertices,
-      transitionRemeshUVFaces,
-      transitionRemeshSteinerRequested,
-      transitionRemeshSteinerInserted,
-      transitionRemeshPlanarFlips,
-      transitionRemeshIntrinsicFlips,
-      transitionRemeshIntrinsicPasses,
-      transitionRemeshPatchTargetLength,
-      transitionRemeshPatchCount,
-      transitionRemeshPatchBreaks,
-      transitionRemeshPatchStats,
-      transitionBridgeRingCounts: transitionBridgeRings.map((ring) => ring.count),
-      transitionBridgeRingSpacings: transitionBridgeRings.map((ring) => ring.spacing),
-      transitionBridgeRingLevels: transitionBridgeRings.map((ring) => ring.v),
-      transitionBridgeRingPhases: transitionBridgeRings.map((ring) => ring.phaseCells),
-      transitionIntervals,
-      transitionFrontExponent,
-      transitionPhysicalTarget,
-      transitionArcFractions,
-      transitionArcEqualized: true,
-      transitionMedianArcTotal,
-      edgeConditioningBandWidth: boundaryRelaxation.bandWidth,
-      edgeConditioningMaxBoundaryShift: boundaryRelaxation.maxBoundaryShift,
-      edgeConditioningAffectedVertices: boundaryRelaxation.affectedVertices,
-      supportRingCoverage: supportRing.coverage,
-      supportRingDistance: supportRing.supportDistance,
-      supportRingSmoothingRadius: supportRing.smoothingRadius,
-      transitionShoulderLength,
-      transitionShoulderMin,
-      transitionShoulderMax,
-      transitionShoulderXZGain,
-      transitionStartHandleFactor,
-      transitionEndHandleFactor,
-      transitionSupportMinAlignment,
-      transitionPerpClamp,
-      sourceBoundaryPreserved: false,
-      sourceOutsideConditioningBandPreserved: true,
+      transitionRemeshMethod: "local-edge-flip-plus-constrained-fairing",
+      wallAcquireStart,
+      bridgeIntervals,
+      bridgeTargetRowSpacing,
+      bridgeRowCounts: bridgeRows.map((row) => row.count),
+      bridgeEnvelopeTolerance,
       transitionSpan95,
       transitionSpanMax,
       transitionInteriorVertices,
       transitionTriangles,
-      transitionEdgeFlips: transitionRemeshIntrinsicFlips,
-      transitionEdgeFlipPasses: transitionRemeshIntrinsicPasses,
+      transitionEdgeFlips: preFlipStats.flips + postFlipStats.flips,
+      transitionEdgeFlipPasses: preFlipStats.passes + postFlipStats.passes,
+      transitionPreFairingFlips: preFlipStats.flips,
+      transitionPostFairingFlips: postFlipStats.flips,
+      fairingIterations,
+      fairingLambda,
+      fairingMovedVertices,
+      fairingMaxMove,
+      edgeConditioningBandWidth: boundaryRelaxation.bandWidth,
+      edgeConditioningMaxBoundaryShift: boundaryRelaxation.maxBoundaryShift,
+      edgeConditioningAffectedVertices: boundaryRelaxation.affectedVertices,
+      sourceBoundaryPreserved: false,
+      sourceOutsideConditioningBandPreserved: true,
       transitionPatchSourceCount: rawLoop.length,
       transitionPatchTargetCount: targetCount,
       seamOffset,
@@ -10668,26 +10318,10 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       capBoundaryInsetMin: delaunayCap.ringInsetMin,
       capBoundaryInsetMax: delaunayCap.ringInsetMax,
       capLongEdgeTarget: delaunayCap.longEdgeTarget,
-      capLongEdgeSplits: delaunayCap.longEdgeSplits,
-      capQualityRefineRequested: delaunayCap.qualityRefineRequested,
-      capQualityRefineInserted: delaunayCap.qualityRefineInserted,
-      capQualityRefineSkippedGap: delaunayCap.qualityRefineSkippedGap,
-      capQualityRefineSkippedGeometry: delaunayCap.qualityRefineSkippedGeometry,
-      capQualityTargetMinAngle: delaunayCap.qualityTargetMinAngle,
-      capQualityMinPointGap: delaunayCap.qualityMinPointGap,
-      capEdgeFlips: delaunayCap.flips,
-      capRelaxMoves: delaunayCap.relaxedMoves,
-      capMinQuality: delaunayCap.quality.minQuality,
-      capMeanQuality: delaunayCap.quality.meanQuality,
-      capSkinnyTriangles: delaunayCap.quality.skinny,
-      capPointSpacing,
-      capMaxEdge: delaunayCap.quality.maxEdge,
-      boundaryRelaxationBand: boundaryRelaxation.bandWidth,
-      boundaryRelaxationMaxShift: boundaryRelaxation.maxBoundaryShift,
-      boundaryRelaxationAffectedVertices: boundaryRelaxation.affectedVertices,
     },
   }
 }
+
 
 function CadPreviewMesh({ geometry }) {
   useEffect(() => () => geometry?.dispose?.(), [geometry])
