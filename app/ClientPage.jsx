@@ -7734,7 +7734,7 @@ function cadStitchClosedRings(indices, ringA, pointsA, ringB, pointsB, isUpper) 
 }
 
 
-// V21 – parametric advancing-front stitch.
+// V21/V22 – parametric advancing-front stitch.
 // V20 resamploval každý pomocný ring podle jeho vlastního 3D oblouku a stitcher
 // pak znovu porovnával lokální arc fractions. U silně zakřiveného transition
 // surface se tím stejné U pozice rozjížděly a vznikaly dlouhé vějířové trojúhelníky.
@@ -9386,9 +9386,19 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const transitionEndOffset = Math.abs(targetY - boundaryExtremeY)
   const transitionDepth = transitionEndOffset
   const smoothstep = (t) => t * t * (3 - 2 * t)
+
+  // V22 – Medit-style profile fairing.
+  // V21 používal double-smoothstep pro XZ regularizaci. Ten držel detail raw
+  // boundary příliš dlouho a potom jej stáhl do Straight profilu velmi rychle
+  // uprostřed transitionu. Na hladkém renderu se to projevovalo jako svislé
+  // „záclony“ / streaky. Medit začne vysokofrekvenční detail hranice tlumit o něco
+  // dříve, ale stále má nulovou derivaci na obou koncích. Mírně front-loaded
+  // smoothstep proto regularizuje XZ plynuleji bez pohybu raw boundary nebo
+  // finálního Straight profilu.
+  const transitionProfileBias = 1.22
   const profileEase = (t) => {
-    const s = smoothstep(t)
-    return s * s * (3 - 2 * s)
+    const s = smoothstep(THREE.MathUtils.clamp(t, 0, 1))
+    return 1 - Math.pow(Math.max(0, 1 - s), transitionProfileBias)
   }
 
   const targetCount = regularized.length
@@ -9417,7 +9427,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const transitionLoop = new Array(targetCount)
   for (let i = 0; i < targetCount; i++) transitionLoop[i] = evaluateTransitionSurface(i / targetCount, 1)
 
-  // V21 – adaptive parametric advancing-front.
+  // V22 – Medit blend on top of the safe parametric advancing-front.
   //
   // Z V20 exportu jsme naměřili, že topologie je sice manifold, ale v transition
   // vznikají tisíce příliš dlouhých hran (> 1.5 mm). Hlavní příčina není shape,
@@ -9427,6 +9437,52 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const rawTransitionParams = cadClosedLoopVertexFractions(rawLoop).slice(0, rawLoop.length)
   const transitionEndParams = new Array(targetCount)
   for (let i = 0; i < targetCount; i++) transitionEndParams[i] = i / targetCount
+
+  // V22 – fyzicky rovnoměrný postup frontu.
+  // Uniformní V kroky nejsou na této loft ploše uniformní v milimetrech, protože
+  // raw boundary má lokálně velmi rozdílnou výšku a profileEase je nelineární.
+  // Nejprve proto změříme medián 3D arc-length průběhu několika U generátorů a
+  // později inverzí této křivky zvolíme V jednotlivých frontů. Počet frontů se
+  // nemění – mění se jen jejich fyzické rozmístění.
+  const transitionArcUProbes = Math.max(28, Math.min(52, Math.round(targetCount / 10)))
+  const transitionArcVSteps = 72
+  const transitionArcSamples = Array.from({ length: transitionArcVSteps + 1 }, () => [])
+  for (let ui = 0; ui < transitionArcUProbes; ui++) {
+    const u = (ui + 0.5) / transitionArcUProbes
+    let previous = evaluateTransitionSurface(u, 0)
+    let cumulative = 0
+    transitionArcSamples[0].push(0)
+    for (let step = 1; step <= transitionArcVSteps; step++) {
+      const v = step / transitionArcVSteps
+      const current = evaluateTransitionSurface(u, v)
+      cumulative += current.distanceTo(previous)
+      transitionArcSamples[step].push(cumulative)
+      previous = current
+    }
+  }
+  const transitionMedianArc = transitionArcSamples.map((samples) => {
+    const sorted = samples.slice().sort((a, b) => a - b)
+    if (!sorted.length) return 0
+    const mid = Math.floor(sorted.length / 2)
+    return sorted.length & 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) * 0.5
+  })
+  for (let i = 1; i < transitionMedianArc.length; i++) {
+    if (transitionMedianArc[i] < transitionMedianArc[i - 1]) transitionMedianArc[i] = transitionMedianArc[i - 1]
+  }
+  const transitionMedianArcTotal = transitionMedianArc[transitionMedianArc.length - 1] || 0
+  const transitionVForArcFraction = (fraction) => {
+    const f = THREE.MathUtils.clamp(fraction, 0, 1)
+    if (transitionMedianArcTotal <= 1e-8) return f
+    const target = transitionMedianArcTotal * f
+    let hi = 1
+    while (hi < transitionMedianArc.length && transitionMedianArc[hi] < target) hi++
+    if (hi >= transitionMedianArc.length) return 1
+    const lo = Math.max(0, hi - 1)
+    const a = transitionMedianArc[lo]
+    const b = transitionMedianArc[hi]
+    const local = b > a + 1e-9 ? (target - a) / (b - a) : 0
+    return (lo + THREE.MathUtils.clamp(local, 0, 1)) / transitionArcVSteps
+  }
 
   // Odhad fyzické šířky transition surface. Počet intervalů musí splnit dva cíle:
   // 1) žádný globální krok přes surface není zbytečně dlouhý,
@@ -9453,11 +9509,19 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     : 1
   const physicalIntervals = Math.ceil(Math.max(transitionSpan95, transitionSpanMax * 0.72) / 0.92)
   const transitionIntervals = Math.max(5, Math.min(10, Math.max(countReductionIntervals, physicalIntervals)))
+  const transitionVLevels = new Array(transitionIntervals + 1)
+  transitionVLevels[0] = 0
+  transitionVLevels[transitionIntervals] = 1
+  for (let layer = 1; layer < transitionIntervals; layer++) {
+    transitionVLevels[layer] = transitionVForArcFraction(layer / transitionIntervals)
+  }
+
   const transitionBridgeRings = []
   let previousTransitionCount = rawLoop.length
+  const transitionGoldenPhase = 0.3819660112501051
 
   for (let layer = 1; layer < transitionIntervals; layer++) {
-    const v = layer / transitionIntervals
+    const v = transitionVLevels[layer]
     const probeCount = Math.max(320, Math.min(1200, Math.max(previousTransitionCount, targetCount * 2)))
     const probe = new Array(probeCount)
     for (let i = 0; i < probeCount; i++) {
@@ -9483,10 +9547,22 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
 
     const points = new Array(desiredCount)
     const params = new Array(desiredCount)
+
+    // V22 – malý tangenciální stagger rozbíjí dlouhé řetězce vertexů ve stejném
+    // U, které byly ve V21 topologicky bezpečné, ale na smooth shadingu vytvářely
+    // pravidelné svislé pruhy. Offset je vždy menší než půl lokálního segmentu,
+    // mizí u obou constrained hranic a nemění tvar ring obrysu – pouze místo, kde
+    // je daný ring vzorkovaný. Canonical params zůstávají beze změny pro stitcher.
+    const phaseNoise = (layer * transitionGoldenPhase) % 1
+    const phaseFade = Math.pow(Math.max(0, Math.sin(Math.PI * v)), 0.85)
+    const phaseCells = (0.08 + 0.36 * phaseNoise) * phaseFade
+    const phaseU = phaseCells / desiredCount
+
     for (let i = 0; i < desiredCount; i++) {
       const u = i / desiredCount
+      const sampleU = Math.min(1 - 1e-10, u + phaseU)
       params[i] = u
-      points[i] = evaluateTransitionSurface(u, v)
+      points[i] = evaluateTransitionSurface(sampleU, v)
     }
 
     transitionBridgeRings.push({
@@ -9496,6 +9572,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       points,
       params,
       count: desiredCount,
+      phaseCells,
     })
     previousTransitionCount = desiredCount
   }
@@ -9559,10 +9636,11 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     }
   }
 
-  // V21 parametric advancing-front bridge.
-  // Všechny ringy sdílejí stejné U, takže front už nemůže "ujíždět" podle
-  // rozdílných lokálních 3D arc lengths. Při blízkých eventech volíme kratší
-  // diagonálu a redukce počtu vertexů je rozložená do více menších kroků.
+  // V22 arc-equalized staggered parametric advancing-front bridge.
+  // Canonical params zůstávají stejné jako ve V21, ale fyzické ringy jsou nyní
+  // rozmístěné podle 3D arc-length a lehce tangenciálně staggerované. Front tedy
+  // zůstává manifold/watertight, zatímco konektivita už nevytváří tak pravidelné
+  // sloupcové řetězce v dlouhém transition pásu.
   const transitionIndexStart = indices.length
   let previousTransitionIndices = exactBoundaryIndices
   let previousTransitionPoints = rawLoop
@@ -9661,11 +9739,15 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionEndOffset,
-      transitionMode: "parametric-afm-v21",
+      transitionMode: "medit-blend-v22",
       transitionBridgeRingCounts: transitionBridgeRings.map((ring) => ring.count),
       transitionBridgeRingSpacings: transitionBridgeRings.map((ring) => ring.spacing),
       transitionBridgeRingLevels: transitionBridgeRings.map((ring) => ring.v),
+      transitionBridgeRingPhases: transitionBridgeRings.map((ring) => ring.phaseCells),
       transitionIntervals,
+      transitionArcEqualized: true,
+      transitionMedianArcTotal,
+      transitionProfileBias,
       transitionSpan95,
       transitionSpanMax,
       transitionInteriorVertices,
