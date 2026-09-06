@@ -9299,6 +9299,7 @@ function cadOptimizeTransitionEdgeFlips(indices, positions, startIndex, endIndex
   return { flips, passes }
 }
 
+// V24 RELEASE: Medit-density sparse advancing front; V23 geometry retained.
 function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
   const collectedTrianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
   const boundaryData = cadExtractBoundaryLoopsRobust(collectedTrianglePositions)
@@ -9480,7 +9481,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const transitionEndParams = new Array(targetCount)
   for (let i = 0; i < targetCount; i++) transitionEndParams[i] = i / targetCount
 
-  // V23 – fyzicky rovnoměrný postup frontu (zachováno z V22).
+  // V24 – fyzicky kalibrovaný postup frontu (navazuje na V23).
   // Uniformní V kroky nejsou na této loft ploše uniformní v milimetrech, protože
   // raw boundary má lokálně velmi rozdílnou výšku a profileEase je nelineární.
   // Nejprve proto změříme medián 3D arc-length průběhu několika U generátorů a
@@ -9545,22 +9546,47 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     ? sortedTransitionSpans[sortedTransitionSpans.length - 1]
     : 0
 
-  const maxCountReductionRatio = 0.80
-  const countReductionIntervals = rawLoop.length > targetCount
-    ? Math.ceil(Math.log(targetCount / rawLoop.length) / Math.log(maxCountReductionRatio))
-    : 1
-  const physicalIntervals = Math.ceil(Math.max(transitionSpan95, transitionSpanMax * 0.72) / 0.92)
-  const transitionIntervals = Math.max(5, Math.min(10, Math.max(countReductionIntervals, physicalIntervals)))
+  // V24 – Medit-density sparse advancing front.
+  //
+  // Přesné A/B měření V23 proti referenčnímu Medit Rogers STL ukázalo velmi
+  // důležitou věc: první ~0.6–0.8 mm od původního scanu už máme hustotou i
+  // geometrií téměř shodné. Rozdíl vzniká až potom – naše fronty zůstávaly
+  // příliš husté a V23 tak vytvářela výrazně více transition vertexů/faces než
+  // Medit. Navíc tangenciální phase-stagger už po mm-fairingu mohl spojit
+  // canonical U s fyzicky posunutým bodem a lokálně vytvořit 2–3mm diagonály.
+  //
+  // V24 proto:
+  //   1) drží jen 5–7 fyzických intervalů (typicky 6 u Rogers scanu),
+  //   2) fronty zahušťuje blízko scanu a rychleji je rozestupuje směrem k bázi,
+  //   3) počet bodů snižuje logaritmicky – skoro vůbec v prvním kroku, výrazněji
+  //      až po ~0.6 mm,
+  //   4) phase-stagger vypíná; topology se řídí skutečným canonical U.
+  //
+  // Cíl není remeshovat anatomii, ale přiblížit počet a charakter transition
+  // triangles reálnému Medit advancing-front patchi při zachování watertightness.
+  const transitionFrontExponent = 1.70
+  const transitionPhysicalTarget = 1.45
+  const physicalIntervals = Math.ceil(
+    Math.max(transitionSpan95, transitionSpanMax * 0.70) / transitionPhysicalTarget
+  )
+  const transitionIntervals = Math.max(5, Math.min(7, physicalIntervals))
   const transitionVLevels = new Array(transitionIntervals + 1)
+  const transitionArcFractions = new Array(transitionIntervals + 1)
   transitionVLevels[0] = 0
+  transitionArcFractions[0] = 0
   transitionVLevels[transitionIntervals] = 1
+  transitionArcFractions[transitionIntervals] = 1
   for (let layer = 1; layer < transitionIntervals; layer++) {
-    transitionVLevels[layer] = transitionVForArcFraction(layer / transitionIntervals)
+    const normalizedLayer = layer / transitionIntervals
+    const arcFraction = Math.pow(normalizedLayer, transitionFrontExponent)
+    transitionArcFractions[layer] = arcFraction
+    transitionVLevels[layer] = transitionVForArcFraction(arcFraction)
   }
 
   const transitionBridgeRings = []
   let previousTransitionCount = rawLoop.length
-  const transitionGoldenPhase = 0.3819660112501051
+  const sourceLogCount = Math.log(Math.max(3, rawLoop.length))
+  const targetLogCount = Math.log(Math.max(3, targetCount))
 
   for (let layer = 1; layer < transitionIntervals; layer++) {
     const v = transitionVLevels[layer]
@@ -9571,45 +9597,41 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     }
 
     const perimeter = cadClosedLoopPerimeter(probe)
-    const spacingT = smoothstep(v)
-    const targetRingSpacing = THREE.MathUtils.lerp(0.27, profileTargetSpacing, spacingT)
-    const spacingCount = Math.max(targetCount, Math.round(perimeter / targetRingSpacing))
+    const arcFraction = transitionArcFractions[layer]
 
-    // Nejvýše ~20% redukce za jeden front krok. Současně hlídáme, že se do
-    // zbývajících intervalů stále dokážeme plynule dostat na targetCount.
-    const minimumByReduction = Math.ceil(previousTransitionCount * maxCountReductionRatio)
-    const remainingIntervals = transitionIntervals - layer
-    const reachabilityCap = remainingIntervals > 0
-      ? Math.ceil(targetCount / Math.pow(maxCountReductionRatio, remainingIntervals))
-      : targetCount
+    // Medit-like count schedule: interpolujeme v log(count), ale redukci necháme
+    // nabíhat přes smoothstep. První front tedy zůstává skoro stejně hustý jako
+    // raw boundary; teprve další fronty začnou count výrazněji slučovat.
+    const countProgress = smoothstep(arcFraction)
+    const scheduledCount = Math.round(Math.exp(
+      THREE.MathUtils.lerp(sourceLogCount, targetLogCount, countProgress)
+    ))
 
-    let desiredCount = Math.max(targetCount, spacingCount, minimumByReduction)
+    // Samostatný edge-length safety floor. Ten nesmí znovu přehustit celý patch,
+    // pouze brání příliš dlouhým obvodovým hranám v místě s vysokou křivostí.
+    const safetySpacing = THREE.MathUtils.lerp(0.27, 0.44, smoothstep(arcFraction))
+    const spacingCount = Math.max(targetCount, Math.ceil(perimeter / safetySpacing))
+
+    let desiredCount = Math.max(targetCount, scheduledCount, spacingCount)
     desiredCount = Math.min(previousTransitionCount, desiredCount)
-    desiredCount = Math.min(desiredCount, Math.max(targetCount, reachabilityCap))
 
     const points = new Array(desiredCount)
     const params = new Array(desiredCount)
 
-    // V23 – malý tangenciální stagger z V22 dál rozbíjí dlouhé řetězce vertexů ve stejném
-    // U, které byly ve V21 topologicky bezpečné, ale na smooth shadingu vytvářely
-    // pravidelné svislé pruhy. Offset je vždy menší než půl lokálního segmentu,
-    // mizí u obou constrained hranic a nemění tvar ring obrysu – pouze místo, kde
-    // je daný ring vzorkovaný. Canonical params zůstávají beze změny pro stitcher.
-    const phaseNoise = (layer * transitionGoldenPhase) % 1
-    const phaseFade = Math.pow(Math.max(0, Math.sin(Math.PI * v)), 0.85)
-    const phaseCells = (0.08 + 0.36 * phaseNoise) * phaseFade
-    const phaseU = phaseCells / desiredCount
+    // V24: žádný tangenciální phase offset. V23 po fyzickém fairingu ukázala,
+    // že posunutý sampleU + neposunutý canonical param může v prudké křivosti
+    // vytvořit dlouhé diagonály. Kratší cross-diagonálu už volí samotný stitcher.
+    const phaseCells = 0
 
     for (let i = 0; i < desiredCount; i++) {
       const u = i / desiredCount
-      const sampleU = Math.min(1 - 1e-10, u + phaseU)
       params[i] = u
-      points[i] = evaluateTransitionSurface(sampleU, v)
+      points[i] = evaluateTransitionSurface(u, v)
     }
 
     transitionBridgeRings.push({
       v,
-      spacing: targetRingSpacing,
+      spacing: safetySpacing,
       perimeter,
       points,
       params,
@@ -9678,11 +9700,11 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     }
   }
 
-  // V23 mm-faired + arc-equalized staggered parametric advancing-front bridge.
+  // V24 mm-faired + Medit-density sparse parametric advancing-front bridge.
   // Canonical params zůstávají stejné jako ve V21, ale fyzické ringy jsou nyní
-  // rozmístěné podle 3D arc-length a lehce tangenciálně staggerované. Front tedy
-  // zůstává manifold/watertight, zatímco konektivita už nevytváří tak pravidelné
-  // sloupcové řetězce v dlouhém transition pásu.
+  // rozmístěné podle 3D arc-length a bez geometrického phase-staggeru. Front tedy
+  // zůstává manifold/watertight a stitcher vždy porovnává stejný canonical U
+  // s fyzicky stejným bodem na surface.
   const transitionIndexStart = indices.length
   let previousTransitionIndices = exactBoundaryIndices
   let previousTransitionPoints = rawLoop
@@ -9781,12 +9803,15 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionEndOffset,
-      transitionMode: "medit-mm-fair-v23",
+      transitionMode: "medit-density-front-v24",
       transitionBridgeRingCounts: transitionBridgeRings.map((ring) => ring.count),
       transitionBridgeRingSpacings: transitionBridgeRings.map((ring) => ring.spacing),
       transitionBridgeRingLevels: transitionBridgeRings.map((ring) => ring.v),
       transitionBridgeRingPhases: transitionBridgeRings.map((ring) => ring.phaseCells),
       transitionIntervals,
+      transitionFrontExponent,
+      transitionPhysicalTarget,
+      transitionArcFractions,
       transitionArcEqualized: true,
       transitionMedianArcTotal,
       transitionBlendLength,
