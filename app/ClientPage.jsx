@@ -9448,22 +9448,17 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal, isUpper 
 }
 
 
-// V36 – orientation-aware vertical base-envelope clip.
+// V37 – true triangle clipping against the finished Straight footprint.
 //
-// V35 proved that local trim-back helps, but a few palatal/distal scan flaps can still
-// survive because the source triangle soup itself remains outside the final Straight
-// base footprint. V36 therefore applies a deterministic geometric rule AFTER the base
-// footprint is known: inside a narrow band around the open scan edge, any source point
-// whose XZ projection lies outside the final base polygon is clipped back to the
-// corresponding vertical base wall. Y is intentionally preserved, so this behaves like
-// a vertical CAD cut in the established build direction rather than another smoothing
-// pass. Good anatomy farther from the open edge is never touched.
-//
-// The implementation keeps source topology stable for this experiment: outside vertices
-// are projected onto the base prism and triangles that collapse to numerical zero area
-// are discarded. This avoids creating a second uncontrolled open loop while giving us
-// the shape effect of the red "cut everything outside the base" line from the test.
-function cadClipScanBoundaryBandToBaseEnvelope(trianglePositions, rawLoop, footprintLoop, diagonal) {
+// V36 confirmed that the final base footprint is the right geometric hard limit,
+// but projecting existing scan vertices onto that limit collapsed many triangles onto
+// vertical lines. V37 never moves a healthy source vertex. Instead, only triangles in
+// a narrow band around the open scan boundary are classified in XZ against the final
+// Straight footprint. Intersected triangle edges get NEW vertices at the actual
+// footprint crossing, the outside fragment is discarded, and the inside fragment is
+// retriangulated locally. The resulting open loop is extracted again from the clipped
+// source mesh and becomes the exact start boundary for a freshly rebuilt shoulder strip.
+function cadExactClipScanToBaseFootprint(trianglePositions, rawLoop, footprintLoop, diagonal) {
   const source = Array.isArray(trianglePositions) ? trianglePositions : []
   const raw = Array.isArray(rawLoop) ? rawLoop : []
   const footprint = Array.isArray(footprintLoop) ? footprintLoop : []
@@ -9472,201 +9467,340 @@ function cadClipScanBoundaryBandToBaseEnvelope(trianglePositions, rawLoop, footp
       trianglePositions: source.slice(),
       boundary: raw.map((p) => p.clone()),
       clipBandWidth: 0,
-      clippedSourceVertices: 0,
-      clippedBoundaryVertices: 0,
-      maxOutsideDistance: 0,
-      meanOutsideDistance: 0,
+      candidateTriangles: 0,
+      keptTriangles: Math.floor(source.length / 9),
+      clippedTriangles: 0,
+      discardedTriangles: 0,
+      splitTriangles: 0,
+      generatedTriangles: 0,
+      intersectionVertices: 0,
       removedDegenerateTriangles: 0,
-      candidateSourceVertices: 0,
+      extractedBoundaryLoops: 0,
+      extractedBoundaryPoints: raw.length,
+      boundaryPerimeterBefore: cadClosedLoopPerimeter(raw),
+      boundaryPerimeterAfter: cadClosedLoopPerimeter(raw),
     }
   }
 
   const safeDiagonal = Math.max(1, Number(diagonal) || 1)
   const polygon = footprint.map((p) => new THREE.Vector2(p.x, p.z))
-  const rawArc = cadClosedLoopArcTable(raw)
-  const footprintArc = cadClosedLoopArcTable(footprint)
-  const rawFractions = cadClosedLoopVertexFractions(raw).slice(0, raw.length)
-  const zeroDisplacements = raw.map(() => new THREE.Vector3())
+  const clipBandWidth = Math.max(2.95, Math.min(4.25, safeDiagonal * 0.058))
+  const boundaryTolerance = Math.max(2e-5, Math.min(2.5e-4, safeDiagonal * 2.6e-6))
+  const boundaryToleranceSq = boundaryTolerance * boundaryTolerance
+  const areaThreshold = Math.max(1e-10, safeDiagonal * safeDiagonal * 2.5e-11)
 
-  const smootherstep = (t) => {
-    const x = THREE.MathUtils.clamp(t, 0, 1)
-    return x * x * x * (x * (x * 6 - 15) + 10)
-  }
-
-  // Wide enough to catch the palatal/distal hanging strip from the screenshots, but
-  // still far too narrow to reach tooth crowns or useful anatomy away from the cut.
-  const clipBandWidth = Math.max(2.85, Math.min(4.15, safeDiagonal * 0.057))
-  const fullClipBand = clipBandWidth * 0.64
-  const outsideSoft = Math.max(0.055, Math.min(0.10, safeDiagonal * 0.00135))
-  const outsideHard = Math.max(0.28, Math.min(0.46, safeDiagonal * 0.0060))
-  const cellSize = Math.max(0.62, Math.min(1.20, clipBandWidth * 0.30))
-
-  // Spatial hash only for finding the local raw-boundary parameter. The actual clip
-  // target is sampled from the final Straight footprint at that same arc parameter,
-  // which prevents points on opposite sides of the palatal U from snapping together.
-  const buckets = new Map()
-  const cellKey = (x, y, z) => `${Math.floor(x / cellSize)}:${Math.floor(y / cellSize)}:${Math.floor(z / cellSize)}`
+  // A cell as wide as the clip band means that any point closer than clipBandWidth
+  // can only live in the same or one of the 26 neighboring cells. This avoids the
+  // expensive wide-radius spatial search that made the V36 experiment stall on large scans.
+  const boundaryCell = clipBandWidth
+  const invBoundaryCell = 1 / boundaryCell
+  const boundaryGrid = new Map()
+  const boundaryCellKey = (x, y, z) => `${Math.floor(x * invBoundaryCell)}:${Math.floor(y * invBoundaryCell)}:${Math.floor(z * invBoundaryCell)}`
   for (let i = 0; i < raw.length; i++) {
     const p = raw[i]
-    const key = cellKey(p.x, p.y, p.z)
-    let bucket = buckets.get(key)
+    const key = boundaryCellKey(p.x, p.y, p.z)
+    let bucket = boundaryGrid.get(key)
     if (!bucket) {
       bucket = []
-      buckets.set(key, bucket)
+      boundaryGrid.set(key, bucket)
     }
-    bucket.push(i)
+    bucket.push(p)
   }
 
-  const nearestRawIndex = (point) => {
-    const cx = Math.floor(point.x / cellSize)
-    const cy = Math.floor(point.y / cellSize)
-    const cz = Math.floor(point.z / cellSize)
-    let bestIndex = -1
-    let bestDistanceSq = Infinity
-    const radiusCells = Math.max(2, Math.ceil(clipBandWidth / cellSize) + 1)
-    for (let dx = -radiusCells; dx <= radiusCells; dx++) {
-      for (let dy = -radiusCells; dy <= radiusCells; dy++) {
-        for (let dz = -radiusCells; dz <= radiusCells; dz++) {
-          const bucket = buckets.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
+  // Coordinates in an STL/triangle soup are repeated between neighboring faces.
+  // Cache all expensive point tests by a fine quantized coordinate key.
+  const quant = 1 / Math.max(1e-6, safeDiagonal * 1.0e-7)
+  const pointKey = (p) => `${Math.round(p.x * quant)}|${Math.round(p.y * quant)}|${Math.round(p.z * quant)}`
+  const boundaryDistanceCache = new Map()
+  const classificationCache = new Map()
+  const intersectionCache = new Map()
+
+  const distanceToRawBoundarySq = (point) => {
+    const key = pointKey(point)
+    const cached = boundaryDistanceCache.get(key)
+    if (cached != null) return cached
+    const cx = Math.floor(point.x * invBoundaryCell)
+    const cy = Math.floor(point.y * invBoundaryCell)
+    const cz = Math.floor(point.z * invBoundaryCell)
+    let best = Infinity
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const bucket = boundaryGrid.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
           if (!bucket) continue
-          for (const index of bucket) {
-            const bp = raw[index]
-            const ddx = point.x - bp.x
-            const ddy = point.y - bp.y
-            const ddz = point.z - bp.z
+          for (const candidate of bucket) {
+            const ddx = point.x - candidate.x
+            const ddy = point.y - candidate.y
+            const ddz = point.z - candidate.z
             const d2 = ddx * ddx + ddy * ddy + ddz * ddz
-            if (d2 < bestDistanceSq) {
-              bestDistanceSq = d2
-              bestIndex = index
-            }
+            if (d2 < best) best = d2
           }
         }
       }
     }
-    return { index: bestIndex, distanceSq: bestDistanceSq }
+    boundaryDistanceCache.set(key, best)
+    return best
   }
 
-  const fractionFromClosest = (closest) => {
-    const index = closest.boundaryIndex
-    if (index < 0) return 0
-    const next = (index + 1) % raw.length
-    const start = rawArc.cumulative[index] || 0
-    const edgeLength = raw[index].distanceTo(raw[next])
-    const length = start + edgeLength * THREE.MathUtils.clamp(closest.segmentT || 0, 0, 1)
-    return rawArc.total > 1e-9 ? ((length / rawArc.total) % 1 + 1) % 1 : (rawFractions[index] || 0)
+  const pointSegmentDistanceSq2D = (px, py, ax, ay, bx, by) => {
+    const abx = bx - ax
+    const aby = by - ay
+    const len2 = abx * abx + aby * aby
+    if (len2 <= 1e-18) {
+      const dx = px - ax, dy = py - ay
+      return dx * dx + dy * dy
+    }
+    const t = THREE.MathUtils.clamp(((px - ax) * abx + (py - ay) * aby) / len2, 0, 1)
+    const qx = ax + abx * t
+    const qy = ay + aby * t
+    const dx = px - qx, dy = py - qy
+    return dx * dx + dy * dy
   }
 
-  const projectOne = (point, forceBoundary = false) => {
-    const nearest = nearestRawIndex(point)
-    if (nearest.index < 0) return null
-    const closest = cadClosestBoundaryDisplacement(point, raw, zeroDisplacements, nearest.index, 6)
-    const distanceToBoundary = Math.sqrt(closest.distanceSq)
-    if (!forceBoundary && (!Number.isFinite(distanceToBoundary) || distanceToBoundary > clipBandWidth)) return null
-
+  const classifyPoint = (point) => {
+    const key = pointKey(point)
+    const cached = classificationCache.get(key)
+    if (cached) return cached
     const p2 = new THREE.Vector2(point.x, point.z)
-    const inside = cadPointInPolygon2D(p2, polygon)
-    if (inside) return null
-
-    const u = fractionFromClosest(closest)
-    const target = cadSampleClosedLoopArc(footprint, footprintArc, u)
-    const outsideDistance = Math.hypot(point.x - target.x, point.z - target.z)
-    if (outsideDistance <= outsideSoft) return null
-
-    const outsideWeight = smootherstep(
-      (outsideDistance - outsideSoft) / Math.max(1e-6, outsideHard - outsideSoft)
-    )
-    let bandWeight = 1
-    if (!forceBoundary && distanceToBoundary > fullClipBand) {
-      bandWeight = 1 - smootherstep(
-        (distanceToBoundary - fullClipBand) / Math.max(1e-6, clipBandWidth - fullClipBand)
-      )
+    let inside = cadPointInPolygon2D(p2, polygon)
+    let onBoundary = false
+    if (!inside) {
+      let minD2 = Infinity
+      for (let i = 0; i < polygon.length; i++) {
+        const a = polygon[i]
+        const b = polygon[(i + 1) % polygon.length]
+        const d2 = pointSegmentDistanceSq2D(p2.x, p2.y, a.x, a.y, b.x, b.y)
+        if (d2 < minD2) minD2 = d2
+        if (minD2 <= boundaryToleranceSq) break
+      }
+      onBoundary = minD2 <= boundaryToleranceSq
+      if (onBoundary) inside = true
     }
-    const weight = THREE.MathUtils.clamp(outsideWeight * bandWeight, 0, 1)
-    if (weight <= 0.002) return null
-
-    // Keep Y untouched: this is the vertical clip plane/prism defined by the base.
-    const projected = point.clone()
-    projected.x = THREE.MathUtils.lerp(point.x, target.x, weight)
-    projected.z = THREE.MathUtils.lerp(point.z, target.z, weight)
-    return { projected, outsideDistance, weight, distanceToBoundary, u }
+    const result = { inside, onBoundary }
+    classificationCache.set(key, result)
+    return result
   }
 
-  const projectedBoundary = raw.map((point) => {
-    const hit = projectOne(point, true)
-    return hit ? hit.projected : point.clone()
-  })
+  const cross2 = (ax, ay, bx, by) => ax * by - ay * bx
 
-  let clippedBoundaryVertices = 0
-  let maxOutsideDistance = 0
-  let sumOutsideDistance = 0
-  for (let i = 0; i < raw.length; i++) {
-    const shift = Math.hypot(projectedBoundary[i].x - raw[i].x, projectedBoundary[i].z - raw[i].z)
-    if (shift > 1e-5) {
-      clippedBoundaryVertices++
-      maxOutsideDistance = Math.max(maxOutsideDistance, shift)
-      sumOutsideDistance += shift
+  const segmentFootprintHits = (a, b) => {
+    const hits = []
+    const rx = b.x - a.x
+    const rz = b.z - a.z
+    const rLenSq = rx * rx + rz * rz
+    if (rLenSq <= 1e-18) return hits
+
+    for (let i = 0; i < polygon.length; i++) {
+      const c = polygon[i]
+      const d = polygon[(i + 1) % polygon.length]
+      const sx = d.x - c.x
+      const sz = d.y - c.y
+      const denom = cross2(rx, rz, sx, sz)
+      if (Math.abs(denom) <= 1e-12) continue
+      const qx = c.x - a.x
+      const qz = c.y - a.z
+      const t = cross2(qx, qz, sx, sz) / denom
+      const u = cross2(qx, qz, rx, rz) / denom
+      if (t < -1e-8 || t > 1 + 1e-8 || u < -1e-8 || u > 1 + 1e-8) continue
+      hits.push({ t: THREE.MathUtils.clamp(t, 0, 1), segmentIndex: i })
     }
+
+    hits.sort((h1, h2) => h1.t - h2.t)
+    const unique = []
+    for (const hit of hits) {
+      if (!unique.length || Math.abs(hit.t - unique[unique.length - 1].t) > 1e-7) unique.push(hit)
+    }
+    return unique
   }
 
-  const moved = source.slice()
-  const vertexCount = Math.floor(source.length / 3)
-  let clippedSourceVertices = 0
-  let candidateSourceVertices = 0
-  let sourceOutsideSum = 0
-  let sourceOutsideMax = 0
-
-  for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++) {
-    const o = vertexIndex * 3
-    const point = new THREE.Vector3(source[o], source[o + 1], source[o + 2])
-    const nearest = nearestRawIndex(point)
-    if (nearest.index < 0 || nearest.distanceSq > (clipBandWidth + cellSize) * (clipBandWidth + cellSize)) continue
-    candidateSourceVertices++
-    const hit = projectOne(point, false)
-    if (!hit) continue
-    moved[o] = hit.projected.x
-    moved[o + 1] = hit.projected.y
-    moved[o + 2] = hit.projected.z
-    clippedSourceVertices++
-    sourceOutsideSum += hit.outsideDistance
-    sourceOutsideMax = Math.max(sourceOutsideMax, hit.outsideDistance)
+  const binaryCrossingFallback = (a, b, aInside) => {
+    let lo = 0, hi = 1
+    for (let iteration = 0; iteration < 24; iteration++) {
+      const mid = (lo + hi) * 0.5
+      const probe = a.clone().lerp(b, mid)
+      const midInside = classifyPoint(probe).inside
+      if (midInside === aInside) lo = mid
+      else hi = mid
+    }
+    return (lo + hi) * 0.5
   }
 
-  // Remove only triangles that numerically collapse after clipping. This preserves the
-  // existing source connectivity everywhere else and avoids zero-area slivers along the
-  // new vertical cut line.
-  const cleaned = []
-  let removedDegenerateTriangles = 0
-  const areaThreshold = Math.max(1e-10, safeDiagonal * safeDiagonal * 2.5e-11)
-  for (let offset = 0; offset + 8 < moved.length; offset += 9) {
-    const a = new THREE.Vector3(moved[offset], moved[offset + 1], moved[offset + 2])
-    const b = new THREE.Vector3(moved[offset + 3], moved[offset + 4], moved[offset + 5])
-    const c = new THREE.Vector3(moved[offset + 6], moved[offset + 7], moved[offset + 8])
+  const intersectEdge = (a, b, aInside, bInside) => {
+    const ka = pointKey(a), kb = pointKey(b)
+    const undirectedEdgeKey = ka < kb ? `${ka}~${kb}` : `${kb}~${ka}`
+    const hits = segmentFootprintHits(a, b)
+    let chosen = null
+    if (hits.length) {
+      chosen = aInside && !bInside ? hits[0] : hits[hits.length - 1]
+    }
+    const cacheKey = `${undirectedEdgeKey}#${chosen?.segmentIndex ?? -1}`
+    const cached = intersectionCache.get(cacheKey)
+    if (cached) return cached.clone()
+
+    const t = chosen ? chosen.t : binaryCrossingFallback(a, b, aInside)
+    const point = a.clone().lerp(b, THREE.MathUtils.clamp(t, 0, 1))
+
+    // When we know the exact footprint segment, snap XZ to that segment analytically.
+    // Y stays the source-edge interpolation, so the operation is a true vertical prism cut.
+    if (chosen) {
+      const c = polygon[chosen.segmentIndex]
+      const d = polygon[(chosen.segmentIndex + 1) % polygon.length]
+      const vx = d.x - c.x, vz = d.y - c.y
+      const len2 = vx * vx + vz * vz
+      if (len2 > 1e-18) {
+        const s = THREE.MathUtils.clamp(((point.x - c.x) * vx + (point.z - c.y) * vz) / len2, 0, 1)
+        point.x = c.x + vx * s
+        point.z = c.y + vz * s
+      }
+    }
+
+    intersectionCache.set(cacheKey, point.clone())
+    return point
+  }
+
+  const pushTriangle = (out, a, b, c, stats) => {
     const area2 = b.clone().sub(a).cross(c.clone().sub(a)).length()
     if (!Number.isFinite(area2) || area2 <= areaThreshold) {
-      removedDegenerateTriangles++
+      stats.removedDegenerateTriangles++
+      return false
+    }
+    out.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z)
+    return true
+  }
+
+  const clipped = []
+  const stats = {
+    candidateTriangles: 0,
+    keptTriangles: 0,
+    clippedTriangles: 0,
+    discardedTriangles: 0,
+    splitTriangles: 0,
+    generatedTriangles: 0,
+    removedDegenerateTriangles: 0,
+  }
+  const clipBandSq = clipBandWidth * clipBandWidth
+
+  for (let offset = 0; offset + 8 < source.length; offset += 9) {
+    const tri = [
+      new THREE.Vector3(source[offset], source[offset + 1], source[offset + 2]),
+      new THREE.Vector3(source[offset + 3], source[offset + 4], source[offset + 5]),
+      new THREE.Vector3(source[offset + 6], source[offset + 7], source[offset + 8]),
+    ]
+
+    const candidate = tri.some((p) => distanceToRawBoundarySq(p) <= clipBandSq)
+    if (!candidate) {
+      clipped.push(
+        tri[0].x, tri[0].y, tri[0].z,
+        tri[1].x, tri[1].y, tri[1].z,
+        tri[2].x, tri[2].y, tri[2].z
+      )
+      stats.keptTriangles++
       continue
     }
-    cleaned.push(
-      a.x, a.y, a.z,
-      b.x, b.y, b.z,
-      c.x, c.y, c.z
-    )
+
+    stats.candidateTriangles++
+    const inside = tri.map((p) => classifyPoint(p).inside)
+    const insideCount = inside.reduce((sum, value) => sum + (value ? 1 : 0), 0)
+
+    if (insideCount === 3) {
+      clipped.push(
+        tri[0].x, tri[0].y, tri[0].z,
+        tri[1].x, tri[1].y, tri[1].z,
+        tri[2].x, tri[2].y, tri[2].z
+      )
+      stats.keptTriangles++
+      continue
+    }
+
+    if (insideCount === 0) {
+      // In the narrow open-edge band this triangle is entirely on the forbidden side
+      // of the finished footprint. Remove it instead of collapsing it onto the wall.
+      stats.discardedTriangles++
+      continue
+    }
+
+    const polygon3D = []
+    for (let edge = 0; edge < 3; edge++) {
+      const next = (edge + 1) % 3
+      const current = tri[edge]
+      const following = tri[next]
+      const currentInside = inside[edge]
+      const nextInside = inside[next]
+      if (currentInside) polygon3D.push(current.clone())
+      if (currentInside !== nextInside) {
+        polygon3D.push(intersectEdge(current, following, currentInside, nextInside))
+      }
+    }
+
+    // Remove consecutive duplicate points caused by a triangle vertex already lying
+    // exactly on the footprint boundary.
+    const cleanPoly = []
+    for (const point of polygon3D) {
+      if (!cleanPoly.length || cleanPoly[cleanPoly.length - 1].distanceToSquared(point) > boundaryToleranceSq * 0.25) {
+        cleanPoly.push(point)
+      }
+    }
+    if (cleanPoly.length > 2 && cleanPoly[0].distanceToSquared(cleanPoly[cleanPoly.length - 1]) <= boundaryToleranceSq * 0.25) cleanPoly.pop()
+
+    if (cleanPoly.length < 3) {
+      stats.discardedTriangles++
+      continue
+    }
+
+    stats.clippedTriangles++
+    if (cleanPoly.length > 3) stats.splitTriangles++
+    let generatedForSource = 0
+    for (let i = 1; i + 1 < cleanPoly.length; i++) {
+      if (pushTriangle(clipped, cleanPoly[0], cleanPoly[i], cleanPoly[i + 1], stats)) generatedForSource++
+    }
+    stats.generatedTriangles += generatedForSource
+  }
+
+  // The intersection operation creates a genuinely new source-mesh boundary. Recover
+  // that loop from topology instead of trying to predict it from the old vertex order.
+  const extracted = cadExtractBoundaryLoopsRobust(clipped)
+  let newBoundary = extracted?.loops?.[0]?.points?.map((p) => p.clone()) || raw.map((p) => p.clone())
+
+  // Preserve orientation AND phase relative to the original conditioned loop. The
+  // Straight target was built from rawLoop before clipping, so a phase shift here would
+  // connect the palatal side to a buccal target even though both loops are individually valid.
+  const rawArea = cadSignedAreaXZ(raw)
+  if (newBoundary.length >= 4 && cadSignedAreaXZ(newBoundary) * rawArea < 0) newBoundary.reverse()
+  if (newBoundary.length >= 4) {
+    const anchor = raw[0]
+    let anchorIndex = 0
+    let anchorDistanceSq = Infinity
+    for (let i = 0; i < newBoundary.length; i++) {
+      const point = newBoundary[i]
+      const dx = point.x - anchor.x
+      const dz = point.z - anchor.z
+      const dy = (point.y - anchor.y) * 0.18
+      const d2 = dx * dx + dz * dz + dy * dy
+      if (d2 < anchorDistanceSq) {
+        anchorDistanceSq = d2
+        anchorIndex = i
+      }
+    }
+    if (anchorIndex > 0) newBoundary = newBoundary.slice(anchorIndex).concat(newBoundary.slice(0, anchorIndex))
   }
 
   return {
-    trianglePositions: cleaned,
-    boundary: projectedBoundary,
+    trianglePositions: clipped,
+    boundary: newBoundary,
     clipBandWidth,
-    clippedSourceVertices,
-    clippedBoundaryVertices,
-    maxOutsideDistance: Math.max(maxOutsideDistance, sourceOutsideMax),
-    meanOutsideDistance: clippedSourceVertices
-      ? sourceOutsideSum / clippedSourceVertices
-      : (clippedBoundaryVertices ? sumOutsideDistance / clippedBoundaryVertices : 0),
-    removedDegenerateTriangles,
-    candidateSourceVertices,
-    outsideSoft,
-    outsideHard,
+    candidateTriangles: stats.candidateTriangles,
+    keptTriangles: stats.keptTriangles,
+    clippedTriangles: stats.clippedTriangles,
+    discardedTriangles: stats.discardedTriangles,
+    splitTriangles: stats.splitTriangles,
+    generatedTriangles: stats.generatedTriangles,
+    intersectionVertices: intersectionCache.size,
+    removedDegenerateTriangles: stats.removedDegenerateTriangles,
+    extractedBoundaryLoops: extracted?.loops?.length || 0,
+    extractedBoundaryPoints: newBoundary.length,
+    boundaryPerimeterBefore: cadClosedLoopPerimeter(raw),
+    boundaryPerimeterAfter: cadClosedLoopPerimeter(newBoundary),
+    boundaryTolerance,
   }
 }
 
@@ -10605,14 +10739,13 @@ function cadOptimizeTransitionEdgeFlips(indices, positions, startIndex, endIndex
   return { flips, passes }
 }
 
-// V36: Base-envelope vertical cut + robust boundary conditioning + Direct Bridge.
+// V37: Exact footprint clip + rebuilt transition strip.
 //
-// V30 established the robust shape pipeline: conditioned scan edge -> direct bridge
-// to the finished Straight profile -> local edge flips + constrained fairing -> wall.
-// V36 keeps the robust V35 conditioning, but once the final Straight footprint exists it applies one extra
-// orientation-aware rule: source geometry in the narrow open-edge band is not allowed to project outside the
-// finished base footprint. Those overhangs are vertically clipped to the base prism before the shoulder is built.
-// This directly targets the remaining palatal/distal flaps instead of trying to smooth them into submission.
+// V36 proved that the finished Straight footprint is the correct hard limit, but
+// vertex projection damaged topology. V37 returns to the clean V35 conditioned scan,
+// performs a TRUE triangle/footprint cut in the narrow boundary band, extracts the
+// resulting intersection loop, then rebuilds the shoulder from uniformly sampled
+// intermediate rings. Healthy source vertices are never snapped to the base wall.
 function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
   const collectedTrianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
   const boundaryData = cadExtractBoundaryLoopsRobust(collectedTrianglePositions)
@@ -10660,18 +10793,20 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   regularized = cadSmoothClosedLoop(regularized, 10)
   regularized = cadResampleClosedLoopXZ(regularized, profileTargetSpacing)
 
-  // V36 experiment: use the already-final Straight footprint as a vertical cutting
-  // envelope. Only the narrow source band adjacent to the open scan edge may change.
-  // Any palatal/distal flap that sits outside this footprint is projected back onto
-  // the corresponding base wall before bridge generation.
-  const baseEnvelopeClip = cadClipScanBoundaryBandToBaseEnvelope(
+  // V37: physically cut the conditioned source triangles with the final Straight
+  // footprint. No source vertex is projected or collapsed. The returned boundary is
+  // the actual new open edge of the clipped source mesh.
+  const exactFootprintClip = cadExactClipScanToBaseFootprint(
     trianglePositions,
     rawLoop,
     regularized,
     boundaryData.diagonal
   )
-  trianglePositions = baseEnvelopeClip.trianglePositions
-  rawLoop = baseEnvelopeClip.boundary
+  trianglePositions = exactFootprintClip.trianglePositions
+  rawLoop = exactFootprintClip.boundary
+  if (!rawLoop || rawLoop.length < 4) {
+    throw new Error("Po přesném ořezu podle báze se nepodařilo obnovit hlavní hranici scanu.")
+  }
 
   const boundaryMinY = Math.min(...rawLoop.map((p) => p.y))
   const boundaryMaxY = Math.max(...rawLoop.map((p) => p.y))
@@ -10824,30 +10959,40 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     Math.ceil(Math.max(transitionSpan95, transitionSpanMax * 0.72) / bridgeTargetRowSpacing)
   ))
 
-  // Keep dense connectivity next to the scan, then reduce vertex count gently toward
-  // the ~0.39 mm Straight profile. This is only an initial topology; local flips and
-  // fairing below are what remove the obvious structured-strip character.
-  const sourceLogCount = Math.log(Math.max(3, rawLoop.length))
+  // V37 rebuilt transition strip. The exact clipped source boundary may have very
+  // irregular edge spacing because footprint intersections split source triangles.
+  // Do NOT copy that irregular sampling into the shoulder. Connect the exact source
+  // loop once to a uniformly arc-length sampled first ring, then reduce gradually to
+  // the frozen ~0.388 mm Straight profile. This is the narrow local remesh stage.
+  const rawEdgeLengths = rawLoop.map((point, i) => point.distanceTo(rawLoop[(i + 1) % rawLoop.length])).filter((v) => Number.isFinite(v) && v > 1e-5).sort((a, b) => a - b)
+  const rawMedianEdge = rawEdgeLengths.length
+    ? rawEdgeLengths[Math.floor(rawEdgeLengths.length * 0.5)]
+    : profileTargetSpacing * 0.72
+  const shoulderSamplingSpacing = THREE.MathUtils.clamp(rawMedianEdge * 1.45, 0.20, 0.33)
+  const rawPerimeter = cadClosedLoopPerimeter(rawLoop)
+  const shoulderStartCount = Math.max(
+    targetCount,
+    Math.min(980, Math.round(rawPerimeter / Math.max(0.12, shoulderSamplingSpacing)))
+  )
+  const sourceLogCount = Math.log(Math.max(3, shoulderStartCount))
   const targetLogCount = Math.log(Math.max(3, targetCount))
   const bridgeRows = []
-  let previousCount = rawLoop.length
+  let previousCount = shoulderStartCount
 
   for (let layer = 1; layer < bridgeIntervals; layer++) {
     const t = layer / bridgeIntervals
-    const reductionT = THREE.MathUtils.clamp((t - 0.38) / 0.62, 0, 1)
+    const reductionT = THREE.MathUtils.clamp((t - 0.10) / 0.90, 0, 1)
     const countProgress = smoothstep(reductionT)
     let desiredCount = Math.round(Math.exp(
       THREE.MathUtils.lerp(sourceLogCount, targetLogCount, countProgress)
     ))
-    if (layer <= 2) desiredCount = rawLoop.length
     desiredCount = Math.max(targetCount, Math.min(previousCount, desiredCount))
 
     const points = new Array(desiredCount)
     const params = new Array(desiredCount)
     const metadata = new Array(desiredCount)
-    const preserveRawSampling = desiredCount === rawLoop.length && layer <= 2
     for (let i = 0; i < desiredCount; i++) {
-      const u = preserveRawSampling ? rawParams[i] : i / desiredCount
+      const u = i / desiredCount
       params[i] = u
       points[i] = evaluateDirectBridge(u, t)
       metadata[i] = { u, t }
@@ -11183,9 +11328,9 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionEndOffset,
-      transitionMode: "base-envelope-vertical-clip-direct-bridge-v36",
+      transitionMode: "exact-footprint-triangle-clip-rebuilt-shoulder-v37",
       transitionRemeshEnabled: true,
-      transitionRemeshMethod: "closed-spline-plus-outlier-mask-plus-healthy-side-trimback-plus-biharmonic-feather-plus-local-edge-flip-fairing",
+      transitionRemeshMethod: "exact-triangle-footprint-clip-plus-new-intersection-boundary-plus-uniform-arc-rings-plus-local-edge-flip-fairing",
       wallAcquireStart,
       bridgeIntervals,
       bridgeTargetRowSpacing,
@@ -11209,15 +11354,23 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       shoulderGuideRadius,
       fairingMovedVertices,
       fairingMaxMove,
-      baseEnvelopeClipBandWidth: baseEnvelopeClip.clipBandWidth,
-      baseEnvelopeClippedSourceVertices: baseEnvelopeClip.clippedSourceVertices,
-      baseEnvelopeClippedBoundaryVertices: baseEnvelopeClip.clippedBoundaryVertices,
-      baseEnvelopeMaxOutsideDistance: baseEnvelopeClip.maxOutsideDistance,
-      baseEnvelopeMeanOutsideDistance: baseEnvelopeClip.meanOutsideDistance,
-      baseEnvelopeRemovedDegenerateTriangles: baseEnvelopeClip.removedDegenerateTriangles,
-      baseEnvelopeCandidateSourceVertices: baseEnvelopeClip.candidateSourceVertices,
-      baseEnvelopeOutsideSoft: baseEnvelopeClip.outsideSoft,
-      baseEnvelopeOutsideHard: baseEnvelopeClip.outsideHard,
+      exactClipBandWidth: exactFootprintClip.clipBandWidth,
+      exactClipCandidateTriangles: exactFootprintClip.candidateTriangles,
+      exactClipKeptTriangles: exactFootprintClip.keptTriangles,
+      exactClipClippedTriangles: exactFootprintClip.clippedTriangles,
+      exactClipDiscardedTriangles: exactFootprintClip.discardedTriangles,
+      exactClipSplitTriangles: exactFootprintClip.splitTriangles,
+      exactClipGeneratedTriangles: exactFootprintClip.generatedTriangles,
+      exactClipIntersectionVertices: exactFootprintClip.intersectionVertices,
+      exactClipRemovedDegenerateTriangles: exactFootprintClip.removedDegenerateTriangles,
+      exactClipExtractedBoundaryLoops: exactFootprintClip.extractedBoundaryLoops,
+      exactClipExtractedBoundaryPoints: exactFootprintClip.extractedBoundaryPoints,
+      exactClipBoundaryPerimeterBefore: exactFootprintClip.boundaryPerimeterBefore,
+      exactClipBoundaryPerimeterAfter: exactFootprintClip.boundaryPerimeterAfter,
+      exactClipBoundaryTolerance: exactFootprintClip.boundaryTolerance,
+      shoulderSamplingSpacing,
+      shoulderStartCount,
+      rawMedianBoundaryEdge: rawMedianEdge,
       edgeConditioningBandWidth: boundaryRelaxation.bandWidth,
       edgeConditioningMaxBoundaryShift: boundaryRelaxation.maxBoundaryShift,
       edgeConditioningAffectedVertices: boundaryRelaxation.affectedVertices,
@@ -11239,6 +11392,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       adaptiveTrimBackDetectedSegments: boundaryRelaxation.adaptiveTrimBackDetectedSegments,
       edgeConditioningFieldIterations: boundaryRelaxation.fieldIterations,
       sourceBoundaryPreserved: false,
+      sourceBoundaryRebuiltByExactClip: true,
       sourceOutsideConditioningBandPreserved: true,
       transitionPatchSourceCount: rawLoop.length,
       transitionPatchTargetCount: targetCount,
