@@ -8762,10 +8762,13 @@ function cadRelaxClosedBoundaryGentle(points, diagonal) {
     return point.clone().addScaledVector(lap, factor)
   })
 
-  // Krátký Taubin-like cyklus odstraní hlavně high-frequency zuby bez výrazného shrinku.
-  for (let i = 0; i < 11; i++) {
-    current = laplacePass(current, 0.30)
-    current = laplacePass(current, -0.305)
+  // V27: o něco rozhodnější, ale stále velmi lokální conditioning. Medit reference
+  // ukazuje, že samotný poslední okraj není ponechaný 1:1; high-frequency zuby
+  // jsou před vznikem shoulderu skutečně odstraněné. Taubin-like pár drží shrink
+  // pod kontrolou a změna se níže stejně featheruje pouze do úzkého pásu.
+  for (let i = 0; i < 14; i++) {
+    current = laplacePass(current, 0.31)
+    current = laplacePass(current, -0.315)
   }
 
   // Nedovolíme celému loopu "odplout".
@@ -8777,8 +8780,8 @@ function cadRelaxClosedBoundaryGentle(points, diagonal) {
   // V26: referenční Medit export ukazuje, že zásah do původního scanu je
   // opravdu velmi lokální. Držíme proto boundary relaxaci konzervativněji:
   // typicky několik desetin mm, nikdy ne široké "rozmazání" gingivy.
-  const maxShift = Math.max(0.14, Math.min(0.38, Math.max(1, diagonal) * 0.0042))
-  const strength = 0.64
+  const maxShift = Math.max(0.16, Math.min(0.48, Math.max(1, diagonal) * 0.0052))
+  const strength = 0.86
   const relaxed = original.map((raw, i) => {
     const delta = current[i].clone().sub(raw).multiplyScalar(strength)
     const length = delta.length()
@@ -8809,7 +8812,7 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
   // V26 / Medit-style: z referenčního input→output páru vychází většina změn
   // do ~0.5 mm od řezu a téměř vše do ~1 mm. Feather pás proto držíme přibližně
   // 0.8–1.2 mm; mimo něj je původní anatomie vertexově beze změny.
-  const bandWidth = Math.max(0.78, Math.min(1.08, Math.max(1, diagonal) * 0.0155))
+  const bandWidth = Math.max(0.84, Math.min(1.16, Math.max(1, diagonal) * 0.0162))
   const cellSize = bandWidth
   const buckets = new Map()
   const cellKey = (x, y, z) => `${Math.floor(x / cellSize)}:${Math.floor(y / cellSize)}:${Math.floor(z / cellSize)}`
@@ -8879,6 +8882,235 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
     bandWidth,
     maxBoundaryShift,
     affectedVertices,
+  }
+}
+
+
+// V27 – Support-ring guide reconstructed directly from the scan topology.
+//
+// Raw triangle normals from V25 were too noisy at a dental trim edge. Instead we
+// use the actual one-ring topology: for every boundary vertex we find incident
+// scan triangles and collect their NON-boundary vertex. The vector from boundary
+// into that third vertex is the true "healthy side" of the source surface. After
+// removing the component along the boundary tangent and circular low-pass filtering
+// we obtain a robust incoming surface direction without touching the anatomy.
+//
+// The returned supportPoints are NOT inserted into the mesh. They are only tangent
+// guides for the new rounded shoulder, so they may be normalized to a stable
+// physical distance (~0.6–0.85 mm) even when the original scan triangles are tiny.
+function cadBuildBoundarySupportRing(trianglePositions, rawBoundary, conditionedBoundary, isUpper, diagonal) {
+  const raw = Array.isArray(rawBoundary) ? rawBoundary : []
+  const seam = Array.isArray(conditionedBoundary) && conditionedBoundary.length === raw.length
+    ? conditionedBoundary
+    : raw
+  const count = raw.length
+  const transitionDirection = isUpper ? 1 : -1
+  const anatomyAxis = new THREE.Vector3(0, -transitionDirection, 0)
+  const fallbackDistance = Math.max(0.58, Math.min(0.84, Math.max(1, Number(diagonal) || 1) * 0.0108))
+
+  if (count < 4) {
+    return {
+      supportPoints: seam.map((p) => p.clone().addScaledVector(anatomyAxis, fallbackDistance)),
+      directions: seam.map(() => anatomyAxis.clone()),
+      coverage: 0,
+      supportDistance: fallbackDistance,
+      smoothingRadius: 0,
+      tolerance: 0,
+    }
+  }
+
+  const tolerance = Math.max(1e-5, Math.max(1, Number(diagonal) || 1) * 2.8e-5)
+  const inv = 1 / tolerance
+  const keyXYZ = (x, y, z) => `${Math.round(x * inv)}|${Math.round(y * inv)}|${Math.round(z * inv)}`
+
+  const boundaryBuckets = new Map()
+  for (let i = 0; i < count; i++) {
+    const p = raw[i]
+    const key = keyXYZ(p.x, p.y, p.z)
+    let bucket = boundaryBuckets.get(key)
+    if (!bucket) {
+      bucket = []
+      boundaryBuckets.set(key, bucket)
+    }
+    bucket.push(i)
+  }
+
+  const tangentAt = (i) => {
+    const prev = seam[(i - 2 + count) % count]
+    const next = seam[(i + 2) % count]
+    const tangent = next.clone().sub(prev)
+    if (tangent.lengthSq() < 1e-12) tangent.set(1, 0, 0)
+    return tangent.normalize()
+  }
+
+  const sums = Array.from({ length: count }, () => new THREE.Vector3())
+  const weights = new Float64Array(count)
+  const source = Array.isArray(trianglePositions) ? trianglePositions : []
+
+  for (let offset = 0; offset + 8 < source.length; offset += 9) {
+    const tri = [
+      new THREE.Vector3(source[offset], source[offset + 1], source[offset + 2]),
+      new THREE.Vector3(source[offset + 3], source[offset + 4], source[offset + 5]),
+      new THREE.Vector3(source[offset + 6], source[offset + 7], source[offset + 8]),
+    ]
+    const keys = tri.map((p) => keyXYZ(p.x, p.y, p.z))
+    const matched = keys.map((key) => boundaryBuckets.get(key) || null)
+
+    for (let corner = 0; corner < 3; corner++) {
+      const boundaryMatches = matched[corner]
+      if (!boundaryMatches?.length) continue
+      for (const boundaryIndex of boundaryMatches) {
+        const origin = raw[boundaryIndex]
+        for (let other = 0; other < 3; other++) {
+          if (other === corner) continue
+          // A neighboring boundary vertex only describes the tangent of the cut.
+          // We want the third/interior scan vertex on the healthy side.
+          if (matched[other]?.length) continue
+          const delta = tri[other].clone().sub(origin)
+          const length = delta.length()
+          if (length < tolerance * 0.5 || length > 2.6) continue
+          const tangent = tangentAt(boundaryIndex)
+          delta.addScaledVector(tangent, -delta.dot(tangent))
+          const crossLength = delta.length()
+          if (crossLength < tolerance * 0.5) continue
+          // Tiny source triangles should not dominate purely because they are tiny.
+          // A soft inverse-distance weight is enough to favor the local one-ring.
+          const weight = 1 / Math.max(0.14, Math.sqrt(crossLength))
+          sums[boundaryIndex].addScaledVector(delta.normalize(), weight)
+          weights[boundaryIndex] += weight
+        }
+      }
+    }
+  }
+
+  // BoundaryOverride normally lands exactly on split scan vertices. For safety,
+  // add a spatial fallback for the rare points that did not get an exact one-ring
+  // match (float export, resampled trim curve, etc.). Search is intentionally local
+  // so a nearby tooth/second sheet cannot become the guide for this edge.
+  const exactCovered = weights.reduce((sum, value) => sum + (value > 1e-9 ? 1 : 0), 0)
+  if (exactCovered < count * 0.94) {
+    const searchRadius = Math.max(0.62, Math.min(0.92, fallbackDistance * 1.18))
+    const searchCell = searchRadius * 0.72
+    const invCell = 1 / searchCell
+    const vertexGrid = new Map()
+    const gridKey = (x, y, z) => `${Math.floor(x * invCell)}:${Math.floor(y * invCell)}:${Math.floor(z * invCell)}`
+    const seenVertex = new Set()
+    for (let offset = 0; offset + 2 < source.length; offset += 3) {
+      const x = source[offset], y = source[offset + 1], z = source[offset + 2]
+      const uniqueKey = keyXYZ(x, y, z)
+      if (seenVertex.has(uniqueKey)) continue
+      seenVertex.add(uniqueKey)
+      const key = gridKey(x, y, z)
+      let bucket = vertexGrid.get(key)
+      if (!bucket) {
+        bucket = []
+        vertexGrid.set(key, bucket)
+      }
+      bucket.push(new THREE.Vector3(x, y, z))
+    }
+
+    const cellReach = Math.max(1, Math.ceil(searchRadius / searchCell))
+    for (let i = 0; i < count; i++) {
+      if (weights[i] > 1e-9) continue
+      const origin = raw[i]
+      const tangent = tangentAt(i)
+      const cx = Math.floor(origin.x * invCell)
+      const cy = Math.floor(origin.y * invCell)
+      const cz = Math.floor(origin.z * invCell)
+      const localSum = new THREE.Vector3()
+      let localWeight = 0
+      for (let dx = -cellReach; dx <= cellReach; dx++) {
+        for (let dy = -cellReach; dy <= cellReach; dy++) {
+          for (let dz = -cellReach; dz <= cellReach; dz++) {
+            const bucket = vertexGrid.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
+            if (!bucket) continue
+            for (const candidate of bucket) {
+              const delta = candidate.clone().sub(origin)
+              const distance = delta.length()
+              if (distance < 0.12 || distance > searchRadius) continue
+              const anatomyProjection = delta.dot(anatomyAxis) / Math.max(1e-9, distance)
+              if (anatomyProjection < -0.16) continue
+              delta.addScaledVector(tangent, -delta.dot(tangent))
+              const crossLength = delta.length()
+              if (crossLength < 0.08) continue
+              const direction = delta.normalize()
+              const healthyBias = 0.65 + 0.35 * Math.max(0, direction.dot(anatomyAxis))
+              const weight = healthyBias / Math.max(0.16, Math.sqrt(distance))
+              localSum.addScaledVector(direction, weight)
+              localWeight += weight
+            }
+          }
+        }
+      }
+      if (localWeight > 1e-9 && localSum.lengthSq() > 1e-12) {
+        sums[i].copy(localSum)
+        weights[i] = localWeight
+      }
+    }
+  }
+
+  const rawDirections = new Array(count)
+  let covered = 0
+  for (let i = 0; i < count; i++) {
+    let direction
+    if (weights[i] > 1e-9 && sums[i].lengthSq() > 1e-12) {
+      direction = sums[i].normalize()
+      covered++
+    } else {
+      direction = anatomyAxis.clone()
+    }
+
+    // Re-remove tangential leakage after the one-ring average.
+    const tangent = tangentAt(i)
+    direction.addScaledVector(tangent, -direction.dot(tangent))
+    if (direction.lengthSq() < 1e-12) direction.copy(anatomyAxis)
+    direction.normalize()
+
+    // The support point must lie on the healthy/anatomical side of the cut. Very
+    // small local overhangs are allowed, but a guide pointing strongly toward the
+    // future base is replaced by a conservative anatomy-axis blend.
+    const anatomyDot = direction.dot(anatomyAxis)
+    if (anatomyDot < -0.08) {
+      direction.multiplyScalar(0.30).addScaledVector(anatomyAxis, 0.70)
+      if (direction.lengthSq() < 1e-12) direction.copy(anatomyAxis)
+      direction.normalize()
+    }
+    rawDirections[i] = direction
+  }
+
+  // Strong circular low-pass: support guides should describe the macroscopic
+  // arrival direction of the scan, not individual IOS triangles.
+  const smoothingRadius = Math.max(5, Math.min(15, Math.round(count / 85)))
+  const smoothed = rawDirections.map((fallback, i) => {
+    const sum = new THREE.Vector3()
+    let total = 0
+    for (let k = -smoothingRadius; k <= smoothingRadius; k++) {
+      const idx = (i + k + count) % count
+      const weight = smoothingRadius + 1 - Math.abs(k)
+      const candidate = rawDirections[idx].clone()
+      if (candidate.dot(fallback) < 0) candidate.negate()
+      sum.addScaledVector(candidate, weight)
+      total += weight
+    }
+    if (total > 0) sum.multiplyScalar(1 / total)
+    const tangent = tangentAt(i)
+    sum.addScaledVector(tangent, -sum.dot(tangent))
+    if (sum.lengthSq() < 1e-12) sum.copy(fallback)
+    sum.normalize()
+    if (sum.dot(anatomyAxis) < -0.04) {
+      sum.multiplyScalar(0.35).addScaledVector(anatomyAxis, 0.65).normalize()
+    }
+    return sum
+  })
+
+  const supportPoints = seam.map((point, i) => point.clone().addScaledVector(smoothed[i], fallbackDistance))
+  return {
+    supportPoints,
+    directions: smoothed,
+    coverage: covered / count,
+    supportDistance: fallbackDistance,
+    smoothingRadius,
+    tolerance,
   }
 }
 
@@ -9508,7 +9740,7 @@ function cadOptimizeTransitionEdgeFlips(indices, positions, startIndex, endIndex
   return { flips, passes }
 }
 
-// V26 RELEASE: Edge Conditioning + Stable Blend Collar.
+// V27 RELEASE: Conditioned Seam + Support-Ring Guided Rounded Shoulder.
 function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
   const collectedTrianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
   const boundaryData = cadExtractBoundaryLoopsRobust(collectedTrianglePositions)
@@ -9535,7 +9767,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
 
   const exactRawLoop = cadSignedAreaXZ(boundary) < 0 ? boundary.slice().reverse() : boundary.slice()
 
-  // V26 Edge Conditioning.
+  // V27 Edge Conditioning + Support Ring.
   //
   // V25 ukázala, že vynucovat G1 tangent přímo z raw IOS normals je na členité
   // trim hraně příliš agresivní: lokálně může vzniknout folded/fan patch. Medit
@@ -9558,6 +9790,18 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const trianglePositions = boundaryConditioning.trianglePositions
   const rawLoop = boundaryConditioning.boundary
   const boundaryRelaxation = boundaryConditioning
+
+  // V27: reconstruct a virtual support ring from the ORIGINAL one-ring topology.
+  // It gives us the incoming direction of the scan without reintroducing V25's
+  // noisy face-normal tangent driver. The support ring is only a guide; no support
+  // vertex is written into the source anatomy.
+  const supportRing = cadBuildBoundarySupportRing(
+    collectedTrianglePositions,
+    exactRawLoop,
+    rawLoop,
+    isUpper,
+    boundaryData.diagonal
+  )
 
   // V9 – Medit-style transition.
   //
@@ -9614,103 +9858,147 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const transitionDepth = transitionEndOffset
   const smoothstep = (t) => t * t * (3 - 2 * t)
 
-  // V23 – Medit-style fairing podle FYZICKÉ délky v milimetrech.
+  // V27 – compact Medit-like rounded shoulder.
   //
-  // V22 už vyřešila dlouhé hrany a drží transition manifold, ale z posledního
-  // Rogers A/B je vidět, že v hlubších částech trim boundary se detail scanu
-  // stále táhne příliš daleko do báze jako svislé streaky. Příčina je geometrická:
-  // XZ blend byl řízen jen normalizovaným V. Stejných 40 % V tedy znamenalo jinou
-  // reálnou vzdálenost v místě s 1.5mm transitionem a jinou v místě s 7mm
-  // transitionem. Medit naopak high-frequency detail utlumí zhruba v konstantně
-  // širokém fyzickém pásu a potom už pokračuje pravidelný Straight profil.
-  //
-  // V23 proto používá lokální 3D span každého U generátoru a XZ regularizaci
-  // dokončí přibližně během ~1.8–2.1 mm skutečné dráhy. Kratší transitiony se
-  // samozřejmě normalizují na celou dostupnou délku. Raw boundary ani finální
-  // Straight profil se tím neposouvají.
-  const transitionBlendLength = Math.max(1.68, Math.min(2.08, boundaryData.diagonal * 0.028))
-
-  // V26 stable collar slopes.
-  //
-  // XZ profil už nezačíná nulovou derivací (což dělalo viditelnou "římsu"), ale
-  // malou bezpečnou derivací POUZE směrem k regularized Straight profilu.
-  // Na rozdíl od V25 zde není žádný směr odhadovaný z raw face normals; celý
-  // průběh je monotónní mezi dvěma známými endpointy a nemůže se lokálně přehnout.
-  const transitionProfileStartSlope = 0.30
-  const transitionProfileEndSlope = 0.00
-  const transitionVerticalStartSlope = 0.42
-  const transitionVerticalEndSlope = 1.00
-
-  const hermiteProgress = (t, startSlope, endSlope) => {
-    const x = THREE.MathUtils.clamp(t, 0, 1)
-    const x2 = x * x
-    const x3 = x2 * x
-    const h01 = -2 * x3 + 3 * x2
-    const h10 = x3 - 2 * x2 + x
-    const h11 = x3 - x2
-    return THREE.MathUtils.clamp(
-      h01 + h10 * startSlope + h11 * endSlope,
-      0,
-      1
-    )
-  }
-
-  const verticalHermite = (t) => hermiteProgress(
-    t,
-    transitionVerticalStartSlope,
-    transitionVerticalEndSlope
-  )
-
-  const profileHermite = (t) => hermiteProgress(
-    t,
-    transitionProfileStartSlope,
-    transitionProfileEndSlope
-  )
+  // The cross-sections of the 25 mm Medit reference show a short rounded shoulder
+  // directly below the conditioned scan and then a technically clean Straight wall.
+  // Therefore XZ regularization is no longer spread through the whole deep loft.
+  // It is completed in a compact ~0.8–1.15 mm shoulder; any remaining depth then
+  // continues almost vertically with the already-regularized Straight profile.
+  const transitionShoulderLength = Math.max(0.82, Math.min(1.12, boundaryData.diagonal * 0.0155))
+  const transitionShoulderMin = 0.68
+  const transitionShoulderMax = 1.28
+  const transitionShoulderXZGain = 0.24
+  const transitionStartHandleFactor = 0.52
+  const transitionEndHandleFactor = 0.42
+  const transitionSupportMinAlignment = 0.18
+  const transitionPerpClamp = Math.max(0.20, Math.min(0.34, boundaryData.diagonal * 0.0048))
 
   const targetCount = regularized.length
   const capMargin = Math.min(0.45, Math.max(0.16, availableBaseDepth * 0.08))
   const rawArcTable = cadClosedLoopArcTable(rawLoop)
+  const supportPoints = supportRing.supportPoints
+
+  const cubicBezierPoint = (p0, p1, p2, p3, t) => {
+    const x = THREE.MathUtils.clamp(t, 0, 1)
+    const inv = 1 - x
+    const b0 = inv * inv * inv
+    const b1 = 3 * inv * inv * x
+    const b2 = 3 * inv * x * x
+    const b3 = x * x * x
+    return new THREE.Vector3(
+      p0.x * b0 + p1.x * b1 + p2.x * b2 + p3.x * b3,
+      p0.y * b0 + p1.y * b1 + p2.y * b2 + p3.y * b3,
+      p0.z * b0 + p1.z * b1 + p2.z * b2 + p3.z * b3
+    )
+  }
 
   const evaluateTransitionSurface = (u, v) => {
     const vv = THREE.MathUtils.clamp(v, 0, 1)
     const raw = cadSampleClosedLoopArc(rawLoop, rawArcTable, u)
+    const support = cadSampleClosedLoopArc(supportPoints, rawArcTable, u)
     const smooth = cadSampleClosedLoopUniform(regularized, u)
+    const finalPoint = new THREE.Vector3(smooth.x, targetY, smooth.z)
 
-    const dx = smooth.x - raw.x
-    const dy = targetY - raw.y
-    const dz = smooth.z - raw.z
-    const localSpan = Math.max(1e-6, Math.hypot(dx, dy, dz))
-    const localBlendLength = Math.max(0.34, Math.min(transitionBlendLength, localSpan))
-
-    // V26 Stable Blend Collar.
-    //
-    // High-frequency detail conditioned boundary zmizí během přibližně stejné
-    // fyzické délky jako ve V23/V24. Samotný XZ progress je ale nyní cubic Hermite
-    // s malou nenulovou start slope. Collar tedy od scanu začne plynule "odjíždět"
-    // k pravidelnému profilu, ale vždy pouze uvnitř segmentu raw→smooth.
-    const physicalProgress = THREE.MathUtils.clamp(
-      (vv * localSpan) / Math.max(1e-6, localBlendLength),
-      0,
-      1
+    const totalVerticalDepth = Math.max(1e-6, Math.abs(targetY - raw.y))
+    const xzDistance = Math.hypot(smooth.x - raw.x, smooth.z - raw.z)
+    const localShoulderDepth = Math.min(
+      totalVerticalDepth,
+      THREE.MathUtils.clamp(
+        transitionShoulderLength + xzDistance * transitionShoulderXZGain,
+        transitionShoulderMin,
+        transitionShoulderMax
+      )
     )
-    const profileT = profileHermite(physicalProgress)
-    const verticalT = verticalHermite(vv)
-    const interpolatedY = THREE.MathUtils.lerp(raw.y, targetY, verticalT)
-    const y = isUpper
-      ? Math.min(interpolatedY, baseCapY - capMargin)
-      : Math.max(interpolatedY, baseCapY + capMargin)
+    const shoulderFraction = THREE.MathUtils.clamp(localShoulderDepth / totalVerticalDepth, 0, 1)
+    const shoulderEndY = raw.y + transitionDirection * localShoulderDepth
+    const shoulderEnd = new THREE.Vector3(smooth.x, shoulderEndY, smooth.z)
 
-    const point = new THREE.Vector3(
-      THREE.MathUtils.lerp(raw.x, smooth.x, profileT),
-      y,
-      THREE.MathUtils.lerp(raw.z, smooth.z, profileT)
+    // Incoming tangent = continuation from the virtual support ring toward the seam.
+    // If the topology-derived guide points too far away from the final CAD profile,
+    // softly rotate it toward the safe raw→shoulder vector. This keeps V25-style
+    // folds impossible while preserving the actual arrival direction of the scan.
+    const incoming = raw.clone().sub(support)
+    const safeDirection = shoulderEnd.clone().sub(raw)
+    if (safeDirection.lengthSq() < 1e-12) safeDirection.set(0, transitionDirection, 0)
+    safeDirection.normalize()
+    if (incoming.lengthSq() < 1e-12) incoming.copy(safeDirection)
+    else incoming.normalize()
+
+    let alignment = incoming.dot(safeDirection)
+    if (alignment < transitionSupportMinAlignment) {
+      const blend = THREE.MathUtils.clamp(
+        (transitionSupportMinAlignment - alignment) / Math.max(1e-6, 1 - alignment),
+        0,
+        1
+      )
+      incoming.lerp(safeDirection, Math.max(0.34, blend)).normalize()
+      alignment = incoming.dot(safeDirection)
+      if (alignment < 0.02) incoming.copy(safeDirection)
+    }
+
+    const shoulderChord = Math.max(1e-6, raw.distanceTo(shoulderEnd))
+    const startHandle = Math.min(
+      0.64,
+      Math.max(0.20, shoulderChord * transitionStartHandleFactor)
+    )
+    const endHandle = Math.min(
+      0.52,
+      Math.max(0.18, localShoulderDepth * transitionEndHandleFactor)
+    )
+    const p1 = raw.clone().addScaledVector(incoming, startHandle)
+    // End derivative is exactly along the future Straight wall.
+    const p2 = shoulderEnd.clone().addScaledVector(
+      new THREE.Vector3(0, -transitionDirection, 0),
+      endHandle
     )
 
-    // Tvrdý monotónní guard. X/Z už jsou konvexní interpolace endpointů a Y je
-    // omezeno mezi boundary a targetY. Tím V26 z principu nemůže vytvořit V25
-    // normal-driven overshoot/fold za cílový Straight profil.
+    let point
+    if (vv <= shoulderFraction || shoulderFraction >= 0.999999) {
+      const localT = shoulderFraction > 1e-9 ? vv / shoulderFraction : 1
+      point = cubicBezierPoint(raw, p1, p2, shoulderEnd, localT)
+
+      // Conservative XZ guard. The Bézier may bend slightly away from the straight
+      // raw→smooth chord to form the rounded shoulder, but never far enough to create
+      // a folded fan or a local hook. Keep only a small perpendicular component.
+      const chordXZ = new THREE.Vector2(smooth.x - raw.x, smooth.z - raw.z)
+      const chordLenSq = chordXZ.lengthSq()
+      if (chordLenSq > 1e-10) {
+        const pointXZ = new THREE.Vector2(point.x - raw.x, point.z - raw.z)
+        let progress = pointXZ.dot(chordXZ) / chordLenSq
+        progress = THREE.MathUtils.clamp(progress, -0.06, 1.02)
+        const baseXZ = chordXZ.clone().multiplyScalar(progress)
+        const perp = pointXZ.clone().sub(baseXZ)
+        if (perp.length() > transitionPerpClamp) perp.setLength(transitionPerpClamp)
+        const guarded = baseXZ.add(perp)
+        point.x = raw.x + guarded.x
+        point.z = raw.z + guarded.y
+      } else {
+        const radial = new THREE.Vector2(point.x - raw.x, point.z - raw.z)
+        if (radial.length() > transitionPerpClamp) radial.setLength(transitionPerpClamp)
+        point.x = raw.x + radial.x
+        point.z = raw.z + radial.y
+      }
+    } else {
+      // Once the rounded shoulder is complete, keep XZ fully regularized and only
+      // descend/ascend vertically to the transition-end plane. This is the key
+      // V27 difference visible in Medit cross-sections.
+      const tailT = (vv - shoulderFraction) / Math.max(1e-9, 1 - shoulderFraction)
+      point = new THREE.Vector3(
+        smooth.x,
+        THREE.MathUtils.lerp(shoulderEndY, targetY, tailT),
+        smooth.z
+      )
+    }
+
+    // Hard monotonic Y guard: no transition vertex may cross back through the scan
+    // or overshoot beyond the target plane.
     if (transitionDirection > 0) point.y = THREE.MathUtils.clamp(point.y, raw.y, targetY)
     else point.y = THREE.MathUtils.clamp(point.y, targetY, raw.y)
+
+    // Keep the same cap safety used by the stable V26 implementation.
+    if (isUpper) point.y = Math.min(point.y, baseCapY - capMargin)
+    else point.y = Math.max(point.y, baseCapY + capMargin)
     return point
   }
 
@@ -9813,12 +10101,12 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   //
   // Cíl není remeshovat anatomii, ale přiblížit počet a charakter transition
   // triangles reálnému Medit advancing-front patchi při zachování watertightness.
-  const transitionFrontExponent = 1.70
-  const transitionPhysicalTarget = 1.45
+  const transitionFrontExponent = 1.82
+  const transitionPhysicalTarget = 1.12
   const physicalIntervals = Math.ceil(
     Math.max(transitionSpan95, transitionSpanMax * 0.70) / transitionPhysicalTarget
   )
-  const transitionIntervals = Math.max(6, Math.min(8, physicalIntervals))
+  const transitionIntervals = Math.max(7, Math.min(9, physicalIntervals))
   const transitionVLevels = new Array(transitionIntervals + 1)
   const transitionArcFractions = new Array(transitionIntervals + 1)
   transitionVLevels[0] = 0
@@ -9851,14 +10139,18 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     // Medit-like count schedule: interpolujeme v log(count), ale redukci necháme
     // nabíhat přes smoothstep. První front tedy zůstává skoro stejně hustý jako
     // raw boundary; teprve další fronty začnou count výrazněji slučovat.
-    const countProgress = smoothstep(arcFraction)
+    // V27: první dva fyzické fronty jsou stále součástí "landing zone" shoulderu.
+    // Tam hustotu raw scan boundary prakticky nesnižujeme. Redukce začne až po
+    // cca 18 % fyzické dráhy a pak plynule doběhne k regularized wall profilu.
+    const reductionT = THREE.MathUtils.clamp((arcFraction - 0.18) / 0.82, 0, 1)
+    const countProgress = smoothstep(reductionT)
     const scheduledCount = Math.round(Math.exp(
       THREE.MathUtils.lerp(sourceLogCount, targetLogCount, countProgress)
     ))
 
-    // Samostatný edge-length safety floor. Ten nesmí znovu přehustit celý patch,
-    // pouze brání příliš dlouhým obvodovým hranám v místě s vysokou křivostí.
-    const safetySpacing = THREE.MathUtils.lerp(0.27, 0.44, smoothstep(arcFraction))
+    // Jemnější safety floor u horních frontů brání dlouhým vějířům právě v místě,
+    // kde je shoulder ve shaded view nejcitlivější. Níž může mesh přejít k ~0.44 mm.
+    const safetySpacing = THREE.MathUtils.lerp(0.245, 0.44, smoothstep(reductionT))
     const spacingCount = Math.max(targetCount, Math.ceil(perimeter / safetySpacing))
 
     let desiredCount = Math.max(targetCount, scheduledCount, spacingCount)
@@ -9906,7 +10198,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const wallLoop = seamLoop
   const bottomLoop = wallRings[wallRings.length - 1]
 
-  // V26: source část je kopií scanu po velmi lokálním edge conditioningu; mimo
+  // V27: source část je kopií scanu po velmi lokálním edge conditioningu; mimo
   // feather pás zůstává vertexově totožná. Novou CAD část vytvoříme indexovaně.
   // Vertikální stěna i transition band tak sdílejí
   // vertexy a computeVertexNormals může vytvořit skutečně hladké normály místo
@@ -10052,7 +10344,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionEndOffset,
-      transitionMode: "edge-conditioned-stable-collar-v26",
+      transitionMode: "conditioned-seam-support-ring-rounded-shoulder-v27",
       transitionBridgeRingCounts: transitionBridgeRings.map((ring) => ring.count),
       transitionBridgeRingSpacings: transitionBridgeRings.map((ring) => ring.spacing),
       transitionBridgeRingLevels: transitionBridgeRings.map((ring) => ring.v),
@@ -10063,14 +10355,20 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       transitionArcFractions,
       transitionArcEqualized: true,
       transitionMedianArcTotal,
-      transitionBlendLength,
-      transitionProfileStartSlope,
-      transitionProfileEndSlope,
-      transitionVerticalStartSlope,
-      transitionVerticalEndSlope,
       edgeConditioningBandWidth: boundaryRelaxation.bandWidth,
       edgeConditioningMaxBoundaryShift: boundaryRelaxation.maxBoundaryShift,
       edgeConditioningAffectedVertices: boundaryRelaxation.affectedVertices,
+      supportRingCoverage: supportRing.coverage,
+      supportRingDistance: supportRing.supportDistance,
+      supportRingSmoothingRadius: supportRing.smoothingRadius,
+      transitionShoulderLength,
+      transitionShoulderMin,
+      transitionShoulderMax,
+      transitionShoulderXZGain,
+      transitionStartHandleFactor,
+      transitionEndHandleFactor,
+      transitionSupportMinAlignment,
+      transitionPerpClamp,
       sourceBoundaryPreserved: false,
       sourceOutsideConditioningBandPreserved: true,
       transitionSpan95,
