@@ -8746,6 +8746,36 @@ function cadSmoothOutwardNormalsXZ(points) {
 // - posun každého bodu boundary je tvrdě omezený,
 // - stejný posun se přenese do okolní mesh pouze v úzkém feather pásu,
 // - vliv rychle klesá na nulu, takže zuby a vzdálenější gingiva zůstanou beze změny.
+function cadEvalClosedUniformCubicBSpline(controlPoints, fraction) {
+  const points = Array.isArray(controlPoints) ? controlPoints : []
+  const count = points.length
+  if (!count) return new THREE.Vector3()
+  if (count < 4) {
+    const index = ((Math.round((((fraction % 1) + 1) % 1) * count)) % count + count) % count
+    return points[index].clone()
+  }
+
+  const wrapped = ((fraction % 1) + 1) % 1
+  const scaled = wrapped * count
+  const segment = Math.floor(scaled) % count
+  const t = scaled - Math.floor(scaled)
+  const t2 = t * t
+  const t3 = t2 * t
+  const b0 = (1 - 3 * t + 3 * t2 - t3) / 6
+  const b1 = (4 - 6 * t2 + 3 * t3) / 6
+  const b2 = (1 + 3 * t + 3 * t2 - 3 * t3) / 6
+  const b3 = t3 / 6
+  const p0 = points[(segment - 1 + count) % count]
+  const p1 = points[segment]
+  const p2 = points[(segment + 1) % count]
+  const p3 = points[(segment + 2) % count]
+  return new THREE.Vector3(
+    p0.x * b0 + p1.x * b1 + p2.x * b2 + p3.x * b3,
+    p0.y * b0 + p1.y * b1 + p2.y * b2 + p3.y * b3,
+    p0.z * b0 + p1.z * b1 + p2.z * b2 + p3.z * b3
+  )
+}
+
 function cadRegularizeBoundaryArcLength(points, diagonal) {
   if (!Array.isArray(points) || points.length < 4) {
     return {
@@ -8756,79 +8786,114 @@ function cadRegularizeBoundaryArcLength(points, diagonal) {
       maxShiftY: 0,
       maxShift: 0,
       meanShift: 0,
+      splineSampleStep: 0,
+      splineControlPoints: 0,
+      splineFairingPasses: 0,
     }
   }
 
   const original = points.map((p) => p.clone())
   const safeDiagonal = Math.max(1, Number(diagonal) || 1)
-
-  // V33 – physical-distance boundary regularization.
-  // Index-based +/-N smoothing is unreliable on an IOS mesh because vertex density
-  // varies dramatically. The filter therefore works in millimetres along the actual
-  // closed boundary. XZ (the footprint plane) is filtered substantially more than Y,
-  // which preserves the vertical anatomy while removing the palatal saw-tooth / hooks.
-  const halfWindowXZ = Math.max(1.55, Math.min(2.45, safeDiagonal * 0.038))
-  const halfWindowY = Math.max(0.72, Math.min(1.18, halfWindowXZ * 0.48))
-  const sampleStep = Math.max(0.16, Math.min(0.28, safeDiagonal * 0.0042))
-  const maxShiftXZ = Math.max(0.38, Math.min(0.72, safeDiagonal * 0.0115))
-  const maxShiftY = Math.max(0.08, Math.min(0.19, safeDiagonal * 0.0030))
-
-  const gaussianFilter = (source, halfWindow, sigma, blendXZ, blendY) => {
-    const table = cadClosedLoopArcTable(source)
-    if (!table.total || table.total <= 1e-8) return source.map((p) => p.clone())
-    const radiusSamples = Math.max(3, Math.ceil(halfWindow / sampleStep))
-    const result = new Array(source.length)
-
-    for (let i = 0; i < source.length; i++) {
-      const centerDistance = table.cumulative[i]
-      const centerFraction = centerDistance / table.total
-      const sum = new THREE.Vector3()
-      let weightSum = 0
-
-      for (let s = -radiusSamples; s <= radiusSamples; s++) {
-        const distanceOffset = s * sampleStep
-        if (Math.abs(distanceOffset) > halfWindow + 1e-8) continue
-        const normalized = distanceOffset / Math.max(1e-6, sigma)
-        const weight = Math.exp(-0.5 * normalized * normalized)
-        const sampleFraction = centerFraction + distanceOffset / table.total
-        const sample = cadSampleClosedLoopArc(source, table, sampleFraction)
-        sum.addScaledVector(sample, weight)
-        weightSum += weight
-      }
-
-      const average = weightSum > 1e-8 ? sum.multiplyScalar(1 / weightSum) : source[i].clone()
-      const point = source[i].clone()
-      point.x = THREE.MathUtils.lerp(point.x, average.x, blendXZ)
-      point.z = THREE.MathUtils.lerp(point.z, average.z, blendXZ)
-      point.y = THREE.MathUtils.lerp(point.y, average.y, blendY)
-      result[i] = point
+  const rawTable = cadClosedLoopArcTable(original)
+  if (!rawTable.total || rawTable.total <= 1e-8) {
+    return {
+      points: original,
+      halfWindowXZ: 0,
+      halfWindowY: 0,
+      maxShiftXZ: 0,
+      maxShiftY: 0,
+      maxShift: 0,
+      meanShift: 0,
+      splineSampleStep: 0,
+      splineControlPoints: 0,
+      splineFairingPasses: 0,
     }
-
-    // Preserve the low-frequency arch position. We want to remove local hooks, not
-    // shrink or translate the whole dental arch.
-    const sourceCenter = source.reduce((acc, p) => acc.add(p), new THREE.Vector3()).multiplyScalar(1 / source.length)
-    const resultCenter = result.reduce((acc, p) => acc.add(p), new THREE.Vector3()).multiplyScalar(1 / result.length)
-    const correctionX = sourceCenter.x - resultCenter.x
-    const correctionZ = sourceCenter.z - resultCenter.z
-    for (const point of result) {
-      point.x += correctionX
-      point.z += correctionZ
-    }
-    return result
   }
 
-  // Two restrained low-pass passes are enough to regularize the boundary while still
-  // following the genuine arch shape. The second pass is intentionally weaker.
-  let current = gaussianFilter(original, halfWindowXZ, halfWindowXZ * 0.48, 0.88, 0.30)
-  current = gaussianFilter(current, halfWindowXZ * 0.72, halfWindowXZ * 0.38, 0.48, 0.18)
+  // V34 – closed smoothing-spline target.
+  // First resample the trim loop at uniform PHYSICAL arc length. Then fair those
+  // controls with a curvature-penalizing periodic filter and evaluate a closed cubic
+  // B-spline back at the original vertex parameters. This removes low-frequency
+  // palatal waviness that a local moving average can still preserve, while keeping
+  // the overall arch position and the vertical anatomy tightly constrained.
+  const sampleStep = Math.max(0.18, Math.min(0.26, safeDiagonal * 0.0038))
+  const controlCount = Math.max(32, Math.min(1400, Math.round(rawTable.total / sampleStep)))
+  const controlsRaw = new Array(controlCount)
+  for (let i = 0; i < controlCount; i++) {
+    controlsRaw[i] = cadSampleClosedLoopArc(original, rawTable, i / controlCount)
+  }
 
+  const halfWindowXZ = Math.max(1.80, Math.min(2.85, safeDiagonal * 0.043))
+  const halfWindowY = Math.max(0.70, Math.min(1.16, halfWindowXZ * 0.40))
+  const maxShiftXZ = Math.max(0.46, Math.min(0.78, safeDiagonal * 0.0125))
+  const maxShiftY = Math.max(0.07, Math.min(0.17, safeDiagonal * 0.0027))
+  const splineFairingPasses = Math.max(6, Math.min(12, Math.round(halfWindowXZ / Math.max(0.16, sampleStep) * 0.72)))
+
+  let controls = controlsRaw.map((p) => p.clone())
+  for (let pass = 0; pass < splineFairingPasses; pass++) {
+    const previous = controls.map((p) => p.clone())
+    const passT = splineFairingPasses > 1 ? pass / (splineFairingPasses - 1) : 1
+    const lambdaXZ = THREE.MathUtils.lerp(0.34, 0.18, passT)
+    const lambdaY = THREE.MathUtils.lerp(0.10, 0.035, passT)
+    controls = previous.map((point, i) => {
+      const prev = previous[(i - 1 + controlCount) % controlCount]
+      const next = previous[(i + 1) % controlCount]
+      const average = prev.clone().add(next).multiplyScalar(0.5)
+      const candidate = point.clone()
+      candidate.x = THREE.MathUtils.lerp(point.x, average.x, lambdaXZ)
+      candidate.z = THREE.MathUtils.lerp(point.z, average.z, lambdaXZ)
+      candidate.y = THREE.MathUtils.lerp(point.y, average.y, lambdaY)
+      return candidate
+    })
+  }
+
+  // Curvature-aware cleanup: if a short section still has much higher planar second
+  // difference than its neighbours, soften only that section. This targets the exact
+  // kind of residual S-wave visible in the palatal shoulder without globally shrinking
+  // the dental arch.
+  const curvature = controls.map((point, i) => {
+    const prev = controls[(i - 1 + controlCount) % controlCount]
+    const next = controls[(i + 1) % controlCount]
+    return Math.hypot(prev.x - 2 * point.x + next.x, prev.z - 2 * point.z + next.z)
+  })
+  const sortedCurvature = curvature.slice().sort((a, b) => a - b)
+  const medianCurvature = sortedCurvature[Math.floor(sortedCurvature.length * 0.5)] || 1e-6
+  const curvatureReference = Math.max(1e-6, medianCurvature * 1.65)
+  const previousControls = controls.map((p) => p.clone())
+  controls = previousControls.map((point, i) => {
+    const prev = previousControls[(i - 1 + controlCount) % controlCount]
+    const next = previousControls[(i + 1) % controlCount]
+    const average = prev.clone().add(next).multiplyScalar(0.5)
+    const excess = THREE.MathUtils.clamp((curvature[i] - curvatureReference) / curvatureReference, 0, 1)
+    const blendXZ = excess * 0.30
+    const blendY = excess * 0.045
+    return new THREE.Vector3(
+      THREE.MathUtils.lerp(point.x, average.x, blendXZ),
+      THREE.MathUtils.lerp(point.y, average.y, blendY),
+      THREE.MathUtils.lerp(point.z, average.z, blendXZ)
+    )
+  })
+
+  // Preserve the low-frequency position of the arch after fairing.
+  const rawCenter = controlsRaw.reduce((acc, p) => acc.add(p), new THREE.Vector3()).multiplyScalar(1 / controlCount)
+  const controlCenter = controls.reduce((acc, p) => acc.add(p), new THREE.Vector3()).multiplyScalar(1 / controlCount)
+  const correctionX = rawCenter.x - controlCenter.x
+  const correctionZ = rawCenter.z - controlCenter.z
+  const correctionY = (rawCenter.y - controlCenter.y) * 0.30
+  for (const point of controls) {
+    point.x += correctionX
+    point.z += correctionZ
+    point.y += correctionY
+  }
+
+  const vertexFractions = cadClosedLoopVertexFractions(original).slice(0, original.length)
   let maxShift = 0
   let sumShift = 0
   const regularized = original.map((raw, i) => {
-    const candidate = current[i]
-    let dx = candidate.x - raw.x
-    let dz = candidate.z - raw.z
-    let dy = candidate.y - raw.y
+    const target = cadEvalClosedUniformCubicBSpline(controls, vertexFractions[i] || 0)
+    let dx = target.x - raw.x
+    let dz = target.z - raw.z
+    let dy = target.y - raw.y
 
     const xzLength = Math.hypot(dx, dz)
     if (xzLength > maxShiftXZ) {
@@ -8853,6 +8918,9 @@ function cadRegularizeBoundaryArcLength(points, diagonal) {
     maxShiftY,
     maxShift,
     meanShift: regularized.length ? sumShift / regularized.length : 0,
+    splineSampleStep: sampleStep,
+    splineControlPoints: controlCount,
+    splineFairingPasses,
   }
 }
 
@@ -8929,6 +8997,10 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
       boundaryWindowY: 0,
       maxBoundaryShiftXZ: 0,
       maxBoundaryShiftY: 0,
+      splineSampleStep: 0,
+      splineControlPoints: 0,
+      splineFairingPasses: 0,
+      fieldIterations: 0,
     }
   }
 
@@ -8937,13 +9009,14 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
   const displacements = relaxedLoop.map((point, i) => point.clone().sub(rawLoop[i]))
   const maxBoundaryShift = regularization.maxShift
 
-  // V33: instead of merely softening the exact edge, rebuild a full feather strip.
-  // Boundary = 100 % of the regularization displacement, support side = 0 %.
-  // This is the algorithmic equivalent of masking the scan in Blender and smoothing
-  // only the last few rows of polygons before the base is attached.
+  // V34: spread the spline target through a slightly wider support strip, using a
+  // screened two-scale diffusion of the DISPLACEMENT FIELD. This behaves much closer
+  // to a masked/biharmonic sculpt operation than direct vertex averaging: the target
+  // boundary is exact, the inner support side is exact zero, and only the smooth warp
+  // between those constraints is optimized.
   const safeDiagonal = Math.max(1, Number(diagonal) || 1)
-  const bandWidth = Math.max(1.28, Math.min(1.82, safeDiagonal * 0.0275))
-  const cellSize = Math.max(0.48, Math.min(0.92, bandWidth * 0.52))
+  const bandWidth = Math.max(1.55, Math.min(2.18, safeDiagonal * 0.0325))
+  const cellSize = Math.max(0.48, Math.min(0.94, bandWidth * 0.48))
   const buckets = new Map()
   const cellKey = (x, y, z) => `${Math.floor(x / cellSize)}:${Math.floor(y / cellSize)}:${Math.floor(z / cellSize)}`
 
@@ -8979,11 +9052,9 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
     let nearestIndex = -1
     let nearestVertexDistanceSq = Infinity
 
-    // The hash is intentionally searched a little wider than one cell because the
-    // feather band can be wider than cellSize in the larger dental models.
-    for (let dx = -2; dx <= 2; dx++) {
-      for (let dy = -2; dy <= 2; dy++) {
-        for (let dz = -2; dz <= 2; dz++) {
+    for (let dx = -3; dx <= 3; dx++) {
+      for (let dy = -3; dy <= 3; dy++) {
+        for (let dz = -3; dz <= 3; dz++) {
           const bucket = buckets.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
           if (!bucket) continue
           for (const boundaryIndex of bucket) {
@@ -9002,24 +9073,20 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
     }
 
     if (nearestIndex < 0) continue
-    const closest = cadClosestBoundaryDisplacement(point, rawLoop, displacements, nearestIndex, 4)
+    const closest = cadClosestBoundaryDisplacement(point, rawLoop, displacements, nearestIndex, 5)
     const distance = Math.sqrt(closest.distanceSq)
     if (!Number.isFinite(distance) || distance > bandWidth) continue
 
     vertexDistances[vertexIndex] = distance
     const normalized = 1 - distance / bandWidth
-    // Full motion on the trim edge, very soft fade to a fixed support strip.
     const weight = smootherstep(normalized)
     vertexWeights[vertexIndex] = weight
     warpVectors[vertexIndex] = closest.displacement.multiplyScalar(weight)
     if (weight > 0.001) affectedVertices++
   }
 
-  // Smooth the DEFORMATION FIELD, not the anatomy itself. This removes discrete
-  // nearest-edge assignment artifacts while retaining the original surface detail.
-  // Boundary and support limits are hard constraints.
-  const fieldIterations = 2
-  const fieldRadius = Math.max(0.38, Math.min(0.68, bandWidth * 0.38))
+  const fieldIterations = 3
+  const fieldRadius = Math.max(0.48, Math.min(0.88, bandWidth * 0.41))
   const fieldRadiusSq = fieldRadius * fieldRadius
   const fieldCell = fieldRadius
   let displacementFieldSmoothedVertices = 0
@@ -9037,8 +9104,65 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
     bucket.push(vertexIndex)
   }
 
+  const fieldNeighbors = new Array(vertexCount)
+  for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++) {
+    if (!warpVectors[vertexIndex]) continue
+    const o = vertexIndex * 3
+    const x = source[o], y = source[o + 1], z = source[o + 2]
+    const cx = Math.floor(x / fieldCell)
+    const cy = Math.floor(y / fieldCell)
+    const cz = Math.floor(z / fieldCell)
+    const neighbors = []
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const bucket = fieldBuckets.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
+          if (!bucket) continue
+          for (const neighborIndex of bucket) {
+            if (neighborIndex === vertexIndex || !warpVectors[neighborIndex]) continue
+            const no = neighborIndex * 3
+            const ddx = source[no] - x
+            const ddy = source[no + 1] - y
+            const ddz = source[no + 2] - z
+            const d2 = ddx * ddx + ddy * ddy + ddz * ddz
+            if (d2 <= 1e-12 || d2 > fieldRadiusSq) continue
+            const proximity = 1 - Math.sqrt(d2) / fieldRadius
+            const w = Math.max(0, proximity) * (0.40 + 0.60 * vertexWeights[neighborIndex])
+            if (w > 1e-6) neighbors.push([neighborIndex, w])
+          }
+        }
+      }
+    }
+    fieldNeighbors[vertexIndex] = neighbors
+  }
+
+  const diffuseField = (field) => {
+    const diffused = new Array(vertexCount)
+    for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++) {
+      const current = field[vertexIndex]
+      if (!current) continue
+      const neighbors = fieldNeighbors[vertexIndex]
+      if (!neighbors?.length) {
+        diffused[vertexIndex] = current.clone()
+        continue
+      }
+      const average = current.clone().multiplyScalar(0.65)
+      let weightSum = 0.65
+      for (const [neighborIndex, weight] of neighbors) {
+        const neighbor = field[neighborIndex]
+        if (!neighbor) continue
+        average.addScaledVector(neighbor, weight)
+        weightSum += weight
+      }
+      diffused[vertexIndex] = average.multiplyScalar(1 / Math.max(1e-8, weightSum))
+    }
+    return diffused
+  }
+
   for (let iteration = 0; iteration < fieldIterations; iteration++) {
     const previous = warpVectors.map((v) => v ? v.clone() : null)
+    const firstDiffuse = diffuseField(previous)
+    const secondDiffuse = diffuseField(firstDiffuse)
     const updates = new Map()
 
     for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++) {
@@ -9046,49 +9170,22 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
       if (!current) continue
       const distance = vertexDistances[vertexIndex]
       const weight = vertexWeights[vertexIndex]
-      // Keep the exact target boundary and the zero-displacement support side fixed.
-      if (distance < bandWidth * 0.075 || distance > bandWidth * 0.90 || weight < 0.025) continue
+      // Strong Dirichlet constraints at both ends of the deformation strip.
+      if (distance < bandWidth * 0.055 || distance > bandWidth * 0.91 || weight < 0.018) continue
 
-      const o = vertexIndex * 3
-      const x = source[o], y = source[o + 1], z = source[o + 2]
-      const cx = Math.floor(x / fieldCell)
-      const cy = Math.floor(y / fieldCell)
-      const cz = Math.floor(z / fieldCell)
-      const average = new THREE.Vector3()
-      let weightSum = 0
+      const interiorIn = smootherstep(Math.min(1, distance / Math.max(1e-6, bandWidth * 0.34)))
+      const interiorOut = smootherstep(Math.max(0, 1 - distance / bandWidth))
+      const interiorWeight = interiorIn * interiorOut
+      if (interiorWeight < 0.02) continue
 
-      for (let dx = -1; dx <= 1; dx++) {
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dz = -1; dz <= 1; dz++) {
-            const bucket = fieldBuckets.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
-            if (!bucket) continue
-            for (const neighborIndex of bucket) {
-              if (neighborIndex === vertexIndex) continue
-              const neighborWarp = previous[neighborIndex]
-              if (!neighborWarp) continue
-              const no = neighborIndex * 3
-              const ddx = source[no] - x
-              const ddy = source[no + 1] - y
-              const ddz = source[no + 2] - z
-              const d2 = ddx * ddx + ddy * ddy + ddz * ddz
-              if (d2 <= 1e-12 || d2 > fieldRadiusSq) continue
-              const proximity = 1 - Math.sqrt(d2) / fieldRadius
-              const w = Math.max(0, proximity) * (0.45 + 0.55 * vertexWeights[neighborIndex])
-              if (w <= 1e-6) continue
-              average.addScaledVector(neighborWarp, w)
-              weightSum += w
-            }
-          }
-        }
-      }
+      const first = firstDiffuse[vertexIndex] || current
+      const second = secondDiffuse[vertexIndex] || first
+      const candidate = current.clone()
+        .lerp(first, 0.28 * interiorWeight)
+        .lerp(second, 0.18 * interiorWeight)
 
-      if (weightSum <= 1e-6) continue
-      average.multiplyScalar(1 / weightSum)
-      const blend = 0.34 * smootherstep(Math.min(1, distance / Math.max(1e-6, bandWidth * 0.42)))
-      const candidate = current.clone().lerp(average, blend)
-
-      // Never allow field smoothing to exceed the original regularized-boundary move.
-      const localLimit = Math.max(0.05, maxBoundaryShift * weight + 0.025)
+      // Keep the fairing screened to the actual spline correction at this distance.
+      const localLimit = Math.max(0.045, maxBoundaryShift * weight + 0.018)
       if (candidate.length() > localLimit) candidate.setLength(localLimit)
       updates.set(vertexIndex, candidate)
       displacementFieldSmoothedVertices++
@@ -9119,9 +9216,12 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
     boundaryWindowY: regularization.halfWindowY,
     maxBoundaryShiftXZ: regularization.maxShiftXZ,
     maxBoundaryShiftY: regularization.maxShiftY,
+    splineSampleStep: regularization.splineSampleStep,
+    splineControlPoints: regularization.splineControlPoints,
+    splineFairingPasses: regularization.splineFairingPasses,
+    fieldIterations,
   }
 }
-
 
 
 // V27 – Support-ring guide reconstructed directly from the scan topology.
@@ -10058,12 +10158,12 @@ function cadOptimizeTransitionEdgeFlips(indices, positions, startIndex, endIndex
   return { flips, passes }
 }
 
-// V33: Regularized Boundary + Feather Deformation Strip + Direct Bridge.
+// V34: Closed Spline Boundary + Biharmonic-style Feather Strip + Direct Bridge.
 //
 // V30 established the robust shape pipeline: conditioned scan edge -> direct bridge
 // to the finished Straight profile -> local edge flips + constrained fairing -> wall.
-// V33 keeps the robust direct-bridge geometry, but rebuilds the SOURCE boundary first:
-// physical-distance low-pass in XZ, restrained Y filtering, then a smooth deformation
+// V34 keeps the robust direct-bridge geometry, but rebuilds the SOURCE boundary first:
+// uniform arc-length resampling + periodic cubic spline regularization in XZ, restrained Y, then a smooth deformation
 // field across a 1–2 mm source strip. Only after that do we construct the shoulder.
 // The bridge itself remains envelope-constrained and both end loops are hard constraints.
 function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
@@ -10144,7 +10244,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const rawArcTable = cadClosedLoopArcTable(rawLoop)
   const rawParams = cadClosedLoopVertexFractions(rawLoop).slice(0, rawLoop.length)
 
-  // V33 circumferential shoulder guide. The source boundary is already regularized and
+  // V34 circumferential shoulder guide. The source boundary is already spline-regularized and
   // feather-deformed before this stage. This guide therefore only removes any residual
   // high-frequency ripple from the first NEW bridge rows.
   // The displacement is deliberately tiny and hard-clamped.
@@ -10622,9 +10722,9 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionEndOffset,
-      transitionMode: "regularized-boundary-feather-strip-direct-bridge-v33",
+      transitionMode: "closed-spline-boundary-biharmonic-feather-direct-bridge-v34",
       transitionRemeshEnabled: true,
-      transitionRemeshMethod: "arc-length-boundary-regularization-plus-feather-deformation-plus-local-edge-flip-fairing",
+      transitionRemeshMethod: "closed-cubic-spline-boundary-plus-biharmonic-style-feather-field-plus-local-edge-flip-fairing",
       wallAcquireStart,
       bridgeIntervals,
       bridgeTargetRowSpacing,
@@ -10657,6 +10757,10 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       edgeConditioningBoundaryWindowY: boundaryRelaxation.boundaryWindowY,
       edgeConditioningMaxBoundaryShiftXZ: boundaryRelaxation.maxBoundaryShiftXZ,
       edgeConditioningMaxBoundaryShiftY: boundaryRelaxation.maxBoundaryShiftY,
+      edgeConditioningSplineSampleStep: boundaryRelaxation.splineSampleStep,
+      edgeConditioningSplineControlPoints: boundaryRelaxation.splineControlPoints,
+      edgeConditioningSplineFairingPasses: boundaryRelaxation.splineFairingPasses,
+      edgeConditioningFieldIterations: boundaryRelaxation.fieldIterations,
       sourceBoundaryPreserved: false,
       sourceOutsideConditioningBandPreserved: true,
       transitionPatchSourceCount: rawLoop.length,
