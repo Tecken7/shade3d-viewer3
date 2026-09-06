@@ -11443,6 +11443,25 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     flatForBoundary[i * 3 + 2] = positionAttribute.getZ(vertexIndex)
   }
   const finalBoundary = cadExtractBoundaryLoopsRobust(flatForBoundary)
+  // TEST (diagnostics): pinpoint exactly where each remaining open loop in the FINAL
+  // (scan+base+shoulder) mesh sits, so a big unstitched gap can be told apart from small
+  // pre-existing scan noise holes without needing to eyeball the viewport.
+  if (finalBoundary.loops.length > 0) {
+    console.warn(
+      `[cadBuildSolidBaseGeometry] Finální mesh má ${finalBoundary.loops.length} otevřených smyček ` +
+      `(seřazeno od největší podle obvodu):`,
+      finalBoundary.loops.map((loop, idx) => {
+        const box = new THREE.Box3().setFromPoints(loop.points)
+        return {
+          loop: idx + 1,
+          points: loop.points.length,
+          perimeterMm: Number(loop.perimeter?.toFixed(2)),
+          bboxMin: { x: Number(box.min.x.toFixed(2)), y: Number(box.min.y.toFixed(2)), z: Number(box.min.z.toFixed(2)) },
+          bboxMax: { x: Number(box.max.x.toFixed(2)), y: Number(box.max.y.toFixed(2)), z: Number(box.max.z.toFixed(2)) },
+        }
+      })
+    )
+  }
 
   return {
     geometry,
