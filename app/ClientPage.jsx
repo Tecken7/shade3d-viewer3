@@ -9505,6 +9505,23 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal, isUpper 
 // are discarded. This avoids creating a second uncontrolled open loop while giving us
 // the shape effect of the red "cut everything outside the base" line from the test.
 function cadClipScanBoundaryBandToBaseEnvelope(trianglePositions, rawLoop, footprintLoop, diagonal) {
+  // TEST (V39): V36 moved each outside vertex independently toward the footprint. That
+  // never creates a *gap* (topology/index order is untouched), but a triangle with one
+  // vertex left alone and one vertex snapped hard toward the footprint turns into a long
+  // thin sliver - exactly the "fringe of needles" artifact seen after the V36 revert.
+  // The zero/near-zero-area filter below only ever caught fully collapsed triangles, not
+  // stretched-but-nonzero-area slivers.
+  //
+  // V39 never moves a single vertex. Instead, any triangle within the open-edge band that
+  // pokes meaningfully outside the finished base footprint is simply DELETED. The open
+  // boundary is then re-extracted from what remains using the same edge-multiplicity loop
+  // tracer already used everywhere else in this file (cadExtractBoundaryLoopsRobust) -
+  // a purely combinatorial, well-tested operation that always returns a single clean,
+  // non-self-intersecting loop, unlike ad-hoc triangle/polygon clipping (which is what
+  // caused V37's large unstitched gap). The resulting loop is naturally a little jagged
+  // right where triangles were cut away, but that is fine: the shoulder-bridge code
+  // downstream (shoulderGuideLoop circular smoothing) already expects and cleans up a
+  // slightly rough incoming rawLoop.
   const source = Array.isArray(trianglePositions) ? trianglePositions : []
   const raw = Array.isArray(rawLoop) ? rawLoop : []
   const footprint = Array.isArray(footprintLoop) ? footprintLoop : []
@@ -9513,12 +9530,10 @@ function cadClipScanBoundaryBandToBaseEnvelope(trianglePositions, rawLoop, footp
       trianglePositions: source.slice(),
       boundary: raw.map((p) => p.clone()),
       clipBandWidth: 0,
-      clippedSourceVertices: 0,
-      clippedBoundaryVertices: 0,
-      maxOutsideDistance: 0,
-      meanOutsideDistance: 0,
-      removedDegenerateTriangles: 0,
-      candidateSourceVertices: 0,
+      droppedTriangles: 0,
+      keptTriangles: Math.floor(source.length / 9),
+      candidateTriangles: 0,
+      reextractedLoops: 0,
     }
   }
 
@@ -9526,25 +9541,14 @@ function cadClipScanBoundaryBandToBaseEnvelope(trianglePositions, rawLoop, footp
   const polygon = footprint.map((p) => new THREE.Vector2(p.x, p.z))
   const rawArc = cadClosedLoopArcTable(raw)
   const footprintArc = cadClosedLoopArcTable(footprint)
-  const rawFractions = cadClosedLoopVertexFractions(raw).slice(0, raw.length)
   const zeroDisplacements = raw.map(() => new THREE.Vector3())
 
-  const smootherstep = (t) => {
-    const x = THREE.MathUtils.clamp(t, 0, 1)
-    return x * x * x * (x * (x * 6 - 15) + 10)
-  }
-
-  // Wide enough to catch the palatal/distal hanging strip from the screenshots, but
-  // still far too narrow to reach tooth crowns or useful anatomy away from the cut.
+  // Same sizing as the V36/V37 experiments: wide enough to catch a hanging palatal/distal
+  // flap, far too narrow to ever reach tooth crowns or useful anatomy away from the cut.
   const clipBandWidth = Math.max(2.85, Math.min(4.15, safeDiagonal * 0.057))
-  const fullClipBand = clipBandWidth * 0.64
-  const outsideSoft = Math.max(0.055, Math.min(0.10, safeDiagonal * 0.00135))
   const outsideHard = Math.max(0.28, Math.min(0.46, safeDiagonal * 0.0060))
   const cellSize = Math.max(0.62, Math.min(1.20, clipBandWidth * 0.30))
 
-  // Spatial hash only for finding the local raw-boundary parameter. The actual clip
-  // target is sampled from the final Straight footprint at that same arc parameter,
-  // which prevents points on opposite sides of the palatal U from snapping together.
   const buckets = new Map()
   const cellKey = (x, y, z) => `${Math.floor(x / cellSize)}:${Math.floor(y / cellSize)}:${Math.floor(z / cellSize)}`
   for (let i = 0; i < raw.length; i++) {
@@ -9587,126 +9591,98 @@ function cadClipScanBoundaryBandToBaseEnvelope(trianglePositions, rawLoop, footp
     return { index: bestIndex, distanceSq: bestDistanceSq }
   }
 
-  const fractionFromClosest = (closest) => {
+  // How far OUTSIDE the finished footprint this point sits, and whether it was even
+  // close enough to the open edge to be a clipping candidate at all (inBand). Points far
+  // from the band (healthy anatomy) always report outside=0 and are never touched.
+  const outsideDistanceOf = (point) => {
+    const nearest = nearestRawIndex(point)
+    if (nearest.index < 0 || nearest.distanceSq > (clipBandWidth + cellSize) * (clipBandWidth + cellSize)) {
+      return { outside: 0, inBand: false }
+    }
+    const closest = cadClosestBoundaryDisplacement(point, raw, zeroDisplacements, nearest.index, 6)
+    const distanceToBoundary = Math.sqrt(closest.distanceSq)
+    if (!Number.isFinite(distanceToBoundary) || distanceToBoundary > clipBandWidth) {
+      return { outside: 0, inBand: false }
+    }
+    const p2 = new THREE.Vector2(point.x, point.z)
+    if (cadPointInPolygon2D(p2, polygon)) return { outside: 0, inBand: true }
+
     const index = closest.boundaryIndex
-    if (index < 0) return 0
     const next = (index + 1) % raw.length
     const start = rawArc.cumulative[index] || 0
     const edgeLength = raw[index].distanceTo(raw[next])
     const length = start + edgeLength * THREE.MathUtils.clamp(closest.segmentT || 0, 0, 1)
-    return rawArc.total > 1e-9 ? ((length / rawArc.total) % 1 + 1) % 1 : (rawFractions[index] || 0)
-  }
-
-  const projectOne = (point, forceBoundary = false) => {
-    const nearest = nearestRawIndex(point)
-    if (nearest.index < 0) return null
-    const closest = cadClosestBoundaryDisplacement(point, raw, zeroDisplacements, nearest.index, 6)
-    const distanceToBoundary = Math.sqrt(closest.distanceSq)
-    if (!forceBoundary && (!Number.isFinite(distanceToBoundary) || distanceToBoundary > clipBandWidth)) return null
-
-    const p2 = new THREE.Vector2(point.x, point.z)
-    const inside = cadPointInPolygon2D(p2, polygon)
-    if (inside) return null
-
-    const u = fractionFromClosest(closest)
+    const u = rawArc.total > 1e-9 ? ((length / rawArc.total) % 1 + 1) % 1 : 0
     const target = cadSampleClosedLoopArc(footprint, footprintArc, u)
     const outsideDistance = Math.hypot(point.x - target.x, point.z - target.z)
-    if (outsideDistance <= outsideSoft) return null
-
-    const outsideWeight = smootherstep(
-      (outsideDistance - outsideSoft) / Math.max(1e-6, outsideHard - outsideSoft)
-    )
-    let bandWeight = 1
-    if (!forceBoundary && distanceToBoundary > fullClipBand) {
-      bandWeight = 1 - smootherstep(
-        (distanceToBoundary - fullClipBand) / Math.max(1e-6, clipBandWidth - fullClipBand)
-      )
-    }
-    const weight = THREE.MathUtils.clamp(outsideWeight * bandWeight, 0, 1)
-    if (weight <= 0.002) return null
-
-    // Keep Y untouched: this is the vertical clip plane/prism defined by the base.
-    const projected = point.clone()
-    projected.x = THREE.MathUtils.lerp(point.x, target.x, weight)
-    projected.z = THREE.MathUtils.lerp(point.z, target.z, weight)
-    return { projected, outsideDistance, weight, distanceToBoundary, u }
+    return { outside: outsideDistance, inBand: true }
   }
 
-  const projectedBoundary = raw.map((point) => {
-    const hit = projectOne(point, true)
-    return hit ? hit.projected : point.clone()
-  })
-
-  let clippedBoundaryVertices = 0
-  let maxOutsideDistance = 0
-  let sumOutsideDistance = 0
-  for (let i = 0; i < raw.length; i++) {
-    const shift = Math.hypot(projectedBoundary[i].x - raw[i].x, projectedBoundary[i].z - raw[i].z)
-    if (shift > 1e-5) {
-      clippedBoundaryVertices++
-      maxOutsideDistance = Math.max(maxOutsideDistance, shift)
-      sumOutsideDistance += shift
-    }
-  }
-
-  const moved = source.slice()
   const vertexCount = Math.floor(source.length / 3)
-  let clippedSourceVertices = 0
-  let candidateSourceVertices = 0
-  let sourceOutsideSum = 0
-  let sourceOutsideMax = 0
-
-  for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++) {
+  const outsideCache = new Float64Array(vertexCount).fill(-1)
+  const inBandCache = new Uint8Array(vertexCount)
+  const outsideOf = (vertexIndex) => {
+    if (outsideCache[vertexIndex] >= 0) return outsideCache[vertexIndex]
     const o = vertexIndex * 3
-    const point = new THREE.Vector3(source[o], source[o + 1], source[o + 2])
-    const nearest = nearestRawIndex(point)
-    if (nearest.index < 0 || nearest.distanceSq > (clipBandWidth + cellSize) * (clipBandWidth + cellSize)) continue
-    candidateSourceVertices++
-    const hit = projectOne(point, false)
-    if (!hit) continue
-    moved[o] = hit.projected.x
-    moved[o + 1] = hit.projected.y
-    moved[o + 2] = hit.projected.z
-    clippedSourceVertices++
-    sourceOutsideSum += hit.outsideDistance
-    sourceOutsideMax = Math.max(sourceOutsideMax, hit.outsideDistance)
+    const result = outsideDistanceOf(new THREE.Vector3(source[o], source[o + 1], source[o + 2]))
+    outsideCache[vertexIndex] = result.outside
+    inBandCache[vertexIndex] = result.inBand ? 1 : 0
+    return result.outside
   }
 
-  // Remove only triangles that numerically collapse after clipping. This preserves the
-  // existing source connectivity everywhere else and avoids zero-area slivers along the
-  // new vertical cut line.
+  let droppedTriangles = 0
+  let keptTriangles = 0
+  let candidateTriangles = 0
   const cleaned = []
-  let removedDegenerateTriangles = 0
-  const areaThreshold = Math.max(1e-10, safeDiagonal * safeDiagonal * 2.5e-11)
-  for (let offset = 0; offset + 8 < moved.length; offset += 9) {
-    const a = new THREE.Vector3(moved[offset], moved[offset + 1], moved[offset + 2])
-    const b = new THREE.Vector3(moved[offset + 3], moved[offset + 4], moved[offset + 5])
-    const c = new THREE.Vector3(moved[offset + 6], moved[offset + 7], moved[offset + 8])
-    const area2 = b.clone().sub(a).cross(c.clone().sub(a)).length()
-    if (!Number.isFinite(area2) || area2 <= areaThreshold) {
-      removedDegenerateTriangles++
+  const triCount = Math.floor(vertexCount / 3)
+  for (let t = 0; t < triCount; t++) {
+    const ia = t * 3, ib = ia + 1, ic = ia + 2
+    const oa = outsideOf(ia)
+    const ob = outsideOf(ib)
+    const oc = outsideOf(ic)
+    if (inBandCache[ia] || inBandCache[ib] || inBandCache[ic]) candidateTriangles++
+    const maxOutside = Math.max(oa, ob, oc)
+    if (maxOutside > outsideHard) {
+      droppedTriangles++
       continue
     }
-    cleaned.push(
-      a.x, a.y, a.z,
-      b.x, b.y, b.z,
-      c.x, c.y, c.z
-    )
+    keptTriangles++
+    const offset = ia * 3
+    for (let k = 0; k < 9; k++) cleaned.push(source[offset + k])
+  }
+
+  // Re-extract the real open boundary of whatever remains. Most of it is byte-identical
+  // to the incoming raw loop (nothing outside the band was ever touched), so realigning
+  // the new loop's start index/winding to the old one is precise and stable.
+  const rebuilt = cadExtractBoundaryLoopsRobust(cleaned)
+  const candidateLoop = rebuilt.loops?.[0]?.points
+  let boundary
+  let reextractedLoops = rebuilt.loops?.length || 0
+  if (candidateLoop && candidateLoop.length >= 4) {
+    let loop = candidateLoop.slice()
+    const sameWinding = (cadSignedAreaXZ(loop) < 0) === (cadSignedAreaXZ(raw) < 0)
+    if (!sameWinding) loop.reverse()
+    const anchor = raw[0]
+    let bestIndex = 0
+    let bestDistSq = Infinity
+    for (let i = 0; i < loop.length; i++) {
+      const d = loop[i].distanceToSquared(anchor)
+      if (d < bestDistSq) { bestDistSq = d; bestIndex = i }
+    }
+    boundary = bestIndex > 0 ? loop.slice(bestIndex).concat(loop.slice(0, bestIndex)) : loop
+  } else {
+    boundary = raw.map((p) => p.clone())
+    reextractedLoops = 0
   }
 
   return {
     trianglePositions: cleaned,
-    boundary: projectedBoundary,
+    boundary,
     clipBandWidth,
-    clippedSourceVertices,
-    clippedBoundaryVertices,
-    maxOutsideDistance: Math.max(maxOutsideDistance, sourceOutsideMax),
-    meanOutsideDistance: clippedSourceVertices
-      ? sourceOutsideSum / clippedSourceVertices
-      : (clippedBoundaryVertices ? sumOutsideDistance / clippedBoundaryVertices : 0),
-    removedDegenerateTriangles,
-    candidateSourceVertices,
-    outsideSoft,
+    droppedTriangles,
+    keptTriangles,
+    candidateTriangles,
+    reextractedLoops,
     outsideHard,
   }
 }
@@ -10726,9 +10702,9 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   regularized = cadSmoothClosedLoop(regularized, 10)
   regularized = cadResampleClosedLoopXZ(regularized, profileTargetSpacing)
 
-  // TEST (V38 revert): back to the V36 vertical base-envelope clip (see function comment
-  // above for why). Variable kept as exactFootprintClip so the rest of this function and
-  // its downstream stats block don't need touching beyond the field names below.
+  // TEST (V39): delete-triangles-in-band + re-extract-boundary clip (see function comment
+  // above). Variable kept as exactFootprintClip so the rest of this function and its
+  // downstream stats block don't need touching beyond the field names below.
   const exactFootprintClip = cadClipScanBoundaryBandToBaseEnvelope(
     trianglePositions,
     rawLoop,
@@ -10740,6 +10716,12 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   if (!rawLoop || rawLoop.length < 4) {
     throw new Error("Po přesném ořezu podle báze se nepodařilo obnovit hlavní hranici scanu.")
   }
+  console.warn(
+    `[cadClipScanBoundaryBandToBaseEnvelope] band=${exactFootprintClip.clipBandWidth?.toFixed(2)}mm ` +
+    `candidates=${exactFootprintClip.candidateTriangles} dropped=${exactFootprintClip.droppedTriangles} ` +
+    `kept=${exactFootprintClip.keptTriangles} reextractedLoops=${exactFootprintClip.reextractedLoops} ` +
+    `newBoundaryPoints=${rawLoop.length}`
+  )
 
   const boundaryMinY = Math.min(...rawLoop.map((p) => p.y))
   const boundaryMaxY = Math.max(...rawLoop.map((p) => p.y))
@@ -11372,12 +11354,11 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       fairingMovedVertices,
       fairingMaxMove,
       exactClipBandWidth: exactFootprintClip.clipBandWidth,
-      exactClipClippedSourceVertices: exactFootprintClip.clippedSourceVertices,
-      exactClipClippedBoundaryVertices: exactFootprintClip.clippedBoundaryVertices,
-      exactClipMaxOutsideDistance: exactFootprintClip.maxOutsideDistance,
-      exactClipMeanOutsideDistance: exactFootprintClip.meanOutsideDistance,
-      exactClipRemovedDegenerateTriangles: exactFootprintClip.removedDegenerateTriangles,
-      exactClipCandidateSourceVertices: exactFootprintClip.candidateSourceVertices,
+      exactClipDroppedTriangles: exactFootprintClip.droppedTriangles,
+      exactClipKeptTriangles: exactFootprintClip.keptTriangles,
+      exactClipCandidateTriangles: exactFootprintClip.candidateTriangles,
+      exactClipReextractedLoops: exactFootprintClip.reextractedLoops,
+      exactClipOutsideHard: exactFootprintClip.outsideHard,
       shoulderSamplingSpacing,
       shoulderStartCount,
       rawMedianBoundaryEdge: rawMedianEdge,
