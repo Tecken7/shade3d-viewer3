@@ -8928,6 +8928,203 @@ function cadRelaxClosedBoundaryGentle(points, diagonal) {
   return cadRegularizeBoundaryArcLength(points, diagonal).points
 }
 
+
+// V35 – adaptive local trim-back mask.
+//
+// V34 regularizes the whole trim loop very well, but a few genuine scan flaps / local
+// outliers can still force the shoulder to bulge. Here we classify only those short
+// segments by combining distance-to-spline, tangent mismatch and a curvature-spike
+// detector. The mask is then dilated in PHYSICAL millimetres along the loop and the
+// flagged boundary is retracted toward the healthy one-ring direction reconstructed
+// from the source mesh. This is deliberately a topology-preserving "virtual trim-back"
+// for the first experiment: it behaves like a masked sculpt/cut-back without deleting
+// source triangles, so the rest of the stable V34 pipeline stays watertight.
+function cadBuildAdaptiveBoundaryTrimBack(trianglePositions, rawLoop, splineLoop, isUpper, diagonal) {
+  const raw = Array.isArray(rawLoop) ? rawLoop : []
+  const spline = Array.isArray(splineLoop) ? splineLoop : []
+  const count = raw.length
+  if (count < 6 || spline.length !== count) {
+    return {
+      points: spline.length === count ? spline.map((p) => p.clone()) : raw.map((p) => p.clone()),
+      scores: new Float32Array(count),
+      depths: new Float32Array(count),
+      affectedBoundaryVertices: 0,
+      peakScore: 0,
+      maxDepth: 0,
+      meanDepth: 0,
+      dilateRadius: 0,
+      supportCoverage: 0,
+      detectedSegments: 0,
+    }
+  }
+
+  const safeDiagonal = Math.max(1, Number(diagonal) || 1)
+  const rawTable = cadClosedLoopArcTable(raw)
+  const total = Math.max(1e-9, rawTable.total || 0)
+  const cumulative = rawTable.cumulative
+  const smootherstep = (t) => {
+    const x = THREE.MathUtils.clamp(t, 0, 1)
+    return x * x * x * (x * (x * 6 - 15) + 10)
+  }
+
+  const tangentXZ = (points, i, radius = 2) => {
+    const prev = points[(i - radius + count) % count]
+    const next = points[(i + radius) % count]
+    const v = new THREE.Vector2(next.x - prev.x, next.z - prev.z)
+    if (v.lengthSq() < 1e-12) v.set(1, 0)
+    return v.normalize()
+  }
+  const turnXZ = (points, i) => {
+    const prev = points[(i - 1 + count) % count]
+    const point = points[i]
+    const next = points[(i + 1) % count]
+    const a = new THREE.Vector2(point.x - prev.x, point.z - prev.z)
+    const b = new THREE.Vector2(next.x - point.x, next.z - point.z)
+    if (a.lengthSq() < 1e-12 || b.lengthSq() < 1e-12) return 0
+    a.normalize(); b.normalize()
+    return Math.acos(THREE.MathUtils.clamp(a.dot(b), -1, 1))
+  }
+  const circularDistance = (i, j) => {
+    const di = cumulative[Math.min(i, cumulative.length - 1)] || 0
+    const dj = cumulative[Math.min(j, cumulative.length - 1)] || 0
+    const direct = Math.abs(di - dj)
+    return Math.min(direct, Math.max(0, total - direct))
+  }
+
+  const deviations = new Float32Array(count)
+  const rawTurns = new Float32Array(count)
+  const splineTurns = new Float32Array(count)
+  const tangentMismatch = new Float32Array(count)
+  for (let i = 0; i < count; i++) {
+    deviations[i] = Math.hypot(spline[i].x - raw[i].x, spline[i].z - raw[i].z)
+    rawTurns[i] = turnXZ(raw, i)
+    splineTurns[i] = turnXZ(spline, i)
+    const tr = tangentXZ(raw, i, 2)
+    const ts = tangentXZ(spline, i, 2)
+    tangentMismatch[i] = Math.acos(THREE.MathUtils.clamp(tr.dot(ts), -1, 1))
+  }
+
+  // Compare each raw turning angle with a local physical-neighbourhood baseline.
+  // A smooth palatal U can have high curvature, but it should not have a short spike
+  // relative to its neighbours; this prevents natural arch curvature from being cut.
+  const curvatureBaselineRadius = Math.max(1.8, Math.min(3.2, safeDiagonal * 0.045))
+  const curvatureSpike = new Float32Array(count)
+  for (let i = 0; i < count; i++) {
+    const local = []
+    for (let j = 0; j < count; j++) {
+      if (circularDistance(i, j) <= curvatureBaselineRadius) local.push(rawTurns[j])
+    }
+    local.sort((a, b) => a - b)
+    const median = local.length ? local[Math.floor(local.length * 0.5)] : rawTurns[i]
+    curvatureSpike[i] = Math.max(0, rawTurns[i] - median)
+  }
+
+  const rawScores = new Float32Array(count)
+  const deviationSoft = Math.max(0.28, Math.min(0.38, safeDiagonal * 0.0052))
+  const deviationHard = Math.max(0.62, Math.min(0.82, safeDiagonal * 0.0112))
+  const tangentSoft = THREE.MathUtils.degToRad(9)
+  const tangentHard = THREE.MathUtils.degToRad(27)
+  const spikeSoft = THREE.MathUtils.degToRad(7)
+  const spikeHard = THREE.MathUtils.degToRad(24)
+  let peakRawScore = 0
+
+  for (let i = 0; i < count; i++) {
+    const devScore = smootherstep((deviations[i] - deviationSoft) / Math.max(1e-6, deviationHard - deviationSoft))
+    const tangentScore = smootherstep((tangentMismatch[i] - tangentSoft) / Math.max(1e-6, tangentHard - tangentSoft))
+    const spikeScore = smootherstep((curvatureSpike[i] - spikeSoft) / Math.max(1e-6, spikeHard - spikeSoft))
+    // Turning/curvature alone must not classify a healthy sharp arch section. They only
+    // become decisive once there is also a measurable offset from the robust spline.
+    const deviationGate = smootherstep((deviations[i] - 0.16) / 0.30)
+    const score = Math.max(devScore, tangentScore * deviationGate * 0.82, spikeScore * deviationGate * 0.88)
+    rawScores[i] = score
+    peakRawScore = Math.max(peakRawScore, score)
+  }
+
+  // Grow only around detected outliers, with a smootherstep falloff over a few mm.
+  // This is the equivalent of feathering the mask before a local Blender trim/smooth.
+  const dilateRadius = Math.max(2.6, Math.min(4.1, safeDiagonal * 0.056))
+  const scores = new Float32Array(count)
+  for (let i = 0; i < count; i++) {
+    let value = rawScores[i]
+    for (let j = 0; j < count; j++) {
+      if (rawScores[j] <= 0.03) continue
+      const d = circularDistance(i, j)
+      if (d > dilateRadius) continue
+      const falloff = 1 - smootherstep(d / dilateRadius)
+      value = Math.max(value, rawScores[j] * falloff)
+    }
+    scores[i] = THREE.MathUtils.clamp(value, 0, 1)
+  }
+
+  // Suppress isolated numerical specks and count contiguous detected zones.
+  let detectedSegments = 0
+  let inSegment = false
+  for (let i = 0; i < count; i++) {
+    const active = scores[i] > 0.16
+    if (active && !inSegment) detectedSegments++
+    inSegment = active
+  }
+  if (scores[0] > 0.16 && scores[count - 1] > 0.16 && detectedSegments > 1) detectedSegments--
+
+  const support = cadBuildBoundarySupportRing(trianglePositions, raw, spline, isUpper, safeDiagonal)
+  const directions = support?.directions || []
+  const maxTrimDepth = Math.max(0.72, Math.min(1.05, safeDiagonal * 0.0142))
+  const minUsefulDepth = 0.10
+  const maxTrimY = Math.max(0.16, Math.min(0.34, safeDiagonal * 0.0046))
+  const depths = new Float32Array(count)
+  const points = spline.map((p) => p.clone())
+  let affectedBoundaryVertices = 0
+  let peakScore = 0
+  let actualMaxDepth = 0
+  let sumDepth = 0
+
+  for (let i = 0; i < count; i++) {
+    const score = scores[i]
+    peakScore = Math.max(peakScore, score)
+    if (score <= 0.12) continue
+
+    // Gentle at the edge of the mask, decisive only for true outliers.
+    const depth = maxTrimDepth * Math.pow(smootherstep((score - 0.10) / 0.90), 1.22)
+    if (depth < minUsefulDepth) continue
+    const direction = directions[i]?.clone?.() || new THREE.Vector3(0, isUpper ? -1 : 1, 0)
+    if (direction.lengthSq() < 1e-12) continue
+    direction.normalize()
+    const delta = direction.multiplyScalar(depth)
+    delta.y = THREE.MathUtils.clamp(delta.y, -maxTrimY * score, maxTrimY * score)
+
+    // Keep the final shift bounded in XZ as well; V35 should retract a bad flap, not
+    // invent a new dental arch. The robust spline correction already did the global job.
+    const xz = Math.hypot(delta.x, delta.z)
+    const xzLimit = maxTrimDepth * (0.78 + 0.22 * score)
+    if (xz > xzLimit) {
+      const scale = xzLimit / Math.max(1e-9, xz)
+      delta.x *= scale
+      delta.z *= scale
+    }
+
+    points[i].add(delta)
+    const actual = delta.length()
+    depths[i] = actual
+    actualMaxDepth = Math.max(actualMaxDepth, actual)
+    sumDepth += actual
+    affectedBoundaryVertices++
+  }
+
+  return {
+    points,
+    scores,
+    depths,
+    affectedBoundaryVertices,
+    peakScore,
+    maxDepth: actualMaxDepth,
+    meanDepth: affectedBoundaryVertices ? sumDepth / affectedBoundaryVertices : 0,
+    dilateRadius,
+    supportCoverage: support?.coverage || 0,
+    detectedSegments,
+    rawPeakScore: peakRawScore,
+  }
+}
+
 function cadClosestBoundaryDisplacement(point, rawLoop, displacements, nearestIndex, searchRadius = 3) {
   if (!Array.isArray(rawLoop) || rawLoop.length < 2 || nearestIndex < 0) {
     return { distanceSq: Infinity, displacement: new THREE.Vector3(), boundaryIndex: -1, segmentT: 0 }
@@ -8982,7 +9179,7 @@ function cadClosestBoundaryDisplacement(point, rawLoop, displacements, nearestIn
   }
 }
 
-function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
+function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal, isUpper = false) {
   const source = Array.isArray(trianglePositions) ? trianglePositions : []
   if (source.length < 9 || !Array.isArray(rawLoop) || rawLoop.length < 4) {
     return {
@@ -9000,22 +9197,42 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
       splineSampleStep: 0,
       splineControlPoints: 0,
       splineFairingPasses: 0,
+      adaptiveTrimBackAffectedBoundaryVertices: 0,
+      adaptiveTrimBackPeakScore: 0,
+      adaptiveTrimBackMaxDepth: 0,
+      adaptiveTrimBackMeanDepth: 0,
+      adaptiveTrimBackDilateRadius: 0,
+      adaptiveTrimBackSupportCoverage: 0,
+      adaptiveTrimBackDetectedSegments: 0,
       fieldIterations: 0,
     }
   }
 
   const regularization = cadRegularizeBoundaryArcLength(rawLoop, diagonal)
-  const relaxedLoop = regularization.points
+  const splineLoop = regularization.points
+  const trimBack = cadBuildAdaptiveBoundaryTrimBack(
+    source,
+    rawLoop,
+    splineLoop,
+    isUpper,
+    diagonal
+  )
+  const relaxedLoop = trimBack.points
   const displacements = relaxedLoop.map((point, i) => point.clone().sub(rawLoop[i]))
-  const maxBoundaryShift = regularization.maxShift
+  let maxBoundaryShift = 0
+  let meanBoundaryShift = 0
+  for (const delta of displacements) {
+    const length = delta.length()
+    maxBoundaryShift = Math.max(maxBoundaryShift, length)
+    meanBoundaryShift += length
+  }
+  if (displacements.length) meanBoundaryShift /= displacements.length
 
-  // V34: spread the spline target through a slightly wider support strip, using a
-  // screened two-scale diffusion of the DISPLACEMENT FIELD. This behaves much closer
-  // to a masked/biharmonic sculpt operation than direct vertex averaging: the target
-  // boundary is exact, the inner support side is exact zero, and only the smooth warp
-  // between those constraints is optimized.
+  // V35: the V34 spline/biharmonic strip remains the default path. Only detected
+  // outlier zones receive an additional healthy-side trim-back, so the deformation
+  // field needs a little more room there while staying zero outside the strip.
   const safeDiagonal = Math.max(1, Number(diagonal) || 1)
-  const bandWidth = Math.max(1.55, Math.min(2.18, safeDiagonal * 0.0325))
+  const bandWidth = Math.max(1.72, Math.min(2.72, safeDiagonal * 0.034 + trimBack.maxDepth * 0.72))
   const cellSize = Math.max(0.48, Math.min(0.94, bandWidth * 0.48))
   const buckets = new Map()
   const cellKey = (x, y, z) => `${Math.floor(x / cellSize)}:${Math.floor(y / cellSize)}:${Math.floor(z / cellSize)}`
@@ -9209,7 +9426,7 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
     boundary: relaxedLoop,
     bandWidth,
     maxBoundaryShift,
-    meanBoundaryShift: regularization.meanShift,
+    meanBoundaryShift,
     affectedVertices,
     displacementFieldSmoothedVertices,
     boundaryWindowXZ: regularization.halfWindowXZ,
@@ -9219,6 +9436,13 @@ function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal) {
     splineSampleStep: regularization.splineSampleStep,
     splineControlPoints: regularization.splineControlPoints,
     splineFairingPasses: regularization.splineFairingPasses,
+    adaptiveTrimBackAffectedBoundaryVertices: trimBack.affectedBoundaryVertices,
+    adaptiveTrimBackPeakScore: trimBack.peakScore,
+    adaptiveTrimBackMaxDepth: trimBack.maxDepth,
+    adaptiveTrimBackMeanDepth: trimBack.meanDepth,
+    adaptiveTrimBackDilateRadius: trimBack.dilateRadius,
+    adaptiveTrimBackSupportCoverage: trimBack.supportCoverage,
+    adaptiveTrimBackDetectedSegments: trimBack.detectedSegments,
     fieldIterations,
   }
 }
@@ -10158,14 +10382,14 @@ function cadOptimizeTransitionEdgeFlips(indices, positions, startIndex, endIndex
   return { flips, passes }
 }
 
-// V34: Closed Spline Boundary + Biharmonic-style Feather Strip + Direct Bridge.
+// V35: Robust Outlier Detection + Adaptive Local Trim-Back + Direct Bridge.
 //
 // V30 established the robust shape pipeline: conditioned scan edge -> direct bridge
 // to the finished Straight profile -> local edge flips + constrained fairing -> wall.
-// V34 keeps the robust direct-bridge geometry, but rebuilds the SOURCE boundary first:
-// uniform arc-length resampling + periodic cubic spline regularization in XZ, restrained Y, then a smooth deformation
-// field across a 1–2 mm source strip. Only after that do we construct the shoulder.
-// The bridge itself remains envelope-constrained and both end loops are hard constraints.
+// V35 keeps the robust V34 spline/feather preprocessing, then detects only genuine local outliers:
+// deviation + tangent mismatch + curvature-spike scoring -> physical-mm mask dilation -> healthy-side
+// adaptive trim-back -> smooth deformation through the source strip. Only after that do we construct the shoulder.
+// Good boundary sections therefore remain almost identical to V34; only bad flaps are retracted.
 function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
   const collectedTrianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
   const boundaryData = cadExtractBoundaryLoopsRobust(collectedTrianglePositions)
@@ -10198,7 +10422,8 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const boundaryConditioning = cadRelaxTrimBoundaryBand(
     collectedTrianglePositions,
     exactRawLoop,
-    boundaryData.diagonal
+    boundaryData.diagonal,
+    isUpper
   )
   const trianglePositions = boundaryConditioning.trianglePositions
   const rawLoop = boundaryConditioning.boundary
@@ -10722,9 +10947,9 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionEndOffset,
-      transitionMode: "closed-spline-boundary-biharmonic-feather-direct-bridge-v34",
+      transitionMode: "robust-outlier-adaptive-trimback-direct-bridge-v35",
       transitionRemeshEnabled: true,
-      transitionRemeshMethod: "closed-cubic-spline-boundary-plus-biharmonic-style-feather-field-plus-local-edge-flip-fairing",
+      transitionRemeshMethod: "closed-spline-plus-outlier-mask-plus-healthy-side-trimback-plus-biharmonic-feather-plus-local-edge-flip-fairing",
       wallAcquireStart,
       bridgeIntervals,
       bridgeTargetRowSpacing,
@@ -10760,6 +10985,13 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       edgeConditioningSplineSampleStep: boundaryRelaxation.splineSampleStep,
       edgeConditioningSplineControlPoints: boundaryRelaxation.splineControlPoints,
       edgeConditioningSplineFairingPasses: boundaryRelaxation.splineFairingPasses,
+      adaptiveTrimBackAffectedBoundaryVertices: boundaryRelaxation.adaptiveTrimBackAffectedBoundaryVertices,
+      adaptiveTrimBackPeakScore: boundaryRelaxation.adaptiveTrimBackPeakScore,
+      adaptiveTrimBackMaxDepth: boundaryRelaxation.adaptiveTrimBackMaxDepth,
+      adaptiveTrimBackMeanDepth: boundaryRelaxation.adaptiveTrimBackMeanDepth,
+      adaptiveTrimBackDilateRadius: boundaryRelaxation.adaptiveTrimBackDilateRadius,
+      adaptiveTrimBackSupportCoverage: boundaryRelaxation.adaptiveTrimBackSupportCoverage,
+      adaptiveTrimBackDetectedSegments: boundaryRelaxation.adaptiveTrimBackDetectedSegments,
       edgeConditioningFieldIterations: boundaryRelaxation.fieldIterations,
       sourceBoundaryPreserved: false,
       sourceOutsideConditioningBandPreserved: true,
