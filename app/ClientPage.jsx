@@ -7733,6 +7733,80 @@ function cadStitchClosedRings(indices, ringA, pointsA, ringB, pointsB, isUpper) 
   }
 }
 
+
+// V21 – parametric advancing-front stitch.
+// V20 resamploval každý pomocný ring podle jeho vlastního 3D oblouku a stitcher
+// pak znovu porovnával lokální arc fractions. U silně zakřiveného transition
+// surface se tím stejné U pozice rozjížděly a vznikaly dlouhé vějířové trojúhelníky.
+// V21 drží jeden společný kanonický parametr U od raw boundary až po Straight ring.
+//
+// paramsA/paramsB jsou vzestupné hodnoty < 1. Při téměř souběžném eventu vytvoříme
+// quad a zvolíme kratší cross-diagonálu, což omezuje skinny triangles.
+function cadStitchClosedRingsParametric(indices, ringA, pointsA, paramsA, ringB, pointsB, paramsB, isUpper) {
+  if (!ringA?.length || !ringB?.length) return
+  const nA = ringA.length
+  const nB = ringB.length
+  if (nA < 2 || nB < 2) return
+
+  const pushTri = (a, b, c) => {
+    if (isUpper) indices.push(a, c, b)
+    else indices.push(a, b, c)
+  }
+
+  const paramAt = (params, index, count) => {
+    if (index <= 0) {
+      const value = Number(params?.[0])
+      return Number.isFinite(value) ? value : 0
+    }
+    if (index >= count) return 1
+    const value = Number(params?.[index])
+    return Number.isFinite(value) ? value : index / count
+  }
+
+  let i = 0
+  let j = 0
+  const mergeTolerance = 0.42 * Math.min(1 / nA, 1 / nB)
+
+  while (i < nA || j < nB) {
+    const ai = i % nA
+    const bj = j % nB
+    const aCurrent = ringA[ai]
+    const bCurrent = ringB[bj]
+    const nextA = i < nA ? paramAt(paramsA, i + 1, nA) : Infinity
+    const nextB = j < nB ? paramAt(paramsB, j + 1, nB) : Infinity
+
+    if (i < nA && j < nB && Math.abs(nextA - nextB) <= mergeTolerance) {
+      const ani = (i + 1) % nA
+      const bnj = (j + 1) % nB
+      const aNext = ringA[ani]
+      const bNext = ringB[bnj]
+
+      const diagA = pointsA[ai].distanceTo(pointsB[bnj])
+      const diagB = pointsA[ani].distanceTo(pointsB[bj])
+
+      if (diagA <= diagB) {
+        pushTri(aCurrent, aNext, bNext)
+        pushTri(aCurrent, bNext, bCurrent)
+      } else {
+        pushTri(aCurrent, aNext, bCurrent)
+        pushTri(aNext, bNext, bCurrent)
+      }
+      i++
+      j++
+    } else if (i < nA && (j >= nB || nextA < nextB)) {
+      const aNext = ringA[(i + 1) % nA]
+      pushTri(aCurrent, aNext, bCurrent)
+      i++
+    } else if (j < nB) {
+      const bNext = ringB[(j + 1) % nB]
+      pushTri(aCurrent, bNext, bCurrent)
+      j++
+    } else {
+      break
+    }
+  }
+}
+
 function cadEdgeKey(a, b) { return a < b ? `${a}:${b}` : `${b}:${a}` }
 
 // Shared edge -> adjacent-face lookup used by the V15 Delaunay/refinement passes.
@@ -9343,44 +9417,87 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const transitionLoop = new Array(targetCount)
   for (let i = 0; i < targetCount; i++) transitionLoop[i] = evaluateTransitionSurface(i / targetCount, 1)
 
-  // V20 – místo stovek adaptivních "sloupců" použijeme graded advancing-front
-  // bridge složený z několika uzavřených křivek. Reálné STL ukazuje, že Medit mezi
-  // scanem a Straight profilem přidává přibližně jen čtvrtinu vertexů oproti V19;
-  // síť se postupně zhrubuje směrem k pravidelnému 0.388mm profilu.
+  // V21 – adaptive parametric advancing-front.
   //
-  // Každý pomocný ring leží NA STEJNÉ shape-locked transition surface jako V19.
-  // Mění se pouze sampling/topologie, nikoli cílový tvar.
-  const transitionRingSpecs = [
-    { v: 0.08, spacing: 0.29 },
-    { v: 0.28, spacing: 0.33 },
-    { v: 0.54, spacing: 0.37 },
-    { v: 0.78, spacing: 0.39 },
-  ]
-  const transitionProbeCount = Math.max(
-    320,
-    Math.min(1200, Math.max(rawLoop.length, targetCount * 2))
-  )
-  const transitionBridgeRings = []
-  let previousTransitionCount = Math.max(targetCount, rawLoop.length)
+  // Z V20 exportu jsme naměřili, že topologie je sice manifold, ale v transition
+  // vznikají tisíce příliš dlouhých hran (> 1.5 mm). Hlavní příčina není shape,
+  // ale rozjezd parametrizace: každý meziring byl znovu resamplovaný podle svého
+  // vlastního 3D oblouku. Tady proto používáme jeden společný kanonický parametr U
+  // od raw boundary až po Straight profil a hustotu snižujeme po menších krocích.
+  const rawTransitionParams = cadClosedLoopVertexFractions(rawLoop).slice(0, rawLoop.length)
+  const transitionEndParams = new Array(targetCount)
+  for (let i = 0; i < targetCount; i++) transitionEndParams[i] = i / targetCount
 
-  for (const spec of transitionRingSpecs) {
-    const probe = new Array(transitionProbeCount)
-    for (let i = 0; i < transitionProbeCount; i++) {
-      probe[i] = evaluateTransitionSurface(i / transitionProbeCount, spec.v)
+  // Odhad fyzické šířky transition surface. Počet intervalů musí splnit dva cíle:
+  // 1) žádný globální krok přes surface není zbytečně dlouhý,
+  // 2) počet vertexů neklesne v jednom kroku o více než cca 20 %.
+  const transitionSpanProbeCount = Math.max(96, Math.min(420, Math.round(targetCount * 0.9)))
+  const transitionSpans = []
+  for (let i = 0; i < transitionSpanProbeCount; i++) {
+    const u = i / transitionSpanProbeCount
+    transitionSpans.push(
+      evaluateTransitionSurface(u, 0).distanceTo(evaluateTransitionSurface(u, 1))
+    )
+  }
+  const sortedTransitionSpans = transitionSpans.slice().sort((a, b) => a - b)
+  const transitionSpan95 = sortedTransitionSpans.length
+    ? sortedTransitionSpans[Math.min(sortedTransitionSpans.length - 1, Math.floor(sortedTransitionSpans.length * 0.95))]
+    : 0
+  const transitionSpanMax = sortedTransitionSpans.length
+    ? sortedTransitionSpans[sortedTransitionSpans.length - 1]
+    : 0
+
+  const maxCountReductionRatio = 0.80
+  const countReductionIntervals = rawLoop.length > targetCount
+    ? Math.ceil(Math.log(targetCount / rawLoop.length) / Math.log(maxCountReductionRatio))
+    : 1
+  const physicalIntervals = Math.ceil(Math.max(transitionSpan95, transitionSpanMax * 0.72) / 0.92)
+  const transitionIntervals = Math.max(5, Math.min(10, Math.max(countReductionIntervals, physicalIntervals)))
+  const transitionBridgeRings = []
+  let previousTransitionCount = rawLoop.length
+
+  for (let layer = 1; layer < transitionIntervals; layer++) {
+    const v = layer / transitionIntervals
+    const probeCount = Math.max(320, Math.min(1200, Math.max(previousTransitionCount, targetCount * 2)))
+    const probe = new Array(probeCount)
+    for (let i = 0; i < probeCount; i++) {
+      probe[i] = evaluateTransitionSurface(i / probeCount, v)
     }
+
     const perimeter = cadClosedLoopPerimeter(probe)
-    let desiredCount = Math.round(perimeter / spec.spacing)
-    desiredCount = Math.max(targetCount, desiredCount)
-    desiredCount = Math.min(desiredCount, previousTransitionCount)
-    const points = cadResampleClosedLoopCount(probe, desiredCount)
+    const spacingT = smoothstep(v)
+    const targetRingSpacing = THREE.MathUtils.lerp(0.27, profileTargetSpacing, spacingT)
+    const spacingCount = Math.max(targetCount, Math.round(perimeter / targetRingSpacing))
+
+    // Nejvýše ~20% redukce za jeden front krok. Současně hlídáme, že se do
+    // zbývajících intervalů stále dokážeme plynule dostat na targetCount.
+    const minimumByReduction = Math.ceil(previousTransitionCount * maxCountReductionRatio)
+    const remainingIntervals = transitionIntervals - layer
+    const reachabilityCap = remainingIntervals > 0
+      ? Math.ceil(targetCount / Math.pow(maxCountReductionRatio, remainingIntervals))
+      : targetCount
+
+    let desiredCount = Math.max(targetCount, spacingCount, minimumByReduction)
+    desiredCount = Math.min(previousTransitionCount, desiredCount)
+    desiredCount = Math.min(desiredCount, Math.max(targetCount, reachabilityCap))
+
+    const points = new Array(desiredCount)
+    const params = new Array(desiredCount)
+    for (let i = 0; i < desiredCount; i++) {
+      const u = i / desiredCount
+      params[i] = u
+      points[i] = evaluateTransitionSurface(u, v)
+    }
+
     transitionBridgeRings.push({
-      v: spec.v,
-      spacing: spec.spacing,
+      v,
+      spacing: targetRingSpacing,
       perimeter,
       points,
-      count: points.length,
+      params,
+      count: desiredCount,
     })
-    previousTransitionCount = points.length
+    previousTransitionCount = desiredCount
   }
 
   const seamLoop = transitionLoop.map((p) => new THREE.Vector3(p.x, seamY, p.z))
@@ -9442,33 +9559,34 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     }
   }
 
-  // V20 graded boundary stitching / advancing-front style bridge.
-  // Přesnou scan boundary sešíváme s postupně řidšími ringy a nakonec s přesným
-  // 0.388mm transition-end profilem. Tím nevzniká pravidelná sloupcová mřížka,
-  // žádná diagonála nemůže přeskočit přes podkovu a není potřeba riskantní
-  // post-process edge flipping z V19.
+  // V21 parametric advancing-front bridge.
+  // Všechny ringy sdílejí stejné U, takže front už nemůže "ujíždět" podle
+  // rozdílných lokálních 3D arc lengths. Při blízkých eventech volíme kratší
+  // diagonálu a redukce počtu vertexů je rozložená do více menších kroků.
   const transitionIndexStart = indices.length
   let previousTransitionIndices = exactBoundaryIndices
   let previousTransitionPoints = rawLoop
+  let previousTransitionParams = rawTransitionParams
   let transitionInteriorVertices = 0
 
   for (const ring of transitionBridgeRings) {
     const ringIndices = appendRing(ring.points)
-    cadStitchClosedRings(
+    cadStitchClosedRingsParametric(
       indices,
-      previousTransitionIndices, previousTransitionPoints,
-      ringIndices, ring.points,
+      previousTransitionIndices, previousTransitionPoints, previousTransitionParams,
+      ringIndices, ring.points, ring.params,
       isUpper
     )
     previousTransitionIndices = ringIndices
     previousTransitionPoints = ring.points
+    previousTransitionParams = ring.params
     transitionInteriorVertices += ring.points.length
   }
 
-  cadStitchClosedRings(
+  cadStitchClosedRingsParametric(
     indices,
-    previousTransitionIndices, previousTransitionPoints,
-    transitionEndIndices, transitionLoop,
+    previousTransitionIndices, previousTransitionPoints, previousTransitionParams,
+    transitionEndIndices, transitionLoop, transitionEndParams,
     isUpper
   )
   const transitionIndexEnd = indices.length
@@ -9543,10 +9661,13 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionEndOffset,
-      transitionMode: "graded-boundary-stitch-v20",
+      transitionMode: "parametric-afm-v21",
       transitionBridgeRingCounts: transitionBridgeRings.map((ring) => ring.count),
       transitionBridgeRingSpacings: transitionBridgeRings.map((ring) => ring.spacing),
       transitionBridgeRingLevels: transitionBridgeRings.map((ring) => ring.v),
+      transitionIntervals,
+      transitionSpan95,
+      transitionSpanMax,
       transitionInteriorVertices,
       transitionTriangles,
       transitionEdgeFlips: 0,
