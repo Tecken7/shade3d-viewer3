@@ -7257,7 +7257,7 @@ function AlignmentTerminalTypedText({ text, speed = 15, enabled = true, delay = 
   return <>{safeText.slice(0, visibleLength)}</>
 }
 
-/* ---------- ARTHETIC CAD Tools · Model Builder ---------- */
+/* ---------- ARTHETIC CAD Tools · Model Builder V10 ---------- */
 const CAD_SUPPORTED_EXTENSIONS = new Set(["stl", "ply", "obj"])
 
 function cadDisposeObjectUrl(url) {
@@ -7303,6 +7303,8 @@ function cadBuildOrientationMatrix(points, sourceObject, viewerRoot, arch = "low
   if (anterior.lengthSq() < 1e-8) throw new Error("Třetí bod neleží dostatečně mimo osu prvních dvou bodů.")
   anterior.normalize()
 
+  // Pořadí bodů je záměrně součástí workflow. Levý zadní → pravý zadní →
+  // střed fronty definuje pravotočivou CAD bázi bez zrcadlení modelu.
   const baseDir = xAxis.clone().cross(anterior).normalize()
   const sourceAnterior = anterior.clone()
   const box = cadObjectBoundsInRoot(sourceObject, viewerRoot)
@@ -7310,6 +7312,13 @@ function cadBuildOrientationMatrix(points, sourceObject, viewerRoot, arch = "low
   const centroid = box.getCenter(new THREE.Vector3())
 
   const sourceBasis = new THREE.Matrix4().makeBasis(xAxis, sourceAnterior, baseDir)
+  // ARTHETIC CAD souřadnice musí zůstat pravotočivé.
+  // Lower: +X = pravá strana, +Z = anterior, normála báze míří do -Y.
+  // Upper musí být na opačné straně okluzní roviny, ale NESMÍME pouze
+  // převrátit Y (to by vytvořilo determinant -1 = zrcadlení). Proto Upper
+  // používá čistou 180° rotaci kolem X: +X zůstává zachované, zatímco
+  // anterior se mapuje do -Z a normála báze do +Y. Výsledkem je vždy
+  // rigidní rotace bez změny chirality modelu.
   const isUpper = arch === "upper"
   const baseAxisY = isUpper ? 1 : -1
   const anteriorAxisZ = isUpper ? -1 : 1
@@ -7475,6 +7484,10 @@ function cadExtractBoundaryLoops(trianglePositions, toleranceFactor = 1e-5) {
   return { loops, box, diagonal, boundaryEdgeCount: boundaryEdges.length }
 }
 
+// Trim generuje neindexovanou geometrii a body na sousedních face mohou mít
+// nepatrně odlišné float souřadnice. Proto boundary zkoušíme svařit v několika
+// stále bezpečných tolerancích. Na dentálním modelu jde typicky o tisíciny až
+// setiny milimetru, nikoli o viditelnou změnu geometrie.
 function cadExtractBoundaryLoopsRobust(trianglePositions) {
   const factors = [1e-5, 3e-5, 8e-5, 1.8e-4]
   let best = null
@@ -7486,6 +7499,9 @@ function cadExtractBoundaryLoopsRobust(trianglePositions) {
   return best || cadExtractBoundaryLoops(trianglePositions)
 }
 
+// V CAD workflow máme po Ořezu ještě lepší zdroj: samotnou surface spline,
+// kterou uživatel nakreslil. Tyto body jsou přesně stejné body, které trim engine
+// používá při dělení jednotlivých faces, takže jsou ideální horní hranou báze.
 function cadBoundaryFromTrimSegments(segments) {
   const points = []
   const pushPoint = (value) => {
@@ -7506,6 +7522,51 @@ function cadBoundaryFromTrimSegments(segments) {
   return points
 }
 
+function cadSmoothClosedLoop(points, iterations = 28) {
+  if (!Array.isArray(points) || points.length < 4) return (points || []).map((p) => p.clone())
+  let current = points.map((p) => p.clone())
+  const apply = (source, factor) => source.map((point, i) => {
+    const prev = source[(i - 1 + source.length) % source.length]
+    const next = source[(i + 1) % source.length]
+    const lap = prev.clone().add(next).multiplyScalar(0.5).sub(point)
+    return point.clone().addScaledVector(lap, factor)
+  })
+  for (let i = 0; i < iterations; i++) {
+    current = apply(current, 0.42)
+    current = apply(current, -0.435)
+  }
+
+  // Lehký low-pass přes širší okolí odstraní zubatost řezu bez výrazného smrštění archu.
+  const source = current
+  const radius = Math.max(2, Math.min(10, Math.round(points.length / 90)))
+  current = source.map((point, i) => {
+    const sum = new THREE.Vector3()
+    let weightSum = 0
+    for (let offset = -radius; offset <= radius; offset++) {
+      const idx = (i + offset + source.length) % source.length
+      const w = radius + 1 - Math.abs(offset)
+      sum.addScaledVector(source[idx], w)
+      weightSum += w
+    }
+    return sum.multiplyScalar(1 / Math.max(1, weightSum))
+  })
+
+  // Obnov přibližný původní rozměr v XZ, aby smoothing nezužoval dentální oblouk.
+  const sourceCenter = points.reduce((acc, p) => acc.add(p), new THREE.Vector3()).multiplyScalar(1 / points.length)
+  const smoothCenter = current.reduce((acc, p) => acc.add(p), new THREE.Vector3()).multiplyScalar(1 / current.length)
+  let sourceRadius = 0, smoothRadius = 0
+  for (let i = 0; i < points.length; i++) {
+    sourceRadius += Math.hypot(points[i].x - sourceCenter.x, points[i].z - sourceCenter.z)
+    smoothRadius += Math.hypot(current[i].x - smoothCenter.x, current[i].z - smoothCenter.z)
+  }
+  const scale = smoothRadius > 1e-6 ? sourceRadius / smoothRadius : 1
+  current.forEach((p) => {
+    p.x = sourceCenter.x + (p.x - smoothCenter.x) * scale
+    p.z = sourceCenter.z + (p.z - smoothCenter.z) * scale
+  })
+  return current
+}
+
 function cadSignedAreaXZ(points) {
   let area = 0
   for (let i = 0; i < points.length; i++) {
@@ -7515,10 +7576,20 @@ function cadSignedAreaXZ(points) {
   return area * 0.5
 }
 
-function cadResampleClosedLoop(points, targetSpacing = 0.4, minCount = 64, maxCount = 1000) {
-  if (!Array.isArray(points) || points.length < 4) return (points || []).map((p) => p.clone())
+
+// V10/V11 – Medit-style meshing helpers.
+// Referenční Medit export používá na pravidelném profilu zhruba 0.4 mm sampling,
+// horizontální wall ringy po ~1.1 mm a výrazně hustší, rovnoměrnější bottom cap.
+function cadClosedLoopPerimeter(points) {
+  if (!Array.isArray(points) || points.length < 2) return 0
   let perimeter = 0
   for (let i = 0; i < points.length; i++) perimeter += points[i].distanceTo(points[(i + 1) % points.length])
+  return perimeter
+}
+
+function cadResampleClosedLoop(points, targetSpacing = 0.39, minCount = 48, maxCount = 820) {
+  if (!Array.isArray(points) || points.length < 4) return (points || []).map((p) => p.clone())
+  const perimeter = cadClosedLoopPerimeter(points)
   if (!Number.isFinite(perimeter) || perimeter <= 1e-6) return points.map((p) => p.clone())
   const count = Math.max(minCount, Math.min(maxCount, Math.round(perimeter / Math.max(0.08, targetSpacing))))
   const cumulative = [0]
@@ -7539,61 +7610,3446 @@ function cadResampleClosedLoop(points, targetSpacing = 0.4, minCount = 64, maxCo
   return result
 }
 
-function cadComputeSmoothOutwardNormalsXZ(points, isCCW) {
-  const n = points.length
-  const rawNormals = new Array(n)
-  let cx = 0, cz = 0
-  for (let i = 0; i < n; i++) {
-    cx += points[i].x
-    cz += points[i].z
-  }
-  cx /= Math.max(1, n)
-  cz /= Math.max(1, n)
 
-  for (let i = 0; i < n; i++) {
-    const prev = points[(i - 1 + n) % n]
-    const next = points[(i + 1) % n]
-    const tx = next.x - prev.x
-    const tz = next.z - prev.z
-    const len = Math.hypot(tx, tz) || 1e-6
-    let nx = isCCW ? tz / len : -tz / len
-    let nz = isCCW ? -tx / len : tx / len
-
-    const vx = points[i].x - cx
-    const vz = points[i].z - cz
-    if (nx * vx + nz * vz < 0) {
-      nx = -nx
-      nz = -nz
-    }
-    rawNormals[i] = new THREE.Vector3(nx, 0, nz)
+// V19 – resampling finálního Straight profilu měříme pouze v půdorysu XZ.
+// Y zvlnění raw/regularized boundary nemá ovlivňovat počet vertexů na už rovné
+// stěně. To přesně odpovídá referenčnímu Medit profilu (~0.388 mm / segment).
+function cadResampleClosedLoopXZ(points, targetSpacing = 0.388, minCount = 48, maxCount = 820) {
+  if (!Array.isArray(points) || points.length < 4) return (points || []).map((p) => p.clone())
+  const cumulative = [0]
+  let perimeter = 0
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i]
+    const b = points[(i + 1) % points.length]
+    const dx = b.x - a.x
+    const dz = b.z - a.z
+    perimeter += Math.hypot(dx, dz)
+    cumulative.push(perimeter)
   }
-
-  const smoothed = new Array(n)
-  const filterRadius = Math.max(2, Math.min(8, Math.round(n / 100)))
-  for (let i = 0; i < n; i++) {
-    const avg = new THREE.Vector3()
-    let count = 0
-    for (let r = -filterRadius; r <= filterRadius; r++) {
-      const idx = (i + r + n) % n
-      const weight = filterRadius + 1 - Math.abs(r)
-      avg.addScaledVector(rawNormals[idx], weight)
-      count += weight
-    }
-    avg.multiplyScalar(1 / count)
-    if (avg.lengthSq() < 1e-8) avg.copy(rawNormals[i])
-    smoothed[i] = avg.normalize()
+  if (!Number.isFinite(perimeter) || perimeter <= 1e-6) return points.map((p) => p.clone())
+  const count = Math.max(minCount, Math.min(maxCount, Math.round(perimeter / Math.max(0.08, targetSpacing))))
+  const result = []
+  let edge = 0
+  for (let sample = 0; sample < count; sample++) {
+    const distance = (sample / count) * perimeter
+    while (edge + 1 < cumulative.length - 1 && cumulative[edge + 1] < distance) edge++
+    const a = points[edge % points.length]
+    const b = points[(edge + 1) % points.length]
+    const start = cumulative[edge]
+    const end = cumulative[edge + 1]
+    const t = end > start ? THREE.MathUtils.clamp((distance - start) / (end - start), 0, 1) : 0
+    result.push(a.clone().lerp(b, t))
   }
-  return smoothed
+  return result
 }
 
+function cadResampleClosedLoopCount(points, desiredCount) {
+  if (!Array.isArray(points) || points.length < 4) return (points || []).map((p) => p.clone())
+  const count = Math.max(4, Math.round(Number(desiredCount) || points.length))
+  if (count === points.length) return points.map((p) => p.clone())
+  const cumulative = [0]
+  for (let i = 0; i < points.length; i++) {
+    cumulative.push(cumulative[cumulative.length - 1] + points[i].distanceTo(points[(i + 1) % points.length]))
+  }
+  const total = cumulative[cumulative.length - 1]
+  if (!Number.isFinite(total) || total <= 1e-9) return points.map((p) => p.clone())
+  const result = []
+  let edge = 0
+  for (let sample = 0; sample < count; sample++) {
+    const distance = (sample / count) * total
+    while (edge + 1 < cumulative.length - 1 && cumulative[edge + 1] < distance) edge++
+    const a = points[edge % points.length]
+    const b = points[(edge + 1) % points.length]
+    const start = cumulative[edge]
+    const end = cumulative[edge + 1]
+    const t = end > start ? THREE.MathUtils.clamp((distance - start) / (end - start), 0, 1) : 0
+    result.push(a.clone().lerp(b, t))
+  }
+  return result
+}
+
+function cadClosedLoopVertexFractions(points) {
+  const fractions = new Array(points.length + 1).fill(0)
+  if (!Array.isArray(points) || points.length < 2) return fractions
+  let total = 0
+  const lengths = new Array(points.length)
+  for (let i = 0; i < points.length; i++) {
+    lengths[i] = points[i].distanceTo(points[(i + 1) % points.length])
+    total += lengths[i]
+  }
+  if (total <= 1e-9) {
+    for (let i = 0; i <= points.length; i++) fractions[i] = i / Math.max(1, points.length)
+    return fractions
+  }
+  let running = 0
+  fractions[0] = 0
+  for (let i = 0; i < points.length; i++) {
+    running += lengths[i]
+    fractions[i + 1] = running / total
+  }
+  fractions[points.length] = 1
+  return fractions
+}
+
+// Sešije dvě stejně orientované uzavřené smyčky i při rozdílném počtu vertexů.
+// Díky tomu můžeme zachovat přesnou boundary scanu, ale už první pravidelný CAD
+// ring resamplovat na ~0.4 mm bez ztráty watertight napojení.
+function cadStitchClosedRings(indices, ringA, pointsA, ringB, pointsB, isUpper) {
+  if (!ringA?.length || !ringB?.length) return
+  const fractionsA = cadClosedLoopVertexFractions(pointsA)
+  const fractionsB = cadClosedLoopVertexFractions(pointsB)
+  const pushTri = (a, b, c) => {
+    if (isUpper) indices.push(a, c, b)
+    else indices.push(a, b, c)
+  }
+  const pushQuadLocal = (a, b, c, d) => {
+    pushTri(a, b, c)
+    pushTri(a, c, d)
+  }
+
+  let i = 0, j = 0
+  const nA = ringA.length, nB = ringB.length
+  const eps = 1e-7
+  while (i < nA || j < nB) {
+    const aCurrent = ringA[i % nA]
+    const bCurrent = ringB[j % nB]
+    const nextA = i < nA ? fractionsA[i + 1] : Infinity
+    const nextB = j < nB ? fractionsB[j + 1] : Infinity
+
+    if (i < nA && j < nB && Math.abs(nextA - nextB) <= eps) {
+      const aNext = ringA[(i + 1) % nA]
+      const bNext = ringB[(j + 1) % nB]
+      pushQuadLocal(aCurrent, aNext, bNext, bCurrent)
+      i++; j++
+    } else if (i < nA && (j >= nB || nextA < nextB)) {
+      const aNext = ringA[(i + 1) % nA]
+      pushTri(aCurrent, aNext, bCurrent)
+      i++
+    } else if (j < nB) {
+      const bNext = ringB[(j + 1) % nB]
+      pushTri(aCurrent, bNext, bCurrent)
+      j++
+    } else break
+  }
+}
+
+
+// V21/V22 – parametric advancing-front stitch.
+// V20 resamploval každý pomocný ring podle jeho vlastního 3D oblouku a stitcher
+// pak znovu porovnával lokální arc fractions. U silně zakřiveného transition
+// surface se tím stejné U pozice rozjížděly a vznikaly dlouhé vějířové trojúhelníky.
+// V21 drží jeden společný kanonický parametr U od raw boundary až po Straight ring.
+//
+// paramsA/paramsB jsou vzestupné hodnoty < 1. Při téměř souběžném eventu vytvoříme
+// quad a zvolíme kratší cross-diagonálu, což omezuje skinny triangles.
+function cadStitchClosedRingsParametric(indices, ringA, pointsA, paramsA, ringB, pointsB, paramsB, isUpper) {
+  if (!ringA?.length || !ringB?.length) return
+  const nA = ringA.length
+  const nB = ringB.length
+  if (nA < 2 || nB < 2) return
+
+  const pushTri = (a, b, c) => {
+    if (isUpper) indices.push(a, c, b)
+    else indices.push(a, b, c)
+  }
+
+  const paramAt = (params, index, count) => {
+    if (index <= 0) {
+      const value = Number(params?.[0])
+      return Number.isFinite(value) ? value : 0
+    }
+    if (index >= count) return 1
+    const value = Number(params?.[index])
+    return Number.isFinite(value) ? value : index / count
+  }
+
+  let i = 0
+  let j = 0
+  const mergeTolerance = 0.42 * Math.min(1 / nA, 1 / nB)
+
+  while (i < nA || j < nB) {
+    const ai = i % nA
+    const bj = j % nB
+    const aCurrent = ringA[ai]
+    const bCurrent = ringB[bj]
+    const nextA = i < nA ? paramAt(paramsA, i + 1, nA) : Infinity
+    const nextB = j < nB ? paramAt(paramsB, j + 1, nB) : Infinity
+
+    if (i < nA && j < nB && Math.abs(nextA - nextB) <= mergeTolerance) {
+      const ani = (i + 1) % nA
+      const bnj = (j + 1) % nB
+      const aNext = ringA[ani]
+      const bNext = ringB[bnj]
+
+      const diagA = pointsA[ai].distanceTo(pointsB[bnj])
+      const diagB = pointsA[ani].distanceTo(pointsB[bj])
+
+      if (diagA <= diagB) {
+        pushTri(aCurrent, aNext, bNext)
+        pushTri(aCurrent, bNext, bCurrent)
+      } else {
+        pushTri(aCurrent, aNext, bCurrent)
+        pushTri(aNext, bNext, bCurrent)
+      }
+      i++
+      j++
+    } else if (i < nA && (j >= nB || nextA < nextB)) {
+      const aNext = ringA[(i + 1) % nA]
+      pushTri(aCurrent, aNext, bCurrent)
+      i++
+    } else if (j < nB) {
+      const bNext = ringB[(j + 1) % nB]
+      pushTri(aCurrent, bNext, bCurrent)
+      j++
+    } else {
+      break
+    }
+  }
+}
+
+function cadEdgeKey(a, b) { return a < b ? `${a}:${b}` : `${b}:${a}` }
+
+// Shared edge -> adjacent-face lookup used by the V15 Delaunay/refinement passes.
+// Keeping this as one helper avoids rebuilding the same map logic in several
+// algorithms and, importantly, guarantees the helper exists at runtime.
+function cadBuildEdgeFaceMap(faces) {
+  const edgeMap = new Map()
+  for (let fi = 0; fi < (faces?.length || 0); fi++) {
+    const face = faces[fi]
+    if (!face || face.length < 3) continue
+    const [a, b, c] = face
+    for (const [u, v] of [[a, b], [b, c], [c, a]]) {
+      const key = cadEdgeKey(u, v)
+      let adjacent = edgeMap.get(key)
+      if (!adjacent) {
+        adjacent = []
+        edgeMap.set(key, adjacent)
+      }
+      adjacent.push(fi)
+    }
+  }
+  return edgeMap
+}
+
+// Adaptive conforming refinement: začínáme robustní earcut triangulací obrysu,
+// potom půlíme pouze dlouhé VNITŘNÍ hrany. Sdílený midpoint se používá na obou
+// sousedních trianglech, takže nevznikají T-junctions a boundary capu zůstává
+// přesně stejná jako spodní wall ring.
+function cadRefineCapTriangulation(contour, initialFaces, targetEdge = 1.85, maxIterations = 8) {
+  const points = contour.map((p) => p.clone())
+  let faces = (initialFaces || []).map((f) => [f[0], f[1], f[2]])
+  const boundaryEdges = new Set()
+  for (let i = 0; i < contour.length; i++) boundaryEdges.add(cadEdgeKey(i, (i + 1) % contour.length))
+
+  const edgeLength = (a, b) => points[a].distanceTo(points[b])
+  let iterations = 0
+  for (; iterations < maxIterations; iterations++) {
+    const marked = new Set()
+    for (const [a, b, c] of faces) {
+      for (const [u, v] of [[a,b],[b,c],[c,a]]) {
+        const key = cadEdgeKey(u, v)
+        if (boundaryEdges.has(key)) continue
+        if (edgeLength(u, v) > targetEdge) marked.add(key)
+      }
+    }
+    if (!marked.size) break
+
+    const midpoints = new Map()
+    const midpointFor = (a, b) => {
+      const key = cadEdgeKey(a, b)
+      if (!marked.has(key)) return -1
+      if (midpoints.has(key)) return midpoints.get(key)
+      const index = points.length
+      points.push(points[a].clone().add(points[b]).multiplyScalar(0.5))
+      midpoints.set(key, index)
+      return index
+    }
+
+    const nextFaces = []
+    for (const [a, b, c] of faces) {
+      const mAB = midpointFor(a, b)
+      const mBC = midpointFor(b, c)
+      const mCA = midpointFor(c, a)
+      const mask = (mAB >= 0 ? 1 : 0) | (mBC >= 0 ? 2 : 0) | (mCA >= 0 ? 4 : 0)
+      if (mask === 0) nextFaces.push([a,b,c])
+      else if (mask === 1) nextFaces.push([a,mAB,c],[mAB,b,c])
+      else if (mask === 2) nextFaces.push([a,b,mBC],[a,mBC,c])
+      else if (mask === 4) nextFaces.push([a,b,mCA],[mCA,b,c])
+      else if (mask === 3) nextFaces.push([mAB,b,mBC],[a,mAB,c],[mAB,mBC,c])
+      else if (mask === 6) nextFaces.push([mBC,c,mCA],[a,b,mBC],[a,mBC,mCA])
+      else if (mask === 5) nextFaces.push([mCA,a,mAB],[mAB,b,c],[mAB,c,mCA])
+      else nextFaces.push([a,mAB,mCA],[mAB,b,mBC],[mCA,mBC,c],[mAB,mBC,mCA])
+    }
+    faces = nextFaces
+  }
+
+  let maxEdge = 0
+  for (const [a,b,c] of faces) {
+    maxEdge = Math.max(maxEdge, edgeLength(a,b), edgeLength(b,c), edgeLength(c,a))
+  }
+  return { points, faces, iterations, maxEdge }
+}
+
+
+// V11 – isotropic cap optimization.
+// V10 už odstranil obří fan triangulaci, ale dělení midpointů si stále neslo
+// radiální „rodokmen“ původního earcutu. V11 proto po conforming refinementu:
+// 1) opakovaně flipuje vnitřní hrany, pokud tím roste minimální kvalita obou face,
+// 2) lehce relaxuje pouze VNITŘNÍ vertexy (boundary zůstává přesně stejná),
+// 3) znovu provede edge-flip pass. Tím se síť přiblíží isotropní triangulaci.
+function cadOrient2D(a, b, c) {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+function cadTriangleQuality2D(a, b, c) {
+  const area2 = Math.abs(cadOrient2D(a, b, c))
+  if (area2 <= 1e-12) return 0
+  const ab = a.distanceToSquared(b)
+  const bc = b.distanceToSquared(c)
+  const ca = c.distanceToSquared(a)
+  const denom = ab + bc + ca
+  if (denom <= 1e-12) return 0
+  // 1.0 = rovnostranný trojúhelník, 0 = degenerovaný.
+  return Math.min(1, (2 * Math.sqrt(3) * area2) / denom)
+}
+
+function cadPointInPolygon2D(point, polygon) {
+  let inside = false
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const a = polygon[i], b = polygon[j]
+    const intersect = ((a.y > point.y) !== (b.y > point.y)) &&
+      (point.x < (b.x - a.x) * (point.y - a.y) / ((b.y - a.y) || 1e-12) + a.x)
+    if (intersect) inside = !inside
+  }
+  return inside
+}
+
+function cadOptimizeCapEdgeFlips(points, faces, boundaryCount, maxPasses = 10) {
+  const result = faces.map((f) => [f[0], f[1], f[2]])
+  const boundaryEdges = new Set()
+  for (let i = 0; i < boundaryCount; i++) boundaryEdges.add(cadEdgeKey(i, (i + 1) % boundaryCount))
+  let totalFlips = 0
+
+  const orientedFace = (a, b, c, sign) => {
+    const current = cadOrient2D(points[a], points[b], points[c])
+    if ((sign >= 0 && current >= 0) || (sign < 0 && current < 0)) return [a, b, c]
+    return [a, c, b]
+  }
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const edgeMap = new Map()
+    for (let fi = 0; fi < result.length; fi++) {
+      const [a,b,c] = result[fi]
+      for (const [u,v] of [[a,b],[b,c],[c,a]]) {
+        const key = cadEdgeKey(u, v)
+        let list = edgeMap.get(key)
+        if (!list) { list = []; edgeMap.set(key, list) }
+        list.push(fi)
+      }
+    }
+
+    const candidates = []
+    for (const [key, adjacent] of edgeMap.entries()) {
+      if (adjacent.length !== 2 || boundaryEdges.has(key)) continue
+      const [fa, fb] = adjacent
+      const faceA = result[fa], faceB = result[fb]
+      const [uStr, vStr] = key.split(':')
+      const u = Number(uStr), v = Number(vStr)
+      const a = faceA.find((x) => x !== u && x !== v)
+      const b = faceB.find((x) => x !== u && x !== v)
+      if (a == null || b == null || a === b) continue
+
+      const oldArea = Math.abs(cadOrient2D(points[faceA[0]], points[faceA[1]], points[faceA[2]])) +
+        Math.abs(cadOrient2D(points[faceB[0]], points[faceB[1]], points[faceB[2]]))
+      const newArea = Math.abs(cadOrient2D(points[a], points[b], points[u])) +
+        Math.abs(cadOrient2D(points[b], points[a], points[v]))
+      if (oldArea <= 1e-10 || Math.abs(newArea - oldArea) / oldArea > 1e-4) continue
+
+      const oldQuality = Math.min(
+        cadTriangleQuality2D(points[faceA[0]], points[faceA[1]], points[faceA[2]]),
+        cadTriangleQuality2D(points[faceB[0]], points[faceB[1]], points[faceB[2]])
+      )
+      const newQuality = Math.min(
+        cadTriangleQuality2D(points[a], points[b], points[u]),
+        cadTriangleQuality2D(points[b], points[a], points[v])
+      )
+      const improvement = newQuality - oldQuality
+      if (improvement > 0.012) candidates.push({ fa, fb, u, v, a, b, improvement })
+    }
+
+    if (!candidates.length) break
+    candidates.sort((x, y) => y.improvement - x.improvement)
+    const usedFaces = new Set()
+    let passFlips = 0
+    for (const candidate of candidates) {
+      const { fa, fb, u, v, a, b } = candidate
+      if (usedFaces.has(fa) || usedFaces.has(fb)) continue
+      const signA = Math.sign(cadOrient2D(points[result[fa][0]], points[result[fa][1]], points[result[fa][2]])) || 1
+      const signB = Math.sign(cadOrient2D(points[result[fb][0]], points[result[fb][1]], points[result[fb][2]])) || 1
+      result[fa] = orientedFace(a, b, u, signA)
+      result[fb] = orientedFace(b, a, v, signB)
+      usedFaces.add(fa); usedFaces.add(fb)
+      passFlips++; totalFlips++
+    }
+    if (!passFlips) break
+  }
+  return { faces: result, flips: totalFlips }
+}
+
+function cadRelaxCapInterior(points, faces, boundaryCount, polygon, passes = 3, strength = 0.34, protectBoundaryDistance = 0) {
+  const result = points.map((p) => p.clone())
+  let moved = 0
+  for (let pass = 0; pass < passes; pass++) {
+    const neighbors = Array.from({ length: result.length }, () => new Set())
+    const incident = Array.from({ length: result.length }, () => [])
+    for (let fi = 0; fi < faces.length; fi++) {
+      const [a,b,c] = faces[fi]
+      neighbors[a].add(b); neighbors[a].add(c)
+      neighbors[b].add(a); neighbors[b].add(c)
+      neighbors[c].add(a); neighbors[c].add(b)
+      incident[a].push(fi); incident[b].push(fi); incident[c].push(fi)
+    }
+
+    const proposals = new Map()
+    for (let i = boundaryCount; i < result.length; i++) {
+      if (protectBoundaryDistance > 0 && cadMinDistanceToPolygon2D(result[i], polygon) < protectBoundaryDistance) continue
+      const list = [...neighbors[i]]
+      if (list.length < 3) continue
+      const average = new THREE.Vector2()
+      for (const neighbor of list) average.add(result[neighbor])
+      average.multiplyScalar(1 / list.length)
+      const candidate = result[i].clone().lerp(average, strength)
+      if (!cadPointInPolygon2D(candidate, polygon)) continue
+
+      let safe = true
+      for (const fi of incident[i]) {
+        const face = faces[fi]
+        const oldPoints = face.map((idx) => result[idx])
+        const oldSign = cadOrient2D(oldPoints[0], oldPoints[1], oldPoints[2])
+        const newPoints = face.map((idx) => idx === i ? candidate : result[idx])
+        const newSign = cadOrient2D(newPoints[0], newPoints[1], newPoints[2])
+        if (Math.abs(newSign) < 1e-9 || oldSign * newSign <= 0) { safe = false; break }
+      }
+      if (safe) proposals.set(i, candidate)
+    }
+    if (!proposals.size) break
+    for (const [index, value] of proposals.entries()) { result[index] = value; moved++ }
+  }
+  return { points: result, moved }
+}
+
+function cadCapQualityStats(points, faces) {
+  let minQuality = 1
+  let sumQuality = 0
+  let maxEdge = 0
+  let skinny = 0
+  for (const [a,b,c] of faces) {
+    const pa = points[a], pb = points[b], pc = points[c]
+    const quality = cadTriangleQuality2D(pa, pb, pc)
+    minQuality = Math.min(minQuality, quality)
+    sumQuality += quality
+    maxEdge = Math.max(maxEdge, pa.distanceTo(pb), pb.distanceTo(pc), pc.distanceTo(pa))
+    if (quality < 0.12) skinny++
+  }
+  return {
+    minQuality: faces.length ? minQuality : 0,
+    meanQuality: faces.length ? sumQuality / faces.length : 0,
+    maxEdge,
+    skinny,
+  }
+}
+
+function cadOptimizeCapTriangulation(contour, refined, options = {}) {
+  const boundaryCount = contour.length
+  const flipPasses = Math.max(1, Number(options.flipPasses) || 12)
+  const smoothPasses = Math.max(0, Number(options.smoothPasses) || 3)
+  const firstFlip = cadOptimizeCapEdgeFlips(refined.points, refined.faces, boundaryCount, flipPasses)
+  const relaxed = cadRelaxCapInterior(refined.points, firstFlip.faces, boundaryCount, contour, smoothPasses, 0.32)
+  const secondFlip = cadOptimizeCapEdgeFlips(relaxed.points, firstFlip.faces, boundaryCount, Math.max(4, Math.ceil(flipPasses * 0.65)))
+  const quality = cadCapQualityStats(relaxed.points, secondFlip.faces)
+  return {
+    points: relaxed.points,
+    faces: secondFlip.faces,
+    flips: firstFlip.flips + secondFlip.flips,
+    relaxedMoves: relaxed.moved,
+    quality,
+  }
+}
+
+
+// V15/V16 – adaptive boundary strip; V16 replaces midpoint refinement with quality-aware Delaunay refinement.
+//
+// V14 už trefila celkovou hustotu Medit capu velmi dobře, ale analýza ukázala
+// dva lokální problémy:
+//   1) první inward ring byl příliš daleko od boundary (~0.66 mm),
+//   2) několik dlouhých hran zůstávalo hluboko uvnitř plochy.
+//
+// V15 proto dělí úlohu na dvě oddělené části:
+//   • mezi přesnou boundary a matched inward ringem vytvoří explicitní annular
+//     strip široký typicky 0.35–0.42 mm; diagonála každého quadu se volí podle
+//     lepší minimální kvality trojúhelníků,
+//   • uvnitř tohoto ring obrysu vytvoří constrained Delaunay síť a pouze hrany
+//     delší než ~1.9 mm lokálně conforming rozdělí.
+//
+// Tvar boundary se nikdy neposouvá a globální hustota capu se nezvyšuje.
+function cadDistancePointSegment2D(point, a, b) {
+  const abx = b.x - a.x, aby = b.y - a.y
+  const apx = point.x - a.x, apy = point.y - a.y
+  const denom = abx * abx + aby * aby
+  if (denom <= 1e-14) return Math.hypot(apx, apy)
+  const t = Math.max(0, Math.min(1, (apx * abx + apy * aby) / denom))
+  const dx = point.x - (a.x + abx * t)
+  const dy = point.y - (a.y + aby * t)
+  return Math.hypot(dx, dy)
+}
+
+function cadMinDistanceToPolygon2D(point, polygon) {
+  let best = Infinity
+  for (let i = 0; i < polygon.length; i++) {
+    best = Math.min(best, cadDistancePointSegment2D(point, polygon[i], polygon[(i + 1) % polygon.length]))
+  }
+  return best
+}
+
+function cadGenerateHexSteinerPoints(polygon, spacing = 0.82, minBoundaryDistance = null) {
+  if (!Array.isArray(polygon) || polygon.length < 3) return []
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const p of polygon) {
+    minX = Math.min(minX, p.x); minY = Math.min(minY, p.y)
+    maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y)
+  }
+  const sx = Math.max(0.52, spacing)
+  const sy = sx * Math.sqrt(3) * 0.5
+  const clearance = Number.isFinite(minBoundaryDistance)
+    ? Math.max(sx * 0.18, minBoundaryDistance)
+    : sx * 0.27
+  const result = []
+  let row = 0
+  for (let y = minY + sy * 0.55; y <= maxY - sy * 0.35; y += sy, row++) {
+    const offset = (row & 1) ? sx * 0.5 : 0
+    for (let x = minX + sx * 0.45 + offset; x <= maxX - sx * 0.35; x += sx) {
+      const p = new THREE.Vector2(x, y)
+      if (!cadPointInPolygon2D(p, polygon)) continue
+      if (cadMinDistanceToPolygon2D(p, polygon) < clearance) continue
+      result.push(p)
+    }
+  }
+  // Deterministické rozptýlení pořadí vkládání – omezuje lokální řetězce
+  // vznikající při sekvenčním vkládání gridu po řádcích.
+  result.sort((a, b) => {
+    const ha = Math.sin(a.x * 12.9898 + a.y * 78.233) * 43758.5453
+    const hb = Math.sin(b.x * 12.9898 + b.y * 78.233) * 43758.5453
+    return (ha - Math.floor(ha)) - (hb - Math.floor(hb))
+  })
+  return result
+}
+
+function cadSignedArea2D(points) {
+  let area = 0
+  for (let i = 0; i < (points?.length || 0); i++) {
+    const a = points[i], b = points[(i + 1) % points.length]
+    area += a.x * b.y - b.x * a.y
+  }
+  return area * 0.5
+}
+
+function cadClosedLoopPerimeter2D(points) {
+  let length = 0
+  for (let i = 0; i < (points?.length || 0); i++) length += points[i].distanceTo(points[(i + 1) % points.length])
+  return length
+}
+
+function cadResampleClosedLoop2D(points, targetSpacing = 0.8, minCount = 32, maxCount = 520) {
+  if (!Array.isArray(points) || points.length < 3) return (points || []).map((p) => p.clone())
+  const perimeter = cadClosedLoopPerimeter2D(points)
+  if (!Number.isFinite(perimeter) || perimeter <= 1e-7) return points.map((p) => p.clone())
+  const count = Math.max(minCount, Math.min(maxCount, Math.round(perimeter / Math.max(0.18, targetSpacing))))
+  const cumulative = [0]
+  for (let i = 0; i < points.length; i++) cumulative.push(cumulative[cumulative.length - 1] + points[i].distanceTo(points[(i + 1) % points.length]))
+  const total = cumulative[cumulative.length - 1]
+  const result = []
+  let edge = 0
+  for (let sample = 0; sample < count; sample++) {
+    const distance = (sample / count) * total
+    while (edge + 1 < cumulative.length - 1 && cumulative[edge + 1] < distance) edge++
+    const a = points[edge % points.length]
+    const b = points[(edge + 1) % points.length]
+    const edgeLength = Math.max(1e-9, cumulative[edge + 1] - cumulative[edge])
+    const t = Math.max(0, Math.min(1, (distance - cumulative[edge]) / edgeLength))
+    result.push(a.clone().lerp(b, t))
+  }
+  return result
+}
+
+function cadMergeSteinerPointsUnique(groups, minDistance = 0.34) {
+  const result = []
+  const minDistanceSq = minDistance * minDistance
+  for (const group of groups || []) {
+    for (const point of group || []) {
+      let duplicate = false
+      for (const existing of result) {
+        if (existing.distanceToSquared(point) < minDistanceSq) { duplicate = true; break }
+      }
+      if (!duplicate) result.push(point.clone())
+    }
+  }
+  return result
+}
+
+function cadPointInTriangleStrict2D(p, a, b, c, eps = 1e-8) {
+  const o1 = cadOrient2D(a, b, p)
+  const o2 = cadOrient2D(b, c, p)
+  const o3 = cadOrient2D(c, a, p)
+  const hasPos = o1 > eps || o2 > eps || o3 > eps
+  const hasNeg = o1 < -eps || o2 < -eps || o3 < -eps
+  if (hasPos && hasNeg) return false
+  return Math.min(Math.abs(o1), Math.abs(o2), Math.abs(o3)) > eps
+}
+
+function cadInsertSteinerPointsIntoTriangulation(contour, initialFaces, steinerPoints) {
+  const points = contour.map((p) => p.clone())
+  const faces = (initialFaces || []).map((f) => [f[0], f[1], f[2]])
+  let inserted = 0
+  let skipped = 0
+  for (const point of steinerPoints || []) {
+    let faceIndex = -1
+    for (let fi = 0; fi < faces.length; fi++) {
+      const [a, b, c] = faces[fi]
+      if (cadPointInTriangleStrict2D(point, points[a], points[b], points[c], 1e-8)) {
+        faceIndex = fi
+        break
+      }
+    }
+    if (faceIndex < 0) { skipped++; continue }
+    const [a, b, c] = faces[faceIndex]
+    const sign = Math.sign(cadOrient2D(points[a], points[b], points[c])) || 1
+    const index = points.length
+    points.push(point.clone())
+    const orientFace = (u, v, w) => {
+      const orientation = cadOrient2D(points[u], points[v], points[w])
+      return ((sign >= 0 && orientation >= 0) || (sign < 0 && orientation < 0)) ? [u, v, w] : [u, w, v]
+    }
+    faces[faceIndex] = orientFace(a, b, index)
+    faces.push(orientFace(b, c, index), orientFace(c, a, index))
+    inserted++
+  }
+  return { points, faces, inserted, skipped }
+}
+
+function cadInCircleScore2D(a, b, c, d) {
+  const ax = a.x - d.x, ay = a.y - d.y
+  const bx = b.x - d.x, by = b.y - d.y
+  const cx = c.x - d.x, cy = c.y - d.y
+  const det = (ax * ax + ay * ay) * (bx * cy - by * cx)
+    - (bx * bx + by * by) * (ax * cy - ay * cx)
+    + (cx * cx + cy * cy) * (ax * by - ay * bx)
+  const orientation = cadOrient2D(a, b, c)
+  return orientation >= 0 ? det : -det
+}
+
+function cadConstrainedDelaunayFlips(points, faces, boundaryCount, maxPasses = 28) {
+  const result = faces.map((f) => [f[0], f[1], f[2]])
+  const boundaryEdges = new Set()
+  for (let i = 0; i < boundaryCount; i++) boundaryEdges.add(cadEdgeKey(i, (i + 1) % boundaryCount))
+  let totalFlips = 0
+
+  const orientedFace = (a, b, c, sign) => {
+    const current = cadOrient2D(points[a], points[b], points[c])
+    if ((sign >= 0 && current >= 0) || (sign < 0 && current < 0)) return [a, b, c]
+    return [a, c, b]
+  }
+
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const edgeMap = cadBuildEdgeFaceMap(result)
+    const candidates = []
+    for (const [key, adjacent] of edgeMap.entries()) {
+      if (adjacent.length !== 2 || boundaryEdges.has(key)) continue
+      const [fa, fb] = adjacent
+      const faceA = result[fa], faceB = result[fb]
+      const [uStr, vStr] = key.split(':')
+      const u = Number(uStr), v = Number(vStr)
+      const a = faceA.find((x) => x !== u && x !== v)
+      const b = faceB.find((x) => x !== u && x !== v)
+      if (a == null || b == null || a === b) continue
+      const replacementKey = cadEdgeKey(a, b)
+      if (edgeMap.has(replacementKey)) continue
+
+      const oldArea = Math.abs(cadOrient2D(points[faceA[0]], points[faceA[1]], points[faceA[2]]))
+        + Math.abs(cadOrient2D(points[faceB[0]], points[faceB[1]], points[faceB[2]]))
+      const newAreaA = Math.abs(cadOrient2D(points[a], points[b], points[u]))
+      const newAreaB = Math.abs(cadOrient2D(points[b], points[a], points[v]))
+      if (oldArea <= 1e-10 || newAreaA <= 1e-10 || newAreaB <= 1e-10) continue
+      if (Math.abs((newAreaA + newAreaB) - oldArea) / oldArea > 2e-4) continue
+
+      const circleScore = cadInCircleScore2D(points[u], points[v], points[a], points[b])
+      if (circleScore <= 1e-7) continue
+
+      const oldQuality = Math.min(
+        cadTriangleQuality2D(points[faceA[0]], points[faceA[1]], points[faceA[2]]),
+        cadTriangleQuality2D(points[faceB[0]], points[faceB[1]], points[faceB[2]])
+      )
+      const newQuality = Math.min(
+        cadTriangleQuality2D(points[a], points[b], points[u]),
+        cadTriangleQuality2D(points[b], points[a], points[v])
+      )
+      if (newQuality + 1e-6 < oldQuality) continue
+      candidates.push({ fa, fb, u, v, a, b, score: circleScore })
+    }
+
+    if (!candidates.length) break
+    candidates.sort((x, y) => y.score - x.score)
+    const usedFaces = new Set()
+    let passFlips = 0
+    for (const candidate of candidates) {
+      const { fa, fb, u, v, a, b } = candidate
+      if (usedFaces.has(fa) || usedFaces.has(fb)) continue
+      const signA = Math.sign(cadOrient2D(points[result[fa][0]], points[result[fa][1]], points[result[fa][2]])) || 1
+      const signB = Math.sign(cadOrient2D(points[result[fb][0]], points[result[fb][1]], points[result[fb][2]])) || 1
+      result[fa] = orientedFace(a, b, u, signA)
+      result[fb] = orientedFace(b, a, v, signB)
+      usedFaces.add(fa); usedFaces.add(fb)
+      passFlips++; totalFlips++
+    }
+    if (!passFlips) break
+  }
+  return { faces: result, flips: totalFlips }
+}
+
+function cadGenerateMatchedAdaptiveBoundaryRing(polygon, targetSpacing = 0.80) {
+  if (!Array.isArray(polygon) || polygon.length < 3) return { ring: [], insets: [] }
+  const ccw = cadSignedArea2D(polygon) >= 0
+  const baseInset = Math.max(0.35, Math.min(0.42, targetSpacing * 0.48))
+  const ring = []
+  const insets = []
+
+  for (let i = 0; i < polygon.length; i++) {
+    const prev = polygon[(i - 1 + polygon.length) % polygon.length]
+    const point = polygon[i]
+    const next = polygon[(i + 1) % polygon.length]
+
+    const e0x = point.x - prev.x, e0y = point.y - prev.y
+    const e1x = next.x - point.x, e1y = next.y - point.y
+    const e0l = Math.hypot(e0x, e0y) || 1
+    const e1l = Math.hypot(e1x, e1y) || 1
+    const dot = Math.max(-1, Math.min(1, (e0x * e1x + e0y * e1y) / (e0l * e1l)))
+    const turn = Math.acos(dot)
+    const curvature = Math.max(0, Math.min(1, turn / (Math.PI * 0.55)))
+    const desiredInset = Math.max(0.35, Math.min(0.42, baseInset * (1.04 - curvature * 0.12)))
+
+    const tx = next.x - prev.x
+    const ty = next.y - prev.y
+    const tl = Math.hypot(tx, ty) || 1
+    const nx = ccw ? -ty / tl : ty / tl
+    const ny = ccw ? tx / tl : -tx / tl
+
+    let accepted = null
+    let acceptedInset = desiredInset
+    for (const scale of [1, 0.94, 0.86, 0.76, 0.66, 0.56]) {
+      const depth = desiredInset * scale
+      const candidate = new THREE.Vector2(point.x + nx * depth, point.y + ny * depth)
+      if (!cadPointInPolygon2D(candidate, polygon)) continue
+      const minDistance = cadMinDistanceToPolygon2D(candidate, polygon)
+      if (minDistance < Math.max(0.16, depth * 0.42)) continue
+      accepted = candidate
+      acceptedInset = depth
+      break
+    }
+
+    // Nouzový fallback pro velmi konkávní místo: stále jdeme po lokální inward
+    // normále, pouze povolíme menší bezpečný krok. Ring musí zůstat 1:1 matched.
+    if (!accepted) {
+      for (const depth of [0.24, 0.20, 0.16, 0.12]) {
+        const candidate = new THREE.Vector2(point.x + nx * depth, point.y + ny * depth)
+        if (!cadPointInPolygon2D(candidate, polygon)) continue
+        accepted = candidate
+        acceptedInset = depth
+        break
+      }
+    }
+    if (!accepted) {
+      // Prakticky by k tomu u pravidelného U-profile nemělo dojít; zachováme ale
+      // numerickou robustnost a vložíme mikrokrok dovnitř místo NaN/rozbitého ring.
+      accepted = new THREE.Vector2(point.x + nx * 0.08, point.y + ny * 0.08)
+      acceptedInset = 0.08
+    }
+
+    ring.push(accepted)
+    insets.push(acceptedInset)
+  }
+  return { ring, insets }
+}
+
+function cadBuildMatchedBoundaryStripFaces(outer, inner) {
+  if (!Array.isArray(outer) || !Array.isArray(inner) || outer.length !== inner.length || outer.length < 3) return []
+  const count = outer.length
+  const points = [...outer, ...inner]
+  const sign = Math.sign(cadSignedArea2D(outer)) || 1
+  const orientFace = (a, b, c) => {
+    const orientation = cadOrient2D(points[a], points[b], points[c])
+    return ((sign >= 0 && orientation >= 0) || (sign < 0 && orientation < 0)) ? [a, b, c] : [a, c, b]
+  }
+  const faces = []
+  for (let i = 0; i < count; i++) {
+    const j = (i + 1) % count
+    const a = i, b = j, c = count + j, d = count + i
+    const optionA = [orientFace(a, b, c), orientFace(a, c, d)]
+    const optionB = [orientFace(a, b, d), orientFace(b, c, d)]
+    const qa = Math.min(
+      cadTriangleQuality2D(points[optionA[0][0]], points[optionA[0][1]], points[optionA[0][2]]),
+      cadTriangleQuality2D(points[optionA[1][0]], points[optionA[1][1]], points[optionA[1][2]])
+    )
+    const qb = Math.min(
+      cadTriangleQuality2D(points[optionB[0][0]], points[optionB[0][1]], points[optionB[0][2]]),
+      cadTriangleQuality2D(points[optionB[1][0]], points[optionB[1][1]], points[optionB[1][2]])
+    )
+    faces.push(...(qb > qa ? optionB : optionA))
+  }
+  return faces
+}
+
+function cadTriangleAnglesDeg2D(a, b, c) {
+  const ab = Math.max(1e-12, a.distanceTo(b))
+  const bc = Math.max(1e-12, b.distanceTo(c))
+  const ca = Math.max(1e-12, c.distanceTo(a))
+  const clamp = (v) => Math.max(-1, Math.min(1, v))
+  const angleA = Math.acos(clamp((ab * ab + ca * ca - bc * bc) / (2 * ab * ca))) * 180 / Math.PI
+  const angleB = Math.acos(clamp((ab * ab + bc * bc - ca * ca) / (2 * ab * bc))) * 180 / Math.PI
+  const angleC = Math.max(0, 180 - angleA - angleB)
+  return [angleA, angleB, angleC]
+}
+
+function cadTriangleMinAngleDeg2D(a, b, c) {
+  const angles = cadTriangleAnglesDeg2D(a, b, c)
+  return Math.min(angles[0], angles[1], angles[2])
+}
+
+function cadTriangleMaxEdge2D(a, b, c) {
+  return Math.max(a.distanceTo(b), b.distanceTo(c), c.distanceTo(a))
+}
+
+function cadTriangleCircumcenter2D(a, b, c) {
+  const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y))
+  if (!Number.isFinite(d) || Math.abs(d) < 1e-10) return null
+  const aa = a.x * a.x + a.y * a.y
+  const bb = b.x * b.x + b.y * b.y
+  const cc = c.x * c.x + c.y * c.y
+  const ux = (aa * (b.y - c.y) + bb * (c.y - a.y) + cc * (a.y - b.y)) / d
+  const uy = (aa * (c.x - b.x) + bb * (a.x - c.x) + cc * (b.x - a.x)) / d
+  if (!Number.isFinite(ux) || !Number.isFinite(uy)) return null
+  return new THREE.Vector2(ux, uy)
+}
+
+function cadMinDistanceToPointSet2D(point, points) {
+  let bestSq = Infinity
+  for (const other of points || []) bestSq = Math.min(bestSq, point.distanceToSquared(other))
+  return Math.sqrt(bestSq)
+}
+
+function cadInsertSteinerPointsIntoExistingTriangulation(points, faces, steinerPoints) {
+  const resultPoints = (points || []).map((p) => p.clone())
+  const resultFaces = (faces || []).map((f) => [f[0], f[1], f[2]])
+  let inserted = 0
+  let skipped = 0
+
+  for (const point of steinerPoints || []) {
+    let faceIndex = -1
+    for (let fi = 0; fi < resultFaces.length; fi++) {
+      const [a, b, c] = resultFaces[fi]
+      if (cadPointInTriangleStrict2D(point, resultPoints[a], resultPoints[b], resultPoints[c], 1e-8)) {
+        faceIndex = fi
+        break
+      }
+    }
+    if (faceIndex < 0) { skipped++; continue }
+
+    const [a, b, c] = resultFaces[faceIndex]
+    const sign = Math.sign(cadOrient2D(resultPoints[a], resultPoints[b], resultPoints[c])) || 1
+    const index = resultPoints.length
+    resultPoints.push(point.clone())
+    const orientFace = (u, v, w) => {
+      const orientation = cadOrient2D(resultPoints[u], resultPoints[v], resultPoints[w])
+      return ((sign >= 0 && orientation >= 0) || (sign < 0 && orientation < 0)) ? [u, v, w] : [u, w, v]
+    }
+    resultFaces[faceIndex] = orientFace(a, b, index)
+    resultFaces.push(orientFace(b, c, index), orientFace(c, a, index))
+    inserted++
+  }
+  return { points: resultPoints, faces: resultFaces, inserted, skipped }
+}
+
+// V16 – quality-aware Delaunay refinement.
+//
+// V15 odstranila dlouhé hrany midpoint splitem, ale právě midpointy občas
+// přistály příliš blízko již existujícího vertexu a vytvořily malé skinny
+// klíny. V16 proto nevynucuje délku hrany za každou cenu. Refinement je řízený
+// kvalitou: prioritou je nízký minimální úhel a až potom opravdu příliš velký
+// triangle. Kandidát je circumcenter / off-center bod a smí se vložit pouze
+// pokud má bezpečný odstup od všech existujících bodů i constrained boundary.
+function cadQualityAwareDelaunayRefinement(points, faces, boundaryCount, polygon, options = {}) {
+  let resultPoints = (points || []).map((p) => p.clone())
+  let resultFaces = (faces || []).map((f) => [f[0], f[1], f[2]])
+
+  const targetMinAngle = Math.max(22, Math.min(32, Number(options.targetMinAngle) || 27.5))
+  const maxEdgeTarget = Math.max(1.92, Math.min(2.12, Number(options.maxEdgeTarget) || 2.04))
+  const minPointGap = Math.max(0.42, Math.min(0.62, Number(options.minPointGap) || 0.50))
+  const minBoundaryGap = Math.max(0.16, Math.min(0.34, Number(options.minBoundaryGap) || 0.24))
+  const maxPasses = Math.max(1, Math.min(5, Number(options.maxPasses) || 3))
+  const maxInsertions = Math.max(0, Math.min(160, Number(options.maxInsertions) || 84))
+  const maxPerPass = Math.max(4, Math.min(48, Number(options.maxPerPass) || 28))
+
+  let requested = 0
+  let insertedTotal = 0
+  let skippedGap = 0
+  let skippedBoundary = 0
+  let skippedGeometry = 0
+  let flips = 0
+
+  const candidateForFace = (face) => {
+    const [ia, ib, ic] = face
+    const a = resultPoints[ia], b = resultPoints[ib], c = resultPoints[ic]
+    const minAngle = cadTriangleMinAngleDeg2D(a, b, c)
+    const maxEdge = cadTriangleMaxEdge2D(a, b, c)
+    const quality = cadTriangleQuality2D(a, b, c)
+
+    // Neštěpíme malé skinny trojúhelníky jen kvůli číslu úhlu. Ty se mají řešit
+    // Delaunay flipem; nový bod má smysl teprve u dostatečně velké lokální dutiny.
+    const angleBad = minAngle < targetMinAngle && maxEdge > Math.max(1.22, maxEdgeTarget * 0.64)
+    const sizeBad = maxEdge > maxEdgeTarget
+    if (!angleBad && !sizeBad) return null
+
+    const centroid = a.clone().add(b).add(c).multiplyScalar(1 / 3)
+    const circumcenter = cadTriangleCircumcenter2D(a, b, c)
+    const options = []
+    if (circumcenter) {
+      options.push(circumcenter)
+      // U tupého trojúhelníku leží circumcenter mimo face. Postupným posunem
+      // směrem k centroidu získáme klasický off-center kandidát bez midpoint artefaktu.
+      options.push(circumcenter.clone().lerp(centroid, 0.32))
+      options.push(circumcenter.clone().lerp(centroid, 0.55))
+      options.push(circumcenter.clone().lerp(centroid, 0.76))
+    }
+    options.push(centroid)
+
+    let best = null
+    for (const candidate of options) {
+      if (!cadPointInTriangleStrict2D(candidate, a, b, c, 1e-8)) continue
+      if (!cadPointInPolygon2D(candidate, polygon)) continue
+      const boundaryDistance = cadMinDistanceToPolygon2D(candidate, polygon)
+      if (boundaryDistance < minBoundaryGap) continue
+      const pointGap = cadMinDistanceToPointSet2D(candidate, resultPoints)
+      if (pointGap < minPointGap) continue
+
+      // Preferujeme kandidáta s největší prázdnou koulí. Tím se přirozeně
+      // vyhýbáme vkládání bodu těsně vedle existujícího vertexu.
+      const candidateScore = pointGap + Math.min(0.5, boundaryDistance) * 0.18
+      if (!best || candidateScore > best.candidateScore) {
+        best = { point: candidate.clone(), pointGap, boundaryDistance, candidateScore }
+      }
+    }
+    if (!best) return { rejected: true, minAngle, maxEdge, quality, angleBad, sizeBad }
+
+    // Low-angle triangles mají prioritu, ale size-only triangle dostane prioritu
+    // až když opravdu přesáhne referenční ~2.0 mm rozsah Meditu.
+    const anglePenalty = angleBad ? (targetMinAngle - minAngle) * 2.4 : 0
+    const sizePenalty = sizeBad ? (maxEdge - maxEdgeTarget) * 12 : 0
+    const score = anglePenalty + sizePenalty + (1 - quality) * 1.5
+    return { ...best, minAngle, maxEdge, quality, angleBad, sizeBad, score }
+  }
+
+  for (let pass = 0; pass < maxPasses && insertedTotal < maxInsertions; pass++) {
+    const candidates = []
+    for (const face of resultFaces) {
+      const candidate = candidateForFace(face)
+      if (!candidate) continue
+      requested++
+      if (candidate.rejected) { skippedGeometry++; continue }
+      candidates.push(candidate)
+    }
+    if (!candidates.length) break
+    candidates.sort((a, b) => b.score - a.score)
+
+    const selected = []
+    const batchLimit = Math.min(maxPerPass, maxInsertions - insertedTotal)
+    for (const candidate of candidates) {
+      if (selected.length >= batchLimit) break
+      let tooClose = false
+      for (const accepted of selected) {
+        if (candidate.point.distanceTo(accepted) < minPointGap * 1.06) { tooClose = true; break }
+      }
+      if (tooClose) { skippedGap++; continue }
+      selected.push(candidate.point)
+    }
+    if (!selected.length) break
+
+    const inserted = cadInsertSteinerPointsIntoExistingTriangulation(resultPoints, resultFaces, selected)
+    resultPoints = inserted.points
+    resultFaces = inserted.faces
+    insertedTotal += inserted.inserted
+    skippedGeometry += inserted.skipped
+    if (!inserted.inserted) break
+
+    const delaunay = cadConstrainedDelaunayFlips(resultPoints, resultFaces, boundaryCount, 34)
+    resultFaces = delaunay.faces
+    flips += delaunay.flips
+  }
+
+  // Finální čistící pass bez dalších bodů. Důležité: žádná relaxation zde už
+  // není – po V12 shape-locku nechceme kvalitu získávat posunem profilu.
+  const finalDelaunay = cadConstrainedDelaunayFlips(resultPoints, resultFaces, boundaryCount, 30)
+  resultFaces = finalDelaunay.faces
+  flips += finalDelaunay.flips
+
+  return {
+    points: resultPoints,
+    faces: resultFaces,
+    requested,
+    inserted: insertedTotal,
+    skippedGap,
+    skippedBoundary,
+    skippedGeometry,
+    flips,
+    targetMinAngle,
+    maxEdgeTarget,
+    minPointGap,
+    minBoundaryGap,
+  }
+}
+
+function cadBuildConstrainedDelaunayCap(contour, targetSpacing = 0.80) {
+  if (!Array.isArray(contour) || contour.length < 3) throw new Error("Spodní plochu báze se nepodařilo triangulovat.")
+
+  // 1) Explicitní matched strip 0.35–0.42 mm od skutečné boundary.
+  const adaptiveRing = cadGenerateMatchedAdaptiveBoundaryRing(contour, targetSpacing)
+  const innerRing = adaptiveRing.ring
+  if (innerRing.length !== contour.length) throw new Error("Nepodařilo se vytvořit stabilní boundary strip spodní plochy.")
+  const stripFaces = cadBuildMatchedBoundaryStripFaces(contour, innerRing)
+
+  // 2) Vnitřní Delaunay oblast už má jako constrained boundary právě inward ring.
+  const initialFaces = THREE.ShapeUtils.triangulateShape(innerRing, [])
+  if (!initialFaces?.length) throw new Error("Vnitřní plochu báze se nepodařilo triangulovat.")
+  const hexClearance = Math.max(0.20, targetSpacing * 0.27)
+  const hex = cadGenerateHexSteinerPoints(innerRing, targetSpacing, hexClearance)
+  const steiner = cadMergeSteinerPointsUnique([hex], Math.max(0.27, targetSpacing * 0.36))
+  const inserted = cadInsertSteinerPointsIntoTriangulation(innerRing, initialFaces, steiner)
+  const firstDelaunay = cadConstrainedDelaunayFlips(inserted.points, inserted.faces, innerRing.length, 42)
+
+  // Jemná relaxace pouze hluboko uvnitř; matched ring zůstává absolutně fixed.
+  const relaxed = cadRelaxCapInterior(
+    inserted.points,
+    firstDelaunay.faces,
+    innerRing.length,
+    innerRing,
+    1,
+    0.12,
+    Math.max(0.14, targetSpacing * 0.16)
+  )
+  const secondDelaunay = cadConstrainedDelaunayFlips(relaxed.points, firstDelaunay.faces, innerRing.length, 32)
+
+  // 3) V16 quality-aware refinement. Žádné midpoint splity: nové Steiner
+  // body vzniknou jen v lokálně nekvalitním / opravdu velkém trojúhelníku a
+  // pouze pokud mají bezpečný odstup od existujících vertexů i inner boundary.
+  const qualityRefined = cadQualityAwareDelaunayRefinement(
+    relaxed.points,
+    secondDelaunay.faces,
+    innerRing.length,
+    innerRing,
+    {
+      targetMinAngle: 27.5,
+      maxEdgeTarget: 2.04,
+      minPointGap: Math.max(0.48, Math.min(0.54, targetSpacing * 0.62)),
+      minBoundaryGap: Math.max(0.20, Math.min(0.27, targetSpacing * 0.30)),
+      maxPasses: 3,
+      maxInsertions: 84,
+      maxPerPass: 28,
+    }
+  )
+
+  // 4) Spojíme outer strip a vnitřní triangulaci do jedné point/index sady.
+  const outerCount = contour.length
+  const points = contour.map((p) => p.clone())
+  for (const point of qualityRefined.points) points.push(point.clone())
+  const faces = stripFaces.map((f) => [f[0], f[1], f[2]])
+  for (const face of qualityRefined.faces) faces.push(face.map((index) => outerCount + index))
+
+  const quality = cadCapQualityStats(points, faces)
+  const insetMin = adaptiveRing.insets.length ? Math.min(...adaptiveRing.insets) : 0
+  const insetMax = adaptiveRing.insets.length ? Math.max(...adaptiveRing.insets) : 0
+  const insetMean = adaptiveRing.insets.length
+    ? adaptiveRing.insets.reduce((sum, value) => sum + value, 0) / adaptiveRing.insets.length
+    : 0
+
+  return {
+    points,
+    faces,
+    steinerRequested: steiner.length,
+    steinerInserted: inserted.inserted,
+    steinerSkipped: inserted.skipped,
+    boundaryRingRequested: innerRing.length,
+    hexRequested: hex.length,
+    ringInset: insetMean,
+    ringInsetMin: insetMin,
+    ringInsetMax: insetMax,
+    longEdgeTarget: qualityRefined.maxEdgeTarget,
+    longEdgeSplits: 0,
+    qualityRefineRequested: qualityRefined.requested,
+    qualityRefineInserted: qualityRefined.inserted,
+    qualityRefineSkippedGap: qualityRefined.skippedGap,
+    qualityRefineSkippedGeometry: qualityRefined.skippedGeometry,
+    qualityTargetMinAngle: qualityRefined.targetMinAngle,
+    qualityMinPointGap: qualityRefined.minPointGap,
+    flips: firstDelaunay.flips + secondDelaunay.flips + qualityRefined.flips,
+    relaxedMoves: relaxed.moved,
+    quality,
+  }
+}
+
+// Pomocné XZ normály profilu (ponecháno pro budoucí Curved / bottom-bevel nástroje).
+// U kladně orientovaného (CCW) loopu leží materiál vlevo od směru hrany,
+// takže vnější normála je pravá normála tangenty. Normály ještě lehce
+// low-passujeme po obvodu, aby bevel nekopíroval každý drobný zub boundary.
+function cadSmoothOutwardNormalsXZ(points) {
+  if (!Array.isArray(points) || points.length < 3) return []
+  const ccw = cadSignedAreaXZ(points) >= 0
+  const raw = points.map((point, i) => {
+    const prev = points[(i - 1 + points.length) % points.length]
+    const next = points[(i + 1) % points.length]
+    const tx = next.x - prev.x
+    const tz = next.z - prev.z
+    const length = Math.hypot(tx, tz) || 1
+    const nx = ccw ? tz / length : -tz / length
+    const nz = ccw ? -tx / length : tx / length
+    return new THREE.Vector3(nx, 0, nz)
+  })
+
+  const radius = Math.max(2, Math.min(7, Math.round(points.length / 150)))
+  return raw.map((normal, i) => {
+    const sum = new THREE.Vector3()
+    let weightSum = 0
+    for (let offset = -radius; offset <= radius; offset++) {
+      const idx = (i + offset + raw.length) % raw.length
+      const weight = radius + 1 - Math.abs(offset)
+      sum.addScaledVector(raw[idx], weight)
+      weightSum += weight
+    }
+    if (weightSum > 0) sum.multiplyScalar(1 / weightSum)
+    if (sum.lengthSq() < 1e-10) return normal.clone()
+    return sum.normalize()
+  })
+}
+
+// V7 – Boundary Relaxation
+//
+// V6 uklidnil samotnou CAD bázi, ale první milimetry nad napojením stále nesly
+// vysokofrekvenční zubatost přesné trim hranice. Tady proto jemně relaxujeme jen
+// úzký pás PŮVODNÍHO scanu kolem řezu. Nejde o globální smoothing anatomie:
+// - boundary dostane velmi mírný Taubin-like low-pass,
+// - posun každého bodu boundary je tvrdě omezený,
+// - stejný posun se přenese do okolní mesh pouze v úzkém feather pásu,
+// - vliv rychle klesá na nulu, takže zuby a vzdálenější gingiva zůstanou beze změny.
+function cadEvalClosedUniformCubicBSpline(controlPoints, fraction) {
+  const points = Array.isArray(controlPoints) ? controlPoints : []
+  const count = points.length
+  if (!count) return new THREE.Vector3()
+  if (count < 4) {
+    const index = ((Math.round((((fraction % 1) + 1) % 1) * count)) % count + count) % count
+    return points[index].clone()
+  }
+
+  const wrapped = ((fraction % 1) + 1) % 1
+  const scaled = wrapped * count
+  const segment = Math.floor(scaled) % count
+  const t = scaled - Math.floor(scaled)
+  const t2 = t * t
+  const t3 = t2 * t
+  const b0 = (1 - 3 * t + 3 * t2 - t3) / 6
+  const b1 = (4 - 6 * t2 + 3 * t3) / 6
+  const b2 = (1 + 3 * t + 3 * t2 - 3 * t3) / 6
+  const b3 = t3 / 6
+  const p0 = points[(segment - 1 + count) % count]
+  const p1 = points[segment]
+  const p2 = points[(segment + 1) % count]
+  const p3 = points[(segment + 2) % count]
+  return new THREE.Vector3(
+    p0.x * b0 + p1.x * b1 + p2.x * b2 + p3.x * b3,
+    p0.y * b0 + p1.y * b1 + p2.y * b2 + p3.y * b3,
+    p0.z * b0 + p1.z * b1 + p2.z * b2 + p3.z * b3
+  )
+}
+
+function cadRegularizeBoundaryArcLength(points, diagonal) {
+  if (!Array.isArray(points) || points.length < 4) {
+    return {
+      points: (points || []).map((p) => p.clone()),
+      halfWindowXZ: 0,
+      halfWindowY: 0,
+      maxShiftXZ: 0,
+      maxShiftY: 0,
+      maxShift: 0,
+      meanShift: 0,
+      splineSampleStep: 0,
+      splineControlPoints: 0,
+      splineFairingPasses: 0,
+    }
+  }
+
+  const original = points.map((p) => p.clone())
+  const safeDiagonal = Math.max(1, Number(diagonal) || 1)
+  const rawTable = cadClosedLoopArcTable(original)
+  if (!rawTable.total || rawTable.total <= 1e-8) {
+    return {
+      points: original,
+      halfWindowXZ: 0,
+      halfWindowY: 0,
+      maxShiftXZ: 0,
+      maxShiftY: 0,
+      maxShift: 0,
+      meanShift: 0,
+      splineSampleStep: 0,
+      splineControlPoints: 0,
+      splineFairingPasses: 0,
+    }
+  }
+
+  // V34 – closed smoothing-spline target.
+  // First resample the trim loop at uniform PHYSICAL arc length. Then fair those
+  // controls with a curvature-penalizing periodic filter and evaluate a closed cubic
+  // B-spline back at the original vertex parameters. This removes low-frequency
+  // palatal waviness that a local moving average can still preserve, while keeping
+  // the overall arch position and the vertical anatomy tightly constrained.
+  const sampleStep = Math.max(0.18, Math.min(0.26, safeDiagonal * 0.0038))
+  const controlCount = Math.max(32, Math.min(1400, Math.round(rawTable.total / sampleStep)))
+  const controlsRaw = new Array(controlCount)
+  for (let i = 0; i < controlCount; i++) {
+    controlsRaw[i] = cadSampleClosedLoopArc(original, rawTable, i / controlCount)
+  }
+
+  const halfWindowXZ = Math.max(1.80, Math.min(2.85, safeDiagonal * 0.043))
+  const halfWindowY = Math.max(0.70, Math.min(1.16, halfWindowXZ * 0.40))
+  const maxShiftXZ = Math.max(0.46, Math.min(0.78, safeDiagonal * 0.0125))
+  const maxShiftY = Math.max(0.07, Math.min(0.17, safeDiagonal * 0.0027))
+  const splineFairingPasses = Math.max(6, Math.min(12, Math.round(halfWindowXZ / Math.max(0.16, sampleStep) * 0.72)))
+
+  let controls = controlsRaw.map((p) => p.clone())
+  for (let pass = 0; pass < splineFairingPasses; pass++) {
+    const previous = controls.map((p) => p.clone())
+    const passT = splineFairingPasses > 1 ? pass / (splineFairingPasses - 1) : 1
+    const lambdaXZ = THREE.MathUtils.lerp(0.34, 0.18, passT)
+    const lambdaY = THREE.MathUtils.lerp(0.10, 0.035, passT)
+    controls = previous.map((point, i) => {
+      const prev = previous[(i - 1 + controlCount) % controlCount]
+      const next = previous[(i + 1) % controlCount]
+      const average = prev.clone().add(next).multiplyScalar(0.5)
+      const candidate = point.clone()
+      candidate.x = THREE.MathUtils.lerp(point.x, average.x, lambdaXZ)
+      candidate.z = THREE.MathUtils.lerp(point.z, average.z, lambdaXZ)
+      candidate.y = THREE.MathUtils.lerp(point.y, average.y, lambdaY)
+      return candidate
+    })
+  }
+
+  // Curvature-aware cleanup: if a short section still has much higher planar second
+  // difference than its neighbours, soften only that section. This targets the exact
+  // kind of residual S-wave visible in the palatal shoulder without globally shrinking
+  // the dental arch.
+  const curvature = controls.map((point, i) => {
+    const prev = controls[(i - 1 + controlCount) % controlCount]
+    const next = controls[(i + 1) % controlCount]
+    return Math.hypot(prev.x - 2 * point.x + next.x, prev.z - 2 * point.z + next.z)
+  })
+  const sortedCurvature = curvature.slice().sort((a, b) => a - b)
+  const medianCurvature = sortedCurvature[Math.floor(sortedCurvature.length * 0.5)] || 1e-6
+  const curvatureReference = Math.max(1e-6, medianCurvature * 1.65)
+  const previousControls = controls.map((p) => p.clone())
+  controls = previousControls.map((point, i) => {
+    const prev = previousControls[(i - 1 + controlCount) % controlCount]
+    const next = previousControls[(i + 1) % controlCount]
+    const average = prev.clone().add(next).multiplyScalar(0.5)
+    const excess = THREE.MathUtils.clamp((curvature[i] - curvatureReference) / curvatureReference, 0, 1)
+    const blendXZ = excess * 0.30
+    const blendY = excess * 0.045
+    return new THREE.Vector3(
+      THREE.MathUtils.lerp(point.x, average.x, blendXZ),
+      THREE.MathUtils.lerp(point.y, average.y, blendY),
+      THREE.MathUtils.lerp(point.z, average.z, blendXZ)
+    )
+  })
+
+  // Preserve the low-frequency position of the arch after fairing.
+  const rawCenter = controlsRaw.reduce((acc, p) => acc.add(p), new THREE.Vector3()).multiplyScalar(1 / controlCount)
+  const controlCenter = controls.reduce((acc, p) => acc.add(p), new THREE.Vector3()).multiplyScalar(1 / controlCount)
+  const correctionX = rawCenter.x - controlCenter.x
+  const correctionZ = rawCenter.z - controlCenter.z
+  const correctionY = (rawCenter.y - controlCenter.y) * 0.30
+  for (const point of controls) {
+    point.x += correctionX
+    point.z += correctionZ
+    point.y += correctionY
+  }
+
+  const vertexFractions = cadClosedLoopVertexFractions(original).slice(0, original.length)
+  let maxShift = 0
+  let sumShift = 0
+  const regularized = original.map((raw, i) => {
+    const target = cadEvalClosedUniformCubicBSpline(controls, vertexFractions[i] || 0)
+    let dx = target.x - raw.x
+    let dz = target.z - raw.z
+    let dy = target.y - raw.y
+
+    const xzLength = Math.hypot(dx, dz)
+    if (xzLength > maxShiftXZ) {
+      const scale = maxShiftXZ / Math.max(1e-9, xzLength)
+      dx *= scale
+      dz *= scale
+    }
+    dy = THREE.MathUtils.clamp(dy, -maxShiftY, maxShiftY)
+
+    const delta = new THREE.Vector3(dx, dy, dz)
+    const length = delta.length()
+    maxShift = Math.max(maxShift, length)
+    sumShift += length
+    return raw.clone().add(delta)
+  })
+
+  return {
+    points: regularized,
+    halfWindowXZ,
+    halfWindowY,
+    maxShiftXZ,
+    maxShiftY,
+    maxShift,
+    meanShift: regularized.length ? sumShift / regularized.length : 0,
+    splineSampleStep: sampleStep,
+    splineControlPoints: controlCount,
+    splineFairingPasses,
+  }
+}
+
+function cadRelaxClosedBoundaryGentle(points, diagonal) {
+  return cadRegularizeBoundaryArcLength(points, diagonal).points
+}
+
+
+// V35 – adaptive local trim-back mask.
+//
+// V34 regularizes the whole trim loop very well, but a few genuine scan flaps / local
+// outliers can still force the shoulder to bulge. Here we classify only those short
+// segments by combining distance-to-spline, tangent mismatch and a curvature-spike
+// detector. The mask is then dilated in PHYSICAL millimetres along the loop and the
+// flagged boundary is retracted toward the healthy one-ring direction reconstructed
+// from the source mesh. This is deliberately a topology-preserving "virtual trim-back"
+// for the first experiment: it behaves like a masked sculpt/cut-back without deleting
+// source triangles, so the rest of the stable V34 pipeline stays watertight.
+function cadBuildAdaptiveBoundaryTrimBack(trianglePositions, rawLoop, splineLoop, isUpper, diagonal) {
+  const raw = Array.isArray(rawLoop) ? rawLoop : []
+  const spline = Array.isArray(splineLoop) ? splineLoop : []
+  const count = raw.length
+  if (count < 6 || spline.length !== count) {
+    return {
+      points: spline.length === count ? spline.map((p) => p.clone()) : raw.map((p) => p.clone()),
+      scores: new Float32Array(count),
+      depths: new Float32Array(count),
+      affectedBoundaryVertices: 0,
+      peakScore: 0,
+      maxDepth: 0,
+      meanDepth: 0,
+      dilateRadius: 0,
+      supportCoverage: 0,
+      detectedSegments: 0,
+    }
+  }
+
+  const safeDiagonal = Math.max(1, Number(diagonal) || 1)
+  const rawTable = cadClosedLoopArcTable(raw)
+  const total = Math.max(1e-9, rawTable.total || 0)
+  const cumulative = rawTable.cumulative
+  const smootherstep = (t) => {
+    const x = THREE.MathUtils.clamp(t, 0, 1)
+    return x * x * x * (x * (x * 6 - 15) + 10)
+  }
+
+  const tangentXZ = (points, i, radius = 2) => {
+    const prev = points[(i - radius + count) % count]
+    const next = points[(i + radius) % count]
+    const v = new THREE.Vector2(next.x - prev.x, next.z - prev.z)
+    if (v.lengthSq() < 1e-12) v.set(1, 0)
+    return v.normalize()
+  }
+  const turnXZ = (points, i) => {
+    const prev = points[(i - 1 + count) % count]
+    const point = points[i]
+    const next = points[(i + 1) % count]
+    const a = new THREE.Vector2(point.x - prev.x, point.z - prev.z)
+    const b = new THREE.Vector2(next.x - point.x, next.z - point.z)
+    if (a.lengthSq() < 1e-12 || b.lengthSq() < 1e-12) return 0
+    a.normalize(); b.normalize()
+    return Math.acos(THREE.MathUtils.clamp(a.dot(b), -1, 1))
+  }
+  const circularDistance = (i, j) => {
+    const di = cumulative[Math.min(i, cumulative.length - 1)] || 0
+    const dj = cumulative[Math.min(j, cumulative.length - 1)] || 0
+    const direct = Math.abs(di - dj)
+    return Math.min(direct, Math.max(0, total - direct))
+  }
+
+  const deviations = new Float32Array(count)
+  const rawTurns = new Float32Array(count)
+  const splineTurns = new Float32Array(count)
+  const tangentMismatch = new Float32Array(count)
+  for (let i = 0; i < count; i++) {
+    deviations[i] = Math.hypot(spline[i].x - raw[i].x, spline[i].z - raw[i].z)
+    rawTurns[i] = turnXZ(raw, i)
+    splineTurns[i] = turnXZ(spline, i)
+    const tr = tangentXZ(raw, i, 2)
+    const ts = tangentXZ(spline, i, 2)
+    tangentMismatch[i] = Math.acos(THREE.MathUtils.clamp(tr.dot(ts), -1, 1))
+  }
+
+  // Compare each raw turning angle with a local physical-neighbourhood baseline.
+  // A smooth palatal U can have high curvature, but it should not have a short spike
+  // relative to its neighbours; this prevents natural arch curvature from being cut.
+  const curvatureBaselineRadius = Math.max(1.8, Math.min(3.2, safeDiagonal * 0.045))
+  const curvatureSpike = new Float32Array(count)
+  for (let i = 0; i < count; i++) {
+    const local = []
+    for (let j = 0; j < count; j++) {
+      if (circularDistance(i, j) <= curvatureBaselineRadius) local.push(rawTurns[j])
+    }
+    local.sort((a, b) => a - b)
+    const median = local.length ? local[Math.floor(local.length * 0.5)] : rawTurns[i]
+    curvatureSpike[i] = Math.max(0, rawTurns[i] - median)
+  }
+
+  const rawScores = new Float32Array(count)
+  const deviationSoft = Math.max(0.28, Math.min(0.38, safeDiagonal * 0.0052))
+  const deviationHard = Math.max(0.62, Math.min(0.82, safeDiagonal * 0.0112))
+  const tangentSoft = THREE.MathUtils.degToRad(9)
+  const tangentHard = THREE.MathUtils.degToRad(27)
+  const spikeSoft = THREE.MathUtils.degToRad(7)
+  const spikeHard = THREE.MathUtils.degToRad(24)
+  let peakRawScore = 0
+
+  for (let i = 0; i < count; i++) {
+    const devScore = smootherstep((deviations[i] - deviationSoft) / Math.max(1e-6, deviationHard - deviationSoft))
+    const tangentScore = smootherstep((tangentMismatch[i] - tangentSoft) / Math.max(1e-6, tangentHard - tangentSoft))
+    const spikeScore = smootherstep((curvatureSpike[i] - spikeSoft) / Math.max(1e-6, spikeHard - spikeSoft))
+    // Turning/curvature alone must not classify a healthy sharp arch section. They only
+    // become decisive once there is also a measurable offset from the robust spline.
+    const deviationGate = smootherstep((deviations[i] - 0.16) / 0.30)
+    const score = Math.max(devScore, tangentScore * deviationGate * 0.82, spikeScore * deviationGate * 0.88)
+    rawScores[i] = score
+    peakRawScore = Math.max(peakRawScore, score)
+  }
+
+  // Grow only around detected outliers, with a smootherstep falloff over a few mm.
+  // This is the equivalent of feathering the mask before a local Blender trim/smooth.
+  const dilateRadius = Math.max(2.6, Math.min(4.1, safeDiagonal * 0.056))
+  const scores = new Float32Array(count)
+  for (let i = 0; i < count; i++) {
+    let value = rawScores[i]
+    for (let j = 0; j < count; j++) {
+      if (rawScores[j] <= 0.03) continue
+      const d = circularDistance(i, j)
+      if (d > dilateRadius) continue
+      const falloff = 1 - smootherstep(d / dilateRadius)
+      value = Math.max(value, rawScores[j] * falloff)
+    }
+    scores[i] = THREE.MathUtils.clamp(value, 0, 1)
+  }
+
+  // Suppress isolated numerical specks and count contiguous detected zones.
+  let detectedSegments = 0
+  let inSegment = false
+  for (let i = 0; i < count; i++) {
+    const active = scores[i] > 0.16
+    if (active && !inSegment) detectedSegments++
+    inSegment = active
+  }
+  if (scores[0] > 0.16 && scores[count - 1] > 0.16 && detectedSegments > 1) detectedSegments--
+
+  const support = cadBuildBoundarySupportRing(trianglePositions, raw, spline, isUpper, safeDiagonal)
+  const directions = support?.directions || []
+  const maxTrimDepth = Math.max(0.72, Math.min(1.05, safeDiagonal * 0.0142))
+  const minUsefulDepth = 0.10
+  const maxTrimY = Math.max(0.16, Math.min(0.34, safeDiagonal * 0.0046))
+  const depths = new Float32Array(count)
+  const points = spline.map((p) => p.clone())
+  let affectedBoundaryVertices = 0
+  let peakScore = 0
+  let actualMaxDepth = 0
+  let sumDepth = 0
+
+  for (let i = 0; i < count; i++) {
+    const score = scores[i]
+    peakScore = Math.max(peakScore, score)
+    if (score <= 0.12) continue
+
+    // Gentle at the edge of the mask, decisive only for true outliers.
+    const depth = maxTrimDepth * Math.pow(smootherstep((score - 0.10) / 0.90), 1.22)
+    if (depth < minUsefulDepth) continue
+    const direction = directions[i]?.clone?.() || new THREE.Vector3(0, isUpper ? -1 : 1, 0)
+    if (direction.lengthSq() < 1e-12) continue
+    direction.normalize()
+    const delta = direction.multiplyScalar(depth)
+    delta.y = THREE.MathUtils.clamp(delta.y, -maxTrimY * score, maxTrimY * score)
+
+    // Keep the final shift bounded in XZ as well; V35 should retract a bad flap, not
+    // invent a new dental arch. The robust spline correction already did the global job.
+    const xz = Math.hypot(delta.x, delta.z)
+    const xzLimit = maxTrimDepth * (0.78 + 0.22 * score)
+    if (xz > xzLimit) {
+      const scale = xzLimit / Math.max(1e-9, xz)
+      delta.x *= scale
+      delta.z *= scale
+    }
+
+    points[i].add(delta)
+    const actual = delta.length()
+    depths[i] = actual
+    actualMaxDepth = Math.max(actualMaxDepth, actual)
+    sumDepth += actual
+    affectedBoundaryVertices++
+  }
+
+  return {
+    points,
+    scores,
+    depths,
+    affectedBoundaryVertices,
+    peakScore,
+    maxDepth: actualMaxDepth,
+    meanDepth: affectedBoundaryVertices ? sumDepth / affectedBoundaryVertices : 0,
+    dilateRadius,
+    supportCoverage: support?.coverage || 0,
+    detectedSegments,
+    rawPeakScore: peakRawScore,
+  }
+}
+
+function cadClosestBoundaryDisplacement(point, rawLoop, displacements, nearestIndex, searchRadius = 3) {
+  if (!Array.isArray(rawLoop) || rawLoop.length < 2 || nearestIndex < 0) {
+    return { distanceSq: Infinity, displacement: new THREE.Vector3(), boundaryIndex: -1, segmentT: 0 }
+  }
+
+  let bestDistanceSq = Infinity
+  let bestDisplacement = new THREE.Vector3()
+  let bestBoundaryIndex = nearestIndex
+  let bestSegmentT = 0
+  const count = rawLoop.length
+
+  // The spatial hash gives us the nearest boundary vertex. Refining only the nearby
+  // segments provides a smooth continuous displacement field along the loop without
+  // the cost of testing every boundary segment for every source vertex.
+  for (let offset = -searchRadius; offset <= searchRadius; offset++) {
+    const aIndex = (nearestIndex + offset + count) % count
+    const bIndex = (aIndex + 1) % count
+    const a = rawLoop[aIndex]
+    const b = rawLoop[bIndex]
+    const abx = b.x - a.x
+    const aby = b.y - a.y
+    const abz = b.z - a.z
+    const apx = point.x - a.x
+    const apy = point.y - a.y
+    const apz = point.z - a.z
+    const denom = abx * abx + aby * aby + abz * abz
+    const t = denom > 1e-12
+      ? THREE.MathUtils.clamp((apx * abx + apy * aby + apz * abz) / denom, 0, 1)
+      : 0
+    const qx = a.x + abx * t
+    const qy = a.y + aby * t
+    const qz = a.z + abz * t
+    const dx = point.x - qx
+    const dy = point.y - qy
+    const dz = point.z - qz
+    const distanceSq = dx * dx + dy * dy + dz * dz
+    if (distanceSq >= bestDistanceSq) continue
+
+    const da = displacements[aIndex]
+    const db = displacements[bIndex]
+    bestDistanceSq = distanceSq
+    bestBoundaryIndex = aIndex
+    bestSegmentT = t
+    bestDisplacement = da.clone().lerp(db, t)
+  }
+
+  return {
+    distanceSq: bestDistanceSq,
+    displacement: bestDisplacement,
+    boundaryIndex: bestBoundaryIndex,
+    segmentT: bestSegmentT,
+  }
+}
+
+function cadRelaxTrimBoundaryBand(trianglePositions, rawLoop, diagonal, isUpper = false) {
+  const source = Array.isArray(trianglePositions) ? trianglePositions : []
+  if (source.length < 9 || !Array.isArray(rawLoop) || rawLoop.length < 4) {
+    return {
+      trianglePositions: source.slice(),
+      boundary: (rawLoop || []).map((p) => p.clone()),
+      bandWidth: 0,
+      maxBoundaryShift: 0,
+      meanBoundaryShift: 0,
+      affectedVertices: 0,
+      displacementFieldSmoothedVertices: 0,
+      boundaryWindowXZ: 0,
+      boundaryWindowY: 0,
+      maxBoundaryShiftXZ: 0,
+      maxBoundaryShiftY: 0,
+      splineSampleStep: 0,
+      splineControlPoints: 0,
+      splineFairingPasses: 0,
+      adaptiveTrimBackAffectedBoundaryVertices: 0,
+      adaptiveTrimBackPeakScore: 0,
+      adaptiveTrimBackMaxDepth: 0,
+      adaptiveTrimBackMeanDepth: 0,
+      adaptiveTrimBackDilateRadius: 0,
+      adaptiveTrimBackSupportCoverage: 0,
+      adaptiveTrimBackDetectedSegments: 0,
+      fieldIterations: 0,
+    }
+  }
+
+  const regularization = cadRegularizeBoundaryArcLength(rawLoop, diagonal)
+  const splineLoop = regularization.points
+  const trimBack = cadBuildAdaptiveBoundaryTrimBack(
+    source,
+    rawLoop,
+    splineLoop,
+    isUpper,
+    diagonal
+  )
+  const relaxedLoop = trimBack.points
+  const displacements = relaxedLoop.map((point, i) => point.clone().sub(rawLoop[i]))
+  let maxBoundaryShift = 0
+  let meanBoundaryShift = 0
+  for (const delta of displacements) {
+    const length = delta.length()
+    maxBoundaryShift = Math.max(maxBoundaryShift, length)
+    meanBoundaryShift += length
+  }
+  if (displacements.length) meanBoundaryShift /= displacements.length
+
+  // V35: the V34 spline/biharmonic strip remains the default path. Only detected
+  // outlier zones receive an additional healthy-side trim-back, so the deformation
+  // field needs a little more room there while staying zero outside the strip.
+  const safeDiagonal = Math.max(1, Number(diagonal) || 1)
+  const bandWidth = Math.max(1.72, Math.min(2.72, safeDiagonal * 0.034 + trimBack.maxDepth * 0.72))
+  const cellSize = Math.max(0.48, Math.min(0.94, bandWidth * 0.48))
+  const buckets = new Map()
+  const cellKey = (x, y, z) => `${Math.floor(x / cellSize)}:${Math.floor(y / cellSize)}:${Math.floor(z / cellSize)}`
+
+  for (let i = 0; i < rawLoop.length; i++) {
+    const p = rawLoop[i]
+    const key = cellKey(p.x, p.y, p.z)
+    let bucket = buckets.get(key)
+    if (!bucket) {
+      bucket = []
+      buckets.set(key, bucket)
+    }
+    bucket.push(i)
+  }
+
+  const smootherstep = (t) => {
+    const x = THREE.MathUtils.clamp(t, 0, 1)
+    return x * x * x * (x * (x * 6 - 15) + 10)
+  }
+
+  const vertexCount = Math.floor(source.length / 3)
+  const vertexDistances = new Float32Array(vertexCount)
+  vertexDistances.fill(Infinity)
+  const vertexWeights = new Float32Array(vertexCount)
+  const warpVectors = new Array(vertexCount)
+  let affectedVertices = 0
+
+  for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++) {
+    const o = vertexIndex * 3
+    const point = new THREE.Vector3(source[o], source[o + 1], source[o + 2])
+    const cx = Math.floor(point.x / cellSize)
+    const cy = Math.floor(point.y / cellSize)
+    const cz = Math.floor(point.z / cellSize)
+    let nearestIndex = -1
+    let nearestVertexDistanceSq = Infinity
+
+    for (let dx = -3; dx <= 3; dx++) {
+      for (let dy = -3; dy <= 3; dy++) {
+        for (let dz = -3; dz <= 3; dz++) {
+          const bucket = buckets.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
+          if (!bucket) continue
+          for (const boundaryIndex of bucket) {
+            const bp = rawLoop[boundaryIndex]
+            const ddx = point.x - bp.x
+            const ddy = point.y - bp.y
+            const ddz = point.z - bp.z
+            const distanceSq = ddx * ddx + ddy * ddy + ddz * ddz
+            if (distanceSq < nearestVertexDistanceSq) {
+              nearestVertexDistanceSq = distanceSq
+              nearestIndex = boundaryIndex
+            }
+          }
+        }
+      }
+    }
+
+    if (nearestIndex < 0) continue
+    const closest = cadClosestBoundaryDisplacement(point, rawLoop, displacements, nearestIndex, 5)
+    const distance = Math.sqrt(closest.distanceSq)
+    if (!Number.isFinite(distance) || distance > bandWidth) continue
+
+    vertexDistances[vertexIndex] = distance
+    const normalized = 1 - distance / bandWidth
+    const weight = smootherstep(normalized)
+    vertexWeights[vertexIndex] = weight
+    warpVectors[vertexIndex] = closest.displacement.multiplyScalar(weight)
+    if (weight > 0.001) affectedVertices++
+  }
+
+  const fieldIterations = 3
+  const fieldRadius = Math.max(0.48, Math.min(0.88, bandWidth * 0.41))
+  const fieldRadiusSq = fieldRadius * fieldRadius
+  const fieldCell = fieldRadius
+  let displacementFieldSmoothedVertices = 0
+
+  const fieldBuckets = new Map()
+  for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++) {
+    if (!warpVectors[vertexIndex]) continue
+    const o = vertexIndex * 3
+    const key = `${Math.floor(source[o] / fieldCell)}:${Math.floor(source[o + 1] / fieldCell)}:${Math.floor(source[o + 2] / fieldCell)}`
+    let bucket = fieldBuckets.get(key)
+    if (!bucket) {
+      bucket = []
+      fieldBuckets.set(key, bucket)
+    }
+    bucket.push(vertexIndex)
+  }
+
+  const fieldNeighbors = new Array(vertexCount)
+  for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++) {
+    if (!warpVectors[vertexIndex]) continue
+    const o = vertexIndex * 3
+    const x = source[o], y = source[o + 1], z = source[o + 2]
+    const cx = Math.floor(x / fieldCell)
+    const cy = Math.floor(y / fieldCell)
+    const cz = Math.floor(z / fieldCell)
+    const neighbors = []
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const bucket = fieldBuckets.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
+          if (!bucket) continue
+          for (const neighborIndex of bucket) {
+            if (neighborIndex === vertexIndex || !warpVectors[neighborIndex]) continue
+            const no = neighborIndex * 3
+            const ddx = source[no] - x
+            const ddy = source[no + 1] - y
+            const ddz = source[no + 2] - z
+            const d2 = ddx * ddx + ddy * ddy + ddz * ddz
+            if (d2 <= 1e-12 || d2 > fieldRadiusSq) continue
+            const proximity = 1 - Math.sqrt(d2) / fieldRadius
+            const w = Math.max(0, proximity) * (0.40 + 0.60 * vertexWeights[neighborIndex])
+            if (w > 1e-6) neighbors.push([neighborIndex, w])
+          }
+        }
+      }
+    }
+    fieldNeighbors[vertexIndex] = neighbors
+  }
+
+  const diffuseField = (field) => {
+    const diffused = new Array(vertexCount)
+    for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++) {
+      const current = field[vertexIndex]
+      if (!current) continue
+      const neighbors = fieldNeighbors[vertexIndex]
+      if (!neighbors?.length) {
+        diffused[vertexIndex] = current.clone()
+        continue
+      }
+      const average = current.clone().multiplyScalar(0.65)
+      let weightSum = 0.65
+      for (const [neighborIndex, weight] of neighbors) {
+        const neighbor = field[neighborIndex]
+        if (!neighbor) continue
+        average.addScaledVector(neighbor, weight)
+        weightSum += weight
+      }
+      diffused[vertexIndex] = average.multiplyScalar(1 / Math.max(1e-8, weightSum))
+    }
+    return diffused
+  }
+
+  for (let iteration = 0; iteration < fieldIterations; iteration++) {
+    const previous = warpVectors.map((v) => v ? v.clone() : null)
+    const firstDiffuse = diffuseField(previous)
+    const secondDiffuse = diffuseField(firstDiffuse)
+    const updates = new Map()
+
+    for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++) {
+      const current = previous[vertexIndex]
+      if (!current) continue
+      const distance = vertexDistances[vertexIndex]
+      const weight = vertexWeights[vertexIndex]
+      // Strong Dirichlet constraints at both ends of the deformation strip.
+      if (distance < bandWidth * 0.055 || distance > bandWidth * 0.91 || weight < 0.018) continue
+
+      const interiorIn = smootherstep(Math.min(1, distance / Math.max(1e-6, bandWidth * 0.34)))
+      const interiorOut = smootherstep(Math.max(0, 1 - distance / bandWidth))
+      const interiorWeight = interiorIn * interiorOut
+      if (interiorWeight < 0.02) continue
+
+      const first = firstDiffuse[vertexIndex] || current
+      const second = secondDiffuse[vertexIndex] || first
+      const candidate = current.clone()
+        .lerp(first, 0.28 * interiorWeight)
+        .lerp(second, 0.18 * interiorWeight)
+
+      // Keep the fairing screened to the actual spline correction at this distance.
+      const localLimit = Math.max(0.045, maxBoundaryShift * weight + 0.018)
+      if (candidate.length() > localLimit) candidate.setLength(localLimit)
+      updates.set(vertexIndex, candidate)
+      displacementFieldSmoothedVertices++
+    }
+
+    for (const [vertexIndex, candidate] of updates.entries()) warpVectors[vertexIndex] = candidate
+  }
+
+  const result = source.slice()
+  for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++) {
+    const warp = warpVectors[vertexIndex]
+    if (!warp) continue
+    const o = vertexIndex * 3
+    result[o] += warp.x
+    result[o + 1] += warp.y
+    result[o + 2] += warp.z
+  }
+
+  return {
+    trianglePositions: result,
+    boundary: relaxedLoop,
+    bandWidth,
+    maxBoundaryShift,
+    meanBoundaryShift,
+    affectedVertices,
+    displacementFieldSmoothedVertices,
+    boundaryWindowXZ: regularization.halfWindowXZ,
+    boundaryWindowY: regularization.halfWindowY,
+    maxBoundaryShiftXZ: regularization.maxShiftXZ,
+    maxBoundaryShiftY: regularization.maxShiftY,
+    splineSampleStep: regularization.splineSampleStep,
+    splineControlPoints: regularization.splineControlPoints,
+    splineFairingPasses: regularization.splineFairingPasses,
+    adaptiveTrimBackAffectedBoundaryVertices: trimBack.affectedBoundaryVertices,
+    adaptiveTrimBackPeakScore: trimBack.peakScore,
+    adaptiveTrimBackMaxDepth: trimBack.maxDepth,
+    adaptiveTrimBackMeanDepth: trimBack.meanDepth,
+    adaptiveTrimBackDilateRadius: trimBack.dilateRadius,
+    adaptiveTrimBackSupportCoverage: trimBack.supportCoverage,
+    adaptiveTrimBackDetectedSegments: trimBack.detectedSegments,
+    fieldIterations,
+  }
+}
+
+
+// V38 – indexed exact clipping against the finished Straight footprint.
+//
+// V37 computed the geometric cut correctly, but then converted the clipped scan back
+// to triangle soup and appended a NEW copy of the cut boundary for the shoulder. The
+// scan and shoulder therefore only occupied similar coordinates; they did not share
+// topology. V38 keeps a persistent indexed source mesh all the way through the cut.
+// Every intersection on a shared source edge gets one stable vertex ID, the resulting
+// boundary loop is returned as those exact IDs, and the first shoulder triangles reuse
+// the very same vertices. No weld-after-the-fact is needed.
+function cadBuildIndexedMeshFromTriangleSoup(trianglePositions, diagonal) {
+  const source = Array.isArray(trianglePositions) ? trianglePositions : []
+  const safeDiagonal = Math.max(1, Number(diagonal) || 1)
+  const weldTolerance = Math.max(1e-7, Math.min(2.0e-5, safeDiagonal * 1.0e-7))
+  const inv = 1 / weldTolerance
+  const positions = []
+  const indices = []
+  const buckets = new Map()
+  const keyFor = (x, y, z) => `${Math.round(x * inv)}|${Math.round(y * inv)}|${Math.round(z * inv)}`
+  const toleranceSq = weldTolerance * weldTolerance
+  let weldedVertices = 0
+  let removedDegenerateTriangles = 0
+
+  const getVertexId = (x, y, z) => {
+    const key = keyFor(x, y, z)
+    let bucket = buckets.get(key)
+    if (bucket) {
+      for (const id of bucket) {
+        const o = id * 3
+        const dx = positions[o] - x
+        const dy = positions[o + 1] - y
+        const dz = positions[o + 2] - z
+        if (dx * dx + dy * dy + dz * dz <= toleranceSq) {
+          weldedVertices++
+          return id
+        }
+      }
+    } else {
+      bucket = []
+      buckets.set(key, bucket)
+    }
+    const id = positions.length / 3
+    positions.push(x, y, z)
+    bucket.push(id)
+    return id
+  }
+
+  const point = (id) => {
+    const o = id * 3
+    return new THREE.Vector3(positions[o], positions[o + 1], positions[o + 2])
+  }
+
+  for (let offset = 0; offset + 8 < source.length; offset += 9) {
+    const a = getVertexId(source[offset], source[offset + 1], source[offset + 2])
+    const b = getVertexId(source[offset + 3], source[offset + 4], source[offset + 5])
+    const c = getVertexId(source[offset + 6], source[offset + 7], source[offset + 8])
+    if (a === b || b === c || c === a) {
+      removedDegenerateTriangles++
+      continue
+    }
+    const pa = point(a), pb = point(b), pc = point(c)
+    const area2 = pb.clone().sub(pa).cross(pc.clone().sub(pa)).length()
+    if (!Number.isFinite(area2) || area2 <= safeDiagonal * safeDiagonal * 1e-12) {
+      removedDegenerateTriangles++
+      continue
+    }
+    indices.push(a, b, c)
+  }
+
+  return { positions, indices, weldTolerance, weldedVertices, removedDegenerateTriangles }
+}
+
+function cadAnalyzeIndexedTopology(positions, indices, diagonal = 1) {
+  const edgeKey = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`
+  const edges = new Map()
+  const referenced = new Set()
+  const parent = []
+  const rank = []
+  const ensure = (id) => {
+    while (parent.length <= id) {
+      const n = parent.length
+      parent.push(n)
+      rank.push(0)
+    }
+  }
+  const find = (x) => {
+    let r = x
+    while (parent[r] !== r) r = parent[r]
+    while (parent[x] !== x) {
+      const n = parent[x]
+      parent[x] = r
+      x = n
+    }
+    return r
+  }
+  const union = (a, b) => {
+    ensure(Math.max(a, b))
+    let ra = find(a), rb = find(b)
+    if (ra === rb) return
+    if (rank[ra] < rank[rb]) [ra, rb] = [rb, ra]
+    parent[rb] = ra
+    if (rank[ra] === rank[rb]) rank[ra]++
+  }
+  const safeDiagonal = Math.max(1, Number(diagonal) || 1)
+  const areaThreshold = safeDiagonal * safeDiagonal * 1e-12
+  let degenerateTriangles = 0
+  const addEdge = (a, b) => {
+    const key = edgeKey(a, b)
+    const item = edges.get(key)
+    if (item) item.count++
+    else edges.set(key, { count: 1, a, b })
+  }
+  const getPoint = (id) => {
+    const o = id * 3
+    return new THREE.Vector3(positions[o], positions[o + 1], positions[o + 2])
+  }
+
+  for (let o = 0; o + 2 < indices.length; o += 3) {
+    const a = indices[o], b = indices[o + 1], c = indices[o + 2]
+    referenced.add(a); referenced.add(b); referenced.add(c)
+    ensure(Math.max(a, b, c))
+    union(a, b); union(b, c); union(c, a)
+    addEdge(a, b); addEdge(b, c); addEdge(c, a)
+    if (a === b || b === c || c === a) {
+      degenerateTriangles++
+      continue
+    }
+    const pa = getPoint(a), pb = getPoint(b), pc = getPoint(c)
+    const area2 = pb.clone().sub(pa).cross(pc.clone().sub(pa)).length()
+    if (!Number.isFinite(area2) || area2 <= areaThreshold) degenerateTriangles++
+  }
+
+  let boundaryEdges = 0
+  let nonManifoldEdges = 0
+  for (const edge of edges.values()) {
+    if (edge.count === 1) boundaryEdges++
+    else if (edge.count > 2) nonManifoldEdges++
+  }
+  const roots = new Set()
+  for (const id of referenced) roots.add(find(id))
+  return {
+    referencedVertices: referenced.size,
+    triangles: Math.floor(indices.length / 3),
+    boundaryEdges,
+    nonManifoldEdges,
+    connectedComponents: roots.size,
+    degenerateTriangles,
+  }
+}
+
+function cadExtractIndexedBoundaryLoops(positions, indices) {
+  const edgeKey = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`
+  const edges = new Map()
+  const addEdge = (a, b) => {
+    const key = edgeKey(a, b)
+    const item = edges.get(key)
+    if (item) item.count++
+    else edges.set(key, { count: 1, a, b })
+  }
+  for (let o = 0; o + 2 < indices.length; o += 3) {
+    const a = indices[o], b = indices[o + 1], c = indices[o + 2]
+    addEdge(a, b); addEdge(b, c); addEdge(c, a)
+  }
+
+  const adjacency = new Map()
+  const boundaryEdges = []
+  let nonManifoldEdges = 0
+  const connect = (a, b) => {
+    let set = adjacency.get(a)
+    if (!set) { set = new Set(); adjacency.set(a, set) }
+    set.add(b)
+  }
+  for (const edge of edges.values()) {
+    if (edge.count === 1) {
+      boundaryEdges.push([edge.a, edge.b])
+      connect(edge.a, edge.b)
+      connect(edge.b, edge.a)
+    } else if (edge.count > 2) nonManifoldEdges++
+  }
+
+  const getPoint = (id) => {
+    const o = id * 3
+    return new THREE.Vector3(positions[o], positions[o + 1], positions[o + 2])
+  }
+  const used = new Set()
+  const loops = []
+
+  for (const [seedA, seedB] of boundaryEdges) {
+    const seedKey = edgeKey(seedA, seedB)
+    if (used.has(seedKey)) continue
+    const ids = [seedA]
+    let previous = seedA
+    let current = seedB
+    used.add(seedKey)
+    let closed = false
+    let guard = 0
+
+    while (guard++ < boundaryEdges.length + 8) {
+      ids.push(current)
+      if (current === ids[0]) {
+        ids.pop()
+        closed = true
+        break
+      }
+      const neighbors = Array.from(adjacency.get(current) || [])
+      let next = null
+      for (const candidate of neighbors) {
+        if (candidate === previous) continue
+        const key = edgeKey(current, candidate)
+        if (!used.has(key)) { next = candidate; break }
+      }
+      if (next == null) {
+        // At a rare degree>2 boundary junction prefer any unused edge rather than
+        // silently spawning a second copy of the same path.
+        for (const candidate of neighbors) {
+          const key = edgeKey(current, candidate)
+          if (!used.has(key)) { next = candidate; break }
+        }
+      }
+      if (next == null) break
+      used.add(edgeKey(current, next))
+      previous = current
+      current = next
+    }
+
+    if (ids.length >= 3) {
+      const points = ids.map(getPoint)
+      loops.push({
+        vertexIds: ids,
+        points,
+        closed,
+        perimeter: closed ? cadClosedLoopPerimeter(points) : 0,
+      })
+    }
+  }
+  loops.sort((a, b) => (b.closed ? 1 : 0) - (a.closed ? 1 : 0) || b.perimeter - a.perimeter || b.vertexIds.length - a.vertexIds.length)
+  return { loops, boundaryEdges: boundaryEdges.length, nonManifoldEdges }
+}
+
+function cadExactClipScanToBaseFootprint(trianglePositions, rawLoop, footprintLoop, diagonal) {
+  const source = Array.isArray(trianglePositions) ? trianglePositions : []
+  const raw = Array.isArray(rawLoop) ? rawLoop : []
+  const footprint = Array.isArray(footprintLoop) ? footprintLoop : []
+  const safeDiagonal = Math.max(1, Number(diagonal) || 1)
+
+  const indexedSource = cadBuildIndexedMeshFromTriangleSoup(source, safeDiagonal)
+  const sourceBoundaryData = cadExtractIndexedBoundaryLoops(indexedSource.positions, indexedSource.indices)
+  const sourceTopology = cadAnalyzeIndexedTopology(indexedSource.positions, indexedSource.indices, safeDiagonal)
+
+  const fallbackBoundaryLoop = (() => {
+    if (!sourceBoundaryData.loops.length) return null
+    const anchor = raw[0]
+    if (!anchor) return sourceBoundaryData.loops[0]
+    let best = sourceBoundaryData.loops[0]
+    let bestScore = Infinity
+    const rawPerimeter = Math.max(1e-6, cadClosedLoopPerimeter(raw))
+    for (const loop of sourceBoundaryData.loops) {
+      if (!loop.closed || loop.points.length < 4) continue
+      let anchorD2 = Infinity
+      for (const p of loop.points) {
+        const dx = p.x - anchor.x, dy = (p.y - anchor.y) * 0.18, dz = p.z - anchor.z
+        const d2 = dx * dx + dy * dy + dz * dz
+        if (d2 < anchorD2) anchorD2 = d2
+      }
+      const perimeterPenalty = Math.abs(loop.perimeter - rawPerimeter) / rawPerimeter
+      const score = anchorD2 + perimeterPenalty * perimeterPenalty * 0.08
+      if (score < bestScore) { bestScore = score; best = loop }
+    }
+    return best
+  })()
+
+  if (source.length < 9 || raw.length < 4 || footprint.length < 4 || !fallbackBoundaryLoop) {
+    const boundaryIds = fallbackBoundaryLoop?.vertexIds?.slice() || []
+    const boundary = fallbackBoundaryLoop?.points?.map((p) => p.clone()) || raw.map((p) => p.clone())
+    return {
+      positions: indexedSource.positions.slice(),
+      indices: indexedSource.indices.slice(),
+      trianglePositions: source.slice(),
+      boundaryIndices: boundaryIds,
+      boundary,
+      clipApplied: false,
+      clipBandWidth: 0,
+      candidateTriangles: 0,
+      keptTriangles: Math.floor(indexedSource.indices.length / 3),
+      clippedTriangles: 0,
+      discardedTriangles: 0,
+      splitTriangles: 0,
+      generatedTriangles: 0,
+      intersectionVertices: 0,
+      removedDegenerateTriangles: indexedSource.removedDegenerateTriangles,
+      extractedBoundaryLoops: sourceBoundaryData.loops.length,
+      extractedBoundaryPoints: boundary.length,
+      boundaryPerimeterBefore: cadClosedLoopPerimeter(raw),
+      boundaryPerimeterAfter: cadClosedLoopPerimeter(boundary),
+      boundaryTolerance: 0,
+      sourceBoundaryLoopsBefore: sourceBoundaryData.loops.length,
+      sourceBoundaryLoopsAfter: sourceBoundaryData.loops.length,
+      intersectionBoundaryLoopCount: 0,
+      secondaryBoundaryLoopsCreated: 0,
+      sourceIndexedVertices: Math.floor(indexedSource.positions.length / 3),
+      sourceIndexedTriangles: Math.floor(indexedSource.indices.length / 3),
+      sourceWeldTolerance: indexedSource.weldTolerance,
+      sourceWeldedVertices: indexedSource.weldedVertices,
+      sourceTopology,
+    }
+  }
+
+  const polygon = footprint.map((p) => new THREE.Vector2(p.x, p.z))
+  const clipBandWidth = Math.max(2.95, Math.min(4.25, safeDiagonal * 0.058))
+  const clipBandSq = clipBandWidth * clipBandWidth
+  const boundaryTolerance = Math.max(2e-5, Math.min(2.5e-4, safeDiagonal * 2.6e-6))
+  const boundaryToleranceSq = boundaryTolerance * boundaryTolerance
+  const areaThreshold = Math.max(1e-10, safeDiagonal * safeDiagonal * 2.5e-11)
+
+  const positionAt = (id, positions = indexedSource.positions) => {
+    const o = id * 3
+    return new THREE.Vector3(positions[o], positions[o + 1], positions[o + 2])
+  }
+
+  // Spatial distance to the ORIGINAL conditioned open boundary. The topological
+  // outside flood is not allowed to leave this narrow strip, so a crown that happens
+  // to project outside the base footprint can never be reached and clipped.
+  const boundaryCell = clipBandWidth
+  const invBoundaryCell = 1 / boundaryCell
+  const boundaryGrid = new Map()
+  const boundaryCellKey = (x, y, z) => `${Math.floor(x * invBoundaryCell)}:${Math.floor(y * invBoundaryCell)}:${Math.floor(z * invBoundaryCell)}`
+  for (const p of raw) {
+    const key = boundaryCellKey(p.x, p.y, p.z)
+    let bucket = boundaryGrid.get(key)
+    if (!bucket) { bucket = []; boundaryGrid.set(key, bucket) }
+    bucket.push(p)
+  }
+  const distanceCache = new Map()
+  const distanceToRawBoundarySqById = (id) => {
+    const cached = distanceCache.get(id)
+    if (cached != null) return cached
+    const p = positionAt(id)
+    const cx = Math.floor(p.x * invBoundaryCell)
+    const cy = Math.floor(p.y * invBoundaryCell)
+    const cz = Math.floor(p.z * invBoundaryCell)
+    let best = Infinity
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -1; dz <= 1; dz++) {
+          const bucket = boundaryGrid.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
+          if (!bucket) continue
+          for (const q of bucket) {
+            const ddx = p.x - q.x, ddy = p.y - q.y, ddz = p.z - q.z
+            const d2 = ddx * ddx + ddy * ddy + ddz * ddz
+            if (d2 < best) best = d2
+          }
+        }
+      }
+    }
+    distanceCache.set(id, best)
+    return best
+  }
+
+  const pointSegmentDistanceSq2D = (px, py, ax, ay, bx, by) => {
+    const abx = bx - ax, aby = by - ay
+    const len2 = abx * abx + aby * aby
+    if (len2 <= 1e-18) {
+      const dx = px - ax, dy = py - ay
+      return dx * dx + dy * dy
+    }
+    const t = THREE.MathUtils.clamp(((px - ax) * abx + (py - ay) * aby) / len2, 0, 1)
+    const qx = ax + abx * t, qy = ay + aby * t
+    const dx = px - qx, dy = py - qy
+    return dx * dx + dy * dy
+  }
+  const classificationCache = new Map()
+  const classifyId = (id, positions = indexedSource.positions) => {
+    const cacheKey = positions === indexedSource.positions ? id : `x${id}`
+    const cached = classificationCache.get(cacheKey)
+    if (cached) return cached
+    const p = positionAt(id, positions)
+    const p2 = new THREE.Vector2(p.x, p.z)
+    let inside = cadPointInPolygon2D(p2, polygon)
+    let onBoundary = false
+    if (!inside) {
+      let minD2 = Infinity
+      for (let i = 0; i < polygon.length; i++) {
+        const a = polygon[i], b = polygon[(i + 1) % polygon.length]
+        const d2 = pointSegmentDistanceSq2D(p2.x, p2.y, a.x, a.y, b.x, b.y)
+        if (d2 < minD2) minD2 = d2
+        if (minD2 <= boundaryToleranceSq) break
+      }
+      onBoundary = minD2 <= boundaryToleranceSq
+      if (onBoundary) inside = true
+    }
+    const result = { inside, onBoundary }
+    classificationCache.set(cacheKey, result)
+    return result
+  }
+
+  // Indexed source adjacency lets us flood ONLY the forbidden piece that is actually
+  // connected to the original open boundary. This is the V38 guard against the extra
+  // holes V37 could create on a nearby fold of the scan.
+  const adjacency = new Map()
+  const addAdjacency = (a, b) => {
+    let set = adjacency.get(a)
+    if (!set) { set = new Set(); adjacency.set(a, set) }
+    set.add(b)
+  }
+  for (let o = 0; o + 2 < indexedSource.indices.length; o += 3) {
+    const a = indexedSource.indices[o], b = indexedSource.indices[o + 1], c = indexedSource.indices[o + 2]
+    addAdjacency(a, b); addAdjacency(b, a)
+    addAdjacency(b, c); addAdjacency(c, b)
+    addAdjacency(c, a); addAdjacency(a, c)
+  }
+
+  const outsideConnected = new Set()
+  const queue = []
+  for (const id of fallbackBoundaryLoop.vertexIds) {
+    if (!classifyId(id).inside && distanceToRawBoundarySqById(id) <= clipBandSq) {
+      outsideConnected.add(id)
+      queue.push(id)
+    }
+  }
+  for (let qi = 0; qi < queue.length; qi++) {
+    const id = queue[qi]
+    for (const neighbor of adjacency.get(id) || []) {
+      if (outsideConnected.has(neighbor)) continue
+      if (distanceToRawBoundarySqById(neighbor) > clipBandSq) continue
+      if (classifyId(neighbor).inside) continue
+      outsideConnected.add(neighbor)
+      queue.push(neighbor)
+    }
+  }
+
+  const positions = indexedSource.positions.slice()
+  const outputIndices = []
+  const intersectionCache = new Map()
+  const intersectionVertexIds = new Set()
+  const cross2 = (ax, ay, bx, by) => ax * by - ay * bx
+
+  const segmentFootprintHits = (a, b) => {
+    const hits = []
+    const rx = b.x - a.x, rz = b.z - a.z
+    if (rx * rx + rz * rz <= 1e-18) return hits
+    for (let i = 0; i < polygon.length; i++) {
+      const c = polygon[i], d = polygon[(i + 1) % polygon.length]
+      const sx = d.x - c.x, sz = d.y - c.y
+      const denom = cross2(rx, rz, sx, sz)
+      if (Math.abs(denom) <= 1e-12) continue
+      const qx = c.x - a.x, qz = c.y - a.z
+      const t = cross2(qx, qz, sx, sz) / denom
+      const u = cross2(qx, qz, rx, rz) / denom
+      if (t < -1e-8 || t > 1 + 1e-8 || u < -1e-8 || u > 1 + 1e-8) continue
+      hits.push({ t: THREE.MathUtils.clamp(t, 0, 1), segmentIndex: i })
+    }
+    hits.sort((h1, h2) => h1.t - h2.t)
+    const unique = []
+    for (const hit of hits) {
+      if (!unique.length || Math.abs(hit.t - unique[unique.length - 1].t) > 1e-7) unique.push(hit)
+    }
+    return unique
+  }
+
+  const binaryCrossingFallback = (a, b, aInside) => {
+    let lo = 0, hi = 1
+    for (let iteration = 0; iteration < 24; iteration++) {
+      const mid = (lo + hi) * 0.5
+      const p = a.clone().lerp(b, mid)
+      const p2 = new THREE.Vector2(p.x, p.z)
+      let inside = cadPointInPolygon2D(p2, polygon)
+      if (inside === aInside) lo = mid
+      else hi = mid
+    }
+    return (lo + hi) * 0.5
+  }
+
+  const intersectEdgeIds = (aId, bId, aInside, bInside) => {
+    const lo = Math.min(aId, bId), hi = Math.max(aId, bId)
+    const key = `${lo}:${hi}`
+    const cached = intersectionCache.get(key)
+    if (cached != null) return cached
+    const a = positionAt(aId, positions), b = positionAt(bId, positions)
+    const hits = segmentFootprintHits(a, b)
+    let chosen = null
+    if (hits.length) chosen = aInside && !bInside ? hits[0] : hits[hits.length - 1]
+    const t = chosen ? chosen.t : binaryCrossingFallback(a, b, aInside)
+    if (t <= 1e-7) { intersectionCache.set(key, aId); return aId }
+    if (t >= 1 - 1e-7) { intersectionCache.set(key, bId); return bId }
+
+    const p = a.clone().lerp(b, THREE.MathUtils.clamp(t, 0, 1))
+    if (chosen) {
+      const c = polygon[chosen.segmentIndex], d = polygon[(chosen.segmentIndex + 1) % polygon.length]
+      const vx = d.x - c.x, vz = d.y - c.y
+      const len2 = vx * vx + vz * vz
+      if (len2 > 1e-18) {
+        const s = THREE.MathUtils.clamp(((p.x - c.x) * vx + (p.z - c.y) * vz) / len2, 0, 1)
+        p.x = c.x + vx * s
+        p.z = c.y + vz * s
+      }
+    }
+    const id = positions.length / 3
+    positions.push(p.x, p.y, p.z)
+    intersectionCache.set(key, id)
+    intersectionVertexIds.add(id)
+    return id
+  }
+
+  const stats = {
+    candidateTriangles: 0,
+    keptTriangles: 0,
+    clippedTriangles: 0,
+    discardedTriangles: 0,
+    splitTriangles: 0,
+    generatedTriangles: 0,
+    removedDegenerateTriangles: indexedSource.removedDegenerateTriangles,
+  }
+  const pushTriangleIds = (a, b, c) => {
+    if (a === b || b === c || c === a) { stats.removedDegenerateTriangles++; return false }
+    const pa = positionAt(a, positions), pb = positionAt(b, positions), pc = positionAt(c, positions)
+    const area2 = pb.clone().sub(pa).cross(pc.clone().sub(pa)).length()
+    if (!Number.isFinite(area2) || area2 <= areaThreshold) { stats.removedDegenerateTriangles++; return false }
+    outputIndices.push(a, b, c)
+    return true
+  }
+
+  for (let o = 0; o + 2 < indexedSource.indices.length; o += 3) {
+    const tri = [indexedSource.indices[o], indexedSource.indices[o + 1], indexedSource.indices[o + 2]]
+    const touchesOutsideFlood = tri.some((id) => outsideConnected.has(id))
+    if (!touchesOutsideFlood) {
+      outputIndices.push(tri[0], tri[1], tri[2])
+      stats.keptTriangles++
+      continue
+    }
+    stats.candidateTriangles++
+    const inside = tri.map((id) => classifyId(id).inside)
+    const insideCount = inside.reduce((sum, value) => sum + (value ? 1 : 0), 0)
+    if (insideCount === 3) {
+      outputIndices.push(tri[0], tri[1], tri[2])
+      stats.keptTriangles++
+      continue
+    }
+    if (insideCount === 0) {
+      stats.discardedTriangles++
+      continue
+    }
+
+    const polyIds = []
+    for (let edge = 0; edge < 3; edge++) {
+      const next = (edge + 1) % 3
+      const currentId = tri[edge], nextId = tri[next]
+      const currentInside = inside[edge], nextInside = inside[next]
+      if (currentInside) polyIds.push(currentId)
+      if (currentInside !== nextInside) polyIds.push(intersectEdgeIds(currentId, nextId, currentInside, nextInside))
+    }
+    const clean = []
+    for (const id of polyIds) {
+      if (!clean.length || clean[clean.length - 1] !== id) clean.push(id)
+    }
+    if (clean.length > 2 && clean[0] === clean[clean.length - 1]) clean.pop()
+    if (clean.length < 3) { stats.discardedTriangles++; continue }
+
+    stats.clippedTriangles++
+    if (clean.length > 3) stats.splitTriangles++
+    let generated = 0
+    for (let i = 1; i + 1 < clean.length; i++) {
+      if (pushTriangleIds(clean[0], clean[i], clean[i + 1])) generated++
+    }
+    stats.generatedTriangles += generated
+  }
+
+  const clippedBoundaryData = cadExtractIndexedBoundaryLoops(positions, outputIndices)
+  const clippedTopology = cadAnalyzeIndexedTopology(positions, outputIndices, safeDiagonal)
+  const sourceBoundaryIdSet = new Set(fallbackBoundaryLoop.vertexIds)
+  let chosenLoop = null
+  let chosenScore = -Infinity
+  let intersectionBoundaryLoopCount = 0
+  for (const loop of clippedBoundaryData.loops) {
+    if (!loop.closed || loop.vertexIds.length < 4) continue
+    let intersectionHits = 0
+    let sourceHits = 0
+    for (const id of loop.vertexIds) {
+      if (intersectionVertexIds.has(id)) intersectionHits++
+      if (sourceBoundaryIdSet.has(id)) sourceHits++
+    }
+    if (intersectionHits > 0) intersectionBoundaryLoopCount++
+    const score = intersectionHits * 1e6 + sourceHits * 1e3 + loop.perimeter
+    if (score > chosenScore) { chosenScore = score; chosenLoop = loop }
+  }
+  if (!chosenLoop) chosenLoop = clippedBoundaryData.loops[0] || fallbackBoundaryLoop
+
+  let boundaryIndices = chosenLoop.vertexIds.slice()
+  let boundary = boundaryIndices.map((id) => positionAt(id, positions))
+  const rawArea = cadSignedAreaXZ(raw)
+  if (boundary.length >= 4 && cadSignedAreaXZ(boundary) * rawArea < 0) {
+    boundaryIndices.reverse()
+    boundary.reverse()
+  }
+  if (boundary.length >= 4) {
+    const anchor = raw[0]
+    let anchorIndex = 0
+    let anchorDistanceSq = Infinity
+    for (let i = 0; i < boundary.length; i++) {
+      const p = boundary[i]
+      const dx = p.x - anchor.x, dz = p.z - anchor.z, dy = (p.y - anchor.y) * 0.18
+      const d2 = dx * dx + dz * dz + dy * dy
+      if (d2 < anchorDistanceSq) { anchorDistanceSq = d2; anchorIndex = i }
+    }
+    if (anchorIndex > 0) {
+      boundaryIndices = boundaryIndices.slice(anchorIndex).concat(boundaryIndices.slice(0, anchorIndex))
+      boundary = boundary.slice(anchorIndex).concat(boundary.slice(0, anchorIndex))
+    }
+  }
+
+  const clippedSoup = new Array(outputIndices.length * 3)
+  for (let i = 0; i < outputIndices.length; i++) {
+    const id = outputIndices[i], o = id * 3
+    clippedSoup[i * 3] = positions[o]
+    clippedSoup[i * 3 + 1] = positions[o + 1]
+    clippedSoup[i * 3 + 2] = positions[o + 2]
+  }
+
+  const secondaryBoundaryLoopsCreated = Math.max(
+    0,
+    clippedBoundaryData.loops.length - sourceBoundaryData.loops.length,
+    intersectionBoundaryLoopCount - 1
+  )
+  return {
+    positions,
+    indices: outputIndices,
+    trianglePositions: clippedSoup,
+    boundaryIndices,
+    boundary,
+    clipApplied: stats.clippedTriangles > 0 || stats.discardedTriangles > 0,
+    clipBandWidth,
+    candidateTriangles: stats.candidateTriangles,
+    keptTriangles: stats.keptTriangles,
+    clippedTriangles: stats.clippedTriangles,
+    discardedTriangles: stats.discardedTriangles,
+    splitTriangles: stats.splitTriangles,
+    generatedTriangles: stats.generatedTriangles,
+    intersectionVertices: intersectionVertexIds.size,
+    removedDegenerateTriangles: stats.removedDegenerateTriangles,
+    extractedBoundaryLoops: clippedBoundaryData.loops.length,
+    extractedBoundaryPoints: boundary.length,
+    boundaryPerimeterBefore: cadClosedLoopPerimeter(raw),
+    boundaryPerimeterAfter: cadClosedLoopPerimeter(boundary),
+    boundaryTolerance,
+    sourceBoundaryLoopsBefore: sourceBoundaryData.loops.length,
+    sourceBoundaryLoopsAfter: clippedBoundaryData.loops.length,
+    intersectionBoundaryLoopCount,
+    secondaryBoundaryLoopsCreated,
+    outsideFloodVertices: outsideConnected.size,
+    sourceIndexedVertices: Math.floor(indexedSource.positions.length / 3),
+    sourceIndexedTriangles: Math.floor(indexedSource.indices.length / 3),
+    sourceWeldTolerance: indexedSource.weldTolerance,
+    sourceWeldedVertices: indexedSource.weldedVertices,
+    sourceTopology,
+    clippedTopology,
+  }
+}
+
+// V27 – Support-ring guide reconstructed directly from the scan topology.
+//
+// Raw triangle normals from V25 were too noisy at a dental trim edge. Instead we
+// use the actual one-ring topology: for every boundary vertex we find incident
+// scan triangles and collect their NON-boundary vertex. The vector from boundary
+// into that third vertex is the true "healthy side" of the source surface. After
+// removing the component along the boundary tangent and circular low-pass filtering
+// we obtain a robust incoming surface direction without touching the anatomy.
+//
+// The returned supportPoints are NOT inserted into the mesh. They are only tangent
+// guides for the new rounded shoulder, so they may be normalized to a stable
+// physical distance (~0.6–0.85 mm) even when the original scan triangles are tiny.
+function cadBuildBoundarySupportRing(trianglePositions, rawBoundary, conditionedBoundary, isUpper, diagonal) {
+  const raw = Array.isArray(rawBoundary) ? rawBoundary : []
+  const seam = Array.isArray(conditionedBoundary) && conditionedBoundary.length === raw.length
+    ? conditionedBoundary
+    : raw
+  const count = raw.length
+  const transitionDirection = isUpper ? 1 : -1
+  const anatomyAxis = new THREE.Vector3(0, -transitionDirection, 0)
+  const fallbackDistance = Math.max(0.58, Math.min(0.84, Math.max(1, Number(diagonal) || 1) * 0.0108))
+
+  if (count < 4) {
+    return {
+      supportPoints: seam.map((p) => p.clone().addScaledVector(anatomyAxis, fallbackDistance)),
+      directions: seam.map(() => anatomyAxis.clone()),
+      coverage: 0,
+      supportDistance: fallbackDistance,
+      smoothingRadius: 0,
+      tolerance: 0,
+    }
+  }
+
+  const tolerance = Math.max(1e-5, Math.max(1, Number(diagonal) || 1) * 2.8e-5)
+  const inv = 1 / tolerance
+  const keyXYZ = (x, y, z) => `${Math.round(x * inv)}|${Math.round(y * inv)}|${Math.round(z * inv)}`
+
+  const boundaryBuckets = new Map()
+  for (let i = 0; i < count; i++) {
+    const p = raw[i]
+    const key = keyXYZ(p.x, p.y, p.z)
+    let bucket = boundaryBuckets.get(key)
+    if (!bucket) {
+      bucket = []
+      boundaryBuckets.set(key, bucket)
+    }
+    bucket.push(i)
+  }
+
+  const tangentAt = (i) => {
+    const prev = seam[(i - 2 + count) % count]
+    const next = seam[(i + 2) % count]
+    const tangent = next.clone().sub(prev)
+    if (tangent.lengthSq() < 1e-12) tangent.set(1, 0, 0)
+    return tangent.normalize()
+  }
+
+  const sums = Array.from({ length: count }, () => new THREE.Vector3())
+  const weights = new Float64Array(count)
+  const source = Array.isArray(trianglePositions) ? trianglePositions : []
+
+  for (let offset = 0; offset + 8 < source.length; offset += 9) {
+    const tri = [
+      new THREE.Vector3(source[offset], source[offset + 1], source[offset + 2]),
+      new THREE.Vector3(source[offset + 3], source[offset + 4], source[offset + 5]),
+      new THREE.Vector3(source[offset + 6], source[offset + 7], source[offset + 8]),
+    ]
+    const keys = tri.map((p) => keyXYZ(p.x, p.y, p.z))
+    const matched = keys.map((key) => boundaryBuckets.get(key) || null)
+
+    for (let corner = 0; corner < 3; corner++) {
+      const boundaryMatches = matched[corner]
+      if (!boundaryMatches?.length) continue
+      for (const boundaryIndex of boundaryMatches) {
+        const origin = raw[boundaryIndex]
+        for (let other = 0; other < 3; other++) {
+          if (other === corner) continue
+          // A neighboring boundary vertex only describes the tangent of the cut.
+          // We want the third/interior scan vertex on the healthy side.
+          if (matched[other]?.length) continue
+          const delta = tri[other].clone().sub(origin)
+          const length = delta.length()
+          if (length < tolerance * 0.5 || length > 2.6) continue
+          const tangent = tangentAt(boundaryIndex)
+          delta.addScaledVector(tangent, -delta.dot(tangent))
+          const crossLength = delta.length()
+          if (crossLength < tolerance * 0.5) continue
+          // Tiny source triangles should not dominate purely because they are tiny.
+          // A soft inverse-distance weight is enough to favor the local one-ring.
+          const weight = 1 / Math.max(0.14, Math.sqrt(crossLength))
+          sums[boundaryIndex].addScaledVector(delta.normalize(), weight)
+          weights[boundaryIndex] += weight
+        }
+      }
+    }
+  }
+
+  // BoundaryOverride normally lands exactly on split scan vertices. For safety,
+  // add a spatial fallback for the rare points that did not get an exact one-ring
+  // match (float export, resampled trim curve, etc.). Search is intentionally local
+  // so a nearby tooth/second sheet cannot become the guide for this edge.
+  const exactCovered = weights.reduce((sum, value) => sum + (value > 1e-9 ? 1 : 0), 0)
+  if (exactCovered < count * 0.94) {
+    const searchRadius = Math.max(0.62, Math.min(0.92, fallbackDistance * 1.18))
+    const searchCell = searchRadius * 0.72
+    const invCell = 1 / searchCell
+    const vertexGrid = new Map()
+    const gridKey = (x, y, z) => `${Math.floor(x * invCell)}:${Math.floor(y * invCell)}:${Math.floor(z * invCell)}`
+    const seenVertex = new Set()
+    for (let offset = 0; offset + 2 < source.length; offset += 3) {
+      const x = source[offset], y = source[offset + 1], z = source[offset + 2]
+      const uniqueKey = keyXYZ(x, y, z)
+      if (seenVertex.has(uniqueKey)) continue
+      seenVertex.add(uniqueKey)
+      const key = gridKey(x, y, z)
+      let bucket = vertexGrid.get(key)
+      if (!bucket) {
+        bucket = []
+        vertexGrid.set(key, bucket)
+      }
+      bucket.push(new THREE.Vector3(x, y, z))
+    }
+
+    const cellReach = Math.max(1, Math.ceil(searchRadius / searchCell))
+    for (let i = 0; i < count; i++) {
+      if (weights[i] > 1e-9) continue
+      const origin = raw[i]
+      const tangent = tangentAt(i)
+      const cx = Math.floor(origin.x * invCell)
+      const cy = Math.floor(origin.y * invCell)
+      const cz = Math.floor(origin.z * invCell)
+      const localSum = new THREE.Vector3()
+      let localWeight = 0
+      for (let dx = -cellReach; dx <= cellReach; dx++) {
+        for (let dy = -cellReach; dy <= cellReach; dy++) {
+          for (let dz = -cellReach; dz <= cellReach; dz++) {
+            const bucket = vertexGrid.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
+            if (!bucket) continue
+            for (const candidate of bucket) {
+              const delta = candidate.clone().sub(origin)
+              const distance = delta.length()
+              if (distance < 0.12 || distance > searchRadius) continue
+              const anatomyProjection = delta.dot(anatomyAxis) / Math.max(1e-9, distance)
+              if (anatomyProjection < -0.16) continue
+              delta.addScaledVector(tangent, -delta.dot(tangent))
+              const crossLength = delta.length()
+              if (crossLength < 0.08) continue
+              const direction = delta.normalize()
+              const healthyBias = 0.65 + 0.35 * Math.max(0, direction.dot(anatomyAxis))
+              const weight = healthyBias / Math.max(0.16, Math.sqrt(distance))
+              localSum.addScaledVector(direction, weight)
+              localWeight += weight
+            }
+          }
+        }
+      }
+      if (localWeight > 1e-9 && localSum.lengthSq() > 1e-12) {
+        sums[i].copy(localSum)
+        weights[i] = localWeight
+      }
+    }
+  }
+
+  const rawDirections = new Array(count)
+  let covered = 0
+  for (let i = 0; i < count; i++) {
+    let direction
+    if (weights[i] > 1e-9 && sums[i].lengthSq() > 1e-12) {
+      direction = sums[i].normalize()
+      covered++
+    } else {
+      direction = anatomyAxis.clone()
+    }
+
+    // Re-remove tangential leakage after the one-ring average.
+    const tangent = tangentAt(i)
+    direction.addScaledVector(tangent, -direction.dot(tangent))
+    if (direction.lengthSq() < 1e-12) direction.copy(anatomyAxis)
+    direction.normalize()
+
+    // The support point must lie on the healthy/anatomical side of the cut. Very
+    // small local overhangs are allowed, but a guide pointing strongly toward the
+    // future base is replaced by a conservative anatomy-axis blend.
+    const anatomyDot = direction.dot(anatomyAxis)
+    if (anatomyDot < -0.08) {
+      direction.multiplyScalar(0.30).addScaledVector(anatomyAxis, 0.70)
+      if (direction.lengthSq() < 1e-12) direction.copy(anatomyAxis)
+      direction.normalize()
+    }
+    rawDirections[i] = direction
+  }
+
+  // Strong circular low-pass: support guides should describe the macroscopic
+  // arrival direction of the scan, not individual IOS triangles.
+  const smoothingRadius = Math.max(5, Math.min(15, Math.round(count / 85)))
+  const smoothed = rawDirections.map((fallback, i) => {
+    const sum = new THREE.Vector3()
+    let total = 0
+    for (let k = -smoothingRadius; k <= smoothingRadius; k++) {
+      const idx = (i + k + count) % count
+      const weight = smoothingRadius + 1 - Math.abs(k)
+      const candidate = rawDirections[idx].clone()
+      if (candidate.dot(fallback) < 0) candidate.negate()
+      sum.addScaledVector(candidate, weight)
+      total += weight
+    }
+    if (total > 0) sum.multiplyScalar(1 / total)
+    const tangent = tangentAt(i)
+    sum.addScaledVector(tangent, -sum.dot(tangent))
+    if (sum.lengthSq() < 1e-12) sum.copy(fallback)
+    sum.normalize()
+    if (sum.dot(anatomyAxis) < -0.04) {
+      sum.multiplyScalar(0.35).addScaledVector(anatomyAxis, 0.65).normalize()
+    }
+    return sum
+  })
+
+  const supportPoints = seam.map((point, i) => point.clone().addScaledVector(smoothed[i], fallbackDistance))
+  return {
+    supportPoints,
+    directions: smoothed,
+    coverage: covered / count,
+    supportDistance: fallbackDistance,
+    smoothingRadius,
+    tolerance,
+  }
+}
+
+
+// V25 – Blend Collar boundary guides.
+//
+// Důležitý rozdíl proti starším verzím: původní scan už kvůli bázi NEPOSOUVÁME.
+// Místo feather/Laplacian úpravy source mesh pouze odhadneme lokální tečný směr
+// povrchu na otevřené hraně. Nově vytvořený transition patch pak z boundary
+// odchází ve stejném tečném směru (G1-like napojení) a teprve během cca 2 mm se
+// ohne do pravidelného Straight profilu. Anatomie nad hranou tak zůstává 1:1.
+function cadBuildBoundaryBlendGuides(trianglePositions, boundary, isUpper, diagonal) {
+  const points = Array.isArray(boundary) ? boundary : []
+  const count = points.length
+  const transitionDirection = isUpper ? 1 : -1
+  const baseDirection = new THREE.Vector3(0, transitionDirection, 0)
+  if (count < 4) {
+    return {
+      directions: points.map(() => baseDirection.clone()),
+      normalCoverage: 0,
+      smoothingRadius: 0,
+      tolerance: 0,
+    }
+  }
+
+  // Trim points jsou přímo body rozdělených triangles. Kvantizovaný vertex->normal
+  // lookup je proto přesnější a výrazně levnější než globální nearest-triangle scan.
+  const tolerance = Math.max(1e-5, Math.max(1, Number(diagonal) || 1) * 2.4e-5)
+  const inv = 1 / tolerance
+  const keyXYZ = (x, y, z) => `${Math.round(x * inv)}|${Math.round(y * inv)}|${Math.round(z * inv)}`
+  const normalSums = new Map()
+  const addNormal = (x, y, z, nx, ny, nz) => {
+    const key = keyXYZ(x, y, z)
+    const existing = normalSums.get(key)
+    if (existing) {
+      existing[0] += nx; existing[1] += ny; existing[2] += nz
+    } else {
+      normalSums.set(key, [nx, ny, nz])
+    }
+  }
+
+  const source = Array.isArray(trianglePositions) ? trianglePositions : []
+  for (let i = 0; i + 8 < source.length; i += 9) {
+    const ax = source[i], ay = source[i + 1], az = source[i + 2]
+    const bx = source[i + 3], by = source[i + 4], bz = source[i + 5]
+    const cx = source[i + 6], cy = source[i + 7], cz = source[i + 8]
+    const ux = bx - ax, uy = by - ay, uz = bz - az
+    const vx = cx - ax, vy = cy - ay, vz = cz - az
+    let nx = uy * vz - uz * vy
+    let ny = uz * vx - ux * vz
+    let nz = ux * vy - uy * vx
+    const length = Math.hypot(nx, ny, nz)
+    if (!Number.isFinite(length) || length <= 1e-12) continue
+    // Jednotkové face normals dávají malým IOS triangles stejnou váhu jako jejich
+    // sousedům a nedovolí jednomu většímu triangle přetáhnout celý guide field.
+    nx /= length; ny /= length; nz /= length
+    addNormal(ax, ay, az, nx, ny, nz)
+    addNormal(bx, by, bz, nx, ny, nz)
+    addNormal(cx, cy, cz, nx, ny, nz)
+  }
+
+  const rawNormals = new Array(count)
+  let normalHits = 0
+  for (let i = 0; i < count; i++) {
+    const point = points[i]
+    const qx = Math.round(point.x * inv)
+    const qy = Math.round(point.y * inv)
+    const qz = Math.round(point.z * inv)
+    let sum = normalSums.get(`${qx}|${qy}|${qz}`)
+
+    // Float round-trip mezi trim kontextem a root matrix může skončit o jeden
+    // quantized cell vedle. Malé 3x3x3 hledání stále odpovídá sub-0.01mm okolí.
+    if (!sum) {
+      let best = null
+      let bestLength = -1
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dz = -1; dz <= 1; dz++) {
+            const candidate = normalSums.get(`${qx + dx}|${qy + dy}|${qz + dz}`)
+            if (!candidate) continue
+            const candidateLength = candidate[0] * candidate[0] + candidate[1] * candidate[1] + candidate[2] * candidate[2]
+            if (candidateLength > bestLength) {
+              best = candidate
+              bestLength = candidateLength
+            }
+          }
+        }
+      }
+      sum = best
+    }
+
+    if (sum) {
+      const normal = new THREE.Vector3(sum[0], sum[1], sum[2])
+      if (normal.lengthSq() > 1e-12) {
+        normal.normalize()
+        rawNormals[i] = normal
+        normalHits++
+        continue
+      }
+    }
+    rawNormals[i] = null
+  }
+
+  // Smoothing se děje pouze na pomocném normal/guide fieldu – žádný source vertex
+  // se neposouvá. Radius škáluje s hustotou boundary a typicky odpovídá ~0.5 mm.
+  const smoothingRadius = Math.max(2, Math.min(10, Math.round(count / 260)))
+  const smoothedNormals = new Array(count)
+  for (let i = 0; i < count; i++) {
+    const reference = rawNormals[i]
+    const sum = new THREE.Vector3()
+    let weightSum = 0
+    for (let offset = -smoothingRadius; offset <= smoothingRadius; offset++) {
+      const normal = rawNormals[(i + offset + count) % count]
+      if (!normal) continue
+      const weight = smoothingRadius + 1 - Math.abs(offset)
+      const aligned = normal.clone()
+      if (reference && aligned.dot(reference) < 0) aligned.negate()
+      sum.addScaledVector(aligned, weight)
+      weightSum += weight
+    }
+    if (weightSum > 0 && sum.lengthSq() > 1e-12) smoothedNormals[i] = sum.normalize()
+    else smoothedNormals[i] = null
+  }
+
+  const tangentWindow = Math.max(2, Math.min(12, smoothingRadius + 2))
+  let directions = new Array(count)
+  for (let i = 0; i < count; i++) {
+    const previous = points[(i - tangentWindow + count) % count]
+    const next = points[(i + tangentWindow) % count]
+    const tangent = next.clone().sub(previous)
+    if (tangent.lengthSq() <= 1e-12) {
+      directions[i] = baseDirection.clone()
+      continue
+    }
+    tangent.normalize()
+
+    const normal = smoothedNormals[i]
+    if (!normal) {
+      directions[i] = baseDirection.clone()
+      continue
+    }
+
+    // Směr přes boundary = projekce osy budoucí báze do tečné roviny scanu a
+    // současně kolmo na tečnu samotného boundary loopu. Tím automaticky zvolíme
+    // správnou stranu bez závislosti na windingu face normals.
+    const guide = baseDirection.clone()
+    guide.addScaledVector(normal, -guide.dot(normal))
+    guide.addScaledVector(tangent, -guide.dot(tangent))
+
+    if (guide.lengthSq() <= 1e-10) {
+      guide.copy(normal).cross(tangent)
+      if (guide.dot(baseDirection) < 0) guide.negate()
+    }
+    if (guide.lengthSq() <= 1e-12) guide.copy(baseDirection)
+    guide.normalize()
+    if (guide.y * transitionDirection < 0) guide.negate()
+    directions[i] = guide
+  }
+
+  // Poslední lehké circular fairing pouze směru. Před sčítáním sousední vektory
+  // orientujeme do stejné hemisféry, aby nevznikl flip na lokálním noisy vertexu.
+  for (let pass = 0; pass < 3; pass++) {
+    const nextDirections = new Array(count)
+    for (let i = 0; i < count; i++) {
+      const center = directions[i]
+      const sum = center.clone().multiplyScalar(4)
+      for (const offset of [-2, -1, 1, 2]) {
+        const neighbor = directions[(i + offset + count) % count].clone()
+        if (neighbor.dot(center) < 0) neighbor.negate()
+        sum.addScaledVector(neighbor, Math.abs(offset) === 1 ? 2 : 1)
+      }
+      if (sum.lengthSq() <= 1e-12) sum.copy(baseDirection)
+      sum.normalize()
+      if (sum.y * transitionDirection < 0) sum.negate()
+      nextDirections[i] = sum
+    }
+    directions = nextDirections
+  }
+
+  return {
+    directions,
+    normalCoverage: normalHits / Math.max(1, count),
+    smoothingRadius,
+    tolerance,
+  }
+}
+
+function cadSampleClosedLoopDirectionArc(directions, points, table, fraction) {
+  if (!Array.isArray(directions) || !directions.length) return new THREE.Vector3(0, 1, 0)
+  if (directions.length === 1 || !Array.isArray(points) || points.length !== directions.length) return directions[0].clone()
+  const total = table?.total || 0
+  if (total <= 1e-9) return directions[0].clone()
+  let f = Number(fraction) || 0
+  f = ((f % 1) + 1) % 1
+  const distance = f * total
+  const cumulative = table.cumulative
+  let lo = 0, hi = points.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (cumulative[mid] <= distance) lo = mid
+    else hi = mid - 1
+  }
+  const edge = Math.min(points.length - 1, lo)
+  const start = cumulative[edge]
+  const end = cumulative[edge + 1]
+  const t = end > start ? THREE.MathUtils.clamp((distance - start) / (end - start), 0, 1) : 0
+  const a = directions[edge].clone()
+  const b = directions[(edge + 1) % directions.length].clone()
+  if (a.dot(b) < 0) b.negate()
+  a.lerp(b, t)
+  return a.lengthSq() > 1e-12 ? a.normalize() : directions[edge].clone()
+}
+
+// V17/V17.1 helper, reused by V28 for the experimental local shoulder remesh.
+// Transition už není tvořený sadou horizontálních ringů. Místo toho triangulujeme
+// úzký periodický parametrický pás (U = obvod, V = hloubka přechodu) a jeho body
+// promítáme zpět na přesně stejnou shape-locked surface, kterou používala V12/V16.
+function cadClosedLoopArcTable(points) {
+  const cumulative = [0]
+  let total = 0
+  for (let i = 0; i < (points?.length || 0); i++) {
+    total += points[i].distanceTo(points[(i + 1) % points.length])
+    cumulative.push(total)
+  }
+  return { cumulative, total }
+}
+
+function cadSampleClosedLoopArc(points, table, fraction) {
+  if (!Array.isArray(points) || !points.length) return new THREE.Vector3()
+  if (points.length === 1) return points[0].clone()
+  const total = table?.total || 0
+  if (total <= 1e-9) return points[0].clone()
+  let f = Number(fraction) || 0
+  f = ((f % 1) + 1) % 1
+  const distance = f * total
+  const cumulative = table.cumulative
+  let lo = 0, hi = points.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (cumulative[mid] <= distance) lo = mid
+    else hi = mid - 1
+  }
+  const edge = Math.min(points.length - 1, lo)
+  const start = cumulative[edge]
+  const end = cumulative[edge + 1]
+  const t = end > start ? THREE.MathUtils.clamp((distance - start) / (end - start), 0, 1) : 0
+  return points[edge].clone().lerp(points[(edge + 1) % points.length], t)
+}
+
+function cadSampleClosedLoopUniform(points, fraction) {
+  if (!Array.isArray(points) || !points.length) return new THREE.Vector3()
+  if (points.length === 1) return points[0].clone()
+  let f = Number(fraction) || 0
+  f = ((f % 1) + 1) % 1
+  const scaled = f * points.length
+  const index = Math.floor(scaled) % points.length
+  const t = scaled - Math.floor(scaled)
+  return points[index].clone().lerp(points[(index + 1) % points.length], t)
+}
+
+function cadBuildIsotropicTransitionUV(rawLoop, bottomCount, transitionDepth, targetSpacing = 0.58) {
+  const rawCount = rawLoop?.length || 0
+  if (rawCount < 4 || bottomCount < 4) throw new Error("Přechod scan–báze se nepodařilo triangulovat.")
+  const arc = cadClosedLoopArcTable(rawLoop)
+  const perimeter = Math.max(1e-6, arc.total)
+  const depth = Math.max(0.25, transitionDepth)
+  const spacing = Math.max(0.34, Math.min(0.56, targetSpacing))
+  const boundary = []
+  const boundaryMeta = []
+  const pushBoundary = (x, y, meta) => {
+    boundary.push(new THREE.Vector2(x, y))
+    boundaryMeta.push(meta)
+  }
+
+  // Horní constrained boundary = přesná relaxovaná trim boundary.
+  for (let i = 0; i < rawCount; i++) {
+    const u = arc.cumulative[i] / perimeter
+    pushBoundary(u * perimeter, 0, { kind: "top", index: i, u, v: 0 })
+  }
+  // Periodický pravý roh je geometricky stejný bod jako u=0.
+  pushBoundary(perimeter, 0, { kind: "top", index: 0, u: 1, v: 0 })
+
+  // Boční seam rozdělíme na ~isotropní segmenty. Levá a pravá strana se po
+  // triangulaci svaří na stejné 3D indexy, takže patch je topologicky válec.
+  const sideSections = Math.max(2, Math.ceil(depth / spacing))
+  for (let k = 1; k < sideSections; k++) {
+    const v = k / sideSections
+    pushBoundary(perimeter, v * depth, { kind: "side", level: k, u: 1, v })
+  }
+
+  // Spodní constrained boundary = pravidelný transition-end profil, obráceně,
+  // protože obcházíme obvod parametrického obdélníku.
+  pushBoundary(perimeter, depth, { kind: "bottom", index: 0, u: 1, v: 1 })
+  for (let i = bottomCount - 1; i >= 1; i--) {
+    const u = i / bottomCount
+    pushBoundary(u * perimeter, depth, { kind: "bottom", index: i, u, v: 1 })
+  }
+  pushBoundary(0, depth, { kind: "bottom", index: 0, u: 0, v: 1 })
+
+  for (let k = sideSections - 1; k >= 1; k--) {
+    const v = k / sideSections
+    pushBoundary(0, v * depth, { kind: "side", level: k, u: 0, v })
+  }
+
+  const initialFaces = THREE.ShapeUtils.triangulateShape(boundary, [])
+  if (!initialFaces?.length) throw new Error("Přechod scan–báze se nepodařilo triangulovat.")
+
+  // Hexagonální Steiner distribuce v parametrickém prostoru rozbije viditelné
+  // horizontální ringy. U hran necháváme malý clearance, přesné boundary jsou
+  // constrained a nikdy se neposouvají.
+  const clearance = Math.max(0.16, spacing * 0.28)
+  const steiner = cadGenerateHexSteinerPoints(boundary, spacing, clearance)
+  const inserted = cadInsertSteinerPointsIntoTriangulation(boundary, initialFaces, steiner)
+  const firstDelaunay = cadConstrainedDelaunayFlips(inserted.points, inserted.faces, boundary.length, 34)
+  const relaxed = cadRelaxCapInterior(
+    inserted.points,
+    firstDelaunay.faces,
+    boundary.length,
+    boundary,
+    1,
+    0.08,
+    Math.max(0.12, spacing * 0.18)
+  )
+  const finalDelaunay = cadConstrainedDelaunayFlips(relaxed.points, firstDelaunay.faces, boundary.length, 26)
+
+  return {
+    points: relaxed.points,
+    faces: finalDelaunay.faces,
+    boundaryCount: boundary.length,
+    boundaryMeta,
+    perimeter,
+    depth,
+    spacing,
+    sideSections,
+    steinerRequested: steiner.length,
+    steinerInserted: inserted.inserted,
+    steinerSkipped: inserted.skipped,
+    flips: firstDelaunay.flips + finalDelaunay.flips,
+    relaxMoves: relaxed.moved,
+  }
+}
+
+
+// V29 EXPERIMENT – segmented local shoulder remesh.
+//
+// V28 proved that remeshing the entire horseshoe as one periodic UV strip is not
+// safe: a planar triangulator can legally connect points that are far apart on the
+// real 3D arch. V29 therefore triangulates only short open patches along the
+// perimeter. Each patch has constrained top/bottom edges and constrained left/right
+// seams that are shared with its neighbors, so no triangle can span across the arch.
+function cadBuildIsotropicTransitionPatchUV(topCount, bottomCount, patchWidth, transitionDepth, targetSpacing = 0.42) {
+  if (topCount < 2 || bottomCount < 2) throw new Error("Lokální přechod scan–báze se nepodařilo triangulovat.")
+  const width = Math.max(0.8, Number(patchWidth) || 0.8)
+  const depth = Math.max(0.25, Number(transitionDepth) || 0.25)
+  const spacing = Math.max(0.34, Math.min(0.52, Number(targetSpacing) || 0.42))
+  const boundary = []
+  const boundaryMeta = []
+  const pushBoundary = (x, y, meta) => {
+    boundary.push(new THREE.Vector2(x, y))
+    boundaryMeta.push(meta)
+  }
+
+  // Top edge: exact conditioned scan boundary vertices for this local patch.
+  for (let i = 0; i < topCount; i++) {
+    const u = topCount > 1 ? i / (topCount - 1) : 0
+    pushBoundary(u * width, 0, { kind: "top", index: i, u, v: 0 })
+  }
+
+  // Shared right seam.
+  const sideSections = Math.max(2, Math.ceil(depth / spacing))
+  for (let k = 1; k < sideSections; k++) {
+    const v = k / sideSections
+    pushBoundary(width, v * depth, { kind: "side", side: "right", level: k, u: 1, v })
+  }
+
+  // Bottom edge in reverse order to keep a consistent polygon winding.
+  for (let i = bottomCount - 1; i >= 0; i--) {
+    const u = bottomCount > 1 ? i / (bottomCount - 1) : 0
+    pushBoundary(u * width, depth, { kind: "bottom", index: i, u, v: 1 })
+  }
+
+  // Shared left seam.
+  for (let k = sideSections - 1; k >= 1; k--) {
+    const v = k / sideSections
+    pushBoundary(0, v * depth, { kind: "side", side: "left", level: k, u: 0, v })
+  }
+
+  const initialFaces = THREE.ShapeUtils.triangulateShape(boundary, [])
+  if (!initialFaces?.length) throw new Error("Lokální přechod scan–báze se nepodařilo triangulovat.")
+
+  const clearance = Math.max(0.14, spacing * 0.28)
+  const steiner = cadGenerateHexSteinerPoints(boundary, spacing, clearance)
+  const inserted = cadInsertSteinerPointsIntoTriangulation(boundary, initialFaces, steiner)
+  const firstDelaunay = cadConstrainedDelaunayFlips(inserted.points, inserted.faces, boundary.length, 28)
+  const relaxed = cadRelaxCapInterior(
+    inserted.points,
+    firstDelaunay.faces,
+    boundary.length,
+    boundary,
+    1,
+    0.07,
+    Math.max(0.11, spacing * 0.17)
+  )
+  const finalDelaunay = cadConstrainedDelaunayFlips(relaxed.points, firstDelaunay.faces, boundary.length, 22)
+
+  return {
+    points: relaxed.points,
+    faces: finalDelaunay.faces,
+    boundaryCount: boundary.length,
+    boundaryMeta,
+    width,
+    depth,
+    spacing,
+    sideSections,
+    steinerRequested: steiner.length,
+    steinerInserted: inserted.inserted,
+    steinerSkipped: inserted.skipped,
+    flips: firstDelaunay.flips + finalDelaunay.flips,
+    relaxMoves: relaxed.moved,
+  }
+}
+
+
+// V17.2 – graded shape-locked transition strip (legacy helper; V18 uses adaptive columns).
+// V17.1 už zabránil globálním Delaunay diagonálám přes celý arch, ale interní
+// řady byly řidší než finální seam profil. Tím vznikl nežádoucí density dip:
+// hustá scan boundary -> řídký střed -> znovu hustší seam, což vytvářelo velké
+// vějířové/šikmé trojúhelníky.
+//
+// V17.2 drží počet bodů MONOTÓNNĚ mezi source boundary a finálním profilem.
+// Počet bodů klesá geometricky a vertikální pozice řad se rozloží podle jejich
+// lokálního horizontálního spacingu. Tvar surface je stále 100% shape-locked.
+function cadBuildGradedTransitionRows(perimeter, sourceCount, targetCount, transitionDepth, targetSpacing = 0.39) {
+  const length = Math.max(1e-6, Number(perimeter) || 1)
+  const depth = Math.max(0.25, Number(transitionDepth) || 0.8)
+  const src = Math.max(8, Math.round(Number(sourceCount) || targetCount || 8))
+  const dst = Math.max(8, Math.round(Number(targetCount) || src))
+  const spacing = Math.max(0.34, Math.min(0.46, Number(targetSpacing) || 0.39))
+
+  // Transition kolem 1.0–1.4 mm typicky potřebuje 4–5 intervalů. Více řad by
+  // začalo znovu vytvářet horizontální "žebřík", méně by bylo příliš hrubé.
+  const nominalVertical = Math.max(0.22, spacing * 0.72)
+  const sections = Math.max(4, Math.min(6, Math.ceil(depth / nominalVertical)))
+
+  // Counts včetně obou constrained hran. Geometrická interpolace zaručí, že
+  // hustota nikdy neklesne pod finální seam profil a změna mezi sousedními
+  // řadami je malá.
+  const counts = [src]
+  for (let r = 1; r < sections; r++) {
+    const t = r / sections
+    const geometric = Math.exp(Math.log(src) * (1 - t) + Math.log(dst) * t)
+    const c = src >= dst
+      ? Math.max(dst, Math.min(counts[counts.length - 1], Math.round(geometric)))
+      : Math.min(dst, Math.max(counts[counts.length - 1], Math.round(geometric)))
+    counts.push(c)
+  }
+  counts.push(dst)
+
+  // Near-equilateral spacing: hrubší spodní řady dostanou o něco větší část
+  // transition depth, jemná scan boundary menší. Po normalizaci součet přesně
+  // odpovídá transitionDepth.
+  const weights = []
+  for (let r = 0; r < sections; r++) {
+    const hA = length / Math.max(1, counts[r])
+    const hB = length / Math.max(1, counts[r + 1])
+    weights.push(Math.max(1e-6, 0.72 * Math.sqrt(hA * hB)))
+  }
+  const weightSum = weights.reduce((a, b) => a + b, 0) || 1
+  const vLevels = [0]
+  let accum = 0
+  for (let r = 0; r < sections; r++) {
+    accum += weights[r]
+    vLevels.push(accum / weightSum)
+  }
+  vLevels[vLevels.length - 1] = 1
+
+  const rows = []
+  for (let r = 1; r < sections; r++) {
+    const count = counts[r]
+    const v = vLevels[r]
+    const row = new Array(count)
+    for (let i = 0; i < count; i++) row[i] = { u: i / count, v }
+    rows.push(row)
+  }
+
+  return {
+    rows,
+    perimeter: length,
+    depth,
+    spacing,
+    sourceCount: src,
+    targetCount: dst,
+    counts,
+    vLevels,
+    sections,
+  }
+}
+
+
+// V18 – adaptive physical transition columns.
+// Místo globálních horizontálních ringů rozdělujeme přechod po jednotlivých
+// sloupcích kolem archu podle skutečné 3D délky daného profilu. Krátká místa
+// tak dostanou méně segmentů a hlubší části více, bez dlouhých jehlových faces.
+function cadBuildAdaptiveTransitionColumns(evaluateSurface, count, firstV = 0.07, targetSpacing = 0.78, maxAllowedSegments = 10) {
+  const columns = new Array(count)
+  let minSegments = Infinity
+  let maxSegments = 0
+  let totalInterior = 0
+  let maxColumnLength = 0
+  let minColumnLength = Infinity
+
+  const sampleCount = 18
+  for (let i = 0; i < count; i++) {
+    const u = i / count
+    const samples = []
+    const cumulative = [0]
+    let total = 0
+    let previous = evaluateSurface(u, firstV)
+    samples.push({ v: firstV, p: previous })
+
+    for (let k = 1; k <= sampleCount; k++) {
+      const v = THREE.MathUtils.lerp(firstV, 1, k / sampleCount)
+      const point = evaluateSurface(u, v)
+      total += point.distanceTo(previous)
+      cumulative.push(total)
+      samples.push({ v, p: point })
+      previous = point
+    }
+
+    const segments = Math.max(2, Math.min(Math.max(3, maxAllowedSegments), Math.ceil(total / Math.max(0.50, targetSpacing))))
+    const levels = [firstV]
+    for (let k = 1; k < segments; k++) {
+      const wanted = (total * k) / segments
+      let seg = 0
+      while (seg + 1 < cumulative.length && cumulative[seg + 1] < wanted) seg++
+      const a = samples[seg]
+      const b = samples[Math.min(seg + 1, samples.length - 1)]
+      const da = cumulative[seg]
+      const db = cumulative[Math.min(seg + 1, cumulative.length - 1)]
+      const t = db > da ? THREE.MathUtils.clamp((wanted - da) / (db - da), 0, 1) : 0
+      levels.push(THREE.MathUtils.lerp(a.v, b.v, t))
+    }
+    levels.push(1)
+
+    columns[i] = { u, levels, length: total, segments }
+    minSegments = Math.min(minSegments, segments)
+    maxSegments = Math.max(maxSegments, segments)
+    totalInterior += Math.max(0, levels.length - 2)
+    maxColumnLength = Math.max(maxColumnLength, total)
+    minColumnLength = Math.min(minColumnLength, total)
+  }
+
+  return {
+    columns,
+    firstV,
+    targetSpacing,
+    minSegments: Number.isFinite(minSegments) ? minSegments : 0,
+    maxSegments,
+    totalInterior,
+    minColumnLength: Number.isFinite(minColumnLength) ? minColumnLength : 0,
+    maxColumnLength,
+  }
+}
+
+function cadStitchOpenTransitionColumns(indices, indicesA, levelsA, indicesB, levelsB, isUpper) {
+  if (!indicesA?.length || !indicesB?.length) return
+  const pushTri = (a, b, c) => {
+    if (isUpper) indices.push(a, c, b)
+    else indices.push(a, b, c)
+  }
+  const pushQuadLocal = (a, b, c, d) => {
+    pushTri(a, b, c)
+    pushTri(a, c, d)
+  }
+
+  let i = 0
+  let j = 0
+  const eps = 1e-7
+  while (i < indicesA.length - 1 || j < indicesB.length - 1) {
+    const aCurrent = indicesA[Math.min(i, indicesA.length - 1)]
+    const bCurrent = indicesB[Math.min(j, indicesB.length - 1)]
+    const nextA = i < indicesA.length - 1 ? levelsA[i + 1] : Infinity
+    const nextB = j < indicesB.length - 1 ? levelsB[j + 1] : Infinity
+
+    if (i < indicesA.length - 1 && j < indicesB.length - 1 && Math.abs(nextA - nextB) <= eps) {
+      const aNext = indicesA[i + 1]
+      const bNext = indicesB[j + 1]
+      pushQuadLocal(aCurrent, aNext, bNext, bCurrent)
+      i++
+      j++
+    } else if (i < indicesA.length - 1 && (j >= indicesB.length - 1 || nextA < nextB)) {
+      pushTri(aCurrent, indicesA[i + 1], bCurrent)
+      i++
+    } else if (j < indicesB.length - 1) {
+      pushTri(aCurrent, indicesB[j + 1], bCurrent)
+      j++
+    } else {
+      break
+    }
+  }
+}
+
+// V19 – intrinsic/local Delaunay edge flips pro transition patch.
+// V18 už měl bezpečné fyzicky adaptivní vertexy, ale konektivita stále prozrazovala
+// sloupcovou strukturu. Zde měníme POUZE diagonály mezi sousedními triangles;
+// boundary scanu i transition-end ring zůstávají constrained a shape se nehýbe.
+function cadOptimizeTransitionEdgeFlips(indices, positions, startIndex, endIndex, maxPasses = 5) {
+  const edgeKey = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`
+  const point = (id) => {
+    const o = id * 3
+    return [positions[o], positions[o + 1], positions[o + 2]]
+  }
+  const distance = (a, b) => {
+    const A = point(a), B = point(b)
+    return Math.hypot(A[0] - B[0], A[1] - B[1], A[2] - B[2])
+  }
+  const normal = (a, b, c) => {
+    const A = point(a), B = point(b), C = point(c)
+    const ux = B[0] - A[0], uy = B[1] - A[1], uz = B[2] - A[2]
+    const vx = C[0] - A[0], vy = C[1] - A[1], vz = C[2] - A[2]
+    return [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx]
+  }
+  const normalized = (n) => {
+    const l = Math.hypot(n[0], n[1], n[2]) || 1
+    return [n[0] / l, n[1] / l, n[2] / l]
+  }
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+  const angleAt = (center, a, b) => {
+    const C = point(center), A = point(a), B = point(b)
+    const ux = A[0] - C[0], uy = A[1] - C[1], uz = A[2] - C[2]
+    const vx = B[0] - C[0], vy = B[1] - C[1], vz = B[2] - C[2]
+    const lu = Math.hypot(ux, uy, uz), lv = Math.hypot(vx, vy, vz)
+    if (lu < 1e-8 || lv < 1e-8) return 0
+    const c = THREE.MathUtils.clamp((ux * vx + uy * vy + uz * vz) / (lu * lv), -1, 1)
+    return Math.acos(c)
+  }
+  const minAngle = (a, b, c) => Math.min(angleAt(a, b, c), angleAt(b, c, a), angleAt(c, a, b))
+  const maxEdge = (a, b, c) => Math.max(distance(a, b), distance(b, c), distance(c, a))
+  const orient = (tri, referenceNormal) => {
+    const n = normal(tri[0], tri[1], tri[2])
+    return dot(n, referenceNormal) >= 0 ? tri : [tri[0], tri[2], tri[1]]
+  }
+
+  let flips = 0
+  let passes = 0
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const edges = new Map()
+    const add = (a, b, opp, offset) => {
+      const key = edgeKey(a, b)
+      let list = edges.get(key)
+      if (!list) { list = []; edges.set(key, list) }
+      list.push({ a, b, opp, offset })
+    }
+    for (let offset = startIndex; offset + 2 < endIndex; offset += 3) {
+      const a = indices[offset], b = indices[offset + 1], c = indices[offset + 2]
+      add(a, b, c, offset); add(b, c, a, offset); add(c, a, b, offset)
+    }
+
+    const candidates = []
+    for (const list of edges.values()) {
+      if (list.length !== 2) continue
+      const r0 = list[0], r1 = list[1]
+      const a = Math.min(r0.a, r0.b), b = Math.max(r0.a, r0.b)
+      const c = r0.opp, d = r1.opp
+      if (c === d || c === a || c === b || d === a || d === b) continue
+      if (edges.has(edgeKey(c, d))) continue
+      const newDiagonal = distance(c, d)
+      if (!Number.isFinite(newDiagonal) || newDiagonal < 0.20 || newDiagonal > 2.20) continue
+      const t0 = [indices[r0.offset], indices[r0.offset + 1], indices[r0.offset + 2]]
+      const t1 = [indices[r1.offset], indices[r1.offset + 1], indices[r1.offset + 2]]
+      const n0 = normalized(normal(t0[0], t0[1], t0[2]))
+      const n1 = normalized(normal(t1[0], t1[1], t1[2]))
+      let ref = normalized([n0[0] + n1[0], n0[1] + n1[1], n0[2] + n1[2]])
+      if (!Number.isFinite(ref[0])) ref = n0
+      const p0 = orient([c, d, a], ref)
+      const p1 = orient([d, c, b], ref)
+      const pn0 = normalized(normal(p0[0], p0[1], p0[2]))
+      const pn1 = normalized(normal(p1[0], p1[1], p1[2]))
+      if (dot(pn0, ref) < 0.35 || dot(pn1, ref) < 0.35) continue
+      const oldQuality = Math.min(minAngle(t0[0], t0[1], t0[2]), minAngle(t1[0], t1[1], t1[2]))
+      const newQuality = Math.min(minAngle(p0[0], p0[1], p0[2]), minAngle(p1[0], p1[1], p1[2]))
+      const oldMax = Math.max(maxEdge(t0[0], t0[1], t0[2]), maxEdge(t1[0], t1[1], t1[2]))
+      const newMax = Math.max(maxEdge(p0[0], p0[1], p0[2]), maxEdge(p1[0], p1[1], p1[2]))
+      if (newMax > Math.max(2.20, oldMax * 1.08)) continue
+      const oppositeSum = angleAt(c, a, b) + angleAt(d, a, b)
+      const qualityGain = newQuality - oldQuality
+      const delaunayGain = oppositeSum - Math.PI
+      if (delaunayGain <= 0.018 && qualityGain <= THREE.MathUtils.degToRad(1.2)) continue
+      if (newQuality + THREE.MathUtils.degToRad(0.35) < oldQuality) continue
+      const score = delaunayGain * 12 + qualityGain * 8 + Math.max(0, oldMax - newMax)
+      candidates.push({ r0, r1, p0, p1, score })
+    }
+    candidates.sort((a, b) => b.score - a.score)
+    const usedTriangles = new Set()
+    let passFlips = 0
+    for (const candidate of candidates) {
+      const o0 = candidate.r0.offset, o1 = candidate.r1.offset
+      if (usedTriangles.has(o0) || usedTriangles.has(o1)) continue
+      indices[o0] = candidate.p0[0]; indices[o0 + 1] = candidate.p0[1]; indices[o0 + 2] = candidate.p0[2]
+      indices[o1] = candidate.p1[0]; indices[o1 + 1] = candidate.p1[1]; indices[o1 + 2] = candidate.p1[2]
+      usedTriangles.add(o0); usedTriangles.add(o1)
+      passFlips++; flips++
+    }
+    passes++
+    if (!passFlips) break
+  }
+  return { flips, passes }
+}
+
+// V38: Indexed exact footprint clip + topologically shared transition strip.
+//
+// V37 proved the geometric cut itself was useful, but lost connectivity by rebuilding
+// the source boundary as a second ring. V38 keeps the clipped scan indexed and reuses
+// its exact boundary vertex IDs as the first shoulder ring, so scan and base are one
+// connected mesh from the first generated transition triangle onward.
 function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
   const collectedTrianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
   const boundaryData = cadExtractBoundaryLoopsRobust(collectedTrianglePositions)
-
   viewerRoot.updateMatrixWorld(true)
   sourceObject.updateMatrixWorld(true)
   const sourceToRoot = viewerRoot.matrixWorld.clone().invert().multiply(sourceObject.matrixWorld)
-
   const override = Array.isArray(boundaryOverride)
     ? boundaryOverride
         .map((point) => trimVec(point).applyMatrix4(sourceToRoot))
@@ -7602,7 +11058,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
 
   const boundary = override.length >= 4 ? override : boundaryData.loops[0]?.points
   if (!boundary || boundary.length < 4) {
-    throw new Error("Nepodařilo se detekovat otevřenou hranici scanu pro napojení báze.")
+    throw new Error("Nepodařilo se obnovit hlavní otevřenou hranici modelu. Vraťte se do kroku Ořez a vytvořte hranici, nebo použijte Nechat vše u předem oříznutého scanu.")
   }
 
   const box = boundaryData.box
@@ -7612,102 +11068,558 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const transitionDirection = isUpper ? 1 : -1
   const baseCapY = isUpper ? box.min.y + requestedHeight : box.max.y - requestedHeight
 
-  let loop = boundary.map((p) => p.clone())
-  if (cadSignedAreaXZ(loop) < 0) {
-    loop.reverse()
+  const exactRawLoop = cadSignedAreaXZ(boundary) < 0 ? boundary.slice().reverse() : boundary.slice()
+
+  // Keep the proven narrow edge conditioning from V26+. Only roughly the last
+  // millimetre of the scan may move; the clinical anatomy outside that feather band
+  // remains byte-for-byte geometrically unchanged.
+  const boundaryConditioning = cadRelaxTrimBoundaryBand(
+    collectedTrianglePositions,
+    exactRawLoop,
+    boundaryData.diagonal,
+    isUpper
+  )
+  let trianglePositions = boundaryConditioning.trianglePositions
+  let rawLoop = boundaryConditioning.boundary
+  const boundaryRelaxation = boundaryConditioning
+
+  // Finished Straight profile – this part of the engine has consistently looked good
+  // and is therefore treated as a hard target rather than another variable to blend.
+  const profileTargetSpacing = 0.388
+  const sampledRawLoop = cadResampleClosedLoop(rawLoop, profileTargetSpacing)
+  let regularized = cadSmoothClosedLoop(sampledRawLoop, 30)
+  regularized = cadSmoothClosedLoop(regularized, 10)
+  regularized = cadResampleClosedLoopXZ(regularized, profileTargetSpacing)
+
+  // V38: physically cut the conditioned source triangles with the final Straight
+  // footprint while preserving persistent vertex IDs across adjacent triangles. The
+  // returned boundary IDs are later reused directly by the shoulder – no duplicate ring.
+  const exactFootprintClip = cadExactClipScanToBaseFootprint(
+    trianglePositions,
+    rawLoop,
+    regularized,
+    boundaryData.diagonal
+  )
+  trianglePositions = exactFootprintClip.trianglePositions
+  rawLoop = exactFootprintClip.boundary
+  if (!rawLoop || rawLoop.length < 4 || !exactFootprintClip.boundaryIndices?.length) {
+    throw new Error("Po přesném ořezu podle báze se nepodařilo obnovit hlavní hranici scanu.")
+  }
+  if (exactFootprintClip.boundaryIndices.length !== rawLoop.length) {
+    throw new Error("Interní chyba V38: topologická hranice scanu není synchronní s geometrií.")
+  }
+  if (exactFootprintClip.secondaryBoundaryLoopsCreated > 0) {
+    throw new Error(`V38 exact clip vytvořil ${exactFootprintClip.secondaryBoundaryLoopsCreated} vedlejší otevřenou hranici. Operace byla zastavena, aby se nevygeneroval poškozený model.`)
   }
 
-  const targetSpacing = 0.4
-  loop = cadResampleClosedLoop(loop, targetSpacing, 64, 1000)
-  const N = loop.length
+  const boundaryMinY = Math.min(...rawLoop.map((p) => p.y))
+  const boundaryMaxY = Math.max(...rawLoop.map((p) => p.y))
+  const boundaryExtremeY = isUpper ? boundaryMaxY : boundaryMinY
+  const availableBaseDepth = Math.max(
+    0.6,
+    isUpper ? baseCapY - boundaryExtremeY : boundaryExtremeY - baseCapY
+  )
 
-  const outwardNormals = cadComputeSmoothOutwardNormalsXZ(loop, true)
+  // Freeze the same Medit-calibrated wall layout used by the stable previous builds.
+  const nominalTransitionEndOffset = Math.min(0.22, Math.max(0.18, boundaryData.diagonal * 0.0033))
+  const nominalTargetY = boundaryExtremeY + transitionDirection * nominalTransitionEndOffset
+  const seamOffset = 0.10
+  const wallTargetSpacing = 1.08
+  const nominalSeamY = nominalTargetY + transitionDirection * seamOffset
+  const nominalWallDepth = Math.max(0, Math.abs(baseCapY - nominalSeamY))
+  const wallSections = Math.max(1, Math.round(nominalWallDepth / wallTargetSpacing))
+  const snappedSeamY = baseCapY - transitionDirection * wallSections * wallTargetSpacing
+  const snappedTargetY = snappedSeamY - transitionDirection * seamOffset
+  const wallSnapDelta = snappedTargetY - nominalTargetY
+  const wallSpacingSnapped = Number.isFinite(wallSnapDelta) && Math.abs(wallSnapDelta) <= 0.28
+  const targetY = wallSpacingSnapped ? snappedTargetY : nominalTargetY
+  const seamY = wallSpacingSnapped
+    ? snappedSeamY
+    : targetY + transitionDirection * seamOffset
+  const transitionEndOffset = Math.abs(targetY - boundaryExtremeY)
+  const transitionDepth = transitionEndOffset
 
-  const collarHeight = 1.2
-  const collarDraft = 0.15
-  const filletRadius = 1.2
-  const filletSteps = 3
+  const targetCount = regularized.length
+  const capMargin = Math.min(0.45, Math.max(0.16, availableBaseDepth * 0.08))
+  const rawArcTable = cadClosedLoopArcTable(rawLoop)
+  const rawParams = cadClosedLoopVertexFractions(rawLoop).slice(0, rawLoop.length)
 
-  const rings = []
-  rings.push(loop.map((p) => p.clone()))
-
-  const collarRing = loop.map((p, i) => {
-    const pt = p.clone()
-    pt.y += transitionDirection * collarHeight
-    pt.x += outwardNormals[i].x * collarDraft
-    pt.z += outwardNormals[i].z * collarDraft
-    return pt
-  })
-  rings.push(collarRing)
-
-  for (let s = 1; s <= filletSteps; s++) {
-    const progress = s / filletSteps
-    const angle = progress * (Math.PI * 0.5)
-    const dY = Math.sin(angle) * filletRadius
-    const dR = (1 - Math.cos(angle)) * filletRadius
-
-    const filletRing = collarRing.map((p, i) => {
-      const pt = p.clone()
-      pt.y += transitionDirection * dY
-      pt.x += outwardNormals[i].x * dR
-      pt.z += outwardNormals[i].z * dR
-      return pt
-    })
-    rings.push(filletRing)
-  }
-
-  const lastFilletRing = rings[rings.length - 1]
-  const bottomRing = lastFilletRing.map((p) => new THREE.Vector3(p.x, baseCapY, p.z))
-  rings.push(bottomRing)
-
-  const positions = collectedTrianglePositions.slice()
-  const sourceVertexCount = Math.floor(positions.length / 3)
-  const indices = new Array(sourceVertexCount)
-  for (let i = 0; i < sourceVertexCount; i++) indices[i] = i
-
-  const pushTri = (a, b, c) => {
-    if (isUpper) {
-      indices.push(a, c, b)
-    } else {
-      indices.push(a, b, c)
+  // V34 circumferential shoulder guide. The source boundary is already spline-regularized and
+  // feather-deformed before this stage. This guide therefore only removes any residual
+  // high-frequency ripple from the first NEW bridge rows.
+  // The displacement is deliberately tiny and hard-clamped.
+  const shoulderGuideMaxShift = Math.max(0.12, Math.min(0.22, boundaryData.diagonal * 0.0028))
+  const shoulderGuideMaxYShift = Math.max(0.045, Math.min(0.085, shoulderGuideMaxShift * 0.42))
+  const shoulderGuideRadius = Math.max(3, Math.min(9, Math.round(rawLoop.length / 145)))
+  let shoulderGuideLoop = rawLoop.map((point, i) => {
+    const sum = new THREE.Vector3()
+    let weightSum = 0
+    for (let offset = -shoulderGuideRadius; offset <= shoulderGuideRadius; offset++) {
+      const idx = (i + offset + rawLoop.length) % rawLoop.length
+      const d = Math.abs(offset)
+      const w = shoulderGuideRadius + 1 - d
+      sum.addScaledVector(rawLoop[idx], w)
+      weightSum += w
     }
+    const filtered = sum.multiplyScalar(1 / Math.max(1, weightSum))
+    const delta = filtered.sub(point)
+    delta.y = THREE.MathUtils.clamp(delta.y, -shoulderGuideMaxYShift, shoulderGuideMaxYShift)
+    if (delta.length() > shoulderGuideMaxShift) delta.setLength(shoulderGuideMaxShift)
+    return point.clone().add(delta)
+  })
+  // One restrained Taubin-like pass removes alternating high-frequency kinks without
+  // shrinking the dental arch. Clamp again to the raw boundary afterwards.
+  for (let pass = 0; pass < 3; pass++) {
+    const source = shoulderGuideLoop.map((p) => p.clone())
+    shoulderGuideLoop = source.map((point, i) => {
+      const prev = source[(i - 1 + source.length) % source.length]
+      const next = source[(i + 1) % source.length]
+      const candidate = point.clone().lerp(prev.clone().add(next).multiplyScalar(0.5), 0.26)
+      const raw = rawLoop[i]
+      const delta = candidate.sub(raw)
+      delta.y = THREE.MathUtils.clamp(delta.y, -shoulderGuideMaxYShift, shoulderGuideMaxYShift)
+      if (delta.length() > shoulderGuideMaxShift) delta.setLength(shoulderGuideMaxShift)
+      return raw.clone().add(delta)
+    })
+  }
+  const shoulderGuideArcTable = cadClosedLoopArcTable(shoulderGuideLoop)
+
+  const targetParams = new Array(targetCount)
+  for (let i = 0; i < targetCount; i++) targetParams[i] = i / targetCount
+
+  const smoothstep = (t) => {
+    const x = THREE.MathUtils.clamp(t, 0, 1)
+    return x * x * (3 - 2 * x)
+  }
+  const smootherstep = (t) => {
+    const x = THREE.MathUtils.clamp(t, 0, 1)
+    return x * x * x * (x * (x * 6 - 15) + 10)
   }
 
-  const pushQuad = (a, b, c, d) => {
-    pushTri(a, b, c)
-    pushTri(a, c, d)
+  // The compact shoulder is now defined by one extremely simple rule:
+  // XZ reaches the final Straight profile before Y reaches the transition plane.
+  // The remaining travel is therefore vertical. A constrained fairing pass rounds
+  // the bend between these two regimes, much like smoothing a manually bridged strip.
+  const wallAcquireStart = 0.74
+  const bridgeEnvelopeTolerance = Math.max(0.08, Math.min(0.15, boundaryData.diagonal * 0.0019))
+
+  const evaluateDirectBridge = (u, t) => {
+    const uu = ((u % 1) + 1) % 1
+    const tt = THREE.MathUtils.clamp(t, 0, 1)
+    const raw = cadSampleClosedLoopArc(rawLoop, rawArcTable, uu)
+    const guide = cadSampleClosedLoopArc(shoulderGuideLoop, shoulderGuideArcTable, uu)
+    const smooth = cadSampleClosedLoopUniform(regularized, uu)
+
+    const profileT = tt < wallAcquireStart
+      ? smootherstep(tt / wallAcquireStart)
+      : 1
+    const yT = tt
+
+    // Boundary itself is exact (guideWeight=0 at t=0). Within the first ~35 % of the
+    // new shoulder, the start anchor progressively becomes the smooth circumferential
+    // guide. This damps waves without touching a single source-scan vertex.
+    const guideWeight = smootherstep(THREE.MathUtils.clamp(tt / 0.42, 0, 1))
+    const start = raw.clone().lerp(guide, guideWeight)
+
+    const point = new THREE.Vector3(
+      THREE.MathUtils.lerp(start.x, smooth.x, profileT),
+      THREE.MathUtils.lerp(raw.y, targetY, yT),
+      THREE.MathUtils.lerp(start.z, smooth.z, profileT)
+    )
+
+    if (transitionDirection > 0) point.y = THREE.MathUtils.clamp(point.y, raw.y, targetY)
+    else point.y = THREE.MathUtils.clamp(point.y, targetY, raw.y)
+    if (isUpper) point.y = Math.min(point.y, baseCapY - capMargin)
+    else point.y = Math.max(point.y, baseCapY + capMargin)
+    return point
   }
 
-  const ringIndexOffsets = []
-  for (const r of rings) {
-    const offset = positions.length / 3
-    ringIndexOffsets.push(offset)
-    for (const p of r) {
+  const transitionLoop = new Array(targetCount)
+  for (let i = 0; i < targetCount; i++) {
+    const smooth = regularized[i]
+    transitionLoop[i] = new THREE.Vector3(smooth.x, targetY, smooth.z)
+  }
+
+  // Measure the actual 3D bridge width and choose enough rows that the INITIAL
+  // triangulation never needs long cross-shoulder triangles. This is not a global UV
+  // remesh: every triangle starts from local neighboring rings only.
+  const transitionSpanProbeCount = Math.max(96, Math.min(420, Math.round(targetCount * 0.9)))
+  const transitionSpans = []
+  for (let i = 0; i < transitionSpanProbeCount; i++) {
+    const u = i / transitionSpanProbeCount
+    transitionSpans.push(evaluateDirectBridge(u, 0).distanceTo(evaluateDirectBridge(u, 1)))
+  }
+  const sortedTransitionSpans = transitionSpans.slice().sort((a, b) => a - b)
+  const transitionSpan95 = sortedTransitionSpans.length
+    ? sortedTransitionSpans[Math.min(sortedTransitionSpans.length - 1, Math.floor(sortedTransitionSpans.length * 0.95))]
+    : 0
+  const transitionSpanMax = sortedTransitionSpans.length
+    ? sortedTransitionSpans[sortedTransitionSpans.length - 1]
+    : 0
+
+  const bridgeTargetRowSpacing = 0.42
+  const bridgeIntervals = Math.max(6, Math.min(
+    15,
+    Math.ceil(Math.max(transitionSpan95, transitionSpanMax * 0.72) / bridgeTargetRowSpacing)
+  ))
+
+  // V37 rebuilt transition strip. The exact clipped source boundary may have very
+  // irregular edge spacing because footprint intersections split source triangles.
+  // Do NOT copy that irregular sampling into the shoulder. Connect the exact source
+  // loop once to a uniformly arc-length sampled first ring, then reduce gradually to
+  // the frozen ~0.388 mm Straight profile. This is the narrow local remesh stage.
+  const rawEdgeLengths = rawLoop.map((point, i) => point.distanceTo(rawLoop[(i + 1) % rawLoop.length])).filter((v) => Number.isFinite(v) && v > 1e-5).sort((a, b) => a - b)
+  const rawMedianEdge = rawEdgeLengths.length
+    ? rawEdgeLengths[Math.floor(rawEdgeLengths.length * 0.5)]
+    : profileTargetSpacing * 0.72
+  const shoulderSamplingSpacing = THREE.MathUtils.clamp(rawMedianEdge * 1.45, 0.20, 0.33)
+  const rawPerimeter = cadClosedLoopPerimeter(rawLoop)
+  const shoulderStartCount = Math.max(
+    targetCount,
+    Math.min(980, Math.round(rawPerimeter / Math.max(0.12, shoulderSamplingSpacing)))
+  )
+  const sourceLogCount = Math.log(Math.max(3, shoulderStartCount))
+  const targetLogCount = Math.log(Math.max(3, targetCount))
+  const bridgeRows = []
+  let previousCount = shoulderStartCount
+
+  for (let layer = 1; layer < bridgeIntervals; layer++) {
+    const t = layer / bridgeIntervals
+    const reductionT = THREE.MathUtils.clamp((t - 0.10) / 0.90, 0, 1)
+    const countProgress = smoothstep(reductionT)
+    let desiredCount = Math.round(Math.exp(
+      THREE.MathUtils.lerp(sourceLogCount, targetLogCount, countProgress)
+    ))
+    desiredCount = Math.max(targetCount, Math.min(previousCount, desiredCount))
+
+    const points = new Array(desiredCount)
+    const params = new Array(desiredCount)
+    const metadata = new Array(desiredCount)
+    for (let i = 0; i < desiredCount; i++) {
+      const u = i / desiredCount
+      params[i] = u
+      points[i] = evaluateDirectBridge(u, t)
+      metadata[i] = { u, t }
+    }
+    bridgeRows.push({ t, points, params, metadata, count: desiredCount })
+    previousCount = desiredCount
+  }
+
+  const seamLoop = transitionLoop.map((p) => new THREE.Vector3(p.x, seamY, p.z))
+  const wallDepth = Math.max(0, Math.abs(baseCapY - seamY))
+  const wallRings = [seamLoop]
+  for (let section = 1; section <= wallSections; section++) {
+    const y = wallSpacingSnapped
+      ? seamY + transitionDirection * wallTargetSpacing * section
+      : THREE.MathUtils.lerp(seamY, baseCapY, section / wallSections)
+    wallRings.push(seamLoop.map((p) => new THREE.Vector3(p.x, y, p.z)))
+  }
+  const bottomLoop = wallRings[wallRings.length - 1]
+
+  // V38 source is already a shared indexed mesh. This is the key topological change:
+  // the shoulder starts from the SAME vertex IDs that terminate the clipped scan.
+  const positions = exactFootprintClip.positions.slice()
+  const indices = exactFootprintClip.indices.slice()
+  const sourceIndexCount = indices.length
+
+  const appendRing = (points) => {
+    const ringIndices = new Array(points.length)
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i]
+      ringIndices[i] = positions.length / 3
       positions.push(p.x, p.y, p.z)
     }
+    return ringIndices
   }
 
-  for (let r = 0; r < rings.length - 1; r++) {
-    const offA = ringIndexOffsets[r]
-    const offB = ringIndexOffsets[r + 1]
-    for (let i = 0; i < N; i++) {
-      const next = (i + 1) % N
-      pushQuad(offA + i, offA + next, offB + next, offB + i)
-    }
-  }
+  // Never append/copy rawLoop here. These IDs belong to the source scan itself and
+  // must be shared by both source faces and the first transition faces.
+  const exactBoundaryIndices = exactFootprintClip.boundaryIndices.slice()
+  const bridgeRowIndices = bridgeRows.map((row) => appendRing(row.points))
+  const transitionEndIndices = appendRing(transitionLoop)
+  const seamIndices = appendRing(seamLoop)
+  const wallRingIndices = wallRings.slice(1).map(appendRing)
 
-  const bottomOffset = ringIndexOffsets[ringIndexOffsets.length - 1]
-  const shape2D = bottomRing.map((p) => new THREE.Vector2(p.x, p.z))
-  const capFaces = THREE.ShapeUtils.triangulateShape(shape2D, [])
-  for (const face of capFaces) {
-    const idxA = bottomOffset + face[0]
-    const idxB = bottomOffset + face[1]
-    const idxC = bottomOffset + face[2]
-    if (isUpper) {
-      indices.push(idxA, idxB, idxC)
+  const pushTri = (a, b, c) => {
+    if (isUpper) indices.push(a, c, b)
+    else indices.push(a, b, c)
+  }
+  const pushQuadAlternating = (a, b, c, d, flip = false) => {
+    if (flip) {
+      pushTri(a, b, d)
+      pushTri(b, c, d)
     } else {
-      indices.push(idxA, idxC, idxB)
+      pushTri(a, b, c)
+      pushTri(a, c, d)
     }
+  }
+
+  // Build the simplest valid bridge first.
+  const transitionIndexStart = indices.length
+  let previousIndices = exactBoundaryIndices
+  let previousPoints = rawLoop
+  let previousParams = rawParams
+
+  for (let rowIndex = 0; rowIndex < bridgeRows.length; rowIndex++) {
+    const row = bridgeRows[rowIndex]
+    const ringIndices = bridgeRowIndices[rowIndex]
+    cadStitchClosedRingsParametric(
+      indices,
+      previousIndices, previousPoints, previousParams,
+      ringIndices, row.points, row.params,
+      isUpper
+    )
+    previousIndices = ringIndices
+    previousPoints = row.points
+    previousParams = row.params
+  }
+
+  cadStitchClosedRingsParametric(
+    indices,
+    previousIndices, previousPoints, previousParams,
+    transitionEndIndices, transitionLoop, targetParams,
+    isUpper
+  )
+  let transitionIndexEnd = indices.length
+
+  // Metadata for movable bridge vertices. The scan boundary and final Straight ring are
+  // hard constraints. Every fairing update is clamped back inside the scan->base XZ
+  // envelope, so the shoulder can NEVER become wider than the base as in V27/V29.
+  const movableMeta = new Map()
+  for (let rowIndex = 0; rowIndex < bridgeRows.length; rowIndex++) {
+    const row = bridgeRows[rowIndex]
+    const ring = bridgeRowIndices[rowIndex]
+    for (let i = 0; i < ring.length; i++) movableMeta.set(ring[i], row.metadata[i])
+  }
+
+  // Metadata for the two fixed end rings lets V31 distinguish circumferential edges
+  // from scan->wall edges during anisotropic fairing.
+  const transitionVertexMeta = new Map(movableMeta)
+  for (let i = 0; i < exactBoundaryIndices.length; i++) {
+    transitionVertexMeta.set(exactBoundaryIndices[i], { u: rawParams[i], t: 0, fixed: true })
+  }
+  for (let i = 0; i < transitionEndIndices.length; i++) {
+    transitionVertexMeta.set(transitionEndIndices[i], { u: targetParams[i], t: 1, fixed: true })
+  }
+
+  const pointAtIndex = (id) => {
+    const o = id * 3
+    return new THREE.Vector3(positions[o], positions[o + 1], positions[o + 2])
+  }
+  const writePoint = (id, p) => {
+    const o = id * 3
+    positions[o] = p.x
+    positions[o + 1] = p.y
+    positions[o + 2] = p.z
+  }
+
+  const buildTransitionAdjacency = () => {
+    const adjacency = new Map()
+    const add = (a, b) => {
+      let set = adjacency.get(a)
+      if (!set) { set = new Set(); adjacency.set(a, set) }
+      set.add(b)
+    }
+    for (let offset = transitionIndexStart; offset + 2 < transitionIndexEnd; offset += 3) {
+      const a = indices[offset], b = indices[offset + 1], c = indices[offset + 2]
+      add(a, b); add(a, c)
+      add(b, a); add(b, c)
+      add(c, a); add(c, b)
+    }
+    return adjacency
+  }
+
+  // First local Delaunay/quality pass. Unlike V28/V29 this can only flip an existing
+  // LOCAL diagonal; it cannot invent a connection across the horseshoe.
+  const preFlipStats = cadOptimizeTransitionEdgeFlips(
+    indices, positions, transitionIndexStart, transitionIndexEnd, 5
+  )
+
+  const fairingIterations = 10
+  const fairingCircumferentialLambda = 0.33
+  const fairingCrossLambda = 0.10
+  let fairingMovedVertices = 0
+  let fairingMaxMove = 0
+  let fairingCircumferentialSamples = 0
+  let fairingCrossSamples = 0
+
+  for (let iteration = 0; iteration < fairingIterations; iteration++) {
+    const adjacency = buildTransitionAdjacency()
+    const updates = new Map()
+
+    for (const [id, meta] of movableMeta.entries()) {
+      const neighbors = adjacency.get(id)
+      if (!neighbors || neighbors.size < 3) continue
+      const current = pointAtIndex(id)
+      const circumAverage = new THREE.Vector3()
+      const crossAverage = new THREE.Vector3()
+      let circumCount = 0
+      let crossCount = 0
+
+      for (const neighbor of neighbors) {
+        const neighborMeta = transitionVertexMeta.get(neighbor)
+        if (!neighborMeta) continue
+        const point = pointAtIndex(neighbor)
+        if (Math.abs((neighborMeta.t ?? 0) - meta.t) < 1e-7) {
+          circumAverage.add(point)
+          circumCount++
+        } else {
+          crossAverage.add(point)
+          crossCount++
+        }
+      }
+
+      const shoulderWeight = Math.pow(Math.max(0, Math.sin(Math.PI * meta.t)), 0.82)
+      const candidate = current.clone()
+      if (circumCount > 0) {
+        circumAverage.multiplyScalar(1 / circumCount)
+        candidate.addScaledVector(
+          circumAverage.clone().sub(current),
+          fairingCircumferentialLambda * shoulderWeight
+        )
+        fairingCircumferentialSamples++
+      }
+      if (crossCount > 0) {
+        crossAverage.multiplyScalar(1 / crossCount)
+        candidate.addScaledVector(
+          crossAverage.clone().sub(current),
+          fairingCrossLambda * shoulderWeight
+        )
+        fairingCrossSamples++
+      }
+
+      const raw = cadSampleClosedLoopArc(rawLoop, rawArcTable, meta.u)
+      const smooth = cadSampleClosedLoopUniform(regularized, meta.u)
+      const reference = evaluateDirectBridge(meta.u, meta.t)
+
+      // Keep fairing local to the intended direct-bridge surface.
+      const delta = candidate.clone().sub(reference)
+      if (delta.length() > bridgeEnvelopeTolerance) delta.setLength(bridgeEnvelopeTolerance)
+      candidate.copy(reference).add(delta)
+
+      // Hard XZ envelope clamp: project onto the raw->Straight chord and permit only a
+      // tiny perpendicular fairing allowance. No point may pass beyond the base profile.
+      const chordXZ = new THREE.Vector2(smooth.x - raw.x, smooth.z - raw.z)
+      const chordLenSq = chordXZ.lengthSq()
+      if (chordLenSq > 1e-10) {
+        const rel = new THREE.Vector2(candidate.x - raw.x, candidate.z - raw.z)
+        const progress = THREE.MathUtils.clamp(rel.dot(chordXZ) / chordLenSq, 0, 1)
+        const onChord = chordXZ.clone().multiplyScalar(progress)
+        const perpendicular = rel.clone().sub(onChord)
+        if (perpendicular.length() > bridgeEnvelopeTolerance) perpendicular.setLength(bridgeEnvelopeTolerance)
+        const guarded = onChord.add(perpendicular)
+        candidate.x = raw.x + guarded.x
+        candidate.z = raw.z + guarded.y
+      } else {
+        candidate.x = raw.x
+        candidate.z = raw.z
+      }
+
+      // Keep Y ordered between the scan and the target plane.
+      if (transitionDirection > 0) candidate.y = THREE.MathUtils.clamp(candidate.y, raw.y, targetY)
+      else candidate.y = THREE.MathUtils.clamp(candidate.y, targetY, raw.y)
+      if (isUpper) candidate.y = Math.min(candidate.y, baseCapY - capMargin)
+      else candidate.y = Math.max(candidate.y, baseCapY + capMargin)
+
+      const move = candidate.distanceTo(current)
+      if (move > 1e-6) {
+        updates.set(id, candidate)
+        fairingMovedVertices++
+        fairingMaxMove = Math.max(fairingMaxMove, move)
+      }
+    }
+
+    for (const [id, point] of updates.entries()) writePoint(id, point)
+  }
+
+  // Re-optimize diagonals after fairing. This is the lightweight JS equivalent of the
+  // flip/relax part of an isotropic remesher; if the shape test succeeds we can later
+  // replace this block with the full PMP/WASM split-collapse-flip implementation.
+  const postFlipStats = cadOptimizeTransitionEdgeFlips(
+    indices, positions, transitionIndexStart, transitionIndexEnd, 6
+  )
+  transitionIndexEnd = indices.length
+
+  const transitionTriangles = Math.max(0, Math.floor((transitionIndexEnd - transitionIndexStart) / 3))
+  const transitionInteriorVertices = bridgeRowIndices.reduce((sum, ring) => sum + ring.length, 0)
+
+  // 0.10 mm seam followed by the frozen Straight wall.
+  for (let i = 0; i < transitionEndIndices.length; i++) {
+    const j = (i + 1) % transitionEndIndices.length
+    pushQuadAlternating(
+      transitionEndIndices[i], transitionEndIndices[j], seamIndices[j], seamIndices[i],
+      (i & 1) === 1
+    )
+  }
+
+  let previousWallRing = seamIndices
+  for (let wallRing = 0; wallRing < wallRingIndices.length; wallRing++) {
+    const nextWallRing = wallRingIndices[wallRing]
+    for (let i = 0; i < previousWallRing.length; i++) {
+      const j = (i + 1) % previousWallRing.length
+      pushQuadAlternating(
+        previousWallRing[i], previousWallRing[j], nextWallRing[j], nextWallRing[i],
+        ((i + wallRing) & 1) === 1
+      )
+    }
+    previousWallRing = nextWallRing
+  }
+
+  // Keep the proven V16 Delaunay bottom cap unchanged.
+  const contour2D = bottomLoop.map((p) => new THREE.Vector2(p.x, p.z))
+  const capPointSpacing = Math.max(0.75, Math.min(0.85, boundaryData.diagonal * 0.0155))
+  const delaunayCap = cadBuildConstrainedDelaunayCap(contour2D, capPointSpacing)
+  const capIndices = new Array(delaunayCap.points.length)
+  const capBoundaryCount = bottomLoop.length
+  if (previousWallRing.length !== capBoundaryCount) {
+    throw new Error("V38 bottom-cap boundary není synchronní s posledním ringem báze.")
+  }
+  // cadBuildConstrainedDelaunayCap keeps the original contour as the first N points.
+  // Reuse the bottom wall IDs for those points so the cap is topologically welded too.
+  for (let i = 0; i < delaunayCap.points.length; i++) {
+    if (i < capBoundaryCount) {
+      capIndices[i] = previousWallRing[i]
+      continue
+    }
+    const point = delaunayCap.points[i]
+    capIndices[i] = positions.length / 3
+    positions.push(point.x, baseCapY, point.y)
+  }
+  delaunayCap.faces.forEach(([a, b, c]) => pushTri(capIndices[a], capIndices[b], capIndices[c]))
+
+  // Builder 25 exposed nine exact duplicate CAD triangles (the main body itself was
+  // watertight). Remove only geometrically identical GENERATED faces; source scan
+  // triangles are intentionally left byte-for-byte untouched.
+  let duplicateCadFacesRemoved = 0
+  if (indices.length > sourceIndexCount) {
+    const quant = 1e5
+    const vertexKey = (id) => {
+      const o = id * 3
+      return `${Math.round(positions[o] * quant)},${Math.round(positions[o + 1] * quant)},${Math.round(positions[o + 2] * quant)}`
+    }
+    const seenCadFaces = new Set()
+    const cleanedCad = []
+    for (let offset = sourceIndexCount; offset + 2 < indices.length; offset += 3) {
+      const a = indices[offset], b = indices[offset + 1], c = indices[offset + 2]
+      if (a === b || b === c || c === a) { duplicateCadFacesRemoved++; continue }
+      const key = [vertexKey(a), vertexKey(b), vertexKey(c)].sort().join("|")
+      if (seenCadFaces.has(key)) { duplicateCadFacesRemoved++; continue }
+      seenCadFaces.add(key)
+      cleanedCad.push(a, b, c)
+    }
+    if (duplicateCadFacesRemoved > 0) {
+      indices.splice(sourceIndexCount, indices.length - sourceIndexCount, ...cleanedCad)
+    }
+  }
+
+  // Hard topology gate for V38. A preview/export is only considered successful when
+  // the scan + shoulder + base are one closed manifold component. This catches exactly
+  // the V36/V37 failure modes before they can reach Blender or STL export.
+  const finalTopology = cadAnalyzeIndexedTopology(positions, indices, boundaryData.diagonal)
+  if (finalTopology.boundaryEdges !== 0 || finalTopology.nonManifoldEdges !== 0 || finalTopology.connectedComponents !== 1 || finalTopology.degenerateTriangles !== 0) {
+    throw new Error(
+      `V38 topology check selhal: components=${finalTopology.connectedComponents}, boundaryEdges=${finalTopology.boundaryEdges}, nonManifoldEdges=${finalTopology.nonManifoldEdges}, degenerateTriangles=${finalTopology.degenerateTriangles}.`
+    )
   }
 
   const geometry = new THREE.BufferGeometry()
@@ -7717,15 +11629,131 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   geometry.computeBoundingBox()
   geometry.computeBoundingSphere()
 
+  const flatForBoundary = new Array(indices.length * 3)
+  const positionAttribute = geometry.getAttribute("position")
+  for (let i = 0; i < indices.length; i++) {
+    const vertexIndex = indices[i]
+    flatForBoundary[i * 3] = positionAttribute.getX(vertexIndex)
+    flatForBoundary[i * 3 + 1] = positionAttribute.getY(vertexIndex)
+    flatForBoundary[i * 3 + 2] = positionAttribute.getZ(vertexIndex)
+  }
+  const finalBoundary = cadExtractBoundaryLoopsRobust(flatForBoundary)
+
   return {
     geometry,
     stats: {
       totalHeight: requestedHeight,
       naturalHeight,
       bottomY: baseCapY,
-      boundaryPoints: N,
+      boundaryPoints: rawLoop.length,
+      sourceBoundaryLoops: boundaryData.loops.length,
+      boundarySource: override.length >= 4 ? "trim" : "mesh",
+      openBoundaryLoops: finalBoundary.loops.length,
       triangles: Math.floor(indices.length / 3),
-      openBoundaryLoops: 0,
+      transitionDepth,
+      transitionEndOffset,
+      transitionMode: "indexed-exact-footprint-clip-shared-boundary-v38",
+      transitionRemeshEnabled: true,
+      transitionRemeshMethod: "indexed-edge-shared-exact-clip-plus-source-boundary-id-reuse-plus-uniform-arc-rings-plus-local-edge-flip-fairing",
+      wallAcquireStart,
+      bridgeIntervals,
+      bridgeTargetRowSpacing,
+      bridgeRowCounts: bridgeRows.map((row) => row.count),
+      bridgeEnvelopeTolerance,
+      transitionSpan95,
+      transitionSpanMax,
+      transitionInteriorVertices,
+      transitionTriangles,
+      transitionEdgeFlips: preFlipStats.flips + postFlipStats.flips,
+      transitionEdgeFlipPasses: preFlipStats.passes + postFlipStats.passes,
+      transitionPreFairingFlips: preFlipStats.flips,
+      transitionPostFairingFlips: postFlipStats.flips,
+      fairingIterations,
+      fairingCircumferentialLambda,
+      fairingCrossLambda,
+      fairingCircumferentialSamples,
+      fairingCrossSamples,
+      shoulderGuideMaxShift,
+      shoulderGuideMaxYShift,
+      shoulderGuideRadius,
+      fairingMovedVertices,
+      fairingMaxMove,
+      exactClipBandWidth: exactFootprintClip.clipBandWidth,
+      exactClipCandidateTriangles: exactFootprintClip.candidateTriangles,
+      exactClipKeptTriangles: exactFootprintClip.keptTriangles,
+      exactClipClippedTriangles: exactFootprintClip.clippedTriangles,
+      exactClipDiscardedTriangles: exactFootprintClip.discardedTriangles,
+      exactClipSplitTriangles: exactFootprintClip.splitTriangles,
+      exactClipGeneratedTriangles: exactFootprintClip.generatedTriangles,
+      exactClipIntersectionVertices: exactFootprintClip.intersectionVertices,
+      exactClipRemovedDegenerateTriangles: exactFootprintClip.removedDegenerateTriangles,
+      exactClipExtractedBoundaryLoops: exactFootprintClip.extractedBoundaryLoops,
+      exactClipExtractedBoundaryPoints: exactFootprintClip.extractedBoundaryPoints,
+      exactClipBoundaryPerimeterBefore: exactFootprintClip.boundaryPerimeterBefore,
+      exactClipBoundaryPerimeterAfter: exactFootprintClip.boundaryPerimeterAfter,
+      exactClipBoundaryTolerance: exactFootprintClip.boundaryTolerance,
+      exactClipApplied: exactFootprintClip.clipApplied,
+      exactClipSourceBoundaryLoopsBefore: exactFootprintClip.sourceBoundaryLoopsBefore,
+      exactClipSourceBoundaryLoopsAfter: exactFootprintClip.sourceBoundaryLoopsAfter,
+      exactClipIntersectionBoundaryLoopCount: exactFootprintClip.intersectionBoundaryLoopCount || 0,
+      exactClipSecondaryBoundaryLoopsCreated: exactFootprintClip.secondaryBoundaryLoopsCreated,
+      exactClipOutsideFloodVertices: exactFootprintClip.outsideFloodVertices || 0,
+      exactClipSourceIndexedVertices: exactFootprintClip.sourceIndexedVertices,
+      exactClipSourceIndexedTriangles: exactFootprintClip.sourceIndexedTriangles,
+      exactClipSourceWeldTolerance: exactFootprintClip.sourceWeldTolerance,
+      exactClipSourceWeldedVertices: exactFootprintClip.sourceWeldedVertices,
+      finalTopologyComponents: finalTopology.connectedComponents,
+      finalTopologyBoundaryEdges: finalTopology.boundaryEdges,
+      finalTopologyNonManifoldEdges: finalTopology.nonManifoldEdges,
+      finalTopologyDegenerateTriangles: finalTopology.degenerateTriangles,
+      shoulderSamplingSpacing,
+      shoulderStartCount,
+      rawMedianBoundaryEdge: rawMedianEdge,
+      edgeConditioningBandWidth: boundaryRelaxation.bandWidth,
+      edgeConditioningMaxBoundaryShift: boundaryRelaxation.maxBoundaryShift,
+      edgeConditioningAffectedVertices: boundaryRelaxation.affectedVertices,
+      edgeConditioningMeanBoundaryShift: boundaryRelaxation.meanBoundaryShift,
+      edgeConditioningDisplacementFieldSmoothedVertices: boundaryRelaxation.displacementFieldSmoothedVertices,
+      edgeConditioningBoundaryWindowXZ: boundaryRelaxation.boundaryWindowXZ,
+      edgeConditioningBoundaryWindowY: boundaryRelaxation.boundaryWindowY,
+      edgeConditioningMaxBoundaryShiftXZ: boundaryRelaxation.maxBoundaryShiftXZ,
+      edgeConditioningMaxBoundaryShiftY: boundaryRelaxation.maxBoundaryShiftY,
+      edgeConditioningSplineSampleStep: boundaryRelaxation.splineSampleStep,
+      edgeConditioningSplineControlPoints: boundaryRelaxation.splineControlPoints,
+      edgeConditioningSplineFairingPasses: boundaryRelaxation.splineFairingPasses,
+      adaptiveTrimBackAffectedBoundaryVertices: boundaryRelaxation.adaptiveTrimBackAffectedBoundaryVertices,
+      adaptiveTrimBackPeakScore: boundaryRelaxation.adaptiveTrimBackPeakScore,
+      adaptiveTrimBackMaxDepth: boundaryRelaxation.adaptiveTrimBackMaxDepth,
+      adaptiveTrimBackMeanDepth: boundaryRelaxation.adaptiveTrimBackMeanDepth,
+      adaptiveTrimBackDilateRadius: boundaryRelaxation.adaptiveTrimBackDilateRadius,
+      adaptiveTrimBackSupportCoverage: boundaryRelaxation.adaptiveTrimBackSupportCoverage,
+      adaptiveTrimBackDetectedSegments: boundaryRelaxation.adaptiveTrimBackDetectedSegments,
+      edgeConditioningFieldIterations: boundaryRelaxation.fieldIterations,
+      sourceBoundaryPreserved: false,
+      sourceBoundaryRebuiltByExactClip: true,
+      sourceBoundarySharesTransitionVertexIds: true,
+      sourceOutsideConditioningBandPreserved: true,
+      transitionPatchSourceCount: rawLoop.length,
+      transitionPatchTargetCount: targetCount,
+      seamOffset,
+      wallSpacingSnapped,
+      wallSnapDelta,
+      profileTargetSpacing,
+      profilePoints: seamLoop.length,
+      wallTargetSpacing,
+      wallSections,
+      duplicateCadFacesRemoved,
+      capMethod: "quality-aware-delaunay-v16",
+      capVertices: delaunayCap.points.length,
+      capTriangles: delaunayCap.faces.length,
+      capSteinerRequested: delaunayCap.steinerRequested,
+      capSteinerInserted: delaunayCap.steinerInserted,
+      capSteinerSkipped: delaunayCap.steinerSkipped,
+      capBoundaryRingPoints: delaunayCap.boundaryRingRequested,
+      capBoundaryInset: delaunayCap.ringInset,
+      capBoundaryInsetMin: delaunayCap.ringInsetMin,
+      capBoundaryInsetMax: delaunayCap.ringInsetMax,
+      capLongEdgeTarget: delaunayCap.longEdgeTarget,
     },
   }
 }
