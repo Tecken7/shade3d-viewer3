@@ -9387,18 +9387,44 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const transitionDepth = transitionEndOffset
   const smoothstep = (t) => t * t * (3 - 2 * t)
 
-  // V22 – Medit-style profile fairing.
-  // V21 používal double-smoothstep pro XZ regularizaci. Ten držel detail raw
-  // boundary příliš dlouho a potom jej stáhl do Straight profilu velmi rychle
-  // uprostřed transitionu. Na hladkém renderu se to projevovalo jako svislé
-  // „záclony“ / streaky. Medit začne vysokofrekvenční detail hranice tlumit o něco
-  // dříve, ale stále má nulovou derivaci na obou koncích. Mírně front-loaded
-  // smoothstep proto regularizuje XZ plynuleji bez pohybu raw boundary nebo
-  // finálního Straight profilu.
-  const transitionProfileBias = 1.22
-  const profileEase = (t) => {
-    const s = smoothstep(THREE.MathUtils.clamp(t, 0, 1))
-    return 1 - Math.pow(Math.max(0, 1 - s), transitionProfileBias)
+  // V23 – Medit-style fairing podle FYZICKÉ délky v milimetrech.
+  //
+  // V22 už vyřešila dlouhé hrany a drží transition manifold, ale z posledního
+  // Rogers A/B je vidět, že v hlubších částech trim boundary se detail scanu
+  // stále táhne příliš daleko do báze jako svislé streaky. Příčina je geometrická:
+  // XZ blend byl řízen jen normalizovaným V. Stejných 40 % V tedy znamenalo jinou
+  // reálnou vzdálenost v místě s 1.5mm transitionem a jinou v místě s 7mm
+  // transitionem. Medit naopak high-frequency detail utlumí zhruba v konstantně
+  // širokém fyzickém pásu a potom už pokračuje pravidelný Straight profil.
+  //
+  // V23 proto používá lokální 3D span každého U generátoru a XZ regularizaci
+  // dokončí přibližně během ~1.8–2.1 mm skutečné dráhy. Kratší transitiony se
+  // samozřejmě normalizují na celou dostupnou délku. Raw boundary ani finální
+  // Straight profil se tím neposouvají.
+  const smootherstep = (t) => {
+    const x = THREE.MathUtils.clamp(t, 0, 1)
+    return x * x * x * (x * (x * 6 - 15) + 10)
+  }
+  const transitionBlendLength = Math.max(1.68, Math.min(2.08, boundaryData.diagonal * 0.028))
+
+  // Y profil už nekončí nulovou derivací jako klasický smoothstep. Na seam straně
+  // tak transition přichází do pravidelné stěny s opravdovou vertikální tečnou
+  // místo téměř stojícího/nahuštěného konce křivky. Začátek zůstává jemnější, aby
+  // napojení na scan nepůsobilo jako ostrý lom.
+  const transitionVerticalStartSlope = 0.48
+  const transitionVerticalEndSlope = 1.00
+  const verticalHermite = (t) => {
+    const x = THREE.MathUtils.clamp(t, 0, 1)
+    const x2 = x * x
+    const x3 = x2 * x
+    const h01 = -2 * x3 + 3 * x2
+    const h10 = x3 - 2 * x2 + x
+    const h11 = x3 - x2
+    return THREE.MathUtils.clamp(
+      h01 + h10 * transitionVerticalStartSlope + h11 * transitionVerticalEndSlope,
+      0,
+      1
+    )
   }
 
   const targetCount = regularized.length
@@ -9409,12 +9435,28 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     const vv = THREE.MathUtils.clamp(v, 0, 1)
     const raw = cadSampleClosedLoopArc(rawLoop, rawArcTable, u)
     const smooth = cadSampleClosedLoopUniform(regularized, u)
-    const profileT = profileEase(vv)
-    const verticalT = smoothstep(vv)
+
+    const dx = smooth.x - raw.x
+    const dy = targetY - raw.y
+    const dz = smooth.z - raw.z
+    const localSpan = Math.max(1e-6, Math.hypot(dx, dy, dz))
+    const localBlendLength = Math.max(0.34, Math.min(transitionBlendLength, localSpan))
+
+    // Fyzický postup v mm místo čistého normalizovaného V. U hluboké boundary se
+    // detail XZ ztratí už v prvních ~2 mm a zbytek generátoru běží prakticky
+    // vertikálně; u krátké boundary se celý fairing stále vejde mezi oba endpointy.
+    const physicalProgress = THREE.MathUtils.clamp(
+      (vv * localSpan) / Math.max(1e-6, localBlendLength),
+      0,
+      1
+    )
+    const profileT = smootherstep(physicalProgress)
+    const verticalT = verticalHermite(vv)
     const interpolatedY = THREE.MathUtils.lerp(raw.y, targetY, verticalT)
     const y = isUpper
       ? Math.min(interpolatedY, baseCapY - capMargin)
       : Math.max(interpolatedY, baseCapY + capMargin)
+
     return new THREE.Vector3(
       THREE.MathUtils.lerp(raw.x, smooth.x, profileT),
       y,
@@ -9427,7 +9469,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const transitionLoop = new Array(targetCount)
   for (let i = 0; i < targetCount; i++) transitionLoop[i] = evaluateTransitionSurface(i / targetCount, 1)
 
-  // V22 – Medit blend on top of the safe parametric advancing-front.
+  // V23 – mm-locked Medit fairing on top of the safe parametric advancing-front.
   //
   // Z V20 exportu jsme naměřili, že topologie je sice manifold, ale v transition
   // vznikají tisíce příliš dlouhých hran (> 1.5 mm). Hlavní příčina není shape,
@@ -9438,7 +9480,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const transitionEndParams = new Array(targetCount)
   for (let i = 0; i < targetCount; i++) transitionEndParams[i] = i / targetCount
 
-  // V22 – fyzicky rovnoměrný postup frontu.
+  // V23 – fyzicky rovnoměrný postup frontu (zachováno z V22).
   // Uniformní V kroky nejsou na této loft ploše uniformní v milimetrech, protože
   // raw boundary má lokálně velmi rozdílnou výšku a profileEase je nelineární.
   // Nejprve proto změříme medián 3D arc-length průběhu několika U generátorů a
@@ -9548,7 +9590,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     const points = new Array(desiredCount)
     const params = new Array(desiredCount)
 
-    // V22 – malý tangenciální stagger rozbíjí dlouhé řetězce vertexů ve stejném
+    // V23 – malý tangenciální stagger z V22 dál rozbíjí dlouhé řetězce vertexů ve stejném
     // U, které byly ve V21 topologicky bezpečné, ale na smooth shadingu vytvářely
     // pravidelné svislé pruhy. Offset je vždy menší než půl lokálního segmentu,
     // mizí u obou constrained hranic a nemění tvar ring obrysu – pouze místo, kde
@@ -9636,7 +9678,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     }
   }
 
-  // V22 arc-equalized staggered parametric advancing-front bridge.
+  // V23 mm-faired + arc-equalized staggered parametric advancing-front bridge.
   // Canonical params zůstávají stejné jako ve V21, ale fyzické ringy jsou nyní
   // rozmístěné podle 3D arc-length a lehce tangenciálně staggerované. Front tedy
   // zůstává manifold/watertight, zatímco konektivita už nevytváří tak pravidelné
@@ -9739,7 +9781,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionEndOffset,
-      transitionMode: "medit-blend-v22",
+      transitionMode: "medit-mm-fair-v23",
       transitionBridgeRingCounts: transitionBridgeRings.map((ring) => ring.count),
       transitionBridgeRingSpacings: transitionBridgeRings.map((ring) => ring.spacing),
       transitionBridgeRingLevels: transitionBridgeRings.map((ring) => ring.v),
@@ -9747,7 +9789,9 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       transitionIntervals,
       transitionArcEqualized: true,
       transitionMedianArcTotal,
-      transitionProfileBias,
+      transitionBlendLength,
+      transitionVerticalStartSlope,
+      transitionVerticalEndSlope,
       transitionSpan95,
       transitionSpanMax,
       transitionInteriorVertices,
