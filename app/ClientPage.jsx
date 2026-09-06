@@ -10787,6 +10787,32 @@ function cadOptimizeTransitionEdgeFlips(indices, positions, startIndex, endIndex
 function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
   const collectedTrianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
   const boundaryData = cadExtractBoundaryLoopsRobust(collectedTrianglePositions)
+  // TEST (diagnostics): boundaryData.loops[0] is already the largest-perimeter loop
+  // (cadExtractBoundaryLoops sorts by perimeter desc), but any OTHER loops found on the
+  // raw scan are silently dropped below. If the scan has a separate island (e.g. an
+  // isolated tooth whose cut edge never touches the main arch boundary), no shoulder/base
+  // ever gets built around it -> it stays floating, unstitched, in the exported mesh.
+  // This was previously computed (stats.sourceBoundaryLoops) but never surfaced anywhere,
+  // so a large silent gap like this had no early warning. Log it now so it shows up in
+  // the console the moment it happens.
+  if (boundaryData.loops.length > 1) {
+    console.warn(
+      `[cadBuildSolidBaseGeometry] Scan hranice má ${boundaryData.loops.length} oddělených smyček. ` +
+      `Použije se pouze nejdelší (perimeter=${boundaryData.loops[0]?.perimeter?.toFixed(2)} mm, ` +
+      `${boundaryData.loops[0]?.points?.length} bodů). Ostatní se do báze/shoulderu vůbec nezapočítají ` +
+      `a v exportu zůstanou jako otevřená/nesešitá hrana:`,
+      boundaryData.loops.slice(1).map((loop, idx) => {
+        const box = new THREE.Box3().setFromPoints(loop.points)
+        return {
+          loop: idx + 2,
+          points: loop.points.length,
+          perimeterMm: Number(loop.perimeter?.toFixed(2)),
+          bboxMin: { x: Number(box.min.x.toFixed(2)), y: Number(box.min.y.toFixed(2)), z: Number(box.min.z.toFixed(2)) },
+          bboxMax: { x: Number(box.max.x.toFixed(2)), y: Number(box.max.y.toFixed(2)), z: Number(box.max.z.toFixed(2)) },
+        }
+      })
+    )
+  }
   viewerRoot.updateMatrixWorld(true)
   sourceObject.updateMatrixWorld(true)
   const sourceToRoot = viewerRoot.matrixWorld.clone().invert().multiply(sourceObject.matrixWorld)
@@ -13929,9 +13955,13 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         setCadPreviewStats(result.stats)
         setCadPreviewActive(true)
         setCadTotalHeight(result.stats.totalHeight)
-        setCadMessage(result.stats.openBoundaryLoops === 0
+        const extraSourceLoops = Math.max(0, (result.stats.sourceBoundaryLoops || 1) - 1)
+        const extraLoopsNote = extraSourceLoops > 0
+          ? ` ⚠ Scan má ${extraSourceLoops} další oddělenou hranici mimo hlavní oblouk (např. izolovaný zub/ostrůvek) – ta se do báze nezapočítala, zkontrolujte konzoli/Ořez.`
+          : ""
+        setCadMessage((result.stats.openBoundaryLoops === 0
           ? "Preview je připravený · výsledný mesh je uzavřený."
-          : `Preview je připravený · nalezeno ${result.stats.openBoundaryLoops} dalších otevřených hran/otvorů mimo hlavní bázi.`)
+          : `Preview je připravený · nalezeno ${result.stats.openBoundaryLoops} dalších otevřených hran/otvorů mimo hlavní bázi.`) + extraLoopsNote)
       } catch (error) {
         console.error("CAD base preview error:", error)
         setCadMessage(error?.message || "Preview báze se nepodařilo vytvořit.")
