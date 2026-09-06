@@ -9686,7 +9686,7 @@ function cadExtractIndexedBoundaryLoops(positions, indices) {
   return { loops, boundaryEdges: boundaryEdges.length, nonManifoldEdges }
 }
 
-function cadExactClipScanToBaseFootprint(trianglePositions, rawLoop, footprintLoop, diagonal) {
+function cadExactClipScanToBaseFootprint(trianglePositions, rawLoop, footprintLoop, diagonal, isUpper = true) {
   const source = Array.isArray(trianglePositions) ? trianglePositions : []
   const raw = Array.isArray(rawLoop) ? rawLoop : []
   const footprint = Array.isArray(footprintLoop) ? footprintLoop : []
@@ -9755,8 +9755,19 @@ function cadExactClipScanToBaseFootprint(trianglePositions, rawLoop, footprintLo
   }
 
   const polygon = footprint.map((p) => new THREE.Vector2(p.x, p.z))
-  const clipBandWidth = Math.max(2.95, Math.min(4.25, safeDiagonal * 0.058))
-  const clipBandSq = clipBandWidth * clipBandWidth
+
+  // V39: the V38 hard 3D clip-band was the reason the exact cut could create
+  // secondary holes. A palatal/distal flap may extend farther than ~4 mm in XZ while
+  // still belonging to the same low trim-edge sheet. V38 stopped the outside flood at
+  // that arbitrary radius, so the removed region ended on an INTERNAL contour instead
+  // of reaching the footprint. V39 replaces that hard sphere with an orientation-aware
+  // boundary corridor: we may travel farther in XZ, but only a few millimetres toward
+  // the clinical anatomy (Y). That lets a long thin flap be removed completely without
+  // allowing the flood to climb onto crowns that happen to project outside the base.
+  const clipBandWidth = Math.max(2.95, Math.min(4.25, safeDiagonal * 0.058)) // legacy diagnostic only
+  const clipReachXZ = Math.max(7.0, Math.min(12.5, safeDiagonal * 0.145))
+  const clipAnatomyDepth = Math.max(4.2, Math.min(6.4, safeDiagonal * 0.078))
+  const clipBaseSideAllowance = Math.max(2.2, Math.min(4.0, safeDiagonal * 0.050))
   const boundaryTolerance = Math.max(2e-5, Math.min(2.5e-4, safeDiagonal * 2.6e-6))
   const boundaryToleranceSq = boundaryTolerance * boundaryTolerance
   const areaThreshold = Math.max(1e-10, safeDiagonal * safeDiagonal * 2.5e-11)
@@ -9766,43 +9777,60 @@ function cadExactClipScanToBaseFootprint(trianglePositions, rawLoop, footprintLo
     return new THREE.Vector3(positions[o], positions[o + 1], positions[o + 2])
   }
 
-  // Spatial distance to the ORIGINAL conditioned open boundary. The topological
-  // outside flood is not allowed to leave this narrow strip, so a crown that happens
-  // to project outside the base footprint can never be reached and clipped.
-  const boundaryCell = clipBandWidth
+  // XZ lookup of the ORIGINAL conditioned boundary. For every source vertex we keep
+  // the closest trim-edge sample and measure depth relative to THAT local sample, not
+  // to one global Y plane. This is important on a tilted/already oriented arch.
+  const boundaryCell = Math.max(2.4, Math.min(4.0, clipReachXZ * 0.34))
   const invBoundaryCell = 1 / boundaryCell
   const boundaryGrid = new Map()
-  const boundaryCellKey = (x, y, z) => `${Math.floor(x * invBoundaryCell)}:${Math.floor(y * invBoundaryCell)}:${Math.floor(z * invBoundaryCell)}`
-  for (const p of raw) {
-    const key = boundaryCellKey(p.x, p.y, p.z)
+  const boundaryCellKey = (x, z) => `${Math.floor(x * invBoundaryCell)}:${Math.floor(z * invBoundaryCell)}`
+  for (const q of raw) {
+    const key = boundaryCellKey(q.x, q.z)
     let bucket = boundaryGrid.get(key)
     if (!bucket) { bucket = []; boundaryGrid.set(key, bucket) }
-    bucket.push(p)
+    bucket.push(q)
   }
-  const distanceCache = new Map()
-  const distanceToRawBoundarySqById = (id) => {
-    const cached = distanceCache.get(id)
-    if (cached != null) return cached
+  const nearestBoundaryCache = new Map()
+  const nearestRawBoundaryInfoById = (id) => {
+    const cached = nearestBoundaryCache.get(id)
+    if (cached) return cached
     const p = positionAt(id)
     const cx = Math.floor(p.x * invBoundaryCell)
-    const cy = Math.floor(p.y * invBoundaryCell)
     const cz = Math.floor(p.z * invBoundaryCell)
-    let best = Infinity
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dz = -1; dz <= 1; dz++) {
-          const bucket = boundaryGrid.get(`${cx + dx}:${cy + dy}:${cz + dz}`)
-          if (!bucket) continue
-          for (const q of bucket) {
-            const ddx = p.x - q.x, ddy = p.y - q.y, ddz = p.z - q.z
-            const d2 = ddx * ddx + ddy * ddy + ddz * ddz
-            if (d2 < best) best = d2
+    const reach = Math.max(1, Math.ceil(clipReachXZ / boundaryCell))
+    let best = null
+    let bestXZ2 = Infinity
+    for (let dx = -reach; dx <= reach; dx++) {
+      for (let dz = -reach; dz <= reach; dz++) {
+        const bucket = boundaryGrid.get(`${cx + dx}:${cz + dz}`)
+        if (!bucket) continue
+        for (const q of bucket) {
+          const ddx = p.x - q.x, ddz = p.z - q.z
+          const dXZ2 = ddx * ddx + ddz * ddz
+          if (dXZ2 < bestXZ2) {
+            bestXZ2 = dXZ2
+            best = q
           }
         }
       }
     }
-    distanceCache.set(id, best)
-    return best
+    const info = best ? { sample: best, xzDistanceSq: bestXZ2 } : { sample: null, xzDistanceSq: Infinity }
+    nearestBoundaryCache.set(id, info)
+    return info
+  }
+  const isWithinBoundaryCorridor = (id) => {
+    const p = positionAt(id)
+    const info = nearestRawBoundaryInfoById(id)
+    if (!info.sample || info.xzDistanceSq > clipReachXZ * clipReachXZ) return false
+    const q = info.sample
+    // For an upper scan the anatomy lies toward -Y from the lower trim boundary;
+    // for a lower scan it lies toward +Y. Positive anatomyDepth therefore always
+    // means "climbing into anatomy" independent of arch type.
+    const anatomyDepth = isUpper ? (q.y - p.y) : (p.y - q.y)
+    const baseSideDepth = -anatomyDepth
+    if (anatomyDepth > clipAnatomyDepth) return false
+    if (baseSideDepth > clipBaseSideAllowance) return false
+    return true
   }
 
   const pointSegmentDistanceSq2D = (px, py, ax, ay, bx, by) => {
@@ -9861,7 +9889,7 @@ function cadExactClipScanToBaseFootprint(trianglePositions, rawLoop, footprintLo
   const outsideConnected = new Set()
   const queue = []
   for (const id of fallbackBoundaryLoop.vertexIds) {
-    if (!classifyId(id).inside && distanceToRawBoundarySqById(id) <= clipBandSq) {
+    if (!classifyId(id).inside && isWithinBoundaryCorridor(id)) {
       outsideConnected.add(id)
       queue.push(id)
     }
@@ -9870,7 +9898,7 @@ function cadExactClipScanToBaseFootprint(trianglePositions, rawLoop, footprintLo
     const id = queue[qi]
     for (const neighbor of adjacency.get(id) || []) {
       if (outsideConnected.has(neighbor)) continue
-      if (distanceToRawBoundarySqById(neighbor) > clipBandSq) continue
+      if (!isWithinBoundaryCorridor(neighbor)) continue
       if (classifyId(neighbor).inside) continue
       outsideConnected.add(neighbor)
       queue.push(neighbor)
@@ -10077,6 +10105,9 @@ function cadExactClipScanToBaseFootprint(trianglePositions, rawLoop, footprintLo
     boundary,
     clipApplied: stats.clippedTriangles > 0 || stats.discardedTriangles > 0,
     clipBandWidth,
+    clipReachXZ,
+    clipAnatomyDepth,
+    clipBaseSideAllowance,
     candidateTriangles: stats.candidateTriangles,
     keptTriangles: stats.keptTriangles,
     clippedTriangles: stats.clippedTriangles,
@@ -11038,7 +11069,7 @@ function cadOptimizeTransitionEdgeFlips(indices, positions, startIndex, endIndex
   return { flips, passes }
 }
 
-// V38: Indexed exact footprint clip + topologically shared transition strip.
+// V39: Adaptive corridor exact footprint clip + topologically shared transition strip.
 //
 // V37 proved the geometric cut itself was useful, but lost connectivity by rebuilding
 // the source boundary as a second ring. V38 keeps the clipped scan indexed and reuses
@@ -11091,14 +11122,15 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   regularized = cadSmoothClosedLoop(regularized, 10)
   regularized = cadResampleClosedLoopXZ(regularized, profileTargetSpacing)
 
-  // V38: physically cut the conditioned source triangles with the final Straight
+  // V39: physically cut the conditioned source triangles with the final Straight
   // footprint while preserving persistent vertex IDs across adjacent triangles. The
   // returned boundary IDs are later reused directly by the shoulder – no duplicate ring.
   const exactFootprintClip = cadExactClipScanToBaseFootprint(
     trianglePositions,
     rawLoop,
     regularized,
-    boundaryData.diagonal
+    boundaryData.diagonal,
+    isUpper
   )
   trianglePositions = exactFootprintClip.trianglePositions
   rawLoop = exactFootprintClip.boundary
@@ -11106,10 +11138,15 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     throw new Error("Po přesném ořezu podle báze se nepodařilo obnovit hlavní hranici scanu.")
   }
   if (exactFootprintClip.boundaryIndices.length !== rawLoop.length) {
-    throw new Error("Interní chyba V38: topologická hranice scanu není synchronní s geometrií.")
+    throw new Error("Interní chyba V39: topologická hranice scanu není synchronní s geometrií.")
   }
   if (exactFootprintClip.secondaryBoundaryLoopsCreated > 0) {
-    throw new Error(`V38 exact clip vytvořil ${exactFootprintClip.secondaryBoundaryLoopsCreated} vedlejší otevřenou hranici. Operace byla zastavena, aby se nevygeneroval poškozený model.`)
+    throw new Error(
+      `V39 exact clip stále vytvořil ${exactFootprintClip.secondaryBoundaryLoopsCreated} vedlejší otevřenou hranici ` +
+      `(loops ${exactFootprintClip.sourceBoundaryLoopsBefore}→${exactFootprintClip.sourceBoundaryLoopsAfter}, ` +
+      `XZ reach ${exactFootprintClip.clipReachXZ.toFixed(1)} mm, anatomy depth ${exactFootprintClip.clipAnatomyDepth.toFixed(1)} mm). ` +
+      `Operace byla bezpečně zastavena.`
+    )
   }
 
   const boundaryMinY = Math.min(...rawLoop.map((p) => p.y))
