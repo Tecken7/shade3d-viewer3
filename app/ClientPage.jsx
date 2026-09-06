@@ -9287,12 +9287,29 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const boundaryExtremeY = isUpper ? boundaryMaxY : boundaryMinY
   const availableBaseDepth = Math.max(0.6, isUpper ? baseCapY - boundaryExtremeY : boundaryExtremeY - baseCapY)
 
-  // V19 – kalibrace podle skutečné délky rovné stěny v referenčním Medit STL.
-  // V18 končil transition jen ~0.02 mm za extreme boundary a straight wall tak vyšel
-  // asi o 0.18 mm delší než Medit. Posun ~0.20 mm dává téměř stejnou výšku straight
-  // části, ale pořád ponechává naprostou většinu blendu v původním scan→base pásu.
-  const transitionEndOffset = Math.min(0.22, Math.max(0.18, boundaryData.diagonal * 0.0033))
-  const targetY = boundaryExtremeY + (isUpper ? transitionEndOffset : -transitionEndOffset)
+  // V20 – přímá kalibrace podle referenčního Medit STL.
+  // Z reálného Rogers páru lze vyčíst pravidelný CAD úsek:
+  // transition-end -> seam = přesně 0.10 mm a následné wall ringy = přesně 1.08 mm.
+  // Nejprve zvolíme nominální konec přechodu (~0.20 mm za extreme boundary) a pak
+  // jej smíme jemně posunout tak, aby se zbytek stěny skládal z celých 1.08mm kroků.
+  // Snap je omezený na 0.28 mm, takže nikdy nemůže dramaticky změnit scan→base blend.
+  const transitionDirection = isUpper ? 1 : -1
+  const nominalTransitionEndOffset = Math.min(0.22, Math.max(0.18, boundaryData.diagonal * 0.0033))
+  const nominalTargetY = boundaryExtremeY + transitionDirection * nominalTransitionEndOffset
+  const seamOffset = 0.10
+  const wallTargetSpacing = 1.08
+  const nominalSeamY = nominalTargetY + transitionDirection * seamOffset
+  const nominalWallDepth = Math.max(0, Math.abs(baseCapY - nominalSeamY))
+  const wallSections = Math.max(1, Math.round(nominalWallDepth / wallTargetSpacing))
+  const snappedSeamY = baseCapY - transitionDirection * wallSections * wallTargetSpacing
+  const snappedTargetY = snappedSeamY - transitionDirection * seamOffset
+  const wallSnapDelta = snappedTargetY - nominalTargetY
+  const wallSpacingSnapped = Number.isFinite(wallSnapDelta) && Math.abs(wallSnapDelta) <= 0.28
+  const targetY = wallSpacingSnapped ? snappedTargetY : nominalTargetY
+  const seamY = wallSpacingSnapped
+    ? snappedSeamY
+    : targetY + transitionDirection * seamOffset
+  const transitionEndOffset = Math.abs(targetY - boundaryExtremeY)
   const transitionDepth = transitionEndOffset
   const smoothstep = (t) => t * t * (3 - 2 * t)
   const profileEase = (t) => {
@@ -9326,36 +9343,57 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const transitionLoop = new Array(targetCount)
   for (let i = 0; i < targetCount; i++) transitionLoop[i] = evaluateTransitionSurface(i / targetCount, 1)
 
-  // V18: počet vertikálních segmentů se neodvozuje od jednoho nominálního
-  // transitionDepth. Raw boundary má lokálně několikamilimetrové rozdíly Y, takže
-  // každá pozice kolem archu dostane vlastní počet segmentů podle skutečné 3D
-  // délky surface column. Tím mizí dlouhé jehly v hlubších částech trimu.
-  // V19: V18 byl topologicky bezpečný, ale výrazně hustší než Medit a
-  // ve wireframu proto působil jako jemná svislá záclona. Fyzický spacing zvedáme
-  // k ~0.75–0.80 mm a výslednou konektivitu následně intrinsic-Delaunay flipujeme.
-  const transitionColumnSpacing = Math.max(0.72, Math.min(0.80, boundaryData.diagonal * 0.0130))
-  const transitionColumns = cadBuildAdaptiveTransitionColumns(
-    evaluateTransitionSurface,
-    targetCount,
-    0.07,
-    transitionColumnSpacing,
-    10
+  // V20 – místo stovek adaptivních "sloupců" použijeme graded advancing-front
+  // bridge složený z několika uzavřených křivek. Reálné STL ukazuje, že Medit mezi
+  // scanem a Straight profilem přidává přibližně jen čtvrtinu vertexů oproti V19;
+  // síť se postupně zhrubuje směrem k pravidelnému 0.388mm profilu.
+  //
+  // Každý pomocný ring leží NA STEJNÉ shape-locked transition surface jako V19.
+  // Mění se pouze sampling/topologie, nikoli cílový tvar.
+  const transitionRingSpecs = [
+    { v: 0.08, spacing: 0.29 },
+    { v: 0.28, spacing: 0.33 },
+    { v: 0.54, spacing: 0.37 },
+    { v: 0.78, spacing: 0.39 },
+  ]
+  const transitionProbeCount = Math.max(
+    320,
+    Math.min(1200, Math.max(rawLoop.length, targetCount * 2))
   )
-  const seamOffset = Math.min(0.10, Math.max(0.04, availableBaseDepth * 0.025))
-  const seamY = isUpper
-    ? Math.min(transitionLoop[0].y + seamOffset, baseCapY)
-    : Math.max(transitionLoop[0].y - seamOffset, baseCapY)
+  const transitionBridgeRings = []
+  let previousTransitionCount = Math.max(targetCount, rawLoop.length)
+
+  for (const spec of transitionRingSpecs) {
+    const probe = new Array(transitionProbeCount)
+    for (let i = 0; i < transitionProbeCount; i++) {
+      probe[i] = evaluateTransitionSurface(i / transitionProbeCount, spec.v)
+    }
+    const perimeter = cadClosedLoopPerimeter(probe)
+    let desiredCount = Math.round(perimeter / spec.spacing)
+    desiredCount = Math.max(targetCount, desiredCount)
+    desiredCount = Math.min(desiredCount, previousTransitionCount)
+    const points = cadResampleClosedLoopCount(probe, desiredCount)
+    transitionBridgeRings.push({
+      v: spec.v,
+      spacing: spec.spacing,
+      perimeter,
+      points,
+      count: points.length,
+    })
+    previousTransitionCount = points.length
+  }
+
   const seamLoop = transitionLoop.map((p) => new THREE.Vector3(p.x, seamY, p.z))
 
-  // V10: pravidelná stěna dostává horizontální ringy po ~1.08 mm (Medit reference).
-  // Total Height tak pouze přidává/ubírá počet stejných wall sekcí a nemění transition.
-  const wallTargetSpacing = 1.088
+  // Medit reference: po 0.10mm seamu pokračují přesně 1.08mm kroky.
+  // Pokud se použil wall snap výše, jsou ringy skutečně po 1.08 mm; fallback
+  // zachová původní bezpečné rovnoměrné rozdělení.
   const wallDepth = Math.max(0, Math.abs(baseCapY - seamY))
-  const wallSections = Math.max(1, Math.round(wallDepth / wallTargetSpacing))
   const wallRings = [seamLoop]
   for (let section = 1; section <= wallSections; section++) {
-    const t = section / wallSections
-    const y = THREE.MathUtils.lerp(seamY, baseCapY, t)
+    const y = wallSpacingSnapped
+      ? seamY + transitionDirection * wallTargetSpacing * section
+      : THREE.MathUtils.lerp(seamY, baseCapY, section / wallSections)
     wallRings.push(seamLoop.map((p) => new THREE.Vector3(p.x, y, p.z)))
   }
   const wallLoop = seamLoop
@@ -9404,60 +9442,37 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     }
   }
 
-  // V18 adaptive-column transition. První ring je jen 5.5 % dovnitř surface,
-  // takže bezpečně převezme přesnou scan boundary. Od něj k transition end už
-  // mesh vzniká po jednotlivých fyzicky adaptivních sloupcích.
-  const firstTransitionPoints = new Array(targetCount)
-  for (let i = 0; i < targetCount; i++) {
-    firstTransitionPoints[i] = evaluateTransitionSurface(i / targetCount, transitionColumns.firstV)
-  }
-  const firstTransitionIndices = appendRing(firstTransitionPoints)
-
+  // V20 graded boundary stitching / advancing-front style bridge.
+  // Přesnou scan boundary sešíváme s postupně řidšími ringy a nakonec s přesným
+  // 0.388mm transition-end profilem. Tím nevzniká pravidelná sloupcová mřížka,
+  // žádná diagonála nemůže přeskočit přes podkovu a není potřeba riskantní
+  // post-process edge flipping z V19.
   const transitionIndexStart = indices.length
-  cadStitchClosedRings(
-    indices,
-    exactBoundaryIndices, rawLoop,
-    firstTransitionIndices, firstTransitionPoints,
-    isUpper
-  )
-
-  const columnIndices = new Array(targetCount)
-  const columnLevels = new Array(targetCount)
+  let previousTransitionIndices = exactBoundaryIndices
+  let previousTransitionPoints = rawLoop
   let transitionInteriorVertices = 0
 
-  for (let i = 0; i < targetCount; i++) {
-    const spec = transitionColumns.columns[i]
-    const ids = [firstTransitionIndices[i]]
-    const levels = [transitionColumns.firstV]
-    for (let k = 1; k < spec.levels.length - 1; k++) {
-      const v = spec.levels[k]
-      const p = evaluateTransitionSurface(spec.u, v)
-      const idx = positions.length / 3
-      positions.push(p.x, p.y, p.z)
-      ids.push(idx)
-      levels.push(v)
-      transitionInteriorVertices++
-    }
-    ids.push(transitionEndIndices[i])
-    levels.push(1)
-    columnIndices[i] = ids
-    columnLevels[i] = levels
-  }
-
-  for (let i = 0; i < targetCount; i++) {
-    const j = (i + 1) % targetCount
-    cadStitchOpenTransitionColumns(
+  for (const ring of transitionBridgeRings) {
+    const ringIndices = appendRing(ring.points)
+    cadStitchClosedRings(
       indices,
-      columnIndices[i], columnLevels[i],
-      columnIndices[j], columnLevels[j],
+      previousTransitionIndices, previousTransitionPoints,
+      ringIndices, ring.points,
       isUpper
     )
+    previousTransitionIndices = ringIndices
+    previousTransitionPoints = ring.points
+    transitionInteriorVertices += ring.points.length
   }
 
-  const transitionIndexEnd = indices.length
-  const transitionRemesh = cadOptimizeTransitionEdgeFlips(
-    indices, positions, transitionIndexStart, transitionIndexEnd, 5
+  cadStitchClosedRings(
+    indices,
+    previousTransitionIndices, previousTransitionPoints,
+    transitionEndIndices, transitionLoop,
+    isUpper
   )
+  const transitionIndexEnd = indices.length
+  const transitionTriangles = Math.max(0, Math.floor((transitionIndexEnd - transitionIndexStart) / 3))
 
   // Krátký 0.1mm seam – samostatný ring stejně jako v referenčním Medit STL.
   for (let i = 0; i < transitionEndIndices.length; i++) {
@@ -9528,18 +9543,19 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionEndOffset,
-      transitionMode: "adaptive-columns-intrinsic-remesh-v19",
-      transitionColumnSpacing: transitionColumns.targetSpacing,
-      transitionColumnMinSegments: transitionColumns.minSegments,
-      transitionColumnMaxSegments: transitionColumns.maxSegments,
-      transitionColumnMinLength: transitionColumns.minColumnLength,
-      transitionColumnMaxLength: transitionColumns.maxColumnLength,
-      transitionColumnInteriorVertices: transitionInteriorVertices,
-      transitionEdgeFlips: transitionRemesh.flips,
-      transitionEdgeFlipPasses: transitionRemesh.passes,
+      transitionMode: "graded-boundary-stitch-v20",
+      transitionBridgeRingCounts: transitionBridgeRings.map((ring) => ring.count),
+      transitionBridgeRingSpacings: transitionBridgeRings.map((ring) => ring.spacing),
+      transitionBridgeRingLevels: transitionBridgeRings.map((ring) => ring.v),
+      transitionInteriorVertices,
+      transitionTriangles,
+      transitionEdgeFlips: 0,
+      transitionEdgeFlipPasses: 0,
       transitionPatchSourceCount: rawLoop.length,
       transitionPatchTargetCount: targetCount,
       seamOffset,
+      wallSpacingSnapped,
+      wallSnapDelta,
       profileTargetSpacing,
       profilePoints: seamLoop.length,
       wallTargetSpacing,
