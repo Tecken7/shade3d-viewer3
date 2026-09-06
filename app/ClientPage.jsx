@@ -9454,6 +9454,86 @@ function cadBuildIsotropicTransitionUV(rawLoop, bottomCount, transitionDepth, ta
 }
 
 
+// V29 EXPERIMENT – segmented local shoulder remesh.
+//
+// V28 proved that remeshing the entire horseshoe as one periodic UV strip is not
+// safe: a planar triangulator can legally connect points that are far apart on the
+// real 3D arch. V29 therefore triangulates only short open patches along the
+// perimeter. Each patch has constrained top/bottom edges and constrained left/right
+// seams that are shared with its neighbors, so no triangle can span across the arch.
+function cadBuildIsotropicTransitionPatchUV(topCount, bottomCount, patchWidth, transitionDepth, targetSpacing = 0.42) {
+  if (topCount < 2 || bottomCount < 2) throw new Error("Lokální přechod scan–báze se nepodařilo triangulovat.")
+  const width = Math.max(0.8, Number(patchWidth) || 0.8)
+  const depth = Math.max(0.25, Number(transitionDepth) || 0.25)
+  const spacing = Math.max(0.34, Math.min(0.52, Number(targetSpacing) || 0.42))
+  const boundary = []
+  const boundaryMeta = []
+  const pushBoundary = (x, y, meta) => {
+    boundary.push(new THREE.Vector2(x, y))
+    boundaryMeta.push(meta)
+  }
+
+  // Top edge: exact conditioned scan boundary vertices for this local patch.
+  for (let i = 0; i < topCount; i++) {
+    const u = topCount > 1 ? i / (topCount - 1) : 0
+    pushBoundary(u * width, 0, { kind: "top", index: i, u, v: 0 })
+  }
+
+  // Shared right seam.
+  const sideSections = Math.max(2, Math.ceil(depth / spacing))
+  for (let k = 1; k < sideSections; k++) {
+    const v = k / sideSections
+    pushBoundary(width, v * depth, { kind: "side", side: "right", level: k, u: 1, v })
+  }
+
+  // Bottom edge in reverse order to keep a consistent polygon winding.
+  for (let i = bottomCount - 1; i >= 0; i--) {
+    const u = bottomCount > 1 ? i / (bottomCount - 1) : 0
+    pushBoundary(u * width, depth, { kind: "bottom", index: i, u, v: 1 })
+  }
+
+  // Shared left seam.
+  for (let k = sideSections - 1; k >= 1; k--) {
+    const v = k / sideSections
+    pushBoundary(0, v * depth, { kind: "side", side: "left", level: k, u: 0, v })
+  }
+
+  const initialFaces = THREE.ShapeUtils.triangulateShape(boundary, [])
+  if (!initialFaces?.length) throw new Error("Lokální přechod scan–báze se nepodařilo triangulovat.")
+
+  const clearance = Math.max(0.14, spacing * 0.28)
+  const steiner = cadGenerateHexSteinerPoints(boundary, spacing, clearance)
+  const inserted = cadInsertSteinerPointsIntoTriangulation(boundary, initialFaces, steiner)
+  const firstDelaunay = cadConstrainedDelaunayFlips(inserted.points, inserted.faces, boundary.length, 28)
+  const relaxed = cadRelaxCapInterior(
+    inserted.points,
+    firstDelaunay.faces,
+    boundary.length,
+    boundary,
+    1,
+    0.07,
+    Math.max(0.11, spacing * 0.17)
+  )
+  const finalDelaunay = cadConstrainedDelaunayFlips(relaxed.points, firstDelaunay.faces, boundary.length, 22)
+
+  return {
+    points: relaxed.points,
+    faces: finalDelaunay.faces,
+    boundaryCount: boundary.length,
+    boundaryMeta,
+    width,
+    depth,
+    spacing,
+    sideSections,
+    steinerRequested: steiner.length,
+    steinerInserted: inserted.inserted,
+    steinerSkipped: inserted.skipped,
+    flips: firstDelaunay.flips + finalDelaunay.flips,
+    relaxMoves: relaxed.moved,
+  }
+}
+
+
 // V17.2 – graded shape-locked transition strip (legacy helper; V18 uses adaptive columns).
 // V17.1 už zabránil globálním Delaunay diagonálám přes celý arch, ale interní
 // řady byly řidší než finální seam profil. Tím vznikl nežádoucí density dip:
@@ -9740,7 +9820,7 @@ function cadOptimizeTransitionEdgeFlips(indices, positions, startIndex, endIndex
   return { flips, passes }
 }
 
-// V28 EXPERIMENT: Local Shoulder Remesh on top of the V27 target surface.
+// V29 EXPERIMENT: Segmented Local Shoulder Remesh on top of the V27 target surface.
 function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch = "lower", boundaryOverride = null) {
   const collectedTrianglePositions = cadCollectTrianglesInRoot(sourceObject, viewerRoot)
   const boundaryData = cadExtractBoundaryLoopsRobust(collectedTrianglePositions)
@@ -10064,14 +10144,12 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     return (lo + THREE.MathUtils.clamp(local, 0, 1)) / transitionArcVSteps
   }
 
-  // V28 EXPERIMENT – local remesh ONLY in the narrow rounded shoulder.
+  // V29 EXPERIMENT – segmented local remesh ONLY in the narrow rounded shoulder.
   //
-  // This intentionally keeps the V27 target surface unchanged. The experiment
-  // changes only the topology in roughly the first ~1.05 mm of physical travel:
-  // a thin periodic UV strip is triangulated with Steiner points + Delaunay flips
-  // and projected back onto the exact V27 surface. If the wireframe becomes
-  // Medit-like while the silhouette stays similar, that directly supports the
-  // hypothesis that Medit locally remeshes the shoulder instead of using rings.
+  // V28 remeshed the entire horseshoe in one periodic UV rectangle and produced
+  // giant cross-arch triangles. V29 keeps exactly the same V27 target surface, but
+  // divides the shoulder into short 4–7 mm open patches. No patch knows about points
+  // outside its local arc span, therefore a triangle cannot jump across the palate.
   const transitionRemeshTargetLength = 1.05
   const transitionRemeshArcFraction = transitionMedianArcTotal > 1e-8
     ? THREE.MathUtils.clamp(transitionRemeshTargetLength / transitionMedianArcTotal, 0.20, 0.72)
@@ -10079,17 +10157,12 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   const transitionRemeshEndV = transitionVForArcFraction(transitionRemeshArcFraction)
   const transitionRemeshPhysicalDepth = Math.max(0.42, transitionMedianArcTotal * transitionRemeshArcFraction)
   const transitionRemeshSpacing = 0.38
+  const transitionRemeshPatchTargetLength = 4.4
 
-  const remeshPerimeterProbeCount = Math.max(320, Math.min(1200, Math.max(rawLoop.length, targetCount * 2)))
-  const remeshPerimeterProbe = new Array(remeshPerimeterProbeCount)
-  for (let i = 0; i < remeshPerimeterProbeCount; i++) {
-    remeshPerimeterProbe[i] = evaluateTransitionSurface(i / remeshPerimeterProbeCount, transitionRemeshEndV)
-  }
-  const transitionRemeshEndPerimeter = cadClosedLoopPerimeter(remeshPerimeterProbe)
-  const transitionRemeshEndCount = Math.max(
-    targetCount,
-    Math.min(rawLoop.length, Math.ceil(transitionRemeshEndPerimeter / 0.36))
-  )
+  // The remesh-end loop deliberately keeps the same canonical U samples as the
+  // conditioned scan boundary. This makes every local patch a clean topological
+  // quadrilateral and lets neighboring patches share their side seam vertices 1:1.
+  const transitionRemeshEndCount = rawLoop.length
   const transitionRemeshEndLoop = new Array(transitionRemeshEndCount)
   const transitionRemeshEndParams = new Array(transitionRemeshEndCount)
   for (let i = 0; i < transitionRemeshEndCount; i++) {
@@ -10097,12 +10170,39 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     transitionRemeshEndParams[i] = u
     transitionRemeshEndLoop[i] = evaluateTransitionSurface(u, transitionRemeshEndV)
   }
-  const transitionRemeshUV = cadBuildIsotropicTransitionUV(
-    rawLoop,
-    transitionRemeshEndCount,
-    transitionRemeshPhysicalDepth,
-    transitionRemeshSpacing
+
+  // Equal-arc segmentation along the real conditioned boundary. Boundaries are
+  // snapped to existing rawLoop vertices so the top edge remains exact. We also
+  // enforce at least 3 source edges per patch to avoid degenerate slivers.
+  const transitionRemeshRawArc = cadClosedLoopArcTable(rawLoop)
+  const transitionRemeshRawPerimeter = Math.max(1e-6, transitionRemeshRawArc.total)
+  const transitionRemeshMaxPatches = Math.max(1, Math.floor(rawLoop.length / 3))
+  const transitionRemeshDesiredPatches = Math.max(4,
+    Math.round(transitionRemeshRawPerimeter / transitionRemeshPatchTargetLength)
   )
+  const transitionRemeshPatchCount = Math.max(1, Math.min(
+    transitionRemeshMaxPatches,
+    transitionRemeshDesiredPatches
+  ))
+  const transitionRemeshPatchBreaks = [0]
+  let previousBreak = 0
+  for (let patch = 1; patch < transitionRemeshPatchCount; patch++) {
+    const targetDistance = transitionRemeshRawPerimeter * patch / transitionRemeshPatchCount
+    let lo = previousBreak + 3
+    const remainingPatches = transitionRemeshPatchCount - patch
+    let hi = rawLoop.length - remainingPatches * 3
+    if (hi < lo) hi = lo
+    let best = lo
+    let bestError = Infinity
+    for (let candidate = lo; candidate <= hi; candidate++) {
+      const error = Math.abs(transitionRemeshRawArc.cumulative[candidate] - targetDistance)
+      if (error < bestError) { bestError = error; best = candidate }
+      if (transitionRemeshRawArc.cumulative[candidate] > targetDistance && error > bestError) break
+    }
+    transitionRemeshPatchBreaks.push(best)
+    previousBreak = best
+  }
+  transitionRemeshPatchBreaks.push(rawLoop.length)
 
   // Odhad fyzické šířky transition surface. Počet intervalů musí splnit dva cíle:
   // 1) žádný globální krok přes surface není zbytečně dlouhý,
@@ -10139,7 +10239,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
   //      až po ~0.6 mm,
   //   4) phase-stagger vypíná; topology se řídí skutečným canonical U.
   //
-  // V28 keeps this sparse-front logic only BELOW the locally remeshed shoulder.
+  // V29 keeps this sparse-front logic only BELOW the segmented locally remeshed shoulder.
   // The upper ~1 mm is handled by an isotropic/Delaunay patch instead.
   const transitionFrontExponent = 1.82
   const transitionPhysicalTarget = 1.12
@@ -10284,74 +10384,121 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
     }
   }
 
-  // V28 EXPERIMENT – local isotropic shoulder remesh.
-  // The scan boundary and the remesh-end loop are constrained. Only interior
-  // shoulder vertices are new. Below the remeshed shoulder we reuse the existing
-  // sparse parametric front to reach the exact same V27 transition-end profile.
+  // V29 EXPERIMENT – segmented local isotropic shoulder remesh.
+  // Each short patch is triangulated independently. Neighboring patches share the
+  // exact same side-seam vertex indices at every depth level, so the union remains
+  // watertight while connectivity is prevented from crossing patch boundaries.
   const transitionIndexStart = indices.length
-  const remeshVertexMap = new Array(transitionRemeshUV.points.length).fill(-1)
-  const remeshPeriodicSideIndices = new Map()
+  const remeshSharedSideIndices = new Map()
   let transitionRemeshInteriorVertices = 0
+  let transitionRemeshUVVertices = 0
+  let transitionRemeshUVFaces = 0
+  let transitionRemeshSteinerRequested = 0
+  let transitionRemeshSteinerInserted = 0
+  let transitionRemeshPlanarFlips = 0
+  let transitionRemeshIntrinsicFlips = 0
+  let transitionRemeshIntrinsicPasses = 0
+  const transitionRemeshPatchStats = []
 
   const remeshActualV = (normalizedDepth) => {
     const local = THREE.MathUtils.clamp(normalizedDepth, 0, 1)
     return transitionVForArcFraction(local * transitionRemeshArcFraction)
   }
 
-  for (let i = 0; i < transitionRemeshUV.boundaryCount; i++) {
-    const meta = transitionRemeshUV.boundaryMeta[i]
-    if (!meta) continue
-    if (meta.kind === "top") {
-      remeshVertexMap[i] = exactBoundaryIndices[meta.index % exactBoundaryIndices.length]
-    } else if (meta.kind === "bottom") {
-      remeshVertexMap[i] = transitionRemeshEndIndices[meta.index % transitionRemeshEndIndices.length]
-    } else if (meta.kind === "side") {
-      const level = Number(meta.level) || 0
-      let shared = remeshPeriodicSideIndices.get(level)
-      if (!Number.isInteger(shared)) {
-        const actualV = remeshActualV(meta.v)
-        const point = evaluateTransitionSurface(0, actualV)
-        shared = positions.length / 3
-        positions.push(point.x, point.y, point.z)
-        remeshPeriodicSideIndices.set(level, shared)
-        transitionRemeshInteriorVertices++
-      }
-      remeshVertexMap[i] = shared
+  for (let patchIndex = 0; patchIndex < transitionRemeshPatchBreaks.length - 1; patchIndex++) {
+    const startVertex = transitionRemeshPatchBreaks[patchIndex]
+    const endVertex = transitionRemeshPatchBreaks[patchIndex + 1]
+    const segmentCount = Math.max(1, endVertex - startVertex)
+    const patchBoundaryCount = segmentCount + 1
+    const patchWidth = Math.max(0.5,
+      transitionRemeshRawArc.cumulative[endVertex] - transitionRemeshRawArc.cumulative[startVertex]
+    )
+    const patchUV = cadBuildIsotropicTransitionPatchUV(
+      patchBoundaryCount,
+      patchBoundaryCount,
+      patchWidth,
+      transitionRemeshPhysicalDepth,
+      transitionRemeshSpacing
+    )
+    const patchVertexMap = new Array(patchUV.points.length).fill(-1)
+
+    const globalBoundaryIndexForLocal = (localIndex) => (startVertex + localIndex) % rawLoop.length
+    const patchGlobalU = (localU) => {
+      let u = (startVertex + THREE.MathUtils.clamp(localU, 0, 1) * segmentCount) / rawLoop.length
+      if (u >= 1) u -= 1
+      return u
     }
-  }
 
-  for (let i = transitionRemeshUV.boundaryCount; i < transitionRemeshUV.points.length; i++) {
-    const uv = transitionRemeshUV.points[i]
-    let u = transitionRemeshUV.perimeter > 1e-9 ? uv.x / transitionRemeshUV.perimeter : 0
-    u = ((u % 1) + 1) % 1
-    const normalizedDepth = transitionRemeshUV.depth > 1e-9 ? uv.y / transitionRemeshUV.depth : 0
-    const actualV = remeshActualV(normalizedDepth)
-    const point = evaluateTransitionSurface(u, actualV)
-    remeshVertexMap[i] = positions.length / 3
-    positions.push(point.x, point.y, point.z)
-    transitionRemeshInteriorVertices++
-  }
+    for (let i = 0; i < patchUV.boundaryCount; i++) {
+      const meta = patchUV.boundaryMeta[i]
+      if (!meta) continue
+      if (meta.kind === "top") {
+        patchVertexMap[i] = exactBoundaryIndices[globalBoundaryIndexForLocal(meta.index)]
+      } else if (meta.kind === "bottom") {
+        patchVertexMap[i] = transitionRemeshEndIndices[globalBoundaryIndexForLocal(meta.index)]
+      } else if (meta.kind === "side") {
+        const boundaryVertex = meta.side === "left" ? startVertex : endVertex
+        const globalBoundaryIndex = boundaryVertex % rawLoop.length
+        const key = `${globalBoundaryIndex}:${meta.level}`
+        let shared = remeshSharedSideIndices.get(key)
+        if (!Number.isInteger(shared)) {
+          const actualV = remeshActualV(meta.v)
+          const u = globalBoundaryIndex / rawLoop.length
+          const point = evaluateTransitionSurface(u, actualV)
+          shared = positions.length / 3
+          positions.push(point.x, point.y, point.z)
+          remeshSharedSideIndices.set(key, shared)
+          transitionRemeshInteriorVertices++
+        }
+        patchVertexMap[i] = shared
+      }
+    }
 
-  for (const face of transitionRemeshUV.faces) {
-    const a = remeshVertexMap[face[0]]
-    const b = remeshVertexMap[face[1]]
-    const c = remeshVertexMap[face[2]]
-    if (!Number.isInteger(a) || !Number.isInteger(b) || !Number.isInteger(c)) continue
-    if (a === b || b === c || c === a) continue
-    pushTri(a, b, c)
-  }
-  const transitionRemeshIndexEnd = indices.length
+    for (let i = patchUV.boundaryCount; i < patchUV.points.length; i++) {
+      const uv = patchUV.points[i]
+      const localU = patchUV.width > 1e-9 ? uv.x / patchUV.width : 0
+      const normalizedDepth = patchUV.depth > 1e-9 ? uv.y / patchUV.depth : 0
+      const actualV = remeshActualV(normalizedDepth)
+      const point = evaluateTransitionSurface(patchGlobalU(localU), actualV)
+      patchVertexMap[i] = positions.length / 3
+      positions.push(point.x, point.y, point.z)
+      transitionRemeshInteriorVertices++
+    }
 
-  // Once projected onto the 3D shoulder, a few planar-UV Delaunay choices can be
-  // suboptimal intrinsically. A short local flip pass improves only connectivity;
-  // constrained top/bottom edges stay untouched because they have one patch face.
-  const transitionRemeshIntrinsic = cadOptimizeTransitionEdgeFlips(
-    indices,
-    positions,
-    transitionIndexStart,
-    transitionRemeshIndexEnd,
-    3
-  )
+    const patchIndexStart = indices.length
+    for (const face of patchUV.faces) {
+      const a = patchVertexMap[face[0]]
+      const b = patchVertexMap[face[1]]
+      const c = patchVertexMap[face[2]]
+      if (!Number.isInteger(a) || !Number.isInteger(b) || !Number.isInteger(c)) continue
+      if (a === b || b === c || c === a) continue
+      pushTri(a, b, c)
+    }
+    const patchIndexEnd = indices.length
+
+    // Intrinsic flips are deliberately limited to this single patch. The side seams
+    // therefore remain constrained and can never be replaced by a cross-patch edge.
+    const intrinsic = cadOptimizeTransitionEdgeFlips(
+      indices, positions, patchIndexStart, patchIndexEnd, 3
+    )
+
+    transitionRemeshUVVertices += patchUV.points.length
+    transitionRemeshUVFaces += patchUV.faces.length
+    transitionRemeshSteinerRequested += patchUV.steinerRequested
+    transitionRemeshSteinerInserted += patchUV.steinerInserted
+    transitionRemeshPlanarFlips += patchUV.flips
+    transitionRemeshIntrinsicFlips += intrinsic.flips
+    transitionRemeshIntrinsicPasses += intrinsic.passes
+    transitionRemeshPatchStats.push({
+      startVertex,
+      endVertex,
+      width: patchWidth,
+      topCount: patchBoundaryCount,
+      vertices: patchUV.points.length,
+      faces: patchUV.faces.length,
+      intrinsicFlips: intrinsic.flips,
+    })
+  }
 
   let previousTransitionIndices = transitionRemeshEndIndices
   let previousTransitionPoints = transitionRemeshEndLoop
@@ -10450,7 +10597,7 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       triangles: Math.floor(indices.length / 3),
       transitionDepth,
       transitionEndOffset,
-      transitionMode: "local-shoulder-isotropic-remesh-v28-experiment",
+      transitionMode: "segmented-local-shoulder-remesh-v29-experiment",
       transitionRemeshEnabled: true,
       transitionRemeshTargetLength,
       transitionRemeshArcFraction,
@@ -10458,13 +10605,17 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       transitionRemeshPhysicalDepth,
       transitionRemeshSpacing,
       transitionRemeshEndCount,
-      transitionRemeshUVVertices: transitionRemeshUV.points.length,
-      transitionRemeshUVFaces: transitionRemeshUV.faces.length,
-      transitionRemeshSteinerRequested: transitionRemeshUV.steinerRequested,
-      transitionRemeshSteinerInserted: transitionRemeshUV.steinerInserted,
-      transitionRemeshPlanarFlips: transitionRemeshUV.flips,
-      transitionRemeshIntrinsicFlips: transitionRemeshIntrinsic.flips,
-      transitionRemeshIntrinsicPasses: transitionRemeshIntrinsic.passes,
+      transitionRemeshUVVertices,
+      transitionRemeshUVFaces,
+      transitionRemeshSteinerRequested,
+      transitionRemeshSteinerInserted,
+      transitionRemeshPlanarFlips,
+      transitionRemeshIntrinsicFlips,
+      transitionRemeshIntrinsicPasses,
+      transitionRemeshPatchTargetLength,
+      transitionRemeshPatchCount,
+      transitionRemeshPatchBreaks,
+      transitionRemeshPatchStats,
       transitionBridgeRingCounts: transitionBridgeRings.map((ring) => ring.count),
       transitionBridgeRingSpacings: transitionBridgeRings.map((ring) => ring.spacing),
       transitionBridgeRingLevels: transitionBridgeRings.map((ring) => ring.v),
@@ -10495,8 +10646,8 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
       transitionSpanMax,
       transitionInteriorVertices,
       transitionTriangles,
-      transitionEdgeFlips: transitionRemeshIntrinsic.flips,
-      transitionEdgeFlipPasses: transitionRemeshIntrinsic.passes,
+      transitionEdgeFlips: transitionRemeshIntrinsicFlips,
+      transitionEdgeFlipPasses: transitionRemeshIntrinsicPasses,
       transitionPatchSourceCount: rawLoop.length,
       transitionPatchTargetCount: targetCount,
       seamOffset,
