@@ -2984,15 +2984,36 @@ const parseDicomNumbers = (value, fallback = []) => {
   return parsed.every(Number.isFinite) ? parsed : fallback
 }
 
-function dicomSlicePosition(dataSet) {
-  const position = parseDicomNumbers(dataSet.string("x00200032"), [])
+function dicomSliceGeometry(dataSet) {
+  const imagePosition = parseDicomNumbers(dataSet.string("x00200032"), [])
   const orientation = parseDicomNumbers(dataSet.string("x00200037"), [])
-  if (position.length === 3 && orientation.length === 6) {
-    const row = new THREE.Vector3(orientation[0], orientation[1], orientation[2])
-    const column = new THREE.Vector3(orientation[3], orientation[4], orientation[5])
-    const normal = row.cross(column).normalize()
-    return normal.dot(new THREE.Vector3(position[0], position[1], position[2]))
+  if (imagePosition.length !== 3 || orientation.length !== 6) return null
+
+  // DICOM ImageOrientationPatient:
+  //   první trojice = směr rostoucího sloupce obrazu (lokální X)
+  //   druhá trojice = směr rostoucího řádku obrazu (lokální Y)
+  // Oba směry i ImagePositionPatient jsou v patient souřadnicích (LPS, mm).
+  const xDirection = new THREE.Vector3(orientation[0], orientation[1], orientation[2])
+  const yDirection = new THREE.Vector3(orientation[3], orientation[4], orientation[5])
+  if (xDirection.lengthSq() < 1e-12 || yDirection.lengthSq() < 1e-12) return null
+  xDirection.normalize()
+  yDirection.normalize()
+  const normal = xDirection.clone().cross(yDirection)
+  if (normal.lengthSq() < 1e-12) return null
+  normal.normalize()
+  const origin = new THREE.Vector3(imagePosition[0], imagePosition[1], imagePosition[2])
+
+  return {
+    imagePosition: origin.toArray(),
+    orientation: [...xDirection.toArray(), ...yDirection.toArray()],
+    normal: normal.toArray(),
+    position: normal.dot(origin),
   }
+}
+
+function dicomSlicePosition(dataSet) {
+  const geometry = dicomSliceGeometry(dataSet)
+  if (geometry) return geometry.position
   const instance = dataSet.intString("x00200013")
   return Number.isFinite(instance) ? instance : 0
 }
@@ -3051,6 +3072,8 @@ function decodeDicomSlice(bytes, targetSize) {
 
   const spacing = parseDicomNumbers(dataSet.string("x00280030"), [1, 1])
   const thickness = dataSet.floatString("x00180050") || 1
+  const geometry = dicomSliceGeometry(dataSet)
+  const instance = dataSet.intString("x00200013")
   return {
     unsupported: false,
     series: dataSet.string("x0020000e") || "default",
@@ -3059,7 +3082,9 @@ function decodeDicomSlice(bytes, targetSize) {
     width,
     height,
     pixels,
-    position: dicomSlicePosition(dataSet),
+    position: geometry?.position ?? (Number.isFinite(instance) ? instance : 0),
+    imagePosition: geometry?.imagePosition || null,
+    orientation: geometry?.orientation || null,
     spacingX: Math.abs(spacing[1] || spacing[0] || 1),
     spacingY: Math.abs(spacing[0] || 1),
     thickness: Math.abs(thickness || 1),
@@ -3168,7 +3193,29 @@ async function loadDicomZip(url, quality, expectedSize, onProgress, signal) {
     }
     throw new Error("V ZIP archivu nebyla nalezena použitelná DICOM CT série.")
   }
-  slices.sort((a, b) => a.position - b.position)
+  // Řezy řadíme v jednom společném DICOM patient směru. Původní implementace
+  // použila ImagePositionPatient pouze pro pořadí řezů a absolutní transformaci
+  // následně zahodila; tím se CT oddělilo od meshů exportovaných v CT souřadnicích.
+  const hasPatientGeometry = (slice) => (
+    Array.isArray(slice?.imagePosition) && slice.imagePosition.length === 3 &&
+    Array.isArray(slice?.orientation) && slice.orientation.length === 6
+  )
+  const spatialReference = slices.find(hasPatientGeometry)
+  let xDirection = null
+  let yDirection = null
+  let sliceDirection = null
+
+  if (spatialReference) {
+    xDirection = new THREE.Vector3(...spatialReference.orientation.slice(0, 3)).normalize()
+    yDirection = new THREE.Vector3(...spatialReference.orientation.slice(3, 6)).normalize()
+    sliceDirection = xDirection.clone().cross(yDirection).normalize()
+    const project = (slice) => hasPatientGeometry(slice)
+      ? sliceDirection.dot(new THREE.Vector3(...slice.imagePosition))
+      : slice.position
+    slices.sort((a, b) => project(a) - project(b))
+  } else {
+    slices.sort((a, b) => a.position - b.position)
+  }
 
   const first = slices[0]
   const depth = Math.min(slices.length, quality)
@@ -3177,8 +3224,55 @@ async function loadDicomZip(url, quality, expectedSize, onProgress, signal) {
     const sourceIndex = Math.min(slices.length - 1, Math.round(z * (slices.length - 1) / Math.max(1, depth - 1)))
     voxels.set(slices[sourceIndex].pixels, z * first.width * first.height)
   }
-  const positionRange = Math.abs(slices[slices.length - 1].position - slices[0].position)
-  const physicalDepth = positionRange > 0 ? positionRange + first.thickness : slices.length * first.thickness
+
+  // Fyzická hloubka se odvozuje primárně ze skutečných ImagePositionPatient,
+  // nikoliv ze SliceThickness. Při downsamplingu Z zachováme stejné první a
+  // poslední centrum řezu a pouze zvětšíme efektivní voxel spacing textury.
+  let sourcePositionRange = Math.abs(slices[slices.length - 1].position - slices[0].position)
+  let sourceSliceSpacing = Math.abs(first.thickness || 1)
+  let patientMatrix = null
+
+  if (xDirection && yDirection && sliceDirection) {
+    const spatialSlices = slices.filter(hasPatientGeometry)
+    if (spatialSlices.length) {
+      const projected = spatialSlices.map((slice) => sliceDirection.dot(new THREE.Vector3(...slice.imagePosition)))
+      const differences = []
+      for (let i = 1; i < projected.length; i++) {
+        const difference = Math.abs(projected[i] - projected[i - 1])
+        if (difference > 1e-5) differences.push(difference)
+      }
+      if (differences.length) {
+        differences.sort((a, b) => a - b)
+        sourceSliceSpacing = differences[Math.floor(differences.length / 2)]
+      }
+
+      const firstSpatial = spatialSlices[0]
+      const lastSpatial = spatialSlices[spatialSlices.length - 1]
+      const firstOrigin = new THREE.Vector3(...firstSpatial.imagePosition)
+      const lastOrigin = new THREE.Vector3(...lastSpatial.imagePosition)
+      const projectedRange = Math.abs(sliceDirection.dot(lastOrigin.clone().sub(firstOrigin)))
+      if (projectedRange > 1e-5) sourcePositionRange = projectedRange
+
+      const sourceCenterRange = sourcePositionRange > 1e-5
+        ? sourcePositionRange
+        : sourceSliceSpacing * Math.max(0, slices.length - 1)
+      const imageCenter = firstOrigin.clone()
+        .addScaledVector(xDirection, ((first.columns - 1) * first.spacingX) / 2)
+        .addScaledVector(yDirection, ((first.rows - 1) * first.spacingY) / 2)
+        .addScaledVector(sliceDirection, sourceCenterRange / 2)
+
+      patientMatrix = new THREE.Matrix4().makeBasis(xDirection, yDirection, sliceDirection)
+      patientMatrix.setPosition(imageCenter)
+    }
+  }
+
+  const fallbackRange = sourcePositionRange > 1e-5
+    ? sourcePositionRange
+    : sourceSliceSpacing * Math.max(0, slices.length - 1)
+  const effectiveSliceSpacing = depth > 1
+    ? Math.max(1e-6, fallbackRange / (depth - 1))
+    : sourceSliceSpacing
+  const physicalDepth = effectiveSliceSpacing * Math.max(1, depth)
 
   return {
     data: voxels,
@@ -3191,7 +3285,56 @@ async function loadDicomZip(url, quality, expectedSize, onProgress, signal) {
       physicalDepth,
     ],
     sourceDimensions: [first.columns, first.rows, slices.length],
+    patientMatrix: patientMatrix ? patientMatrix.toArray() : null,
+    patientCoordinateSystem: patientMatrix ? "DICOM_LPS" : null,
+    sourceSliceSpacing,
   }
+}
+
+function getDicomAdjustmentMatrix(settings) {
+  const position = new THREE.Vector3(...(settings?.position || [0, 0, 0]))
+  const rotationValues = settings?.rotation || [0, 0, 0]
+  const rotation = new THREE.Euler(
+    THREE.MathUtils.degToRad(rotationValues[0] || 0),
+    THREE.MathUtils.degToRad(rotationValues[1] || 0),
+    THREE.MathUtils.degToRad(rotationValues[2] || 0)
+  )
+  const scaleValue = Number(settings?.scale) || 1
+  return new THREE.Matrix4().compose(
+    position,
+    new THREE.Quaternion().setFromEuler(rotation),
+    new THREE.Vector3(scaleValue, scaleValue, scaleValue)
+  )
+}
+
+function getDicomLocalMatrix(volume, settings) {
+  const patientMatrix = Array.isArray(volume?.patientMatrix) && volume.patientMatrix.length === 16
+    ? new THREE.Matrix4().fromArray(volume.patientMatrix)
+    : new THREE.Matrix4().identity()
+  // Manuální DICOM transformace (pokud je někdy uložena ve viewer_state) zůstává
+  // nad patient transformací. Výchozí [0,0,0] / 0° / 1 tedy nic nemění.
+  return getDicomAdjustmentMatrix(settings).multiply(patientMatrix)
+}
+
+function getDicomWorldMatrix(volume, settings, sceneMatrix = null) {
+  const localMatrix = getDicomLocalMatrix(volume, settings)
+  return sceneMatrix instanceof THREE.Matrix4
+    ? sceneMatrix.clone().multiply(localMatrix)
+    : localMatrix
+}
+
+function expandBoxByDicomVolume(box, volume, settings, sceneMatrix = null) {
+  if (!box || !volume) return box
+  const matrix = getDicomWorldMatrix(volume, settings, sceneMatrix)
+  const half = new THREE.Vector3(...volume.size).multiplyScalar(0.5)
+  for (let z = -1; z <= 1; z += 2) {
+    for (let y = -1; y <= 1; y += 2) {
+      for (let x = -1; x <= 1; x += 2) {
+        box.expandByPoint(new THREE.Vector3(x * half.x, y * half.y, z * half.z).applyMatrix4(matrix))
+      }
+    }
+  }
+  return box
 }
 
 const DICOM_VERTEX_SHADER = `
@@ -3321,7 +3464,8 @@ const DICOM_FRAGMENT_SHADER = `
   }
 `
 
-function DicomVolume({ volume, settings, interactive = false }) {
+function DicomVolume({ volume, settings, interactive = false, sceneRootRef = null }) {
+  const meshRef = useRef(null)
   const texture = useMemo(() => {
     if (!volume) return null
     const value = new THREE.Data3DTexture(volume.data, volume.width, volume.height, volume.depth)
@@ -3378,13 +3522,34 @@ function DicomVolume({ volume, settings, interactive = false }) {
     material.uniforms.uStep.value = (interactive ? 2.5 : 0.9) / Math.max(volume.width, volume.height, volume.depth)
   }, [material, volume, interactive, settings.viewMode, settings.densityMin, settings.densityMax, settings.opacity, settings.cropMin, settings.cropMax])
 
+  const localMatrix = useMemo(() => getDicomLocalMatrix(volume, settings), [
+    volume,
+    settings.position?.[0], settings.position?.[1], settings.position?.[2],
+    settings.rotation?.[0], settings.rotation?.[1], settings.rotation?.[2],
+    settings.scale,
+  ])
+  const worldMatrixRef = useRef(new THREE.Matrix4())
+  const syncWorldMatrix = useCallback(() => {
+    const mesh = meshRef.current
+    if (!mesh || !localMatrix) return
+    if (sceneRootRef?.current) {
+      sceneRootRef.current.updateMatrixWorld(true)
+      worldMatrixRef.current.copy(sceneRootRef.current.matrixWorld).multiply(localMatrix)
+    } else {
+      worldMatrixRef.current.copy(localMatrix)
+    }
+    mesh.matrix.copy(worldMatrixRef.current)
+    mesh.matrixWorldNeedsUpdate = true
+  }, [localMatrix, sceneRootRef])
+
+  useEffect(() => { syncWorldMatrix() }, [syncWorldMatrix])
+  useFrame(() => { syncWorldMatrix() })
+
   if (!volume || !material || settings.visible === false) return null
-  const rotation = (settings.rotation || [0, 0, 0]).map((value) => THREE.MathUtils.degToRad(value || 0))
   return (
     <mesh
-      position={settings.position || [0, 0, 0]}
-      rotation={rotation}
-      scale={settings.scale || 1}
+      ref={meshRef}
+      matrixAutoUpdate={false}
       material={material}
       renderOrder={-1000}
     >
@@ -3415,22 +3580,10 @@ function sampleDicomTrilinear(volume, tx, ty, tz) {
   return c0 * (1 - fz) + c1 * fz
 }
 
-function buildDicomSliceImage(volume, settings, planeMatrixWorld, maxResolution = 224) {
+function buildDicomSliceImage(volume, settings, planeMatrixWorld, maxResolution = 224, sceneMatrix = null) {
   if (!volume || !planeMatrixWorld || settings.visible === false || typeof document === "undefined") return null
 
-  const position = new THREE.Vector3(...(settings.position || [0, 0, 0]))
-  const rotationValues = settings.rotation || [0, 0, 0]
-  const rotation = new THREE.Euler(
-    THREE.MathUtils.degToRad(rotationValues[0] || 0),
-    THREE.MathUtils.degToRad(rotationValues[1] || 0),
-    THREE.MathUtils.degToRad(rotationValues[2] || 0)
-  )
-  const scaleValue = settings.scale || 1
-  const dicomMatrix = new THREE.Matrix4().compose(
-    position,
-    new THREE.Quaternion().setFromEuler(rotation),
-    new THREE.Vector3(scaleValue, scaleValue, scaleValue)
-  )
+  const dicomMatrix = getDicomWorldMatrix(volume, settings, sceneMatrix)
   const inversePlane = planeMatrixWorld.clone().invert()
   const planeToDicom = dicomMatrix.clone().invert().multiply(planeMatrixWorld)
   const half = new THREE.Vector3(volume.size[0] / 2, volume.size[1] / 2, volume.size[2] / 2)
@@ -15723,31 +15876,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
   const getSliceSceneBounds = useCallback(() => {
     const bounds = new THREE.Box3()
-    if (rootGroupRef.current) bounds.setFromObject(rootGroupRef.current)
-
-    if (dicomVolume) {
-      const position = new THREE.Vector3(...(dicomSettings.position || [0, 0, 0]))
-      const rotationValues = dicomSettings.rotation || [0, 0, 0]
-      const rotation = new THREE.Euler(
-        THREE.MathUtils.degToRad(rotationValues[0] || 0),
-        THREE.MathUtils.degToRad(rotationValues[1] || 0),
-        THREE.MathUtils.degToRad(rotationValues[2] || 0)
-      )
-      const scale = Number(dicomSettings.scale) || 1
-      const matrix = new THREE.Matrix4().compose(
-        position,
-        new THREE.Quaternion().setFromEuler(rotation),
-        new THREE.Vector3(scale, scale, scale)
-      )
-      const half = new THREE.Vector3(...dicomVolume.size).multiplyScalar(0.5)
-      for (let z = -1; z <= 1; z += 2) {
-        for (let y = -1; y <= 1; y += 2) {
-          for (let x = -1; x <= 1; x += 2) {
-            bounds.expandByPoint(new THREE.Vector3(x * half.x, y * half.y, z * half.z).applyMatrix4(matrix))
-          }
-        }
-      }
+    let sceneMatrix = null
+    if (rootGroupRef.current) {
+      rootGroupRef.current.updateMatrixWorld(true)
+      bounds.setFromObject(rootGroupRef.current)
+      sceneMatrix = rootGroupRef.current.matrixWorld
     }
+
+    if (dicomVolume) expandBoxByDicomVolume(bounds, dicomVolume, dicomSettings, sceneMatrix)
     return bounds
   }, [dicomVolume, dicomSettings.position, dicomSettings.rotation, dicomSettings.scale])
 
@@ -15853,8 +15989,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
        combinedBounds = { minX, minY, width: maxX - minX, height: maxY - minY }
     }
 
+    rootGroupRef.current.updateMatrixWorld(true)
+    const dicomSceneMatrix = rootGroupRef.current.matrixWorld
     const dicomSlice = dicomVolume && dicomSettings.visible !== false
-      ? buildDicomSliceImage(dicomVolume, dicomSettings, targetPlaneGroup.matrixWorld, dicomResolution)
+      ? buildDicomSliceImage(dicomVolume, dicomSettings, targetPlaneGroup.matrixWorld, dicomResolution, dicomSceneMatrix)
       : null
 
     if (dicomSlice?.bounds) {
@@ -20561,6 +20699,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             volume={dicomVolume}
             settings={dicomSettings}
             interactive={false}
+            sceneRootRef={rootGroupRef}
           />
         )}
 
@@ -20644,7 +20783,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             isMobile={isMobile}
             desktopScale={1.0}
             mobileScale={1.0}
-            centerMode={centerMode}
+            centerMode={dicomSource ? "combined" : centerMode}
             setTarget={setCameraTarget}
           />
         )}
