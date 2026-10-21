@@ -1821,7 +1821,7 @@ function findRepairBoundaryLoops(context) {
   return loops.sort((a,b) => a.area - b.area)
 }
 
-function classifyRepairBoundaryLoops(context, loops) {
+function classifyRepairBoundaryLoops(context, loops, { preserveMainBoundary = false } = {}) {
   const list = Array.isArray(loops) ? loops.slice() : []
   if (!context || !list.length) return { visible: list, hiddenBottom: null }
 
@@ -1837,9 +1837,9 @@ function classifyRepairBoundaryLoops(context, loops) {
     : Infinity
 
   const highConfidenceBottom =
-    !largest.likely &&
+    preserveMainBoundary || (!largest.likely &&
     sizeRatio >= 2.15 &&
-    (second ? dominanceRatio >= 2.35 : sizeRatio >= 2.8)
+    (second ? dominanceRatio >= 2.35 : sizeRatio >= 2.8))
 
   if (!highConfidenceBottom) return { visible: list, hiddenBottom: null }
 
@@ -1847,7 +1847,7 @@ function classifyRepairBoundaryLoops(context, loops) {
     visible: list.filter((hole) => hole.id !== largest.id),
     hiddenBottom: {
       ...largest,
-      bottomConfidence: Math.min(
+      bottomConfidence: preserveMainBoundary ? 1 : Math.min(
         1,
         0.72 +
           Math.min(0.18, (sizeRatio - 2.15) * 0.08) +
@@ -14267,7 +14267,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       const rawHoles = findRepairBoundaryLoops(context)
 
       updateRepairProgress("Analyzuji model · klasifikuji nalezené otvory", 86)
-      const classified = classifyRepairBoundaryLoops(context, rawHoles)
+      // Ořez v Model Builderu ponechává hlavní otevřený obvod pro napojení
+      // báze. Jeho identita nezávisí na délce vůči diagonále ani orientaci.
+      // Obecná oprava sítě nadále používá konzervativní detekci níže.
+      const classified = classifyRepairBoundaryLoops(context, rawHoles, {
+        preserveMainBoundary: cadStandalone && cadStage === "repair",
+      })
       const holes = classified.visible
 
       setRepairSelection(url)
