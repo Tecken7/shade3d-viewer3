@@ -17413,6 +17413,22 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         </button>
       </div>
 
+      <div style={{ width: dicomLayoutActive ? 120 : 270, display: isMobile ? "none" : "block" }}>
+        <a
+          href="/model-builder"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ ...viewerToolbarButtonStyle(), textDecoration: "none" }}
+          title="Otevřít Model Builder v nové kartě · úprava scanu, dutá báze, odtokové otvory a popisek"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M4 9l8-5 8 5v9l-8 4-8-4V9z"/>
+            <path d="M4 9l8 4 8-4M12 13v9M4 15l8 4 8-4"/>
+          </svg>
+          Model Builder
+        </a>
+      </div>
+
       <style>{`
         @keyframes artheticAnalysisMenuIn { from { opacity:0; transform:translateY(-5px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
         @keyframes artheticAlignMenuIn { from { opacity:0; transform:translateY(-4px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
