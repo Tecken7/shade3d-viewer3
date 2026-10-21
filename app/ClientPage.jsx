@@ -11,9 +11,17 @@ import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader"
 import { STLExporter } from "three/examples/jsm/exporters/STLExporter"
 import { PLYExporter } from "three/examples/jsm/exporters/PLYExporter"
 import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter"
+import { BuilderPreview } from "./model-builder/BuilderPreview"
+import { collectTrianglesInRoot } from "./model-builder/scene-input.mjs"
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, SAH } from "three-mesh-bvh"
 import { Unzip, UnzipInflate } from "fflate"
 import * as dicomParser from "dicom-parser"
+import { DEFAULTS as BUILDER_DEFAULTS } from "./model-builder/defaults.mjs"
+import { prepareRepairVertices } from "./model-builder/mesh-preflight.mjs"
+import { orientRepairPatch } from "./model-builder/repair-orientation.mjs"
+import { buildEdgePatch } from "./model-builder/edge-edit.mjs"
+import { EdgeEditOverlay } from "./model-builder/EdgeEditOverlay"
+import { BuilderControls, BuilderHandle } from "./model-builder/BuilderControls"
 
 // DICOM podpora vyžaduje v projektu balíčky: fflate a dicom-parser.
 
@@ -293,7 +301,7 @@ function buildTrimMeshContext(sourceObject) {
     const originalColor = child.userData?._originalColors || geometry.getAttribute("color")
     const uv = geometry.getAttribute("uv")
     const index = geometry.index
-    const childToSource = sourceInverse.clone().multiply(child.matrixWorld)
+    const childToSource = child === sourceObject ? new THREE.Matrix4() : sourceInverse.clone().multiply(child.matrixWorld)
     const sourceToChild = childToSource.clone().invert()
     const normalMatrix = new THREE.Matrix3().getNormalMatrix(childToSource)
     const faceCount = Math.floor((index ? index.count : position.count) / 3)
@@ -2563,16 +2571,10 @@ function buildCGALPatchVertexNormals(positions, triangles, boundaryAnchors, orig
     ab.copy(b).sub(a); ac.copy(c).sub(a)
     faceNormal.copy(ab).cross(ac)
     if (faceNormal.lengthSq() < 1e-18) continue
-    faceNormal.normalize()
     normals[ia].add(faceNormal); normals[ib].add(faceNormal); normals[ic].add(faceNormal)
   }
 
   const expected = repairAverageBoundaryNormal(hole?.boundary || [])
-  const average = new THREE.Vector3()
-  normals.forEach((normal) => { if (normal.lengthSq() > 1e-18) average.add(normal) })
-  if (average.lengthSq() > 1e-18 && expected.lengthSq() > 1e-18 && average.dot(expected) < 0) {
-    normals.forEach((normal) => normal.negate())
-  }
 
   for (let vertex = 0; vertex < vertexCount; vertex++) {
     const originLocal = origins?.[vertex]
@@ -2580,7 +2582,7 @@ function buildCGALPatchVertexNormals(positions, triangles, boundaryAnchors, orig
       ? sourceNodeIds?.[originLocal]
       : null
     const sourceNormal = Number.isInteger(sourceNodeId) ? boundaryAnchors.get(sourceNodeId)?.normal : null
-    if (sourceNormal) {
+    if (sourceNormal && normals[vertex].dot(new THREE.Vector3(...sourceNormal)) >= 0) {
       normals[vertex].set(sourceNormal[0], sourceNormal[1], sourceNormal[2]).normalize()
     } else if (normals[vertex].lengthSq() > 1e-18) {
       normals[vertex].normalize()
@@ -2598,7 +2600,7 @@ function buildCGALRepairPatchData(context, hole, workerResult, sourceNodeIds, ti
   const positions = workerResult.positions instanceof Float64Array
     ? workerResult.positions
     : new Float64Array(workerResult.positions)
-  const triangleIndices = workerResult.triangles instanceof Uint32Array
+  let triangleIndices = workerResult.triangles instanceof Uint32Array
     ? workerResult.triangles
     : new Uint32Array(workerResult.triangles)
   const origins = workerResult.origins instanceof Int32Array
@@ -2609,6 +2611,11 @@ function buildCGALRepairPatchData(context, hole, workerResult, sourceNodeIds, ti
   if (!vertexCount || triangleIndices.length < 3 || origins.length !== vertexCount) {
     throw new Error("CGAL: worker vrátil neplatnou patch geometrii.")
   }
+  const orientation = orientRepairPatch(
+    context.triangles.filter(triangle => triangle.childUuid === hole.childUuid).map(triangle => triangle.nodeIds),
+    hole.nodeIds, triangleIndices, origins, sourceNodeIds
+  )
+  triangleIndices = orientation.triangles
 
   const boundaryAnchors = buildRepairBoundaryAttributeMap(hole)
   const colorAnchors = new Array(vertexCount).fill(null)
@@ -2665,6 +2672,7 @@ function buildCGALRepairPatchData(context, hole, workerResult, sourceNodeIds, ti
       densityControlFactor: CGAL_REPAIR_DENSITY,
       continuity: CGAL_REPAIR_CONTINUITY,
       fairSuccess: true,
+      orientation: { flippedFaces: orientation.flippedFaces, matchedEdges: orientation.matchedEdges },
       vertexCount,
       triangleCount: triangles.length,
       timings,
@@ -2743,7 +2751,7 @@ function applyRepairPatchesToObject(context, patches) {
     else geometry.addGroup(0, baseCount, 0)
     patchMaterialGroups.forEach((group) => geometry.addGroup(group.start, group.count, group.materialIndex))
     geometry.computeBoundingBox(); geometry.computeBoundingSphere()
-    try { geometry.computeBoundsTree?.(ALIGNMENT_BVH_OPTIONS) } catch {}
+    try { geometry.computeBoundsTree?.({ ...ALIGNMENT_BVH_OPTIONS, indirect: true }) } catch {}
     backup.push({ mesh, geometry: original, visible: mesh.visible, originalColors: mesh.userData?._originalColors, baseGeom: mesh.userData?._baseGeom, derivedGeom: mesh.userData?._derivedGeom })
     mesh.geometry = geometry
     mesh.visible = true
@@ -7543,38 +7551,7 @@ function cadLookupVertexNormal(map, point, tolerance, fallback) {
 }
 
 function cadCollectTrianglesInRoot(sourceObject, viewerRoot) {
-  if (!sourceObject || !viewerRoot) throw new Error("Model není připravený pro vytvoření báze.")
-  viewerRoot.updateMatrixWorld(true)
-  sourceObject.updateMatrixWorld(true)
-  const rootInverse = viewerRoot.matrixWorld.clone().invert()
-  const positions = []
-  const p = new THREE.Vector3()
-
-  sourceObject.traverse((child) => {
-    if (!child?.isMesh || !child.geometry) return
-    child.updateMatrixWorld(true)
-    const localToRoot = rootInverse.clone().multiply(child.matrixWorld)
-    const geometry = child.geometry
-    const position = geometry.getAttribute("position")
-    if (!position) return
-    const index = geometry.getIndex()
-    const pushVertex = (vertexIndex) => {
-      p.fromBufferAttribute(position, vertexIndex).applyMatrix4(localToRoot)
-      positions.push(p.x, p.y, p.z)
-    }
-    if (index) {
-      for (let i = 0; i + 2 < index.count; i += 3) {
-        pushVertex(index.getX(i)); pushVertex(index.getX(i + 1)); pushVertex(index.getX(i + 2))
-      }
-    } else {
-      for (let i = 0; i + 2 < position.count; i += 3) {
-        pushVertex(i); pushVertex(i + 1); pushVertex(i + 2)
-      }
-    }
-  })
-
-  if (positions.length < 9) throw new Error("Model neobsahuje dostatek trojúhelníků.")
-  return positions
+  return collectTrianglesInRoot(sourceObject, viewerRoot)
 }
 
 function cadExtractBoundaryLoops(trianglePositions, toleranceFactor = 1e-5) {
@@ -11564,16 +11541,6 @@ function cadBuildSolidBaseGeometry(sourceObject, viewerRoot, totalHeight, arch =
 }
 
 
-function CadPreviewMesh({ geometry }) {
-  useEffect(() => () => geometry?.dispose?.(), [geometry])
-  if (!geometry) return null
-  return (
-    <mesh geometry={geometry} renderOrder={50}>
-      <meshStandardMaterial color="#AAA08E" roughness={0.24} metalness={0.08} side={THREE.DoubleSide} />
-    </mesh>
-  )
-}
-
 function CadEyeIcon({ active = false }) {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -12151,6 +12118,16 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
   // -- ARTHETIC CAD Tools · Model Builder V13 --
   const [cadStage, setCadStage] = useState("scan") // scan | repair | orient | trim | base | result
+  const [cadEditContext, setCadEditContext] = useState(null)
+  const [cadEditLoops, setCadEditLoops] = useState([])
+  const [cadEditSelection, setCadEditSelection] = useState([])
+  const [cadEditBulge, setCadEditBulge] = useState(0)
+  const [cadEditHistory, setCadEditHistory] = useState([])
+  const cadEditPreview = useMemo(() => {
+    if (!cadEditContext || cadEditSelection.length !== 2) return { patch: null, error: "" }
+    try { return { patch: buildEdgePatch(cadEditContext, cadEditLoops[cadEditSelection[0].loop], cadEditSelection[0].index, cadEditSelection[1].index, cadEditBulge), error: "" } }
+    catch (error) { return { patch: null, error: error.message } }
+  }, [cadEditContext, cadEditLoops, cadEditSelection, cadEditBulge])
   // Upper/Lower nejsou jen názvy souborů. Typ čelisti je součást CAD workflow,
   // protože určuje stranu okluzní roviny při orientaci a později i směr báze.
   const [cadUpperUrl, setCadUpperUrl] = useState("")
@@ -12175,11 +12152,42 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadBusy, setCadBusy] = useState(false)
   const [cadMessage, setCadMessage] = useState("Nahrajte Upper a/nebo Lower scan.")
   const [cadNaturalHeight, setCadNaturalHeight] = useState(20)
-  const [cadTotalHeight, setCadTotalHeight] = useState(30)
-  const [cadHeightDraft, setCadHeightDraft] = useState("30.0")
+  const [cadTotalHeight, setCadTotalHeight] = useState(25)
+  const [cadHeightDraft, setCadHeightDraft] = useState("25.0")
   const [cadPreviewActive, setCadPreviewActive] = useState(false)
   const [cadPreviewGeometry, setCadPreviewGeometry] = useState(null)
   const [cadPreviewStats, setCadPreviewStats] = useState(null)
+  const [builderOptions, setBuilderOptions] = useState(() => ({ ...BUILDER_DEFAULTS }))
+  const [builderDirty, setBuilderDirty] = useState(true)
+  const [builderSelected, setBuilderSelected] = useState(null)
+  const [builderPlacing, setBuilderPlacing] = useState(false)
+  const [builderDragging, setBuilderDragging] = useState(false)
+  const builderWorkerRef = useRef(null)
+  const changeBuilderOptions = useCallback((patch) => {
+    setBuilderOptions(previous => ({ ...previous, ...patch }))
+    setBuilderDirty(true)
+  }, [])
+  const cancelBuilder = useCallback(() => {
+    builderWorkerRef.current?.terminate()
+    builderWorkerRef.current = null
+    setCadBusy(false)
+    setCadMessage("Výpočet byl zrušen. Parametry můžete upravit a zkusit znovu.")
+  }, [])
+  useEffect(() => () => { builderWorkerRef.current?.terminate(); builderWorkerRef.current = null }, [])
+  const placeBuilderFeature = useCallback((event) => {
+    if (!builderPlacing || cadBusy || !event.face) return
+    event.stopPropagation()
+    const position = event.object.worldToLocal(event.point.clone()).toArray()
+    const normal = event.face.normal.clone().normalize().toArray()
+    if (Math.abs(normal[1]) > 0.8) { setCadMessage("Vyberte boční stěnu báze."); return }
+    if (builderSelected === "text") changeBuilderOptions({ textPosition: position, textNormal: normal })
+    else if (builderSelected?.startsWith("hole:")) {
+      const index = Number(builderSelected.split(":")[1])
+      changeBuilderOptions({ holes: builderOptions.holes.map((hole, i) => i === index ? { ...hole, position, normal, enabled: true } : hole) })
+    }
+    setBuilderPlacing(false)
+  }, [builderPlacing, builderSelected, builderOptions.holes, cadBusy, changeBuilderOptions])
+
   // Přesná uzavřená křivka z CAD Ořezu. Base Generator ji používá jako primární
   // horní hranu báze, takže není odkázaný jen na opětovné skládání boundary
   // z neindexovaných trojúhelníků po trimu.
@@ -12229,6 +12237,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [repairPainting, setRepairPainting] = useState(false)
   const [repairBusy, setRepairBusy] = useState(false)
   const [repairMessage, setRepairMessage] = useState("")
+  const [repairVertexReport, setRepairVertexReport] = useState("")
   const [repairProgressVisible, setRepairProgressVisible] = useState(false)
   const [repairProgressLeaving, setRepairProgressLeaving] = useState(false)
   const [repairProgressPercent, setRepairProgressPercent] = useState(0)
@@ -12515,7 +12524,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         reject(error)
       }
     })
-  }, [])
+  }, [buildCGALRepairWorkerPayload])
 
   const prepareCGALRepairPatch = useCallback(async (context, hole, onProgress) => {
     if (!context || !hole) throw new Error("CGAL: není vybraný otvor.")
@@ -13606,6 +13615,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [createTrimmedExport, editorCapabilities.canSaveTrimmedToCase])
 
   const resetCadBuilder = useCallback(() => {
+    builderWorkerRef.current?.terminate()
+    builderWorkerRef.current = null
+    setBuilderDragging(false)
     setTrimMode(false)
     setRepairMode(false)
     cadDisposeObjectUrl(cadObjectUrlsRef.current.upper)
@@ -13632,7 +13644,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadBusy(false)
     setCadMessage("Nahrajte Upper a/nebo Lower scan.")
     setCadNaturalHeight(20)
-    setCadTotalHeight(30)
+    setCadTotalHeight(25)
+    setBuilderOptions({ ...BUILDER_DEFAULTS })
+    setBuilderDirty(true)
+    setBuilderSelected(null)
+    setBuilderPlacing(false)
     setCadPreviewActive(false)
     setCadPreviewStats(null)
     setCadTrimBoundaryPoints([])
@@ -13741,7 +13757,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setCadFileName(file.name)
     }
     setCadStage("scan")
-    setCadMessage(`${arch === "upper" ? "Upper" : "Lower"} je načtený. ${nextFiles.length === 2 ? "Obě čelisti jsou připravené; pokračujte kontrolou sítě." : "Můžete přidat i druhou čelist nebo pokračovat kontrolou sítě."}`)
+    setCadMessage(`${arch === "upper" ? "Upper" : "Lower"} je načtený. ${nextFiles.length === 2 ? "Obě čelisti jsou připravené; pokračujte ořezem." : "Můžete přidat i druhou čelist nebo pokračovat ořezem."}`)
     setIsAutoRotating(false)
     setDidInitialFrame(false)
     setInitialCameraState(null)
@@ -13868,13 +13884,19 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
   const confirmCadOrientation = useCallback(() => {
     if (!cadFileUrl || !cadOrientationPrepared || cadBusy) return
+    const box = cadObjectBoundsInRoot(modelObjectsRef.current[cadFileUrl], rootGroupRef.current)
+    const naturalHeight = Math.max(1, box.max.y - box.min.y)
+    setCadNaturalHeight(naturalHeight)
+    setCadTotalHeight(Math.max(25, Math.ceil((naturalHeight + 1.5) * 10) / 10))
     setCadOrientationPoints([])
     setCadTrimBoundaryPoints([])
-    setCadStage("trim")
-    setTrimMode(true)
-    setCadMessage("Ořez · vytvořte uzavřenou hranici kolem části scanu, kterou chcete zachovat, nebo zvolte Nechat vše u předem oříznutého scanu.")
-    window.setTimeout(() => selectTrimModel(cadFileUrl), 40)
-  }, [cadFileUrl, cadOrientationPrepared, cadBusy, selectTrimModel])
+    setBuilderOptions({ ...BUILDER_DEFAULTS })
+    setBuilderDirty(true)
+    setBuilderSelected(null)
+    setBuilderPlacing(false)
+    setCadStage("base")
+    setCadMessage("Nastavte celkovou výšku a vytvořte náhled dutého modelu.")
+  }, [cadFileUrl, cadOrientationPrepared, cadBusy])
 
   // Medit-style "Nechat vše": žádný nový řez ani změna source geometrie.
   // Base Generator si v dalším kroku vezme největší zbývající otevřenou boundary
@@ -13919,14 +13941,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [cadFileUrl, cadBusy, trimBusy])
 
   const invalidateCadPreview = useCallback((message = "Parametry byly změněny. Klikněte na Preview pro nový náhled.") => {
-    setCadPreviewActive(false)
-    setCadPreviewStats(null)
-    setCadPreviewGeometry((previous) => { previous?.dispose?.(); return null })
+    setBuilderDirty(true)
     if (cadStage === "base") setCadMessage(message)
   }, [cadStage])
 
   const handleCadTotalHeightChange = useCallback((value) => {
-    const min = Math.max(1, cadNaturalHeight + 1.5)
+    const min = Math.ceil(Math.max(1, cadNaturalHeight + 1.5) * 10) / 10
     const max = Math.max(min + 4, cadNaturalHeight + 35)
     const parsed = Number(String(value).replace(",", "."))
     const safe = Number.isFinite(parsed) ? parsed : min
@@ -13947,55 +13967,61 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     handleCadTotalHeightChange(parsed)
   }, [cadTotalHeight, handleCadTotalHeightChange])
 
-  const toggleCadPreview = useCallback(() => {
+  const toggleCadPreview = useCallback(async () => {
     if (cadStage !== "base" || cadBusy || !cadFileUrl) return
-    if (cadPreviewActive) {
-      setCadPreviewActive(false)
-      setCadPreviewStats(null)
-      setCadPreviewGeometry((previous) => { previous?.dispose?.(); return null })
-      setCadMessage("Preview je vypnutý. Upravte výšku nebo znovu zapněte Preview.")
-      return
-    }
     const sourceObject = modelObjectsRef.current[cadFileUrl]
-    if (!sourceObject || !rootGroupRef.current) {
-      setCadMessage("Model ještě není připravený pro vytvoření báze.")
-      return
-    }
+    if (!sourceObject || !rootGroupRef.current) { setCadMessage("Model ještě není připravený."); return }
     setCadBusy(true)
-    setCadMessage("Generuji Preview hladké solid báze…")
-    window.setTimeout(() => {
-      try {
-        const result = cadBuildSolidBaseGeometry(sourceObject, rootGroupRef.current, cadTotalHeight, cadActiveArch, cadTrimBoundaryPoints)
-        setCadPreviewGeometry((previous) => { previous?.dispose?.(); return result.geometry })
-        setCadPreviewStats(result.stats)
-        setCadPreviewActive(true)
-        setCadTotalHeight(result.stats.totalHeight)
-        const extraSourceLoops = Math.max(0, (result.stats.sourceBoundaryLoops || 1) - 1)
-        const extraLoopsNote = extraSourceLoops > 0
-          ? ` ⚠ Scan má ${extraSourceLoops} další oddělenou hranici mimo hlavní oblouk (např. izolovaný zub/ostrůvek) – ta se do báze nezapočítala, zkontrolujte konzoli/Ořez.`
-          : ""
-        setCadMessage((result.stats.openBoundaryLoops === 0
-          ? "Preview je připravený · výsledný mesh je uzavřený."
-          : `Preview je připravený · nalezeno ${result.stats.openBoundaryLoops} dalších otevřených hran/otvorů mimo hlavní bázi.`) + extraLoopsNote)
-      } catch (error) {
-        console.error("CAD base preview error:", error)
-        setCadMessage(error?.message || "Preview báze se nepodařilo vytvořit.")
-      } finally {
+    const pending = { terminate() {} }
+    builderWorkerRef.current = pending
+    setCadMessage("Připravuji nový model…")
+    try {
+      const positions = new Float32Array(cadCollectTrianglesInRoot(sourceObject, rootGroupRef.current))
+      const fontResponse = await fetch("/wasm/model-builder/font.json")
+      if (!fontResponse.ok) throw new Error("Nepodařilo se načíst místní písmo.")
+      const font = await fontResponse.json()
+      if (builderWorkerRef.current !== pending) return
+      const worker = new Worker(new URL("./workers/model-builder.worker.js", import.meta.url), { type: "module" })
+      builderWorkerRef.current = worker
+      worker.onmessage = ({ data }) => {
+        if (builderWorkerRef.current !== worker) return
+        if (data.preparedHoles) { setBuilderOptions(previous => ({ ...previous, holes: data.preparedHoles })); return }
+        if (data.progress) { setCadMessage(data.progress); return }
+        worker.terminate(); builderWorkerRef.current = null
         setCadBusy(false)
+        if (data.error) { setBuilderDirty(true); setCadMessage(data.error); return }
+        const result = data.result
+        const geometry = new THREE.BufferGeometry()
+        geometry.setAttribute("position", new THREE.BufferAttribute(result.positions, 3))
+        geometry.setIndex(new THREE.BufferAttribute(result.indices, 1))
+        geometry.computeVertexNormals()
+        geometry.computeBoundingBox()
+        setCadPreviewGeometry(previous => { previous?.dispose?.(); return geometry })
+        setCadPreviewStats(result.stats)
+        setBuilderOptions(previous => ({ ...previous, holes: result.holes }))
+        setCadPreviewActive(true)
+        setBuilderDirty(false)
+        setCadMessage("Náhled je připravený. Zkontrolujte dutinu, polohu otvorů a popisku. Změny před exportem přepočítejte.")
       }
-    }, 35)
-  }, [cadStage, cadBusy, cadFileUrl, cadPreviewActive, cadTotalHeight, cadActiveArch, cadTrimBoundaryPoints])
+      worker.onerror = (event) => {
+        if (builderWorkerRef.current !== worker) return
+        worker.terminate(); builderWorkerRef.current = null; setCadBusy(false); setBuilderDirty(true)
+        setCadMessage(event.message || "Výpočet selhal. Zkuste menší model nebo upravte ořez.")
+      }
+      worker.postMessage({ positions, options: { ...builderOptions, totalHeight: cadTotalHeight, arch: cadActiveArch }, font }, [positions.buffer])
+    } catch (error) { if (builderWorkerRef.current !== pending) return; builderWorkerRef.current = null; setCadBusy(false); setBuilderDirty(true); setCadMessage(error.message) }
+  }, [cadStage, cadBusy, cadFileUrl, cadTotalHeight, cadActiveArch, builderOptions])
 
   const applyCadBase = useCallback(() => {
-    if (cadStage !== "base" || !cadPreviewActive || !cadPreviewGeometry || cadBusy) return
+    if (cadStage !== "base" || !cadPreviewActive || !cadPreviewGeometry || cadBusy || builderDirty) return
     setCadStage("result")
     setCadMessage(cadPreviewStats?.openBoundaryLoops === 0
       ? "Model je připravený k exportu jako STL."
       : "Model je vytvořený. Před výrobním použitím doporučujeme zkontrolovat zbývající otevřené hrany.")
-  }, [cadStage, cadPreviewActive, cadPreviewGeometry, cadBusy, cadPreviewStats])
+  }, [cadStage, cadPreviewActive, cadPreviewGeometry, cadBusy, cadPreviewStats, builderDirty])
 
   const downloadCadModel = useCallback(() => {
-    if (!cadPreviewGeometry) return
+    if (!cadPreviewGeometry || builderDirty || cadBusy) return
     try {
       const mesh = new THREE.Mesh(cadPreviewGeometry, new THREE.MeshBasicMaterial())
       mesh.updateMatrixWorld(true)
@@ -14013,25 +14039,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       console.error("CAD STL export error:", error)
       setCadMessage(error?.message || "STL se nepodařilo exportovat.")
     }
-  }, [cadPreviewGeometry, cadFileName])
+  }, [cadPreviewGeometry, cadFileName, builderDirty, cadBusy])
 
-  useEffect(() => {
-    if (!cadStandalone || cadStage !== "trim" || trimStage !== "result" || trimBusy || !cadFileUrl) return
-    setTrimMode(false)
-    const sourceObject = modelObjectsRef.current[cadFileUrl]
-    if (!sourceObject || !rootGroupRef.current) return
-    const box = cadObjectBoundsInRoot(sourceObject, rootGroupRef.current)
-    if (box.isEmpty()) return
-    const naturalHeight = Math.max(1, box.max.y - box.min.y)
-    const nextHeight = Math.ceil((naturalHeight + 8) * 2) / 2
-    setCadNaturalHeight(naturalHeight)
-    setCadTotalHeight(nextHeight)
-    setCadPreviewActive(false)
-    setCadPreviewStats(null)
-    setCadPreviewGeometry((previous) => { previous?.dispose?.(); return null })
-    setCadStage("base")
-    setCadMessage("Báze · nastavte celkovou výšku modelu a klikněte na Preview.")
-  }, [cadStandalone, cadStage, trimStage, trimBusy, cadFileUrl])
 
   const clearRepairWorkingState = useCallback(() => {
     setRepairStage("model")
@@ -14115,7 +14124,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [repairBusy, repairContext, repairHoles, repairVariant, repairSelectedHoleIds, repairCompletedHoleIds])
 
 
-  const selectRepairModel = useCallback(async (url) => {
+  const selectRepairModel = useCallback(async (url, { skipWeld = false } = {}) => {
     if (repairBusy || !url) return
     const object = modelObjectsRef.current[url]
     if (!object) {
@@ -14125,12 +14134,26 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
     setRepairBusy(true)
     setRepairMessage("")
+    setRepairVertexReport("")
     startRepairProgress("Analyzuji model · připravuji topologii", 8)
     repairPatchCacheRef.current.clear()
 
     try {
       await repairWaitForBusyPaint()
-      updateRepairProgress("Analyzuji model · připravuji topologii", 18)
+      updateRepairProgress("Kontroluji a slučuji blízké vrcholy · 0,005 mm", 14)
+      const preflight = skipWeld ? { stats: {}, backup: [] } : prepareRepairVertices(object)
+      if (preflight.backup.length) {
+        const stack = repairHistoryByUrlRef.current[url] || []
+        repairHistoryByUrlRef.current[url] = [...stack, { backup: preflight.backup, kind: "vertices", holeIds: [], patchCount: 0, createdAt: Date.now() }]
+        setRepairedExportsByUrl(previous => ({ ...previous, [url]: { ...previous[url], count: previous[url]?.count || 0, verticesPrepared: true, saveRequested: false, createdAt: Date.now() } }))
+        invalidateComparisonResult()
+      }
+      const { moved, degenerate, duplicateFaces } = preflight.stats
+      setRepairVertexReport(skipWeld ? "Sloučení vrcholů bylo vráceno; analýza používá původní vrcholy." : moved || degenerate || duplicateFaces
+        ? `Kontrola vrcholů: spojeno ${moved.toLocaleString("cs-CZ")} blízkých vrcholů · tolerance 0,005 mm${degenerate + duplicateFaces ? ` · odstraněno ${degenerate + duplicateFaces} neplatných / duplicitních trojúhelníků` : ""}.`
+        : "Kontrola vrcholů: bez rozpojených švů v toleranci 0,005 mm.")
+      await repairWaitForBusyPaint()
+      updateRepairProgress("Analyzuji model · připravuji topologii", 28)
       const context = buildTrimMeshContext(object)
 
       updateRepairProgress("Analyzuji model · hledám otevřené boundary", 58)
@@ -14171,7 +14194,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     } finally {
       setRepairBusy(false)
     }
-  }, [repairBusy, repairVariant, cadStandalone, cadStage, startRepairProgress, updateRepairProgress, finishRepairProgress, resetRepairProgress])
+  }, [repairBusy, repairVariant, cadStandalone, cadStage, startRepairProgress, updateRepairProgress, finishRepairProgress, resetRepairProgress, invalidateComparisonResult])
 
 
 
@@ -14198,14 +14221,87 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     window.setTimeout(() => selectRepairModel(url), 80)
   }, [cadStandalone, cadBusy, repairBusy, cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName, clearRepairWorkingState, selectRepairModel])
 
-  const beginCadRepairStage = useCallback(() => {
-    const arch = cadUpperUrl ? "upper" : cadLowerUrl ? "lower" : ""
-    if (!arch) {
-      setCadMessage("Nejdřív nahrajte Upper nebo Lower scan.")
-      return
-    }
-    startCadRepairForArch(arch)
-  }, [cadUpperUrl, cadLowerUrl, startCadRepairForArch])
+  const refreshCadEdit = useCallback((object) => {
+    const context = buildTrimMeshContext(object)
+    const loops = findRepairBoundaryLoops(context)
+    setCadEditContext(context)
+    setCadEditLoops(loops)
+    setCadEditSelection([])
+    setCadEditBulge(0)
+  }, [])
+  const beginCadEditStage = useCallback(async () => {
+    const arch = cadUpperUrl ? "upper" : "lower"
+    const url = arch === "upper" ? cadUpperUrl : cadLowerUrl
+    const object = modelObjectsRef.current[url]
+    if (!object || cadBusy) return
+    setCadBusy(true)
+    setCadMessage("Připravuji otevřené okraje scanu…")
+    try {
+      await repairWaitForBusyPaint()
+      prepareRepairVertices(object)
+      refreshCadEdit(object)
+      setCadEditHistory([])
+      setCadActiveArch(arch); setCadFileUrl(url)
+      setCadFileName(arch === "upper" ? cadUpperName : cadLowerName)
+      setCadStage("edit"); setIsAutoRotating(false)
+      setCadMessage("Úprava · klikněte na dva konce zářezu u zvýrazněného okraje. Tažením stále otáčíte model.")
+    } catch(error) { setCadMessage(error.message) }
+    finally { setCadBusy(false) }
+  }, [cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName, cadBusy, refreshCadEdit])
+  const handleCadEditClick = useCallback((url, event) => {
+    if (cadStage !== "edit" || !cadEditContext || url !== cadFileUrl || event.delta > 4 || event.nativeEvent?.ctrlKey) return
+    if (event.button != null && event.button !== 0) return
+    const object = cadEditContext.sourceObject
+    object.updateMatrixWorld(true)
+    const point = object.worldToLocal(event.point.clone())
+    let best = null, distance = Infinity
+    cadEditLoops.forEach((loop, l) => {
+      if (cadEditSelection.length === 1 && cadEditSelection[0].loop !== l) return
+      loop.boundary.forEach((sample, index) => {
+        const d = point.distanceTo(sample.position)
+        if (d < distance) { distance = d; best = { loop:l, index } }
+      })
+    })
+    if (!best || distance > Math.max(1.5, cadEditContext.diagonal * 0.025)) { setCadMessage("Klikněte blíž ke zvýrazněné otevřené hraně scanu."); return }
+    setCadEditSelection(previous => previous.length === 1 ? [...previous,best] : [best])
+    setCadEditBulge(0)
+    setCadMessage(cadEditSelection.length === 1 ? "Úsek označen. Zkontrolujte náhled a případně upravte prohnutí nové hrany." : "První bod označen. Klikněte na druhý konec stejného zářezu.")
+  }, [cadStage, cadEditContext, cadFileUrl, cadEditLoops, cadEditSelection])
+  const applyCadEdgePatch = useCallback(() => {
+    if (!cadEditPreview.patch || !cadEditContext) return
+    let backup = null
+    try {
+      backup = applyRepairPatchesToObject(cadEditContext, [cadEditPreview.patch])
+      refreshCadEdit(cadEditContext.sourceObject)
+      setCadEditHistory(previous => [...previous, backup])
+      setCadMessage("Plocha doplněna. Můžete označit další zářez nebo pokračovat ořezem.")
+    } catch(error) { if(backup) restoreTrimBackup(backup); setCadMessage(error.message) }
+  }, [cadEditPreview, cadEditContext, refreshCadEdit])
+  const undoCadEdgePatch = useCallback(() => {
+    if (!cadEditHistory.length || !cadEditContext) return
+    restoreTrimBackup(cadEditHistory.at(-1))
+    refreshCadEdit(cadEditContext.sourceObject)
+    setCadEditHistory(previous => previous.slice(0,-1))
+    setCadMessage("Poslední doplnění bylo vráceno.")
+  }, [cadEditHistory, cadEditContext, refreshCadEdit])
+
+  const beginCadTrimStage = useCallback(() => {
+    const arch = cadUpperUrl ? "upper" : "lower"
+    const url = arch === "upper" ? cadUpperUrl : cadLowerUrl
+    if (!url || cadBusy) return
+    setCadActiveArch(arch)
+    setCadFileUrl(url)
+    setCadFileName(arch === "upper" ? cadUpperName : cadLowerName)
+    setCadStage("trim")
+    setTrimMode(true)
+    setCadMessage("Ořízněte scan, nebo u připraveného scanu zvolte Nechat vše.")
+    window.setTimeout(() => selectTrimModel(url), 80)
+  }, [cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName, cadBusy, selectTrimModel])
+  useEffect(() => {
+    if (!cadStandalone || cadStage !== "trim" || trimStage !== "result" || trimBusy || !cadFileUrl) return
+    setTrimMode(false)
+    startCadRepairForArch(cadActiveArch)
+  }, [cadStandalone, cadStage, trimStage, trimBusy, cadFileUrl, cadActiveArch, startCadRepairForArch])
 
   useEffect(() => {
     if (!cadStandalone || cadStage !== "repair" || !repairSelection || !repairContext || repairBusy || repairStage === "model") return
@@ -14603,7 +14699,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     // Array fallback zachovává kompatibilitu se starším session formátem.
     const backup = Array.isArray(entry) ? entry : entry?.backup
     const undoneHoleIds = Array.isArray(entry?.holeIds) ? entry.holeIds : []
-    const undoneCount = Math.max(
+    const undoneCount = entry?.kind === "vertices" ? 0 : Math.max(
       1,
       Number(entry?.patchCount) || undoneHoleIds.length || 1
     )
@@ -14664,7 +14760,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setRepairHiddenBottomBoundary(null)
       setRepairStage("model")
       setRepairMessage("")
-      window.setTimeout(() => selectRepairModel(url), 20)
+      window.setTimeout(() => selectRepairModel(url, { skipWeld: entry?.kind === "vertices" }), 20)
     }
   }, [repairSelection, repairVariant, selectRepairModel])
 
@@ -18308,12 +18404,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     }
   }
 
-  const cadStepOrder = ["scan", "repair", "orient", "trim", "base", "result"]
-  const cadStepLabels = { scan: "Scan", repair: "Oprava", orient: "Orientace", trim: "Ořez", base: "Báze", result: "Výsledek" }
+  const cadStepOrder = ["scan", "edit", "trim", "repair", "orient", "base", "result"]
+  const cadStepLabels = { scan: "Scan", edit: "Úprava", repair: "Oprava", orient: "Orientace", trim: "Ořez", base: "Báze", result: "Výsledek" }
   const cadLoadedArchCount = (cadUpperUrl ? 1 : 0) + (cadLowerUrl ? 1 : 0)
   const cadRepairAllReady = cadLoadedArchCount > 0 && (!cadUpperUrl || cadArchRepairDone.upper) && (!cadLowerUrl || cadArchRepairDone.lower)
   const cadStepDone = (step) => cadStepOrder.indexOf(cadStage) > cadStepOrder.indexOf(step) || (step === "result" && cadStage === "result")
-  const cadMinHeight = Math.max(1, cadNaturalHeight + 1.5)
+  const cadMinHeight = Math.ceil(Math.max(1, cadNaturalHeight + 1.5) * 10) / 10
   const cadMaxHeight = Math.max(cadMinHeight + 4, cadNaturalHeight + 35)
   const cadMarkerRadius = Math.max(0.32, Math.min(1.0, cadNaturalHeight * 0.03))
 
@@ -18328,6 +18424,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         .artheticCadReady { animation:artheticCadReadyPulse 2.1s ease-in-out infinite; }
         .artheticCadRange { accent-color:#f1f1f1; }
         .artheticCadNumber:focus { border-color:rgba(255,255,255,.22) !important; background:rgba(255,255,255,.055) !important; box-shadow:0 0 0 2px rgba(255,255,255,.035); }
+        .artheticEdgeEdit button { padding:7px 11px; color:#d1fae5; background:#16392f; border:1px solid #32634f; border-radius:8px; cursor:pointer; font-size:11px; }
+        .artheticEdgeEdit button:disabled { opacity:.35; cursor:default; }
         .artheticCadUpload:hover { border-color:rgba(255,255,255,.20) !important; background:rgba(255,255,255,.045) !important; transform:translateY(-1px); }
         .artheticCadOrthoViews { width:min(250px, 22vw); }
         @media (max-width:1100px) { .artheticCadOrthoViews { width:205px !important; } .artheticCadOrthoView { height:112px !important; } }
@@ -18375,10 +18473,25 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               Nahrajte <span style={{ color:cadUpperUrl?"#d8d8d8":"#8a8a8a", fontWeight:720 }}>Upper</span> a/nebo <span style={{ color:cadLowerUrl?"#d8d8d8":"#8a8a8a", fontWeight:720 }}>Lower</span>. Typ čelisti určuje správnou stranu okluzní roviny. {cadLoadedArchCount ? `${cadLoadedArchCount}/2 načteno.` : ""}
             </div>
             {cadLoadedArchCount > 0 && (
-              <button className="artheticCadPrimary artheticCadReady" type="button" onClick={beginCadRepairStage} disabled={cadBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:cadBusy?"wait":"pointer", whiteSpace:"nowrap" }}>
-                Pokračovat · Oprava sítě
+              <button className="artheticCadPrimary artheticCadReady" type="button" onClick={beginCadEditStage} disabled={cadBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:cadBusy?"wait":"pointer", whiteSpace:"nowrap" }}>
+                Pokračovat · Úprava
               </button>
             )}
+          </div>
+        )}
+
+        {cadStage === "edit" && (
+          <div className="artheticEdgeEdit" style={{fontSize:11,color:"#ccc",lineHeight:1.6}}>
+            <div>Označte dvěma kliknutími konce zářezu na modrém okraji scanu. Zelená plocha ukazuje doplnění; původní scan se neposouvá.</div>
+            {(cadUpperUrl && cadLowerUrl) && <div style={{display:"flex",gap:8,marginTop:6}}>{["upper","lower"].map(arch=><button key={arch} onClick={()=>{const url=arch==="upper"?cadUpperUrl:cadLowerUrl; const object=modelObjectsRef.current[url]; if(object){prepareRepairVertices(object);refreshCadEdit(object);setCadActiveArch(arch);setCadFileUrl(url);setCadFileName(arch==="upper"?cadUpperName:cadLowerName);setCadEditHistory([])}}}>{arch==="upper"?"Upper":"Lower"}</button>)}</div>}
+            {cadEditSelection.length===2 && <label style={{display:"flex",gap:10,alignItems:"center",marginTop:8}}>Prohnutí nové hrany <input aria-label="Prohnutí nové hrany" type="range" min="-2" max="6" step="0.1" value={cadEditBulge} onChange={e=>setCadEditBulge(Number(e.target.value))}/>{cadEditBulge.toFixed(1)} mm</label>}
+            {cadEditPreview.error && <div role="alert" style={{color:"#fbbf24"}}>{cadEditPreview.error}</div>}
+            <div style={{display:"flex",gap:8,marginTop:8,flexWrap:"wrap"}}>
+              <button disabled={!cadEditPreview.patch} onClick={applyCadEdgePatch}>Doplnit plochu</button>
+              <button disabled={!cadEditSelection.length} onClick={()=>setCadEditSelection([])}>Zrušit výběr</button>
+              <button disabled={!cadEditHistory.length} onClick={undoCadEdgePatch}>Vrátit doplnění</button>
+              <button onClick={()=>{setCadEditSelection([]);beginCadTrimStage()}}>Pokračovat · Ořez</button>
+            </div>
           </div>
         )}
 
@@ -18454,9 +18567,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             <div style={{ display:"grid", gridTemplateColumns:"110px minmax(180px,1fr) 76px", gap:9, alignItems:"center", minWidth:0 }}>
               <div>
                 <div style={{ color:"#d1d1d1", fontSize:9.4, fontWeight:730 }}>Celková výška</div>
-                <div style={{ color:"#575757", fontSize:8.1, marginTop:2 }}>Solid base · mm</div>
+                <div style={{ color:"#575757", fontSize:8.1, marginTop:2 }}>Otevřená dutá báze · mm</div>
               </div>
-              <input className="artheticCadRange" type="range" min={cadMinHeight} max={cadMaxHeight} step="0.1" value={cadTotalHeight} onChange={(e) => handleCadTotalHeightChange(e.target.value)} />
+              <input className="artheticCadRange" type="range" min={cadMinHeight} max={cadMaxHeight} step="0.1" value={cadTotalHeight} disabled={cadBusy} onChange={(e) => handleCadTotalHeightChange(e.target.value)} />
               <div style={{ position:"relative", height:29 }} title={`Přesná celková výška · ${cadMinHeight.toFixed(2)}–${cadMaxHeight.toFixed(2)} mm`}>
                 <input
                   className="artheticCadNumber"
@@ -18476,6 +18589,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                       e.currentTarget.blur()
                     }
                   }}
+                  disabled={cadBusy}
                   aria-label="Přesná celková výška modelu v milimetrech"
                   style={{ width:"100%", height:"100%", boxSizing:"border-box", padding:"0 22px 0 7px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", outline:"none", background:"rgba(255,255,255,.03)", color:"#e4e4e4", fontSize:9.2, fontWeight:720, fontVariantNumeric:"tabular-nums", textAlign:"right" }}
                 />
@@ -18487,8 +18601,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 height:33, minWidth:84, padding:"0 10px", borderRadius:9, border:cadPreviewActive?"1px solid rgba(74,222,128,.28)":"1px solid rgba(255,255,255,.09)",
                 background:cadPreviewActive?"rgba(34,197,94,.11)":"rgba(255,255,255,.035)", color:cadPreviewActive?"#bbf7d0":"#c8c8c8",
                 display:"inline-flex", alignItems:"center", justifyContent:"center", gap:6, fontSize:9, fontWeight:720, cursor:cadBusy?"wait":"pointer",
-              }}><CadEyeIcon active={cadPreviewActive}/><span>Preview</span></button>
-              {cadPreviewActive && <button className="artheticCadPrimary artheticCadReady" type="button" onClick={applyCadBase} disabled={cadBusy} style={{ height:33, padding:"0 13px", borderRadius:9, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:"pointer" }}>Použít</button>}
+              }}><CadEyeIcon active={cadPreviewActive}/><span>{builderDirty && cadPreviewActive ? "Přepočítat náhled" : "Vytvořit náhled"}</span></button>
+              {cadPreviewActive && !builderDirty && <button className="artheticCadPrimary artheticCadReady" type="button" onClick={applyCadBase} disabled={cadBusy} style={{ height:33, padding:"0 13px", borderRadius:9, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:"pointer" }}>Dokončit model</button>}
             </div>
           </div>
         )}
@@ -18511,6 +18625,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         )}
       </div>
 
+      {cadStage === "base" && <BuilderControls options={builderOptions} change={changeBuilderOptions} selected={builderSelected} select={setBuilderSelected} placing={builderPlacing} setPlacing={setBuilderPlacing} dirty={builderDirty} busy={cadBusy} cancel={cancelBuilder} hasPreview={cadPreviewActive} />}
+      {cadStage === "result" && <button type="button" onClick={() => setCadStage("base")} style={{ position: "absolute", top: 160, right: 18, zIndex: 80, padding: 12, background: "#333", color: "white", border: "1px solid #555", borderRadius: 8, cursor: "pointer" }}>Zpět k nastavení modelu</button>}
       {cadStage === "scan" && (
         <div style={{ position:"absolute", inset:0, zIndex:6, display:"grid", placeItems:"center", pointerEvents:"none", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif" }}>
           <div style={{ pointerEvents:"auto", width:"min(760px, calc(100vw - 44px))", padding:"22px", borderRadius:18, border:"1px solid rgba(255,255,255,.10)", background:"rgba(12,12,12,.84)", boxShadow:"0 24px 80px rgba(0,0,0,.42)", backdropFilter:"blur(18px)" }}>
@@ -19166,6 +19282,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         </div>
       )}
 
+      {!repairProgressVisible && repairContext && repairVertexReport && <div role="status" style={{ marginTop: 9, color: "#9ad9ad", fontSize: 10, lineHeight: 1.5 }}>{repairVertexReport}</div>}
       {!repairProgressVisible && repairMessage && /nepodař|nenaš|potřeba|není načten|selhal|chyba/i.test(repairMessage) && (
         <div style={{ marginTop: 9, padding: "7px 9px", borderRadius: 9, background: "rgba(239,68,68,.045)", border: "1px solid rgba(248,113,113,.11)", color: "#ba8585", fontSize: 8.8, lineHeight: 1.45 }}>
           {repairMessage}
@@ -19284,6 +19401,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       {repairStage === "result" && !repairProgressVisible && (
         <div style={{ padding:"9px 10px", borderRadius:10, border:"1px solid rgba(134,239,172,.13)", background:"rgba(34,197,94,.045)", color:"#9ad9ad", fontSize:8.9, lineHeight:1.45 }}>✓ Oprava vybraných otvorů je hotová. Pokud už nezůstává žádná další díra, můžete pokračovat k orientaci.</div>
       )}
+      {!repairBusy && repairSelection && repairHistoryByUrlRef.current[repairSelection]?.length > 0 && (
+        <button type="button" onClick={() => undoLastRepair(repairSelection)} style={{ marginTop: 9, width: "100%", padding: 8, borderRadius: 8, border: "1px solid #444", background: "#252525", color: "#ddd", cursor: "pointer", fontSize: 10 }}>
+          {repairHistoryByUrlRef.current[repairSelection].at(-1)?.kind === "vertices" ? "Vrátit sloučení vrcholů" : "Vrátit poslední opravu"}
+        </button>
+      )}
 
       {repairProgressVisible && (
         <div style={{ marginTop:repairHoles.length?9:0, padding:"9px", borderRadius:10, background:"rgba(255,255,255,.026)", border:"1px solid rgba(255,255,255,.065)" }}>
@@ -19296,6 +19418,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         </div>
       )}
 
+      {!repairProgressVisible && repairContext && repairVertexReport && <div role="status" style={{ marginTop: 9, color: "#9ad9ad", fontSize: 10, lineHeight: 1.5 }}>{repairVertexReport}</div>}
       {!repairProgressVisible && repairMessage && /nepodař|nenaš|potřeba|není načten|selhal|chyba/i.test(repairMessage) && (
         <div style={{ marginTop:9, padding:"8px 9px", borderRadius:9, background:"rgba(239,68,68,.045)", border:"1px solid rgba(248,113,113,.11)", color:"#ba8585", fontSize:8.6, lineHeight:1.45 }}>{repairMessage}</div>
       )}
@@ -20606,11 +20729,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 onRepairHoleMove={repairMode && repairVariant === "auto" && repairSelection === f.url && repairStage !== "result" ? handleRepairHoleMove : null}
                 onRepairHoleClick={repairMode && repairVariant === "auto" && repairSelection === f.url && repairStage !== "result" ? handleRepairHoleClick : null}
                 onRepairHoleOut={repairMode && repairVariant === "auto" && repairSelection === f.url && repairStage !== "result" ? handleRepairHoleOut : null}
-                onCadSurfaceClick={cadStandalone && cadStage === "orient" && f.url === cadFileUrl ? handleCadOrientationSurfaceClick : null}
+                onCadSurfaceClick={cadStandalone && f.url === cadFileUrl && cadStage === "orient" ? handleCadOrientationSurfaceClick : null}
               />
             ))}
           </Suspense>
 
+          {cadStandalone && cadStage === "edit" && <EdgeEditOverlay context={cadEditContext} loops={cadEditLoops} selection={cadEditSelection} patch={cadEditPreview.patch} onPick={event=>handleCadEditClick(cadFileUrl,event)}/>}
           {cadStandalone && cadStage === "orient" && !cadOrientationPrepared && cadOrientationPoints.map((point, index) => (
             <AlignmentMarker key={`cad-orient-${index}`} point={point} index={index} radius={cadMarkerRadius} />
           ))}
@@ -20619,8 +20743,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             <CadOrientationReferencePlane center={cadOrientationPlaneCenter} y={cadOrientationPlaneY} size={cadOrientationPlaneSize} />
           )}
 
+          {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && <BuilderHandle selected={builderSelected} options={builderOptions} change={changeBuilderOptions} dragging={setBuilderDragging} />}
           {cadStandalone && (cadPreviewActive || cadStage === "result") && cadPreviewGeometry && (
-            <CadPreviewMesh geometry={cadPreviewGeometry} />
+            <BuilderPreview geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} />
           )}
 
           {trimMode && trimContext && trimSelection && trimStage !== "result" && (
@@ -20797,7 +20922,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           />
         )}
 
-        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} ref={trackballRef} target={cameraTarget} enabled={!sliceOverlayInteracting && !alignmentBusy && !cadBusy && trimDraggingPoint == null && !trimBusy} onInteractionChange={handleCameraInteraction} />
+        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} ref={trackballRef} target={cameraTarget} enabled={!builderDragging && !builderPlacing && !sliceOverlayInteracting && !alignmentBusy && !cadBusy && trimDraggingPoint == null && !trimBusy} onInteractionChange={handleCameraInteraction} />
         <RightButtonPan setTarget={setCameraTarget} trackballRef={trackballRef} onInteractionChange={handleCameraInteraction} />
       </Canvas>
 

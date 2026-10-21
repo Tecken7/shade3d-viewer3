@@ -1,0 +1,78 @@
+'use client'
+import React, { useMemo } from 'react'
+import { createPortal, useThree } from '@react-three/fiber'
+import * as THREE from 'three'
+import { TransformControls, Html } from '@react-three/drei'
+
+const fieldStyle = { width: '100%', boxSizing: 'border-box', background: '#252525', color: '#eee', border: '1px solid #484848', padding: '7px 8px', borderRadius: 6 }
+function NumberField({ label, value, onChange, min, max, step = 0.1 }) {
+  return <label style={{ display: 'grid', gap: 5, fontSize: 12 }}>{label}<input aria-label={label} style={fieldStyle} type="number" min={min} max={max} step={step} value={value} onChange={e => { if (e.target.value !== '' && Number.isFinite(e.target.valueAsNumber)) onChange(e.target.valueAsNumber) }} /></label>
+}
+export function BuilderControls({ options: p, change, selected, select, placing, setPlacing, dirty, busy, cancel, hasPreview }) {
+  const hole = selected?.startsWith('hole:') ? Number(selected.split(':')[1]) : -1
+  const editHole = patch => change({ holes: p.holes.map((h, i) => i === hole ? { ...h, ...patch } : h) })
+  const button = (active = false) => ({ ...fieldStyle, width: 'auto', cursor: 'pointer', background: active ? '#3b5645' : '#303030', fontSize: 12 })
+  return <aside aria-label="Nastavení Model Builderu" style={{ position: 'absolute', top: 160, right: 18, bottom: 20, width: 292, overflowY: 'auto', overflowX: 'hidden', zIndex: 80, background: 'rgba(22,22,22,.96)', border: '1px solid #444', borderRadius: 12, padding: 16, color: '#ddd', fontFamily: 'system-ui', boxSizing: 'border-box' }}>
+    <h2 style={{ fontSize: 16, margin: '0 0 10px' }}>Nastavení modelu</h2>
+    <p style={{ fontSize: 12, color: '#bbb', lineHeight: 1.5 }}>Dutina je zespodu otevřená. Bez rozšíření báze a bez výplně.</p>
+    {busy && <button type="button" style={button()} onClick={cancel}>Zrušit výpočet</button>}
+    <fieldset disabled={busy} style={{ border: 0, minWidth: 0, padding: 0, margin: 0, display: 'grid', gap: 14 }}>
+      <label style={{ fontSize: 13 }}><input type="checkbox" checked={p.hollow} onChange={e => change({ hollow: e.target.checked })} /> Dutý model</label>
+      {p.hollow && <NumberField label="Tloušťka stěny (mm)" value={p.wall} min={0.8} max={10} onChange={wall => change({ wall })} />}
+      <NumberField label="Spodní bevel (mm)" value={p.bevel} min={0} max={Math.min(2, p.wall * 0.7)} onChange={bevel => change({ bevel })} />
+      <p style={{ margin: 0, fontSize: 11, color: '#aaa' }}>Výchozí bevel 1 mm / 45° odpovídá dodanému modelu z Meditu.</p>
+      <NumberField label="Vyhlazení okraje (mm)" value={p.smoothing ?? 0.8} min={0} max={2} onChange={smoothing => change({ smoothing })} />
+      <p style={{ margin: 0, fontSize: 11, color: '#aaa' }}>Vyhlazuje jen úzký pás u ořezu a napojení na bázi. Nula vyhlazení vypne.</p>
+      <NumberField label="Zaoblení napojení scanu (mm)" value={p.rounding ?? 1} min={0} max={3} onChange={rounding => change({ rounding })} />
+      <p style={{ margin: 0, fontSize: 11, color: '#aaa' }}>Plynulý přechod scanu do stěny báze. Hodnota určuje šířku upravovaného pásu; nula zachová ostré napojení.</p>
+      <hr style={{ width: '100%', border: 0, borderTop: '1px solid #444' }} />
+      <strong style={{ fontSize: 13 }}>Popisek</strong>
+      <label style={{ display: 'grid', gap: 5, fontSize: 12 }}>Text<input aria-label="Text popisku" style={fieldStyle} maxLength={60} value={p.text} onChange={e => change({ text: e.target.value })} /></label>
+      <label style={{ display: 'grid', gap: 5, fontSize: 12 }}>Provedení<select aria-label="Provedení popisku" style={fieldStyle} value={p.textMode} onChange={e => change({ textMode: e.target.value })}><option value="emboss">Vystouplý</option><option value="engrave">Vyrytý</option></select></label>
+      <NumberField label="Vystoupení / hloubka textu (mm)" value={p.textDepth} min={0.1} max={3} onChange={textDepth => change({ textDepth })} />
+      <NumberField label="Velikost textu (mm)" value={p.textSize} min={1} max={12} onChange={textSize => change({ textSize })} />
+      <NumberField label="Otočení textu (°)" value={p.textRotation} min={-180} max={180} step={5} onChange={textRotation => change({ textRotation })} />
+      <button disabled={!hasPreview || !p.text.trim()} type="button" style={button(selected === 'text' && placing)} onClick={() => { select('text'); setPlacing(!(selected === 'text' && placing)) }}>Umístit popisek na stěnu</button>
+      <hr style={{ width: '100%', border: 0, borderTop: '1px solid #444' }} />
+      <strong style={{ fontSize: 13 }}>Odtokové zářezy · poslední krok</strong>
+      <p style={{ margin: 0, fontSize: 11, color: '#aaa' }}>Oba řezy jsou rovnoběžné. Výchozí poloha protíná spodní hranu i bevel.</p>
+      <NumberField label="Společný směr otvorů (°)" value={p.holeYaw ?? 0} min={-90} max={90} step={1} onChange={holeYaw => change({ holeYaw })} />
+      {hasPreview && <button type="button" style={button()} onClick={() => { change({ holes: [] }); select(null) }}>Obnovit výchozí odtokové zářezy</button>}
+      {!p.holes.length && <span style={{ fontSize: 12 }}>První náhled navrhne dva otvory Ø 4,5 mm. Jejich polohu zkontrolujte.</span>}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{p.holes.map((h, i) => <button key={i} type="button" style={button(hole === i)} onClick={() => { select(`hole:${i}`); setPlacing(false) }}>Otvor {i + 1}{h.enabled ? '' : ' (vyp.)'}</button>)}</div>
+      {hole >= 0 && p.holes[hole] && <>
+        <label style={{ fontSize: 12 }}><input type="checkbox" checked={p.holes[hole].enabled} onChange={e => editHole({ enabled: e.target.checked })} /> Aktivní otvor</label>
+        <NumberField label="Průměr otvoru (mm)" value={p.holes[hole].diameter} min={1} max={15} onChange={diameter => editHole({ diameter })} />
+        <label style={{ fontSize: 12 }}><input type="checkbox" checked={p.holes[hole].autoDepth !== false} onChange={e => editHole({ autoDepth: e.target.checked })} /> Automaticky otevřít celý průřez</label>
+        <NumberField label="Hloubka řezu otvoru (mm)" value={p.holes[hole].length} min={0.5} max={50} onChange={length => editHole({ length, autoDepth: false })} />
+        <p style={{ margin: 0, fontSize: 11, color: '#aaa' }}>Automatika podle potřeby prodlouží řez do dutiny. Ruční změna hloubky ji vypne.</p>
+        {p.holes[hole].baseY != null && <NumberField label="Výška středu nad spodkem (mm)" value={Math.round((p.holes[hole].baseY - p.holes[hole].position[1]) * p.holes[hole].baseDirection * 100) / 100} min={0} max={25} onChange={height => editHole({ position: p.holes[hole].position.map((value, axis) => axis === 1 ? p.holes[hole].baseY - p.holes[hole].baseDirection * height : value) })} />}
+        {p.hollow && p.holes[hole].enabled && p.holes[hole].through === false && !dirty && <p role="status" style={{ color: '#f4d28b', fontSize: 12, margin: 0 }}>Otvor není průchozí po celém průřezu. Zapněte automatické otevření, prodlužte řez nebo změňte polohu.</p>}
+        <button disabled={!hasPreview} type="button" style={button(placing)} onClick={() => setPlacing(!placing)}>{placing ? 'Klikněte na boční stěnu…' : 'Umístit otvor na stěnu'}</button>
+      </>}
+
+      {selected && hasPreview && <p style={{ fontSize: 12, color: '#bfe5c8', margin: 0 }}>Polohu vybraného prvku můžete posunout tažením barevných os v modelu. Kliknutím na stěnu prvek přemístíte; směr otvorů nastavíte společně.</p>}
+    </fieldset>
+    <p role="status" style={{ color: dirty ? '#f4d28b' : '#bfe5c8', fontSize: 12, lineHeight: 1.5 }}>{dirty && hasPreview ? 'Změny čekají na přepočet. Použijte „Přepočítat náhled“ v horní liště.' : hasPreview ? 'Náhled odpovídá nastavení.' : 'Nastavte výšku a vytvořte první náhled.'}</p>
+  </aside>
+}
+
+export function BuilderHandle({ selected, options, change, dragging }) {
+  const target = useMemo(() => new THREE.Group(), [])
+  const { scene } = useThree()
+  const index = selected?.startsWith('hole:') ? Number(selected.split(':')[1]) : -1
+  const position = index >= 0 ? options.holes[index]?.position : selected === 'text' ? options.textPosition : null
+  if (!position) return null
+  const commit = () => {
+    const next = target.position.toArray()
+    if (index >= 0) change({ holes: options.holes.map((h, i) => i === index ? { ...h, position: next } : h) })
+    else change({ textPosition: next })
+  }
+  return <>
+    <primitive object={target} position={position}>
+      <mesh><sphereGeometry args={[0.65, 12, 12]} /><meshBasicMaterial color="#8eeeb1" depthTest={false} transparent opacity={0.9} /></mesh>
+      <Html position={[0, 1.5, 0]} center style={{ pointerEvents: 'none', fontSize: 11, whiteSpace: 'nowrap', background: '#222', color: '#cfeeda', padding: 4, borderRadius: 4 }}>{index >= 0 ? `Otvor ${index + 1}` : 'Popisek'}</Html>
+    </primitive>
+    {createPortal(<TransformControls object={target} mode="translate" showX showY showZ size={0.65} onMouseDown={() => dragging(true)} onMouseUp={() => { commit(); dragging(false) }} />, scene)}
+  </>
+}
