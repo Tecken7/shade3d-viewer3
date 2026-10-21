@@ -16,6 +16,7 @@ export function ScanBrush({context,tool,options,paint,onStart,onEnd,onBusy,onMes
       ray.setFromCamera(pointer,camera)
       return ray.intersectObject(context.sourceObject,true)[0]
     }
+    const unlock=()=>requestAnimationFrame(()=>{if(latest.current.controlsRef.current)latest.current.controlsRef.current.enabled=true})
     const busy=value=>latest.current.onBusy(value)
     const finish=()=>{
       if(!stroke)return
@@ -35,7 +36,7 @@ export function ScanBrush({context,tool,options,paint,onStart,onEnd,onBusy,onMes
       normal.transformDirection(hit.object.matrixWorld).transformDirection(context.sourceObject.matrixWorld.clone().invert())
       const quaternion=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1),normal)
       setCursor({point:sourcePoint.toArray(),quaternion})
-      if(config.tool==='paint') {config.paint(sourcePoint,config.options.radius);return}
+      if(['paint','erase'].includes(config.tool)) {config.paint(sourcePoint,config.options.radius,config.tool==='erase'||e.ctrlKey);return}
       if(!stroke||hit.object!==stroke.mesh)return
       const local=stroke.mesh.worldToLocal(hit.point.clone())
       const scale=stroke.mesh.getWorldScale(new THREE.Vector3()),unit=Math.max(.0001,(scale.x+scale.y+scale.z)/3)
@@ -43,7 +44,7 @@ export function ScanBrush({context,tool,options,paint,onStart,onEnd,onBusy,onMes
       if(lastPoint&&local.distanceTo(lastPoint)<radius*.15)return
       const previous=lastPoint?.clone();lastPoint=local.clone()
       const count=previous?Math.min(32,Math.max(1,Math.ceil(previous.distanceTo(local)/(radius*.2)))):1
-      for(let i=1;i<=count;i++)queue.push({point:(previous?previous.clone().lerp(local,i/count):local).toArray(),options:{...config.options,radius,tool:e.shiftKey?'smooth':config.tool,invert:e.ctrlKey}})
+      for(let i=1;i<=count;i++)queue.push({point:(previous?previous.clone().lerp(local,i/count):local).toArray(),options:{...config.options,dyntopo:false,radius,tool:e.shiftKey?'smooth':config.tool,invert:e.ctrlKey}})
       // Backpressure keeps long strokes responsive without dropping the path.
       if(queue.length>64)queue=queue.filter((_,i)=>i%2===0)
       flush()
@@ -55,7 +56,7 @@ export function ScanBrush({context,tool,options,paint,onStart,onEnd,onBusy,onMes
       const hit=hitAt(e);if(!hit)return
       e.preventDefault();e.stopImmediatePropagation();canvas.setPointerCapture(e.pointerId)
       if(config.controlsRef.current)config.controlsRef.current.enabled=false
-      if(config.tool==='paint'){stroke={paint:true,changed:false};dab(hit,e);return}
+      if(['paint','erase'].includes(config.tool)){stroke={paint:true,changed:false};busy(true);dab(hit,e);return}
       const mesh=hit.object,g=mesh.userData._baseGeom?.isBufferGeometry?mesh.userData._baseGeom:mesh.geometry
       const backup=config.onStart(mesh)
       stroke={mesh,backup,changed:false};busy(true)
@@ -100,16 +101,16 @@ export function ScanBrush({context,tool,options,paint,onStart,onEnd,onBusy,onMes
       }
     }
     const up=e=>{
-      if(altOrbit){altOrbit=false;requestAnimationFrame(()=>{if(latest.current.controlsRef.current)latest.current.controlsRef.current.enabled=latest.current.tool==='navigate'});return}
+      unlock();if(altOrbit){altOrbit=false;return}
       if(!stroke)return
       if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId)
-      if(stroke.paint){stroke=null;lastPoint=null;return}
+      if(stroke.paint){stroke=null;lastPoint=null;busy(false);return}
       ending=true;flush()
     }
-    const cancel=e=>{if(stroke?.paint){stroke=null;return}if(stroke){queue=[];ending=true;flush()}if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId)}
+    const cancel=e=>{unlock();if(stroke?.paint){stroke=null;busy(false);return}if(stroke){queue=[];ending=true;flush()}if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId)}
     canvas.addEventListener('pointerdown',down,true);canvas.addEventListener('pointermove',move);canvas.addEventListener('pointerup',up);canvas.addEventListener('pointercancel',cancel)
-    return()=>{worker?.terminate();canvas.removeEventListener('pointerdown',down,true);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',cancel)}
+    return()=>{unlock();worker?.terminate();canvas.removeEventListener('pointerdown',down,true);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',cancel)}
   },[context,camera,gl])
   if(!cursor||tool==='navigate')return null
-  return <group matrix={context.sourceObject.matrix} matrixAutoUpdate={false}><mesh position={cursor.point} quaternion={cursor.quaternion} raycast={noRaycast} renderOrder={2100}><ringGeometry args={[options.radius*.97,options.radius,64]}/><meshBasicMaterial color={tool==='paint'?'#fbbf24':tool==='subtract'?'#fb7185':'#38bdf8'} side={THREE.DoubleSide} depthTest={false}/></mesh></group>
+  return <group matrix={context.sourceObject.matrix} matrixAutoUpdate={false}><mesh position={cursor.point} quaternion={cursor.quaternion} raycast={noRaycast} renderOrder={2100}><ringGeometry args={[options.radius*.97,options.radius,64]}/><meshBasicMaterial color={tool==='erase'?'#fb7185':tool==='paint'?'#fbbf24':tool==='subtract'?'#fb7185':'#38bdf8'} side={THREE.DoubleSide} depthTest={false}/></mesh></group>
 }

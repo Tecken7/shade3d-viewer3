@@ -20,7 +20,7 @@ V hlavním prohlížeči tlačítko **Model Builder** přepne pracovní prostře
 - **Označit doplnění:** tahem po povrchu přetřete zdravé okolí zářezu i oba jeho konce. Žlutě se označí dotčený úsek otevřeného okraje. Zelený náhled a prohnutí nové hrany lze upravit před potvrzením. Pro jiný zářez zrušte výběr a namalujte novou oblast.
 - **Vyhladit okraj / Vyrovnat okraj:** lokální zjemnění hranice nebo její přiblížení k místní přímce. Okolní anatomie mimo štětec se neposouvá.
 - **Přidávat / Odebírat / Smooth:** lokální sculpting s nastavením poloměru v mm a síly. Shift vyhlazuje, Ctrl obrací přidávání/odebírání; Alt + levé tažení otáčí modelem. Přepínač Otáčet umožňuje běžnou navigaci.
-- **Dynotopo – Constant detail:** skutečné lokální dělení a slučování hran během sculptingu. Výchozí rozlišení je 3/mm, cílová hrana přibližně 0,33 mm; vyšší číslo znamená jemnější síť. Rozlišení nezávisí na zoomu. Výpočet běží v odděleném vlákně a používá pracovní limit 750 000 trojúhelníků. Jde o vlastní browserovou implementaci, nikoli o stejný geometrický algoritmus Blenderu.
+- **Plynulý sculpting:** přidávání, odebírání a smoothing používají stávající síť. Dynotopo je z rozhraní odstraněné kvůli prodlevám na hustých scanech; pracovní vlákno změny topologie při sculptingu nespouští.
 - **Vrátit úpravu:** vrátí poslední potvrzené doplnění nebo celý tah sculptingového štětce včetně změny topologie.
 
 Pro vložený editor se posílá zpráva `ARTHETIC_MODEL_BUILDER_MODE` s `payload.active`, obdobně jako u Zarovnání. Připravené Framer komponenty LabCaseForm a LabCaseDetail přidávají tento stav do `viewerWorkspaceActive`; databáze ani ukládání původních příloh se nemění.
@@ -66,3 +66,10 @@ Dutina se počítá metodou vzdálenostního pole s přibližnou délkou hrany 0
 `npm run prepare:model-builder` obnoví lokální WASM a písmo z uzamčených závislostí. Pro běžné spuštění není potřeba, připravené soubory jsou v projektu.
 
 Nová implementace je ověřovaná na horním testovacím skenu. Artikulátory, pahýly, automatické rozpoznání zubů a dolní čelist nejsou součástí ověřeného rozsahu první verze.
+
+## Ovládání úprav scanu
+
+- Kamera se při zvoleném štětci otáčí tažením mimo scan nebo Alt + tažením přes scan; zamkne se pouze během tahu.
+- Odznačovat lze samostatnou gumou nebo podržením Ctrl při označování.
+- Náhled doplnění po dokončení tahu hledá blízké zdravé okraje ústí zářezu; u zahnutého okraje může automaticky vysunout novou hranu. Před potvrzením je plocha zeleně viditelná.
+- Vyhladit celý okraj provede tři plné průchody hlavního okraje každého meshe. Vnitřní otvory a vzdálená anatomie zůstávají zachované. Úpravu lze vrátit.

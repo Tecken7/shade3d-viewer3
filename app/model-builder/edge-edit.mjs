@@ -103,11 +103,12 @@ export function buildEdgePatch(context, loop, first, last, bulge = 0, alternate 
       }
     }
   }
-  const directed = new Map()
-  context.triangles.forEach(t => t.nodeIds.forEach((id,i)=> {
+  const directed = context._edgePatchDirected || new Map()
+  if(!context._edgePatchDirected) context.triangles.forEach(t => t.nodeIds.forEach((id,i)=> {
     const next=t.nodeIds[(i+1)%3], k=key(id,next)
     if(context.edgeTriangles.get(k)?.length===1) directed.set(k,[id,next])
   }))
+  context._edgePatchDirected=directed
   let flip = null
   for(let i=0;i<arc.length-1;i++) {
     const source=directed.get(key(arc[i].nodeId,arc[i+1].nodeId))
@@ -148,4 +149,70 @@ export function buildEdgePatch(context, loop, first, last, bulge = 0, alternate 
   faces.forEach(([u,v,w])=> { const face=samples[v].position.clone().sub(samples[u].position).cross(samples[w].position.clone().sub(samples[u].position));if(face.lengthSq()<1e-28) throw new Error('Doplnění obsahuje zkolabovanou plochu. Upravte výběr.');[u,v,w].forEach(id=>normals[id].add(face)) })
   const corners=samples.map((s,i)=>({sourcePos:s.position.toArray(),sourceNormal:normals[i].normalize().toArray(),color:s.color,uv:s.uv}))
   return { childUuid:loop.childUuid, materialIndex:loop.materialIndex, triangles:faces.map(f=>f.map(i=>corners[i])), bridge, arc:arc.map(s=>s.position.toArray()), normal:normal.toArray() }
+}
+
+// Extend a painted notch to nearby healthy rim, trying the smallest local
+// extension first. A failed chord is not presented as a user geometry error.
+export function predictEdgePatch(context,loop,first,last,bulge=0) {
+  const arc=selectEdgeArc(loop,first,last),n=loop.boundary.length
+  const start=loop.boundary.indexOf(arc[0]),end=loop.boundary.indexOf(arc.at(-1))
+  const step=loop.boundary[(start+1)%n]===arc[1]?1:-1
+  const extend=(id,direction)=>{
+    const options=[{id,d:0}];let d=0,previous=id,nextMark=.3
+    for(let guard=0;guard<Math.min(n*.1,500);guard++){
+      const next=(previous+direction+n)%n;d+=loop.boundary[next].position.distanceTo(loop.boundary[previous].position);previous=next
+      if(d>3)break
+      if(d>=nextMark){options.push({id:next,d});nextMark+=.3}
+    }
+    return options
+  }
+  const tangent=(id,direction)=>{
+    let next=id,d=0
+    for(let i=0;i<80&&d<.6;i++){const j=(next+direction+n)%n;d+=loop.boundary[next].position.distanceTo(loop.boundary[j].position);next=j}
+    return loop.boundary[next].position.clone().sub(loop.boundary[id].position).normalize()
+  }
+  const candidates=extend(start,-step).flatMap(a=>extend(end,step).map(b=>{
+    const axis=loop.boundary[b.id].position.clone().sub(loop.boundary[a.id].position).normalize()
+    const turn=2+tangent(a.id,-step).dot(axis)-tangent(b.id,step).dot(axis)
+    return {a,b,score:(a.d+b.d)*.3+Math.abs(a.d-b.d)*.1+turn*2}
+  })).sort((a,b)=>a.score-b.score)
+  let error
+  for(const {a,b} of candidates.slice(0,4)){
+    const candidate=selectEdgeArc(loop,a.id,b.id)
+    if(!arc.every(sample=>candidate.includes(sample)))continue
+    try{return buildEdgePatch(context,loop,a.id,b.id,bulge)}catch(e){error=e}
+  }
+  // Curled scan margins may need the free lip moved outward as well as
+  // extended. Try a small automatic outward bow before asking for more paint.
+  if(bulge===0)for(const bow of [.5,1,2])for(const {a,b} of [{a:{id:start},b:{id:end}},...candidates.slice(0,2)]){
+    const candidate=selectEdgeArc(loop,a.id,b.id)
+    if(!arc.every(sample=>candidate.includes(sample)))continue
+    try{return {...buildEdgePatch(context,loop,a.id,b.id,bow),automaticBow:bow}}catch(e){error=e}
+  }
+  throw error||new Error('Označte okolí jednoho zářezu včetně jeho ústí.')
+}
+
+// Smooth only the longest open margin per mesh; enclosed holes and anatomy
+// away from that margin stay exact. Update every copy of a shared vertex.
+export function smoothScanBorder(context,loops,passes=3) {
+  const chosen=new Map()
+  for(const loop of loops){const prior=chosen.get(loop.childUuid);if(!prior||loop.perimeter>prior.perimeter)chosen.set(loop.childUuid,loop)}
+  const pending=[]
+  for(const [uuid,loop]of chosen){
+    if(loop.boundary.length<3)continue
+    const meta=context.childMeta.get(uuid),mesh=meta.mesh,original=mesh.userData._baseGeom?.isBufferGeometry?mesh.userData._baseGeom:mesh.geometry
+    let points=loop.boundary.map(s=>s.position.clone())
+    for(let pass=0;pass<passes;pass++)points=points.map((p,i)=>p.clone().multiplyScalar(.5).addScaledVector(points[(i+points.length-1)%points.length],.25).addScaledVector(points[(i+1)%points.length],.25))
+    const targets=new Map(loop.boundary.map((s,i)=>[s.position.toArray().map(v=>Math.round(v*1e6)).join(','),points[i]]))
+    const geometry=original.clone(),position=geometry.attributes.position,p=new THREE.Vector3()
+    for(let i=0;i<position.count;i++){
+      p.fromBufferAttribute(position,i).applyMatrix4(meta.childToSource)
+      const target=targets.get(p.toArray().map(v=>Math.round(v*1e6)).join(','))
+      if(target){p.copy(target).applyMatrix4(meta.sourceToChild);position.setXYZ(i,p.x,p.y,p.z)}
+    }
+    geometry.computeVertexNormals();geometry.computeBoundingBox();geometry.computeBoundingSphere();geometry.boundsTree=null;geometry.computeBoundsTree?.({indirect:true})
+    pending.push({mesh,geometry,backup:{mesh,geometry:mesh.geometry,visible:mesh.visible,baseGeom:mesh.userData._baseGeom,derivedGeom:mesh.userData._derivedGeom,originalColors:mesh.userData._originalColors}})
+  }
+  for(const {mesh,geometry}of pending){mesh.geometry=geometry;mesh.userData._baseGeom=geometry;mesh.userData._derivedGeom=geometry;mesh.userData._originalColors=geometry.attributes.color?.clone()||null}
+  return pending.map(p=>p.backup)
 }

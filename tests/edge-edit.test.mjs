@@ -41,3 +41,22 @@ test('collinear rim vertices remain attached without collapsed patch faces',()=>
  for(let i=1;i<7;i++){const k=[loop.boundary[i].position.toArray().join(','),loop.boundary[i+1].position.toArray().join(',')].sort().join('|');assert.equal(directed.get(k),1)}
  for(const t of patch.triangles){const [a,b,c]=t.map(p=>new THREE.Vector3(...p.sourcePos));assert.ok(b.sub(a).cross(c.sub(a)).lengthSq()>1e-20)}
 })
+
+test('painted keyhole expands its mouth to the healthy outside rim',async()=>{
+ const {predictEdgePatch}=await import('../app/model-builder/edge-edit.mjs')
+ const {context,loop}=fixture([[0,0],[3,0],[3,1],[2,1],[2,3],[5,3],[5,1],[4,1],[4,0],[7,0],[7,2],[7,4],[7,5],[5,5],[3,5],[0,5],[0,3],[0,1]])
+ const patch=predictEdgePatch(context,loop,2,7)
+ assert.deepEqual(patch.arc[0],[3,0,0]);assert.deepEqual(patch.arc.at(-1),[4,0,0])
+ assert.ok(patch.triangles.length>0)
+})
+
+test('whole border smoothing keeps interior vertices and geometry history intact',async()=>{
+ const {smoothScanBorder}=await import('../app/model-builder/edge-edit.mjs')
+ const geometry=new THREE.BufferGeometry();geometry.setAttribute('position',new THREE.Float32BufferAttribute([0,0,0,2,0,0,2,2,0,0,2,0,1,1,1],3));geometry.setIndex([0,1,4,1,2,4,2,3,4,3,0,4]);geometry.computeVertexNormals()
+ const mesh=new THREE.Mesh(geometry),matrix=new THREE.Matrix4(),boundary=[0,1,2,3].map(nodeId=>({nodeId,position:new THREE.Vector3().fromBufferAttribute(geometry.attributes.position,nodeId)}))
+ const context={childMeta:new Map([[mesh.uuid,{mesh,childToSource:matrix,sourceToChild:matrix}]])}
+ const snapshot=Array.from(geometry.attributes.position.array),backup=smoothScanBorder(context,[{childUuid:mesh.uuid,boundary,perimeter:8}],3)
+ assert.equal(backup[0].geometry,geometry);assert.deepEqual(Array.from(geometry.attributes.position.array),snapshot)
+ assert.deepEqual(Array.from(mesh.geometry.attributes.position.array).slice(12),[1,1,1]);assert.deepEqual(Array.from(mesh.geometry.index.array),Array.from(geometry.index.array))
+ assert.ok(mesh.geometry.attributes.position.getX(0)>0)
+})
