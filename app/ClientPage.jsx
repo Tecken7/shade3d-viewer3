@@ -22,6 +22,8 @@ import { orientRepairPatch } from "./model-builder/repair-orientation.mjs"
 import { predictEdgePatch, smoothScanBorder, paintedEdgeSelection } from "./model-builder/edge-edit.mjs"
 import { fairArtifact, applySurfacePositions } from "./model-builder/surface-edit.mjs"
 import { EdgeEditOverlay, SurfaceSelectionOverlay } from "./model-builder/EdgeEditOverlay"
+import { buildTrimRegions } from "./model-builder/trim-regions.mjs"
+import { refreshLocalNormals } from "./model-builder/surface-edit.mjs"
 import { ScanBrush } from "./model-builder/ScanBrush"
 import { BuilderControls, BuilderHandle } from "./model-builder/BuilderControls"
 
@@ -865,6 +867,7 @@ function buildTrimBoundaryPlan(context, segments) {
     const split = buildTrimBoundarySplit(context, plan, triIndex, pieces)
     if (split) plan.splits.set(triIndex, split)
   }
+  plan.regions=buildTrimRegions(context,plan)
   return plan
 }
 
@@ -884,6 +887,11 @@ function resolveTrimComponentFromHit(context, plan, hit) {
   if (!context || !plan || !hit || !Number.isInteger(hit.triangleIndex)) return null
   const direct = plan.componentIds[hit.triangleIndex]
   if (direct >= 0) return direct
+  if(plan.regions?.has(hit.triangleIndex)){
+    const triangle=context.triangles[hit.triangleIndex],projection=trimTriangleProjection(triangle),point=projection.project(hit.point)
+    const region=plan.regions.get(hit.triangleIndex).find(r=>trimPointInPolygon2D(point,r.polygon.map(projection.project)))
+    return region?.component??null
+  }
   const split = plan.splits.get(hit.triangleIndex)
   if (!split) return null
   const point2 = split.projection.project(hit.point)
@@ -903,7 +911,7 @@ function interpolateTrimCorner(triangle, point) {
   const c = trimVec(triangle.corners[2].sourcePos)
   const bary = new THREE.Vector3()
   THREE.Triangle.getBarycoord(p, a, b, c, bary)
-  if (!Number.isFinite(bary.x)) bary.set(1, 0, 0)
+  if (![bary.x,bary.y,bary.z].every(Number.isFinite) || Math.min(bary.x,bary.y,bary.z)<-1e-3 || Math.max(bary.x,bary.y,bary.z)>1.001) throw new Error('Ořezová křivka nenavazuje na plochu. Posuňte body v této oblasti a zkuste ořez znovu.')
   bary.x = THREE.MathUtils.clamp(bary.x, -1e-5, 1 + 1e-5)
   bary.y = THREE.MathUtils.clamp(bary.y, -1e-5, 1 + 1e-5)
   bary.z = THREE.MathUtils.clamp(bary.z, -1e-5, 1 + 1e-5)
@@ -963,9 +971,8 @@ function createTrimRegionPreviewGeometry(context, plan, componentId, keep = true
       continue
     }
     if (component !== -2) continue
-    const polygon = trimBoundaryPolygonForComponent(plan, triIndex, componentId, keep)
-    if (!polygon) continue
-    for (const tri of triangulateTrimPolygon(triangle, polygon)) {
+    const polygons=plan.regions?plan.regions.get(triIndex)?.filter(r=>(r.component===componentId)===!!keep).map(r=>r.polygon)||[]:[trimBoundaryPolygonForComponent(plan,triIndex,componentId,keep)].filter(Boolean)
+    for (const tri of polygons.flatMap(p=>triangulateTrimPolygon(triangle,p))) {
       for (const corner of tri) positions.push(...corner.sourcePos)
     }
   }
@@ -1004,9 +1011,8 @@ function buildTrimmedGeometryForChild(context, plan, componentId, childUuid) {
       continue
     }
     if (component !== -2) continue
-    const polygon = trimBoundaryPolygonForComponent(plan, triIndex, componentId, true)
-    if (!polygon) continue
-    for (const corners of triangulateTrimPolygon(triangle, polygon)) appendTriangle(triangle, corners)
+    const polygons=plan.regions?plan.regions.get(triIndex)?.filter(r=>r.component===componentId).map(r=>r.polygon)||[]:[trimBoundaryPolygonForComponent(plan,triIndex,componentId,true)].filter(Boolean)
+    for (const corners of polygons.flatMap(p=>triangulateTrimPolygon(triangle,p))) appendTriangle(triangle, corners)
   }
 
   const geometry = new THREE.BufferGeometry()
@@ -1082,10 +1088,10 @@ function restoreTrimBackup(backup) {
 function TrimRegionPreview({ context, plan, componentId }) {
   const geometries = useMemo(() => {
     if (!context || !plan || componentId == null) return { keep: null, drop: null }
-    return {
+    try {return {
       keep: createTrimRegionPreviewGeometry(context, plan, componentId, true),
       drop: createTrimRegionPreviewGeometry(context, plan, componentId, false),
-    }
+    }}catch{return {keep:null,drop:null}}
   }, [context, plan, componentId])
   useEffect(() => () => {
     geometries.keep?.dispose?.(); geometries.drop?.dispose?.()
@@ -2736,6 +2742,8 @@ function applyRepairPatchesToObject(context, patches) {
         uvs.push(t[0], t[1])
       }
     }
+    const removedFaces=new Set(childPatches.flatMap(p=>(p.removeFaces||[]).filter(f=>f.childUuid===childUuid).map(f=>f.faceIndex)))
+    const originalBaseCount=position.count
     const baseCount = position.count
     let appendedTriangles = 0
     childPatches.forEach((patch) => {
@@ -2749,9 +2757,16 @@ function applyRepairPatchesToObject(context, patches) {
     else geometry.computeVertexNormals()
     if (color && colors.length === positions.length) geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3))
     if (uv && uvs.length * 3 === positions.length * 2) geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2))
-    if (base.groups?.length) base.groups.forEach((group) => geometry.addGroup(group.start, group.count, group.materialIndex || 0))
+    if(removedFaces.size){
+      const kept=[];for(let f=0;f<geometry.attributes.position.count/3;f++)if(f>=originalBaseCount/3||!removedFaces.has(f))kept.push(f)
+      for(const name of Object.keys(geometry.attributes)){const attribute=geometry.attributes[name],array=new attribute.array.constructor(kept.length*3*attribute.itemSize);kept.forEach((f,i)=>array.set(attribute.array.subarray(f*3*attribute.itemSize,(f+1)*3*attribute.itemSize),i*3*attribute.itemSize));geometry.setAttribute(name,new THREE.BufferAttribute(array,attribute.itemSize,attribute.normalized))}
+      geometry.clearGroups();let cursor=0
+      for(const f of kept){const group=base.groups?.find(g=>f*3>=g.start&&f*3<g.start+g.count)||patchMaterialGroups.find(g=>f*3>=g.start&&f*3<g.start+g.count),materialIndex=group?.materialIndex||0,last=geometry.groups.at(-1);if(last?.materialIndex===materialIndex)last.count+=3;else geometry.addGroup(cursor,3,materialIndex);cursor+=3}
+    }
+    else if (base.groups?.length) base.groups.forEach((group) => geometry.addGroup(group.start, group.count, group.materialIndex || 0))
     else geometry.addGroup(0, baseCount, 0)
-    patchMaterialGroups.forEach((group) => geometry.addGroup(group.start, group.count, group.materialIndex))
+    if(!removedFaces.size)patchMaterialGroups.forEach((group) => geometry.addGroup(group.start, group.count, group.materialIndex))
+    refreshLocalNormals(geometry,new Set(Array.from({length:geometry.attributes.position.count-(baseCount-removedFaces.size*3)},(_,i)=>baseCount-removedFaces.size*3+i)))
     geometry.computeBoundingBox(); geometry.computeBoundingSphere()
     try { geometry.computeBoundsTree?.({ ...ALIGNMENT_BVH_OPTIONS, indirect: true }) } catch {}
     backup.push({ mesh, geometry: original, visible: mesh.visible, originalColors: mesh.userData?._originalColors, baseGeom: mesh.userData?._baseGeom, derivedGeom: mesh.userData?._derivedGeom })
@@ -4104,7 +4119,7 @@ const CGAL_REPAIR_CONTINUITY = 1
 
 // Stejné nastavení používá i legacy fallback, aby měl při případném selhání Workeru
 // stejnou exact-surface matematiku a podobný výkon jako hlavní Best Fit engine.
-const ALIGNMENT_BVH_OPTIONS = { strategy: SAH, maxLeafTris: 8 }
+const ALIGNMENT_BVH_OPTIONS = { strategy: SAH, maxLeafTris: 8, indirect: true }
 
 function copyPositionAttributeForWorker(attribute) {
   if (!attribute?.count) return null
@@ -12136,11 +12151,35 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadArtifactPainted, setCadArtifactPainted] = useState(new Set())
   const cadPaintSelection = useMemo(()=>paintedEdgeSelection(cadEditLoops,cadEditPainted),[cadEditLoops,cadEditPainted])
   const cadEffectiveSelection = cadEditPainted.size ? cadPaintSelection : cadEditSelection
-  const cadEditPreview = useMemo(() => {
-    if (!['paint','erase'].includes(cadEditorTool) || cadEditorBusy || !cadEditContext || cadEffectiveSelection.length !== 2) return { patch: null, error: "" }
-    try { return { patch: predictEdgePatch(cadEditContext, cadEditLoops[cadEffectiveSelection[0].loop], cadEffectiveSelection[0].index, cadEffectiveSelection[1].index, cadEditBulge), error: "" } }
-    catch (error) { return { patch: null, error: error.message } }
-  }, [cadEditContext, cadEditLoops, cadEffectiveSelection, cadEditBulge, cadEditorBusy, cadEditorTool])
+  const [cadEditPreview,setCadEditPreview]=useState({patch:null,error:'',pending:false})
+  const cadEditWorkerRef=useRef(null),cadEditRequestRef=useRef(0)
+  useEffect(()=>{
+    if(!cadEditContext)return
+    const worker=new Worker(new URL('./workers/edge-edit.worker.js',import.meta.url),{type:'module'})
+    cadEditWorkerRef.current=worker
+    const positions=new Float64Array(cadEditContext.nodes.length*3),indices=new Uint32Array(cadEditContext.triangles.length*3),faceIds=new Uint32Array(cadEditContext.triangles.length),childIndices=new Uint16Array(cadEditContext.triangles.length),children=[...cadEditContext.childMeta.keys()],childMap=new Map(children.map((id,i)=>[id,i]))
+    cadEditContext.nodes.forEach((p,i)=>p.toArray(positions,i*3));cadEditContext.triangles.forEach((t,i)=>{indices.set(t.nodeIds,i*3);faceIds[i]=t.faceIndex;childIndices[i]=childMap.get(t.childUuid)})
+    const nodeColors=new Float32Array(cadEditContext.nodes.length*3),nodeUvs=new Float32Array(cadEditContext.nodes.length*2),nodeNormals=new Float32Array(cadEditContext.nodes.length*3),seen=new Set()
+    let hasColors=false,hasUvs=false
+    for(const t of cadEditContext.triangles)t.nodeIds.forEach((id,i)=>{if(seen.has(id))return;seen.add(id);const c=t.corners[i];if(c.color){nodeColors.set(c.color,id*3);hasColors=true}if(c.uv){nodeUvs.set(c.uv,id*2);hasUvs=true}if(c.sourceNormal)nodeNormals.set(c.sourceNormal,id*3)})
+    const loops=cadEditLoops.map(loop=>({childUuid:loop.childUuid,materialIndex:loop.materialIndex,boundary:loop.boundary.map(s=>({nodeId:s.nodeId,position:s.position.toArray(),normal:s.normal?.toArray()||null,color:s.color,uv:s.uv}))}))
+    worker._edgeBusy=false;worker._edgeQueued=null
+    worker.onmessage=event=>{
+      if(event.data.id===cadEditRequestRef.current)setCadEditPreview({...event.data,pending:false})
+      worker._edgeBusy=false
+      if(worker._edgeQueued){const message=worker._edgeQueued;worker._edgeQueued=null;worker._edgeBusy=true;worker.postMessage(message)}
+    }
+    worker.onerror=()=>{worker._edgeBusy=false;worker._edgeQueued=null;setCadEditPreview({patch:null,error:'Výpočet doplnění se nepodařil. Zkuste oblast označit znovu.',pending:false})}
+    worker.postMessage({type:'init',payload:{positions,indices,faceIds,childIndices,children,loops,nodeColors:hasColors?nodeColors:null,nodeUvs:hasUvs?nodeUvs:null,nodeNormals}},[positions.buffer,indices.buffer,faceIds.buffer,childIndices.buffer,nodeColors.buffer,nodeUvs.buffer,nodeNormals.buffer])
+    return()=>{worker.terminate();if(cadEditWorkerRef.current===worker)cadEditWorkerRef.current=null}
+  },[cadEditContext,cadEditLoops])
+  useEffect(()=>{
+    const id=++cadEditRequestRef.current
+    if(!['paint','erase'].includes(cadEditorTool)||cadEditorBusy||!cadEditContext||cadEffectiveSelection.length!==2){setCadEditPreview({patch:null,error:'',pending:false});if(cadEditWorkerRef.current)cadEditWorkerRef.current._edgeQueued=null;return}
+    setCadEditPreview({patch:null,error:'',pending:true})
+    const worker=cadEditWorkerRef.current,message={type:'preview',id,payload:{selection:cadEffectiveSelection,bulge:cadEditBulge}}
+    if(worker){if(worker._edgeBusy)worker._edgeQueued=message;else{worker._edgeBusy=true;worker.postMessage(message)}}
+  },[cadEditContext,cadEditLoops,cadEffectiveSelection,cadEditBulge,cadEditorBusy,cadEditorTool])
   // Upper/Lower nejsou jen názvy souborů. Typ čelisti je součást CAD workflow,
   // protože určuje stranu okluzní roviny při orientaci a později i směr báze.
   const [cadUpperUrl, setCadUpperUrl] = useState("")
@@ -18602,6 +18641,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             </div>
             {(cadUpperUrl && cadLowerUrl) && <div style={{display:"flex",gap:8,marginTop:6}}>{["upper","lower"].map(arch=><button key={arch} disabled={cadEditorBusy} onClick={()=>{const url=arch==="upper"?cadUpperUrl:cadLowerUrl; const object=modelObjectsRef.current[url]; if(object){prepareRepairVertices(object);refreshCadEdit(object);setCadActiveArch(arch);setCadFileUrl(url);setCadFileName(arch==="upper"?cadUpperName:cadLowerName);setCadEditHistory([])}}}>{arch==="upper"?"Upper":"Lower"}</button>)}</div>}
             {cadEffectiveSelection.length===2 && <label style={{display:"flex",gap:10,alignItems:"center",marginTop:8}}>Prohnutí nové hrany <input aria-label="Prohnutí nové hrany" type="range" min="-2" max="6" step="0.1" value={cadEditBulge} onChange={e=>setCadEditBulge(Number(e.target.value))}/>{cadEditBulge.toFixed(1)} mm</label>}
+            {cadEditPreview.pending&&<div role="status">Připravuji síť doplnění…</div>}
             {['paint','erase'].includes(cadEditorTool)&&cadEditPreview.error && <div role="alert" style={{color:"#fbbf24"}}>{cadEditPreview.error}</div>}
             <div style={{display:"flex",gap:8,marginTop:8,flexWrap:"wrap"}}>
               {['paint','erase'].includes(cadEditorTool)&&<button disabled={!cadEditPreview.patch||cadEditorBusy} onClick={applyCadEdgePatch}>Doplnit plochu</button>}

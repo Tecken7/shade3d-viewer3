@@ -60,3 +60,24 @@ test('whole border smoothing keeps interior vertices and geometry history intact
  assert.deepEqual(Array.from(mesh.geometry.attributes.position.array).slice(12),[1,1,1]);assert.deepEqual(Array.from(mesh.geometry.index.array),Array.from(geometry.index.array))
  assert.ok(mesh.geometry.attributes.position.getX(0)>0)
 })
+
+test('patch refinement removes long interior spans instead of only adding triangle centres',()=>{
+ const {context,loop}=fixture(),patch=buildEdgePatch(context,loop,1,4,.6),triangles=patch.triangles.map(t=>t.map(c=>new THREE.Vector3(...c.sourcePos)))
+ const lengths=triangles.flatMap(t=>t.map((p,i)=>p.distanceTo(t[(i+1)%3]))).sort((a,b)=>a-b)
+ const qualities=triangles.map(([a,b,c])=>b.clone().sub(a).cross(c.clone().sub(a)).length()/(a.distanceToSquared(b)+b.distanceToSquared(c)+c.distanceToSquared(a))).sort((a,b)=>a-b)
+ assert.ok(lengths[Math.floor(lengths.length*.9)]<patch.targetEdgeLength*1.8)
+ assert.ok(qualities[Math.floor(qualities.length*.05)]>.02)
+})
+
+test('filling a protrusion cannot add a second skin over the existing scan',()=>{
+ const {context,loop}=fixture([[0,0],[2,0],[3,-2],[4,0],[6,0],[6,5],[0,5]])
+ assert.throws(()=>buildEdgePatch(context,loop,1,3),/překrývalo/)
+})
+
+test('collision check rejects both crossing triangles and a near-parallel duplicate layer',async()=>{
+ const {assertPatchClear}=await import('../app/model-builder/patch-collision.mjs')
+ const {context,loop}=fixture()
+ const samples=points=>points.map(p=>({position:new THREE.Vector3(...p)}))
+ assert.throws(()=>assertPatchClear(context,loop,samples([[.2,.2,.001],[1.5,.2,.001],[.2,1.5,.001]]),[[0,1,2]],.15),/překrývalo/)
+ assert.throws(()=>assertPatchClear(context,loop,samples([[.2,.2,-1],[1.5,.2,1],[.2,1.5,1]]),[[0,1,2]],.15),/překrývalo/)
+})

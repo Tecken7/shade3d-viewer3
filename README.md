@@ -76,3 +76,11 @@ Nová implementace je ověřovaná na horním testovacím skenu. Artikulátory, 
 - Vyhladit celý okraj provede tři plné průchody hlavního okraje každého meshe. Vnitřní otvory a vzdálená anatomie zůstávají zachované. Úpravu lze vrátit.
 
 Vyhlazení po doplnění uchovává původní normály mimo upravené okolí. V okolí změny se normály sčítají přes geometricky společné vrcholy i na neindexované síti, aby nevznikalo ploškové stínování celého scanu. Odstranění artefaktu používá lokální harmonické vyrovnání podle pevného okolí; nevytváří novou anatomii ani nedetekuje artefakty automaticky.
+
+## Kvalita doplnění a ořezu
+
+Doplnění používá místní délku hran (0,06–0,30 mm), společné půlení hran, překlápění diagonál, slučování krátkých vnitřních hran a relaxaci. Sdílený okraj zůstává přesný. Vnitřní plocha se vyrovnává podle výšek a normál okolí. Pokud původní zahnutý lem překáží, nahrazuje se úzký pás místo přidání druhé vrstvy. Potvrzení odstraní nahrazované původní trojúhelníky a podporuje vrácení zpět.
+
+Před potvrzením se kontrolují průniky, koplanární překrytí a blízké souběžné vrstvy. Kontakty na společném švu mají toleranci 0,001 mm. Nejde o kompletní detekci všech možných samoprůniků celého vstupního scanu. Výpočet náhledu běží v pracovním vlákně; z čekajících požadavků se zpracuje jen poslední označení.
+
+Ořez zachovává identitu trojúhelníků při vytváření BVH a rozděluje i více samostatných průchodů jednou face. Nejednoznačná nebo vadná křivka se odmítne, místo exportu roztržené plochy. Testy ověřují plochu skutečné ořezové cesty a odstranění původních faces při náhradě lemu.
