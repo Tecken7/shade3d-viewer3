@@ -1,6 +1,17 @@
 import * as THREE from 'three'
 
 const key = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`
+export function paintedEdgeSelection(loops, painted) {
+  let best=[]
+  loops.forEach((loop,l)=>{
+    const ids=loop.boundary.map((_,i)=>i).filter(i=>painted.has(`${l}:${i}`))
+    if(ids.length<2||ids.length<=best.length)return
+    let gap=-1,start=0,end=0
+    ids.forEach((id,i)=>{const next=ids[(i+1)%ids.length],length=(next-id+loop.boundary.length)%loop.boundary.length;if(length>gap){gap=length;start=next;end=id}})
+    if(loop.boundary.length-gap<loop.boundary.length*.65)best=ids.map(index=>({loop:l,index,start,end}))
+  })
+  return best.length?[{loop:best[0].loop,index:best[0].start},{loop:best[0].loop,index:best[0].end}]:[]
+}
 export function selectEdgeArc(loop, first, last, alternate = false) {
   const n = loop.boundary.length, walk = step => {
     const out = []

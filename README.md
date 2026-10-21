@@ -13,12 +13,24 @@ npm run dev
 
 Otevřete http://localhost:3000/model-builder. Původní prohlížeč zůstává na `/`. Původní vstup `/?mode=cad&cadTool=model` také zůstává zachovaný.
 
+V hlavním prohlížeči tlačítko **Model Builder** přepne pracovní prostředí přímo ve stejné scéně. V dolním panelu vyberte horní a/nebo dolní čelist z již nahraných STL, PLY nebo OBJ. Při návratu do prohlížeče se obnoví původní geometrie a transformace; tiskový výsledek před návratem exportujte jako STL. Přímá stránka `/model-builder` nadále umožňuje samostatné nahrání souborů.
+
+### Štětcové úpravy scanu
+
+- **Označit doplnění:** tahem po povrchu přetřete zdravé okolí zářezu i oba jeho konce. Žlutě se označí dotčený úsek otevřeného okraje. Zelený náhled a prohnutí nové hrany lze upravit před potvrzením. Pro jiný zářez zrušte výběr a namalujte novou oblast.
+- **Vyhladit okraj / Vyrovnat okraj:** lokální zjemnění hranice nebo její přiblížení k místní přímce. Okolní anatomie mimo štětec se neposouvá.
+- **Přidávat / Odebírat / Smooth:** lokální sculpting s nastavením poloměru v mm a síly. Shift vyhlazuje, Ctrl obrací přidávání/odebírání; Alt + levé tažení otáčí modelem. Přepínač Otáčet umožňuje běžnou navigaci.
+- **Dynotopo – Constant detail:** skutečné lokální dělení a slučování hran během sculptingu. Výchozí rozlišení je 3/mm, cílová hrana přibližně 0,33 mm; vyšší číslo znamená jemnější síť. Rozlišení nezávisí na zoomu. Výpočet běží v odděleném vlákně a používá pracovní limit 750 000 trojúhelníků. Jde o vlastní browserovou implementaci, nikoli o stejný geometrický algoritmus Blenderu.
+- **Vrátit úpravu:** vrátí poslední potvrzené doplnění nebo celý tah sculptingového štětce včetně změny topologie.
+
+Pro vložený editor se posílá zpráva `ARTHETIC_MODEL_BUILDER_MODE` s `payload.active`, obdobně jako u Zarovnání. Připravené Framer komponenty LabCaseForm a LabCaseDetail přidávají tento stav do `viewerWorkspaceActive`; databáze ani ukládání původních příloh se nemění.
+
 Produkční sestavení: `npm run build`, potom `npm start`.
 
 ## Postup
 
 1. Nahrajte horní STL, PLY nebo OBJ.
-2. V kroku „Úprava“ lze doplnit zářezy spojené s otevřeným okrajem. Klikněte na dva konce zářezu u modré hrany, posuvníkem nastavte prohnutí nové hrany a zkontrolujte zelený náhled. „Doplnit plochu“ přidá skutečnou geometrii s návazností a orientací podle původních hran; „Vrátit doplnění“ vrací poslední zásah. Původní scan se neposouvá a hlavní otevřená hranice zůstává otevřená. Nevhodný nebo křížící se výběr se odmítne; zvolte menší úsek nebo upravte prohnutí. Krok lze přeskočit. Pak ořízněte scan stávajícím nástrojem, nebo použijte „Nechat vše“ u připraveného skenu.
+2. V kroku „Úprava“ lze doplnit zářezy spojené s otevřeným okrajem. Štětcem označte zdravé okolí a oba konce zářezu, posuvníkem nastavte prohnutí nové hrany a zkontrolujte zelený náhled. „Doplnit plochu“ přidá skutečnou geometrii s návazností a orientací podle původních hran; „Vrátit doplnění“ vrací poslední zásah. Původní scan se neposouvá a hlavní otevřená hranice zůstává otevřená. Nevhodný nebo křížící se výběr se odmítne; zvolte menší úsek nebo upravte prohnutí. Krok lze přeskočit. Pak ořízněte scan stávajícím nástrojem, nebo použijte „Nechat vše“ u připraveného skenu.
 3. Před hledáním děr se automaticky zkontrolují a bezpečně sloučí vrcholy do vzdálenosti 0,005 mm. Používá se skutečná prostorová vzdálenost, kontrola zachování topologie a odstranění zkolabovaných či duplicitních trojúhelníků. Barvy, UV a materiály zůstávají zachované; původní soubor na disku se nemění. Sloučení lze vrátit stejně jako opravu. Potom opravte díry. Hlavní otevřená hranice pro bázi se zachovává.
 4. Určete tři body okluzní roviny a potvrďte orientaci.
 5. Vytvořte náhled báze. Domluvené výchozí hodnoty: celková výška 25 mm, dutý model otevřený zespodu, stěna 2,5 mm, spodní bevel 1 mm / 45°, vyhlazení okraje 0,8 mm, zaoblení napojení scanu v pásu 1 mm, dva rovnoběžné odtokové zářezy Ø 4,5 mm s počáteční hloubkou řezu 8 mm s automatickým prodloužením pro celý průřez a středem 1,5 mm nad spodkem (proříznou i spodní bevel). Báze nemá rozšíření ani infill.

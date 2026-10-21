@@ -19,8 +19,9 @@ import * as dicomParser from "dicom-parser"
 import { DEFAULTS as BUILDER_DEFAULTS } from "./model-builder/defaults.mjs"
 import { prepareRepairVertices } from "./model-builder/mesh-preflight.mjs"
 import { orientRepairPatch } from "./model-builder/repair-orientation.mjs"
-import { buildEdgePatch } from "./model-builder/edge-edit.mjs"
+import { buildEdgePatch, paintedEdgeSelection } from "./model-builder/edge-edit.mjs"
 import { EdgeEditOverlay } from "./model-builder/EdgeEditOverlay"
+import { ScanBrush } from "./model-builder/ScanBrush"
 import { BuilderControls, BuilderHandle } from "./model-builder/BuilderControls"
 
 // DICOM podpora vyžaduje v projektu balíčky: fflate a dicom-parser.
@@ -11749,9 +11750,13 @@ function CadOrientationMiniPlaceholder({ label }) {
 }
 
 export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = false } = {}) {
-  const hideSidebar = getParam("hideSidebar") === "1";
-  const cadStandalone = forceCadMode || (getParam("mode") === "cad" && (getParam("cadTool") || "model") === "model"); // ÚPRAVA 1: Zjištění, jestli máme schovat levý panel
-  const alignmentDemoStandalone = forceAlignmentDemo || getParam("mode") === "alignment-demo"
+  const [clientReady, setClientReady] = useState(false)
+  useEffect(()=>setClientReady(true),[])
+  const hideSidebar = clientReady && getParam("hideSidebar") === "1";
+  const [cadEmbedded, setCadEmbedded] = useState(false)
+  const cadSessionRef = useRef(null)
+  const cadStandalone = cadEmbedded || forceCadMode || (clientReady && getParam("mode") === "cad" && (getParam("cadTool") || "model") === "model")
+  const alignmentDemoStandalone = forceAlignmentDemo || (clientReady && getParam("mode") === "alignment-demo")
   const standaloneToolMode = cadStandalone || alignmentDemoStandalone
   const [sceneIntensity, setSceneIntensity] = useState(1)
   const [highlightIntensity, setHighlightIntensity] = useState(1)
@@ -12123,11 +12128,17 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadEditSelection, setCadEditSelection] = useState([])
   const [cadEditBulge, setCadEditBulge] = useState(0)
   const [cadEditHistory, setCadEditHistory] = useState([])
+  const [cadEditorTool, setCadEditorTool] = useState("paint")
+  const [cadEditorBusy, setCadEditorBusy] = useState(false)
+  const [cadBrushOptions, setCadBrushOptions] = useState({radius:2,strength:.3,dyntopo:false,resolution:3})
+  const [cadEditPainted, setCadEditPainted] = useState(new Set())
+  const cadPaintSelection = useMemo(()=>paintedEdgeSelection(cadEditLoops,cadEditPainted),[cadEditLoops,cadEditPainted])
+  const cadEffectiveSelection = cadEditPainted.size ? cadPaintSelection : cadEditSelection
   const cadEditPreview = useMemo(() => {
-    if (!cadEditContext || cadEditSelection.length !== 2) return { patch: null, error: "" }
-    try { return { patch: buildEdgePatch(cadEditContext, cadEditLoops[cadEditSelection[0].loop], cadEditSelection[0].index, cadEditSelection[1].index, cadEditBulge), error: "" } }
+    if (!cadEditContext || cadEffectiveSelection.length !== 2) return { patch: null, error: "" }
+    try { return { patch: buildEdgePatch(cadEditContext, cadEditLoops[cadEffectiveSelection[0].loop], cadEffectiveSelection[0].index, cadEffectiveSelection[1].index, cadEditBulge), error: "" } }
     catch (error) { return { patch: null, error: error.message } }
-  }, [cadEditContext, cadEditLoops, cadEditSelection, cadEditBulge])
+  }, [cadEditContext, cadEditLoops, cadEffectiveSelection, cadEditBulge])
   // Upper/Lower nejsou jen názvy souborů. Typ čelisti je součást CAD workflow,
   // protože určuje stranu okluzní roviny při orientaci a později i směr báze.
   const [cadUpperUrl, setCadUpperUrl] = useState("")
@@ -12369,6 +12380,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     }
     return () => window.removeEventListener("message", onMessage)
   }, [])
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.parent || window.parent === window) return
+    window.parent.postMessage({ type: "ARTHETIC_MODEL_BUILDER_MODE", payload: { active: cadStandalone } }, "*")
+  }, [cadStandalone])
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.parent || window.parent === window) return
@@ -13615,6 +13631,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [createTrimmedExport, editorCapabilities.canSaveTrimmedToCase])
 
   const resetCadBuilder = useCallback(() => {
+    if(cadEmbedded&&cadSessionRef.current){restoreTrimBackup(cadSessionRef.current.backup);setModelTransforms(cadSessionRef.current.transforms)}
+    setCadEditContext(null);setCadEditLoops([]);setCadEditHistory([]);setCadEditSelection([]);setCadEditPainted(new Set())
     builderWorkerRef.current?.terminate()
     builderWorkerRef.current = null
     setBuilderDragging(false)
@@ -13663,14 +13681,46 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setRepairHiddenBottomBoundary(null)
     setRepairPreviewPatch(null)
     setRepairMessage("")
+    if (!cadEmbedded) {
     setFiles([])
     setColors([]); setOpacities([]); setVisibles([]); setRoughnesses([]); setMetalnesses([]); setVertexColors([]); setWireframes([]); setGhostModes([])
     setModelTransforms({})
     meshesRef.current = {}
     modelObjectsRef.current = {}
+    }
     setDidInitialFrame(false)
     setInitialCameraState(null)
-  }, [])
+  }, [cadEmbedded])
+
+  const openCadEmbedded = useCallback(() => {
+    const backup = []
+    Object.values(modelObjectsRef.current).forEach(object => object.traverse(mesh => {
+      if (mesh.isMesh) backup.push({ mesh, geometry:mesh.geometry, visible:mesh.visible, baseGeom:mesh.userData._baseGeom, derivedGeom:mesh.userData._derivedGeom, originalColors:mesh.userData._originalColors })
+    }))
+    cadSessionRef.current = { backup, transforms:{...modelTransforms}, rootPosition:rootGroupRef.current?.position.clone(), spin:isAutoRotating }
+    setCadUpperUrl(""); setCadLowerUrl(""); setCadFileUrl(""); setCadUpperName(""); setCadLowerName("")
+    setCadStage("scan"); setCadEmbedded(true); setIsAutoRotating(false)
+    setTrimMode(false); setRepairMode(false); setAlignmentMode(false)
+    setHeatmapMenuOpen(false); setComparisonMenuOpen(false); setShowHeatmap(false); setShowComparison(false)
+    setCadMessage("Vyberte horní a/nebo dolní scan z nahraných modelů.")
+  }, [modelTransforms, isAutoRotating])
+  const closeCadEmbedded = useCallback(() => {
+    if(cadBusy||cadEditorBusy) return
+    const session=cadSessionRef.current
+    builderWorkerRef.current?.terminate(); builderWorkerRef.current=null
+    if(session){ restoreTrimBackup(session.backup);setModelTransforms(session.transforms);if(session.rootPosition)rootGroupRef.current?.position.copy(session.rootPosition);setIsAutoRotating(session.spin) }
+    setCadPreviewActive(false);setCadPreviewGeometry(previous=>{previous?.dispose();return null})
+    setTrimMode(false);setRepairMode(false);setCadEmbedded(false);setCadEditContext(null);setCadEditLoops([]);setCadEditSelection([]);setCadEditHistory([])
+    setCadOrientationPoints([]);setCadOrientationPrepared(false);setCadStage("scan")
+    cadSessionRef.current=null
+  }, [cadBusy,cadEditorBusy])
+  const selectCadExisting = useCallback((arch,url) => {
+    const file=files.find(f=>f.url===url)
+    if(arch==="upper"){setCadUpperUrl(url);setCadUpperName(file?.rawName||file?.name||"")}
+    else {setCadLowerUrl(url);setCadLowerName(file?.rawName||file?.name||"")}
+    setCadArchRepairDone(previous=>({...previous,[arch]:false}))
+    setCadMessage("Scany jsou připravené pro Model Builder. Původní modely zůstanou po zavření nástroje zachované.")
+  }, [files])
 
   const activateCadArch = useCallback((arch, options = {}) => {
     const url = arch === "upper" ? cadUpperUrl : cadLowerUrl
@@ -14227,8 +14277,24 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadEditContext(context)
     setCadEditLoops(loops)
     setCadEditSelection([])
+    setCadEditPainted(new Set())
     setCadEditBulge(0)
   }, [])
+  const paintCadEdge = useCallback((point,radius) => {
+    setCadEditPainted(previous=>{
+      const next=new Set(previous)
+      cadEditLoops.forEach((loop,l)=>loop.boundary.forEach((sample,i)=>{if(sample.position.distanceTo(point)<=radius)next.add(`${l}:${i}`)}))
+      return next.size===previous.size?previous:next
+    })
+  }, [cadEditLoops])
+  const startCadSculpt = useCallback(mesh=>({mesh,geometry:mesh.geometry,visible:mesh.visible,baseGeom:mesh.userData._baseGeom,derivedGeom:mesh.userData._derivedGeom,originalColors:mesh.userData._originalColors}),[])
+  const endCadSculpt = useCallback((backup,changed,cancelled=false)=>{
+    if(!backup)return
+    if(changed&&!cancelled)setCadEditHistory(previous=>[...previous,[backup]])
+    else restoreTrimBackup([backup])
+    setCadEditSelection([]);setCadEditPainted(new Set())
+    if(cancelled)refreshCadEdit(cadEditContext.sourceObject)
+  },[cadEditContext,refreshCadEdit])
   const beginCadEditStage = useCallback(async () => {
     const arch = cadUpperUrl ? "upper" : "lower"
     const url = arch === "upper" ? cadUpperUrl : cadLowerUrl
@@ -14238,13 +14304,15 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadMessage("Připravuji otevřené okraje scanu…")
     try {
       await repairWaitForBusyPaint()
+      if(cadSessionRef.current)object.traverse(mesh=>{if(mesh.isMesh&&!cadSessionRef.current.backup.some(item=>item.mesh===mesh))cadSessionRef.current.backup.push({mesh,geometry:mesh.geometry,visible:mesh.visible,baseGeom:mesh.userData._baseGeom,derivedGeom:mesh.userData._derivedGeom,originalColors:mesh.userData._originalColors})})
       prepareRepairVertices(object)
       refreshCadEdit(object)
       setCadEditHistory([])
       setCadActiveArch(arch); setCadFileUrl(url)
       setCadFileName(arch === "upper" ? cadUpperName : cadLowerName)
       setCadStage("edit"); setIsAutoRotating(false)
-      setCadMessage("Úprava · klikněte na dva konce zářezu u zvýrazněného okraje. Tažením stále otáčíte model.")
+      setCadEditorTool("paint")
+      setCadMessage("Úprava · štětcem označte okolí zářezu nebo zvolte nástroj pro okraj a sculpting. Alt + tažení otáčí modelem.")
     } catch(error) { setCadMessage(error.message) }
     finally { setCadBusy(false) }
   }, [cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName, cadBusy, refreshCadEdit])
@@ -17414,22 +17482,20 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       </div>
 
       <div style={{ width: dicomLayoutActive ? 120 : 270, display: isMobile ? "none" : "block" }}>
-        <a
-          href="/model-builder"
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{ ...viewerToolbarButtonStyle(), textDecoration: "none" }}
-          title="Otevřít Model Builder v nové kartě · úprava scanu, dutá báze, odtokové otvory a popisek"
+        <button
+          onClick={openCadEmbedded}
+          style={viewerToolbarButtonStyle()}
+          title="Vytvořit tiskový model z nahraných scanů"
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="M4 9l8-5 8 5v9l-8 4-8-4V9z"/>
             <path d="M4 9l8 4 8-4M12 13v9M4 15l8 4 8-4"/>
           </svg>
           Model Builder
-        </a>
+        </button>
       </div>
 
-      <style>{`
+      <style dangerouslySetInnerHTML={{__html:`
         @keyframes artheticAnalysisMenuIn { from { opacity:0; transform:translateY(-5px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
         @keyframes artheticAlignMenuIn { from { opacity:0; transform:translateY(-4px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
         @keyframes artheticAnalysisSpin { to { transform:rotate(360deg); } }
@@ -17449,7 +17515,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         .sidebar input[type="range"] { accent-color:#a3a3a3; }
         .sidebar::-webkit-scrollbar { width:6px; }
         .sidebar::-webkit-scrollbar-thumb { background:rgba(255,255,255,.10); border-radius:999px; }
-      `}</style>
+      `}} />
 
       <div style={{
         width: isMobile ? "100%" : (dicomLayoutActive ? 120 : 270),
@@ -18475,10 +18541,13 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             </div>
           </div>
 
-          <button type="button" onClick={resetCadBuilder} style={{
+          <div style={{display:"flex",gap:6}}>
+          {cadEmbedded && <button type="button" onClick={closeCadEmbedded} disabled={cadBusy||cadEditorBusy} style={{padding:"0 10px",borderRadius:9,border:"1px solid #444",background:"#222",color:"#ddd",cursor:"pointer"}}>Zpět do prohlížeče</button>}
+          <button type="button" onClick={resetCadBuilder} disabled={cadBusy||cadEditorBusy} style={{
             height:31, padding:"0 10px", borderRadius:9, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.035)",
             color:"#9a9a9a", fontSize:9, fontWeight:700, cursor:"pointer", whiteSpace:"nowrap",
           }}>Nový model</button>
+          </div>
         </div>
 
         <div style={{ height:1, margin:"9px 0", background:"rgba(255,255,255,.065)" }} />
@@ -18486,7 +18555,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         {cadStage === "scan" && (
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
             <div style={{ color:"#858585", fontSize:9.5, lineHeight:1.45, minWidth:0 }}>
-              Nahrajte <span style={{ color:cadUpperUrl?"#d8d8d8":"#8a8a8a", fontWeight:720 }}>Upper</span> a/nebo <span style={{ color:cadLowerUrl?"#d8d8d8":"#8a8a8a", fontWeight:720 }}>Lower</span>. Typ čelisti určuje správnou stranu okluzní roviny. {cadLoadedArchCount ? `${cadLoadedArchCount}/2 načteno.` : ""}
+              {cadEmbedded ? "Vyberte z nahraných modelů " : "Nahrajte "}<span style={{ color:cadUpperUrl?"#d8d8d8":"#8a8a8a", fontWeight:720 }}>Upper</span> a/nebo <span style={{ color:cadLowerUrl?"#d8d8d8":"#8a8a8a", fontWeight:720 }}>Lower</span>. Typ čelisti určuje správnou stranu okluzní roviny. {cadLoadedArchCount ? `${cadLoadedArchCount}/2 načteno.` : ""}
             </div>
             {cadLoadedArchCount > 0 && (
               <button className="artheticCadPrimary artheticCadReady" type="button" onClick={beginCadEditStage} disabled={cadBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:cadBusy?"wait":"pointer", whiteSpace:"nowrap" }}>
@@ -18497,16 +18566,27 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         )}
 
         {cadStage === "edit" && (
-          <div className="artheticEdgeEdit" style={{fontSize:11,color:"#ccc",lineHeight:1.6}}>
-            <div>Označte dvěma kliknutími konce zářezu na modrém okraji scanu. Zelená plocha ukazuje doplnění; původní scan se neposouvá.</div>
+          <div className="artheticEdgeEdit" role="region" aria-label="Úprava scanu" style={{position:"absolute",top:120,left:"calc(-50vw + 50% + 16px)",width:285,boxSizing:"border-box",maxHeight:"calc(100vh - 155px)",overflowY:"auto",padding:14,borderRadius:15,background:"rgba(12,12,12,.96)",border:"1px solid #333",fontSize:11,color:"#ccc",lineHeight:1.6}}>
+            <div style={{fontWeight:750,fontSize:13,marginBottom:8}}>Úprava scanu</div>
+            <div>Štětcem přetřete okolí zářezu včetně obou jeho konců. Žlutě se označí hrany pro doplnění a zeleně nová plocha. Alt + tažení otáčí model; Shift při sculptingu vyhlazuje a Ctrl obrátí přidávání/odebírání.</div>
+            <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:8}}>
+              {[["navigate","Otáčet"],["paint","Označit doplnění"],["edge","Vyhladit okraj"],["edgeFlatten","Vyrovnat okraj"],["add","Přidávat"],["subtract","Odebírat"],["smooth","Smooth"]].map(([tool,label])=><button key={tool} aria-pressed={cadEditorTool===tool} disabled={cadEditorBusy} onClick={()=>{if(tool==='paint'&&cadEditorTool!=='paint'&&cadEditContext)refreshCadEdit(cadEditContext.sourceObject);setCadEditorTool(tool)}} style={{background:cadEditorTool===tool?"#215747":"#222",borderColor:cadEditorTool===tool?"#75c6a6":"#444"}}>{label}</button>)}
+            </div>
+            <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap",marginTop:8}}>
+              <label>Poloměr <input aria-label="Poloměr štětce" type="range" min="0.3" max="12" step="0.1" value={cadBrushOptions.radius} disabled={cadEditorBusy} onChange={e=>setCadBrushOptions(p=>({...p,radius:Number(e.target.value)}))}/>{cadBrushOptions.radius.toFixed(1)} mm</label>
+              <label>Síla <input aria-label="Síla štětce" type="range" min="0.02" max="1" step="0.01" value={cadBrushOptions.strength} disabled={cadEditorBusy} onChange={e=>setCadBrushOptions(p=>({...p,strength:Number(e.target.value)}))}/>{Math.round(cadBrushOptions.strength*100)} %</label>
+              <label><input type="checkbox" checked={cadBrushOptions.dyntopo} disabled={cadEditorBusy} onChange={e=>setCadBrushOptions(p=>({...p,dyntopo:e.target.checked}))}/> Dynotopo · Constant detail</label>
+              <label>Rozlišení <input aria-label="Rozlišení dynotopo" type="number" min="0.5" max="12" step="0.5" value={cadBrushOptions.resolution} disabled={cadEditorBusy} style={{width:50,color:"#eee",background:"#222",border:"1px solid #555",padding:4}} onChange={e=>setCadBrushOptions(p=>({...p,resolution:Math.max(.5,Math.min(12,Number(e.target.value)||3))}))}/> /mm · ~{(1/cadBrushOptions.resolution).toFixed(2)} mm</label>
+            </div>
             {(cadUpperUrl && cadLowerUrl) && <div style={{display:"flex",gap:8,marginTop:6}}>{["upper","lower"].map(arch=><button key={arch} onClick={()=>{const url=arch==="upper"?cadUpperUrl:cadLowerUrl; const object=modelObjectsRef.current[url]; if(object){prepareRepairVertices(object);refreshCadEdit(object);setCadActiveArch(arch);setCadFileUrl(url);setCadFileName(arch==="upper"?cadUpperName:cadLowerName);setCadEditHistory([])}}}>{arch==="upper"?"Upper":"Lower"}</button>)}</div>}
-            {cadEditSelection.length===2 && <label style={{display:"flex",gap:10,alignItems:"center",marginTop:8}}>Prohnutí nové hrany <input aria-label="Prohnutí nové hrany" type="range" min="-2" max="6" step="0.1" value={cadEditBulge} onChange={e=>setCadEditBulge(Number(e.target.value))}/>{cadEditBulge.toFixed(1)} mm</label>}
-            {cadEditPreview.error && <div role="alert" style={{color:"#fbbf24"}}>{cadEditPreview.error}</div>}
+            {cadEffectiveSelection.length===2 && <label style={{display:"flex",gap:10,alignItems:"center",marginTop:8}}>Prohnutí nové hrany <input aria-label="Prohnutí nové hrany" type="range" min="-2" max="6" step="0.1" value={cadEditBulge} onChange={e=>setCadEditBulge(Number(e.target.value))}/>{cadEditBulge.toFixed(1)} mm</label>}
+            {cadEditorTool==='paint'&&cadEditPreview.error && <div role="alert" style={{color:"#fbbf24"}}>{cadEditPreview.error}</div>}
             <div style={{display:"flex",gap:8,marginTop:8,flexWrap:"wrap"}}>
-              <button disabled={!cadEditPreview.patch} onClick={applyCadEdgePatch}>Doplnit plochu</button>
-              <button disabled={!cadEditSelection.length} onClick={()=>setCadEditSelection([])}>Zrušit výběr</button>
-              <button disabled={!cadEditHistory.length} onClick={undoCadEdgePatch}>Vrátit doplnění</button>
-              <button onClick={()=>{setCadEditSelection([]);beginCadTrimStage()}}>Pokračovat · Ořez</button>
+              <button disabled={cadEditorTool!=='paint'||!cadEditPreview.patch||cadEditorBusy} onClick={applyCadEdgePatch}>Doplnit plochu</button>
+              <button disabled={(!cadEditSelection.length&&!cadEditPainted.size)||cadEditorBusy} onClick={()=>{setCadEditSelection([]);setCadEditPainted(new Set())}}>Zrušit výběr</button>
+              <button disabled={!cadEditHistory.length||cadEditorBusy} onClick={undoCadEdgePatch}>Vrátit úpravu</button>
+              <button disabled={cadEditorBusy} onClick={()=>{setCadEditSelection([]);beginCadTrimStage()}}>Pokračovat · Ořez</button>
+              {cadEditorBusy&&<span role="status">Přepočítávám tah štětce…</span>}
             </div>
           </div>
         )}
@@ -18643,7 +18723,16 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
       {cadStage === "base" && <BuilderControls options={builderOptions} change={changeBuilderOptions} selected={builderSelected} select={setBuilderSelected} placing={builderPlacing} setPlacing={setBuilderPlacing} dirty={builderDirty} busy={cadBusy} cancel={cancelBuilder} hasPreview={cadPreviewActive} />}
       {cadStage === "result" && <button type="button" onClick={() => setCadStage("base")} style={{ position: "absolute", top: 160, right: 18, zIndex: 80, padding: 12, background: "#333", color: "white", border: "1px solid #555", borderRadius: 8, cursor: "pointer" }}>Zpět k nastavení modelu</button>}
-      {cadStage === "scan" && (
+      {cadStage === "scan" && cadEmbedded && (
+        <div style={{position:"absolute",bottom:24,left:"50%",transform:"translateX(-50%)",zIndex:20,width:"min(740px,calc(100vw - 32px))",padding:20,borderRadius:16,background:"rgba(15,15,15,.95)",border:"1px solid #333",color:"#ddd"}}>
+          <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>Vyberte scany pro Model Builder</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+            {[{arch:"upper",label:"Horní čelist · Upper",value:cadUpperUrl,other:cadLowerUrl},{arch:"lower",label:"Dolní čelist · Lower",value:cadLowerUrl,other:cadUpperUrl}].map(item=><label key={item.arch} style={{display:"grid",gap:8,fontSize:12}}>{item.label}<select aria-label={item.label} value={item.value} onChange={event=>selectCadExisting(item.arch,event.target.value)} style={{padding:12,borderRadius:9,color:"#eee",background:"#222",border:"1px solid #444"}}><option value="">Vybrat nahraný scan…</option>{analysisEligibleFiles.filter(f=>f.url!==item.other).map(f=><option key={f.url} value={f.url}>{f.rawName||f.name}</option>)}</select></label>)}
+          </div>
+          {!analysisEligibleFiles.length && <p style={{fontSize:12,color:"#aaa"}}>Vraťte se do prohlížeče a nejprve nahrajte STL, PLY nebo OBJ scan.</p>}
+        </div>
+      )}
+      {cadStage === "scan" && !cadEmbedded && (
         <div style={{ position:"absolute", inset:0, zIndex:6, display:"grid", placeItems:"center", pointerEvents:"none", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif" }}>
           <div style={{ pointerEvents:"auto", width:"min(760px, calc(100vw - 44px))", padding:"22px", borderRadius:18, border:"1px solid rgba(255,255,255,.10)", background:"rgba(12,12,12,.84)", boxShadow:"0 24px 80px rgba(0,0,0,.42)", backdropFilter:"blur(18px)" }}>
             <div style={{ color:"#ededed", fontSize:13, fontWeight:760, textAlign:"center" }}>Vyberte čelisti</div>
@@ -20750,7 +20839,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             ))}
           </Suspense>
 
-          {cadStandalone && cadStage === "edit" && <EdgeEditOverlay context={cadEditContext} loops={cadEditLoops} selection={cadEditSelection} patch={cadEditPreview.patch} onPick={event=>handleCadEditClick(cadFileUrl,event)}/>}
+          {cadStandalone && cadStage === "edit" && <>{cadEditorTool==='paint'&&<EdgeEditOverlay context={cadEditContext} loops={cadEditLoops} selection={cadEffectiveSelection} patch={cadEditPreview.patch} picking={false} painted={cadEditPainted}/>}<ScanBrush context={cadEditContext} tool={cadEditorTool} options={cadBrushOptions} paint={paintCadEdge} onStart={startCadSculpt} onEnd={endCadSculpt} onBusy={setCadEditorBusy} onMessage={setCadMessage} controlsRef={trackballRef}/></>}
           {cadStandalone && cadStage === "orient" && !cadOrientationPrepared && cadOrientationPoints.map((point, index) => (
             <AlignmentMarker key={`cad-orient-${index}`} point={point} index={index} radius={cadMarkerRadius} />
           ))}
@@ -20938,7 +21027,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           />
         )}
 
-        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} ref={trackballRef} target={cameraTarget} enabled={!builderDragging && !builderPlacing && !sliceOverlayInteracting && !alignmentBusy && !cadBusy && trimDraggingPoint == null && !trimBusy} onInteractionChange={handleCameraInteraction} />
+        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} ref={trackballRef} target={cameraTarget} enabled={!(cadStandalone&&cadStage==='edit'&&cadEditorTool!=='navigate') && !builderDragging && !builderPlacing && !sliceOverlayInteracting && !alignmentBusy && !cadBusy && trimDraggingPoint == null && !trimBusy} onInteractionChange={handleCameraInteraction} />
         <RightButtonPan setTarget={setCameraTarget} trackballRef={trackballRef} onInteractionChange={handleCameraInteraction} />
       </Canvas>
 
