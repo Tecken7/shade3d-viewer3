@@ -18,10 +18,11 @@ V hlavním prohlížeči tlačítko **Model Builder** přepne pracovní prostře
 ### Štětcové úpravy scanu
 
 - **Označit doplnění:** tahem po povrchu přetřete zdravé okolí zářezu i oba jeho konce. Žlutě se označí dotčený úsek otevřeného okraje. Zelený náhled a prohnutí nové hrany lze upravit před potvrzením. Pro jiný zářez zrušte výběr a namalujte novou oblast.
-- **Vyhladit okraj / Vyrovnat okraj:** lokální zjemnění hranice nebo její přiblížení k místní přímce. Okolní anatomie mimo štětec se neposouvá.
+- **Vyhladit celý okraj:** tři průchody s fyzickým dosahem 1,2 mm srovnají obrys bez závislosti na hustotě sítě. Posun se plynule rozloží do pásu 0,8 mm. Vyrovnat okraj zůstává lokálním štětcem.
 - **Přidávat / Odebírat / Smooth:** lokální sculpting s nastavením poloměru v mm a síly. Shift vyhlazuje, Ctrl obrací přidávání/odebírání; Alt + levé tažení otáčí modelem. Přepínač Otáčet umožňuje běžnou navigaci.
 - **Plynulý sculpting:** přidávání, odebírání a smoothing používají stávající síť. Dynotopo je z rozhraní odstraněné kvůli prodlevám na hustých scanech; pracovní vlákno změny topologie při sculptingu nespouští.
-- **Vrátit úpravu:** vrátí poslední potvrzené doplnění nebo celý tah sculptingového štětce včetně změny topologie.
+- **Označit artefakt / Odstranit artefakt:** přetřete výstupek a malé okolí. Fialová plocha ukáže výběr; Ctrl ubírá. Potvrzení vyrovná označenou oblast podle neoznačeného okolí včetně otevřeného okraje. Výslednou úpravu lze vrátit.
+- **Vrátit úpravu:** vrátí doplnění, vyhlazení obrysu, odstranění artefaktu i celý tah sculptingu.
 
 Pro vložený editor se posílá zpráva `ARTHETIC_MODEL_BUILDER_MODE` s `payload.active`, obdobně jako u Zarovnání. Připravené Framer komponenty LabCaseForm a LabCaseDetail přidávají tento stav do `viewerWorkspaceActive`; databáze ani ukládání původních příloh se nemění.
 
@@ -73,3 +74,5 @@ Nová implementace je ověřovaná na horním testovacím skenu. Artikulátory, 
 - Odznačovat lze samostatnou gumou nebo podržením Ctrl při označování.
 - Náhled doplnění po dokončení tahu hledá blízké zdravé okraje ústí zářezu; u zahnutého okraje může automaticky vysunout novou hranu. Před potvrzením je plocha zeleně viditelná.
 - Vyhladit celý okraj provede tři plné průchody hlavního okraje každého meshe. Vnitřní otvory a vzdálená anatomie zůstávají zachované. Úpravu lze vrátit.
+
+Vyhlazení po doplnění uchovává původní normály mimo upravené okolí. V okolí změny se normály sčítají přes geometricky společné vrcholy i na neindexované síti, aby nevznikalo ploškové stínování celého scanu. Odstranění artefaktu používá lokální harmonické vyrovnání podle pevného okolí; nevytváří novou anatomii ani nedetekuje artefakty automaticky.

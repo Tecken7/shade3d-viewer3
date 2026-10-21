@@ -36,7 +36,7 @@ export function ScanBrush({context,tool,options,paint,onStart,onEnd,onBusy,onMes
       normal.transformDirection(hit.object.matrixWorld).transformDirection(context.sourceObject.matrixWorld.clone().invert())
       const quaternion=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1),normal)
       setCursor({point:sourcePoint.toArray(),quaternion})
-      if(['paint','erase'].includes(config.tool)) {config.paint(sourcePoint,config.options.radius,config.tool==='erase'||e.ctrlKey);return}
+      if(['paint','erase','artifact'].includes(config.tool)) {config.paint(sourcePoint,config.options.radius,config.tool==='erase'||e.ctrlKey,hit);return}
       if(!stroke||hit.object!==stroke.mesh)return
       const local=stroke.mesh.worldToLocal(hit.point.clone())
       const scale=stroke.mesh.getWorldScale(new THREE.Vector3()),unit=Math.max(.0001,(scale.x+scale.y+scale.z)/3)
@@ -56,7 +56,7 @@ export function ScanBrush({context,tool,options,paint,onStart,onEnd,onBusy,onMes
       const hit=hitAt(e);if(!hit)return
       e.preventDefault();e.stopImmediatePropagation();canvas.setPointerCapture(e.pointerId)
       if(config.controlsRef.current)config.controlsRef.current.enabled=false
-      if(['paint','erase'].includes(config.tool)){stroke={paint:true,changed:false};busy(true);dab(hit,e);return}
+      if(['paint','erase','artifact'].includes(config.tool)){stroke={paint:true,changed:false};busy(true);dab(hit,e);return}
       const mesh=hit.object,g=mesh.userData._baseGeom?.isBufferGeometry?mesh.userData._baseGeom:mesh.geometry
       const backup=config.onStart(mesh)
       stroke={mesh,backup,changed:false};busy(true)
@@ -112,5 +112,5 @@ export function ScanBrush({context,tool,options,paint,onStart,onEnd,onBusy,onMes
     return()=>{unlock();worker?.terminate();canvas.removeEventListener('pointerdown',down,true);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',cancel)}
   },[context,camera,gl])
   if(!cursor||tool==='navigate')return null
-  return <group matrix={context.sourceObject.matrix} matrixAutoUpdate={false}><mesh position={cursor.point} quaternion={cursor.quaternion} raycast={noRaycast} renderOrder={2100}><ringGeometry args={[options.radius*.97,options.radius,64]}/><meshBasicMaterial color={tool==='erase'?'#fb7185':tool==='paint'?'#fbbf24':tool==='subtract'?'#fb7185':'#38bdf8'} side={THREE.DoubleSide} depthTest={false}/></mesh></group>
+  return <group matrix={context.sourceObject.matrix} matrixAutoUpdate={false}><mesh position={cursor.point} quaternion={cursor.quaternion} raycast={noRaycast} renderOrder={2100}><ringGeometry args={[options.radius*.97,options.radius,64]}/><meshBasicMaterial color={tool==='artifact'?'#c4b5fd':tool==='erase'?'#fb7185':tool==='paint'?'#fbbf24':tool==='subtract'?'#fb7185':'#38bdf8'} side={THREE.DoubleSide} depthTest={false}/></mesh></group>
 }

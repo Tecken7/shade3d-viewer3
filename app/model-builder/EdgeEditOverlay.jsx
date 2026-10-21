@@ -48,3 +48,14 @@ export function EdgeEditOverlay({ context, loops, selection, patch, onPick, pick
     {patch&&<><mesh geometry={geometry} raycast={()=>null} renderOrder={1999}><meshStandardMaterial color="#49dbb1" side={THREE.DoubleSide} transparent opacity={0.8} polygonOffset polygonOffsetFactor={-2}/></mesh><EdgeLine points={patch.bridge} color="#a7f3d0"/><EdgeLine points={patch.arc} color="#fbbf24"/></>}
   </group>
 }
+
+export function SurfaceSelectionOverlay({context,selected}) {
+  const geometry=useMemo(()=>{
+    const positions=[]
+    for(const id of selected)context?.triangles[id]?.corners.forEach(c=>positions.push(...c.sourcePos))
+    return new THREE.BufferGeometry().setAttribute('position',new THREE.Float32BufferAttribute(positions,3))
+  },[context,selected])
+  useEffect(()=>()=>geometry.dispose(),[geometry])
+  if(!context?.sourceObject)return null
+  return <group matrix={context.sourceObject.matrix} matrixAutoUpdate={false}><mesh geometry={geometry} raycast={()=>null} renderOrder={2003}><meshBasicMaterial color="#ad80ff" side={THREE.DoubleSide} transparent opacity={.6} depthWrite={false} polygonOffset polygonOffsetFactor={-3}/></mesh></group>
+}

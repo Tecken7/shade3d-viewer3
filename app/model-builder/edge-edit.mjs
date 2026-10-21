@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import {smoothMarginPoints,applySurfacePositions,surfaceGraph,surfacePositionKey} from './surface-edit.mjs'
 
 const key = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`
 export function paintedEdgeSelection(loops, painted) {
@@ -195,24 +196,26 @@ export function predictEdgePatch(context,loop,first,last,bulge=0) {
 // Smooth only the longest open margin per mesh; enclosed holes and anatomy
 // away from that margin stay exact. Update every copy of a shared vertex.
 export function smoothScanBorder(context,loops,passes=3) {
-  const chosen=new Map()
+  const chosen=new Map(),targets=new Map(),deltas=new Map()
   for(const loop of loops){const prior=chosen.get(loop.childUuid);if(!prior||loop.perimeter>prior.perimeter)chosen.set(loop.childUuid,loop)}
-  const pending=[]
-  for(const [uuid,loop]of chosen){
-    if(loop.boundary.length<3)continue
-    const meta=context.childMeta.get(uuid),mesh=meta.mesh,original=mesh.userData._baseGeom?.isBufferGeometry?mesh.userData._baseGeom:mesh.geometry
-    let points=loop.boundary.map(s=>s.position.clone())
-    for(let pass=0;pass<passes;pass++)points=points.map((p,i)=>p.clone().multiplyScalar(.5).addScaledVector(points[(i+points.length-1)%points.length],.25).addScaledVector(points[(i+1)%points.length],.25))
-    const targets=new Map(loop.boundary.map((s,i)=>[s.position.toArray().map(v=>Math.round(v*1e6)).join(','),points[i]]))
-    const geometry=original.clone(),position=geometry.attributes.position,p=new THREE.Vector3()
-    for(let i=0;i<position.count;i++){
-      p.fromBufferAttribute(position,i).applyMatrix4(meta.childToSource)
-      const target=targets.get(p.toArray().map(v=>Math.round(v*1e6)).join(','))
-      if(target){p.copy(target).applyMatrix4(meta.sourceToChild);position.setXYZ(i,p.x,p.y,p.z)}
-    }
-    geometry.computeVertexNormals();geometry.computeBoundingBox();geometry.computeBoundingSphere();geometry.boundsTree=null;geometry.computeBoundsTree?.({indirect:true})
-    pending.push({mesh,geometry,backup:{mesh,geometry:mesh.geometry,visible:mesh.visible,baseGeom:mesh.userData._baseGeom,derivedGeom:mesh.userData._derivedGeom,originalColors:mesh.userData._originalColors}})
+  for(const loop of chosen.values()){
+    const points=smoothMarginPoints(loop.boundary,passes)
+    loop.boundary.forEach((sample,i)=>{targets.set(surfacePositionKey(sample.position),points[i]);deltas.set(sample.nodeId,points[i].clone().sub(sample.position))})
   }
-  for(const {mesh,geometry}of pending){mesh.geometry=geometry;mesh.userData._baseGeom=geometry;mesh.userData._derivedGeom=geometry;mesh.userData._originalColors=geometry.attributes.color?.clone()||null}
-  return pending.map(p=>p.backup)
+  // Blend the contour displacement into a narrow surface collar, avoiding a
+  // crease immediately inside the newly rounded margin. Teeth stay unchanged.
+  if(context.nodes&&context.triangles){
+    const neighbors=surfaceGraph(context),distance=new Map(),owner=new Map(),queue=[]
+    for(const id of deltas.keys()){distance.set(id,0);owner.set(id,id);queue.push(id)}
+    for(let i=0;i<queue.length;i++){
+      const id=queue[i],d=distance.get(id)
+      for(const next of neighbors[id]){
+        const nd=d+context.nodes[id].distanceTo(context.nodes[next])
+        if(nd>=.8||nd>=(distance.get(next)??Infinity))continue
+        distance.set(next,nd);owner.set(next,owner.get(id));queue.push(next)
+      }
+    }
+    for(const [id,d]of distance)if(d>0){const p=context.nodes[id];targets.set(surfacePositionKey(p),p.clone().addScaledVector(deltas.get(owner.get(id)),(1-d/.8)**2))}
+  }
+  return applySurfacePositions(context,targets)
 }
