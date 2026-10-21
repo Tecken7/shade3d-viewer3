@@ -22,6 +22,7 @@ import { orientRepairPatch } from "./model-builder/repair-orientation.mjs"
 import { predictEdgePatch, smoothScanBorder, paintedEdgeSelection } from "./model-builder/edge-edit.mjs"
 import { fairArtifact, applySurfacePositions } from "./model-builder/surface-edit.mjs"
 import { EdgeEditOverlay, SurfaceSelectionOverlay, PatchPendingIndicator } from "./model-builder/EdgeEditOverlay"
+import { trimPlaneSurfacePath } from './model-builder/trim-surface-path.mjs'
 import { buildTrimRegions } from "./model-builder/trim-regions.mjs"
 import { refreshLocalNormals } from "./model-builder/surface-edit.mjs"
 import { ScanBrush } from "./model-builder/ScanBrush"
@@ -252,8 +253,8 @@ function makeTrimmedExportName(file, aligned = false) {
 }
 
 const trimEdgeKey = (a, b) => a < b ? `${a}:${b}` : `${b}:${a}`
-const trimVertexKey = (v) => `${v.x.toFixed(5)}|${v.y.toFixed(5)}|${v.z.toFixed(5)}`
-const trimPointKey = (point) => `${point[0].toFixed(6)}|${point[1].toFixed(6)}|${point[2].toFixed(6)}`
+const trimVertexKey = v => v.toArray().map(n=>Number(n.toFixed(5))).join('|')
+const trimPointKey = point => point.map(n=>Number(n.toFixed(6))).join('|')
 const trimVec = (point) => Array.isArray(point) ? new THREE.Vector3(point[0], point[1], point[2]) : point.clone()
 const trimArr = (point) => [point.x, point.y, point.z]
 
@@ -471,7 +472,7 @@ function buildTrimSurfaceSplineSamples(context, controlNodes, closed = false, sa
   const curve = controls.length === 2 && !closed
     ? new THREE.LineCurve3(controls[0], controls[1])
     : new THREE.CatmullRomCurve3(controls, !!closed, "centripetal", 0.28)
-  const perSpan = Math.max(2, Math.min(18, Math.round(samplesPerSpan)))
+  const perSpan = Math.max(12, Math.min(32, Math.round(samplesPerSpan)))
   const result = []
   const maxProjectionDistance = Math.max(context.diagonal * 0.06, 0.8)
 
@@ -483,7 +484,8 @@ function buildTrimSurfaceSplineSamples(context, controlNodes, closed = false, sa
   }
 
   for (let span = 0; span < spanCount; span++) {
-    for (let step = 0; step < perSpan; step++) {
+    const steps=Math.min(160,Math.max(perSpan,Math.ceil(controls[span].distanceTo(controls[(span+1)%controls.length])/.15)))
+    for (let step = 0; step < steps; step++) {
       if (step === 0) {
         // Křivka musí přesně projít uživatelem umístěnou kuličkou.
         append({
@@ -493,7 +495,7 @@ function buildTrimSurfaceSplineSamples(context, controlNodes, closed = false, sa
         })
         continue
       }
-      const t = (span + step / perSpan) / spanCount
+      const t = (span + step / steps) / spanCount
       const sample = curve.getPoint(THREE.MathUtils.clamp(t, 0, 1))
       append(projectTrimPointToSurface(context, sample, maxProjectionDistance))
     }
@@ -516,7 +518,7 @@ function buildTrimSurfaceSplineSegments(context, controlNodes, closed = false, s
     const b = samples[(i + 1) % samples.length]
     if (!a || !b || trimVec(a.point).distanceToSquared(trimVec(b.point)) <= 1e-14) continue
     const path = trimTriangleSurfacePath(context, a, b)
-    if (!path?.pieces?.length) continue
+    if (!path?.pieces?.length) throw new Error('Ořezová křivka v tomto místě nenavazuje na povrch. Posuňte nejbližší bod.')
     // visualPoints jsou hladké, na povrch promítnuté spline body. Samotné pieces
     // jsou sub-face cesta použitá pro skutečné rozdělení triangulace.
     path.visualPoints = [a.point, b.point]
@@ -546,6 +548,9 @@ function trimTriangleSurfacePath(context, startHit, endHit) {
       pieces: [{ triangleIndex: startTriangle, a: trimArr(startPoint), b: trimArr(endPoint) }],
     }
   }
+
+  const planePath=trimPlaneSurfacePath(context,startHit,endHit)
+  if(planePath)return planePath
 
   const count = context.triangles.length
   const distance = new Float64Array(count)
@@ -645,10 +650,12 @@ function trimTriangleSurfacePath(context, startHit, endHit) {
     }
     return portal.a.clone().lerp(portal.b, (lo + hi) * 0.5)
   }
-  for (let pass = 0; pass < 4; pass++) {
-    for (let i = 0; i < portals.length; i++) {
-      points[i + 1] = optimizePortal(portals[i], points[i], points[i + 2])
+  for (let pass = 0; pass < 32; pass++) {
+    let movement=0
+    for(const reverse of [false,true])for(let k=0;k<portals.length;k++){
+      const i=reverse?portals.length-1-k:k,next=optimizePortal(portals[i],points[i],points[i+2]);movement=Math.max(movement,next.distanceTo(points[i+1]));points[i+1]=next
     }
+    if(movement<1e-5)break
   }
 
   const pathPoints = points.map(trimArr)
@@ -1128,7 +1135,7 @@ function collectTrimBoundaryPoints(segments, closed = false) {
   return result
 }
 
-function makeTrimPolylineCurve(points, closed = false) {
+function makeTrimPolylineCurve(points, closed = false, exact = false) {
   const vectors = []
   for (const point of points || []) {
     const vector = trimVec(point)
@@ -1136,6 +1143,12 @@ function makeTrimPolylineCurve(points, closed = false) {
   }
   if (closed && vectors.length > 2 && vectors[0].distanceToSquared(vectors[vectors.length - 1]) <= 1e-12) vectors.pop()
   if (vectors.length < 2) return null
+  if(exact){
+    const curve=new THREE.Curve(),spans=closed?vectors.length:vectors.length-1
+    curve.getPoint=(t,target=new THREE.Vector3())=>{const s=Math.min(spans,Math.max(0,t*spans)),i=Math.min(spans-1,Math.floor(s));return target.copy(vectors[i]).lerp(vectors[(i+1)%vectors.length],s-i)}
+    curve.getPointAt=(t,target)=>curve.getPoint(t,target)
+    return curve
+  }
   if (vectors.length === 2) return new THREE.LineCurve3(vectors[0], vectors[1])
   // Body už jsou hustě promítnuté z hladké surface-spline. Jemný druhý Catmull-Rom
   // pouze odstraní mikrolomy vzniklé projekcí na sousední triangly.
@@ -1144,6 +1157,7 @@ function makeTrimPolylineCurve(points, closed = false) {
 
 function TrimBoundaryTube({
   points,
+  exact = false,
   radius,
   closed = false,
   color = "#72acd6",
@@ -1167,11 +1181,11 @@ function TrimBoundaryTube({
   const pulseTargetColorRef = useRef(new THREE.Color(pulseToColor))
   const pulseEmissiveColorRef = useRef(new THREE.Color(pulseEmissiveColor))
   const geometry = useMemo(() => {
-    const curve = makeTrimPolylineCurve(points, closed)
+    const curve = makeTrimPolylineCurve(points, closed, exact)
     if (!curve) return null
-    const tubularSegments = Math.max(28, Math.min(1800, Math.max(points.length * 5, closed ? 120 : 48)))
+    const tubularSegments = exact ? Math.max(1,points.length-(closed?0:1)) : Math.max(28, Math.min(1800, Math.max(points.length * 5, closed ? 120 : 48)))
     return new THREE.TubeGeometry(curve, tubularSegments, radius, 12, !!closed)
-  }, [points, radius, closed])
+  }, [points, radius, closed, exact])
   useEffect(() => () => geometry?.dispose?.(), [geometry])
   useEffect(() => {
     pulseBaseColorRef.current.set(color)
@@ -1258,8 +1272,8 @@ function TrimSurfaceOverlay({
 
   const visualBoundaryPoints = useMemo(() => {
     if (!context || !Array.isArray(controlNodes) || controlNodes.length < 2) return []
-    return buildTrimSurfaceSplineSamples(context, controlNodes, !!closed, closed ? 12 : 10).map((hit) => hit.point)
-  }, [context, controlNodes, closed])
+    return segments?.length?collectTrimBoundaryPoints(segments,!!closed):controlNodes.map(node=>node.point)
+  }, [context, controlNodes, segments, closed])
 
   if (!context) return null
   const pointRadius = Math.max(0.10, Math.min(1.15, context.diagonal * 0.0067))
@@ -1274,7 +1288,7 @@ function TrimSurfaceOverlay({
         <TrimRegionPreview context={context} plan={boundaryPlan} componentId={previewComponent} />
       )}
       {visualBoundaryPoints.length >= 2 && (
-        <TrimBoundaryTube points={visualBoundaryPoints} radius={lineRadius} closed={!!closed} />
+        <TrimBoundaryTube exact points={visualBoundaryPoints} radius={lineRadius} closed={!!closed} />
       )}
       {(controlNodes || []).map((control, index) => {
         const point = control?.point

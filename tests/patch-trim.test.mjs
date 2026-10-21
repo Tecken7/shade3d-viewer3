@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import * as THREE from 'three'
 import {computeBoundsTree,disposeBoundsTree,SAH} from 'three-mesh-bvh'
 import {indexed,meshTopology} from '../app/model-builder/engine.mjs'
+import {trimPlaneSurfacePath} from '../app/model-builder/trim-surface-path.mjs'
 import {buildTrimRegions} from '../app/model-builder/trim-regions.mjs'
 import {refreshLocalNormals} from '../app/model-builder/surface-edit.mjs'
 import {buildEdgePatch,patchWithCollar} from '../app/model-builder/edge-edit.mjs'
@@ -11,7 +12,7 @@ THREE.BufferGeometry.prototype.computeBoundsTree=computeBoundsTree
 THREE.BufferGeometry.prototype.disposeBoundsTree=disposeBoundsTree
 const source=fs.readFileSync(new URL('../app/ClientPage.jsx',import.meta.url),'utf8'),section=(a,b)=>source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)))
 const options=new Function('SAH',source.match(/const ALIGNMENT_BVH_OPTIONS = [^\r\n]+/)[0]+';return ALIGNMENT_BVH_OPTIONS')(SAH)
-const helpers=new Function('THREE','ALIGNMENT_BVH_OPTIONS','buildTrimRegions',section('const trimEdgeKey =','const repairWaitForBusyPaint')+section('function buildTrimMeshContext(','function TrimRegionPreview(')+';return {buildTrimMeshContext,projectTrimPointToSurface,trimTriangleSurfacePath,buildTrimBoundaryPlan,resolveTrimComponentFromHit,buildTrimmedGeometryForChild,interpolateTrimCorner}')(THREE,options,buildTrimRegions)
+const helpers=new Function('THREE','ALIGNMENT_BVH_OPTIONS','buildTrimRegions','trimPlaneSurfacePath',section('const trimEdgeKey =','const repairWaitForBusyPaint')+section('function buildTrimMeshContext(','function TrimRegionPreview(')+section('function collectTrimBoundaryPoints(','function TrimBoundaryTube(')+';return {buildTrimSurfaceSplineSamples,buildTrimSurfaceSplineSegments,collectTrimBoundaryPoints,makeTrimPolylineCurve,buildTrimMeshContext,projectTrimPointToSurface,trimTriangleSurfacePath,buildTrimBoundaryPlan,resolveTrimComponentFromHit,buildTrimmedGeometryForChild,interpolateTrimCorner}')(THREE,options,buildTrimRegions,trimPlaneSurfacePath)
 const applyPatches=new Function('THREE','ALIGNMENT_BVH_OPTIONS','refreshLocalNormals',section('const trimEdgeKey =','const repairWaitForBusyPaint')+section('function applyRepairPatchesToObject(','function collectRepairBrushTriangles(')+';return applyRepairPatchesToObject')(THREE,options,refreshLocalNormals)
 export {helpers,options,applyPatches}
 
@@ -77,4 +78,49 @@ test('replacement collar consumes a detached peninsula interior without leaving 
  const welded=indexed(mesh.geometry.attributes.position.array),topology=meshTopology(welded.vertices,welded.faces)
  assert.equal(topology.nonManifold,0);assert.equal(topology.loops.length,1)
  const faces=new Set(patch.removeFaces.map(f=>f.faceIndex));assert.equal(faces.size,patch.removeFaces.length)
+})
+
+
+function unevenTrimGrid(){
+ const nodes=[],positions=[],n=40,step=.5
+ for(let y=0;y<=n;y++)for(let x=0;x<=n;x++)nodes.push([x*step+(x&&x<n?Math.sin(x*19+y*7)*.16:0),y*step+(y&&y<n?Math.cos(y*17+x*11)*.16:0),0])
+ for(let y=0;y<n;y++)for(let x=0;x<n;x++){const a=y*(n+1)+x,b=a+1,c=a+n+1,d=c+1;for(const ids of (x+y)%2?[[a,b,d],[a,d,c]]:[[a,b,c],[b,d,c]])ids.forEach(id=>positions.push(...nodes[id]))}
+ const geometry=new THREE.BufferGeometry().setAttribute('position',new THREE.Float32BufferAttribute(positions,3));geometry.computeVertexNormals();const mesh=new THREE.Mesh(geometry)
+ return {mesh,context:helpers.buildTrimMeshContext(mesh)}
+}
+
+test('surface cut stays straight across an irregular triangle grid instead of following triangle corridors',()=>{
+ const {context}=unevenTrimGrid(),a=helpers.projectTrimPointToSurface(context,[.61,1.13,0]),b=helpers.projectTrimPointToSurface(context,[18.83,17.45,0]),path=helpers.trimTriangleSurfacePath(context,a,b),line=new THREE.Line3(new THREE.Vector3(...a.point),new THREE.Vector3(...b.point))
+ assert.ok(path.pieces.length>30)
+ for(const p of path.points){const point=new THREE.Vector3(...p);assert.ok(point.distanceTo(line.closestPointToPoint(point,true,new THREE.Vector3()))<1e-7)}
+ const length=path.points.slice(1).reduce((sum,p,i)=>sum+new THREE.Vector3(...p).distanceTo(new THREE.Vector3(...path.points[i])),0)
+ assert.ok(Math.abs(length-line.distance())<1e-7)
+})
+
+test('smooth spline trim matches its displayed border and preserves a single clean boundary',()=>{
+ const {mesh,context}=unevenTrimGrid(),controlPoints=[[3.12,4.28,0],[8.23,2.63,0],[15.42,4.13,0],[17.13,10.34,0],[14.76,16.23,0],[7.21,17.14,0],[2.82,11.37,0]],controls=controlPoints.map(p=>helpers.projectTrimPointToSurface(context,p)),segments=helpers.buildTrimSurfaceSplineSegments(context,controls,true,4)
+ const boundary=helpers.collectTrimBoundaryPoints(segments,true),display=helpers.makeTrimPolylineCurve(boundary,true,true)
+ boundary.forEach((p,i)=>assert.ok(display.getPointAt(i/boundary.length).distanceTo(new THREE.Vector3(...p))<1e-8))
+ for(let i=0;i<boundary.length;i+=7){const expected=new THREE.Vector3(...boundary[i]).lerp(new THREE.Vector3(...boundary[(i+1)%boundary.length]),.5);assert.ok(display.getPointAt((i+.5)/boundary.length).distanceTo(expected)<1e-8)}
+ const plan=helpers.buildTrimBoundaryPlan(context,segments),hit=helpers.projectTrimPointToSurface(context,[10,10,0]),component=helpers.resolveTrimComponentFromHit(context,plan,hit),result=helpers.buildTrimmedGeometryForChild(context,plan,component,mesh.uuid),welded=indexed(result.attributes.position.array),topology=meshTopology(welded.vertices,welded.faces)
+ assert.equal(topology.nonManifold,0);assert.equal(topology.loops.length,1)
+ const curve=new THREE.CatmullRomCurve3(controls.map(c=>new THREE.Vector3(...c.point)),true,'centripetal',.28),reference=curve.getPoints(12000)
+ let worst=0
+ for(const id of topology.loops[0]){const p=new THREE.Vector3().fromArray(welded.vertices,id*3);let nearest=Infinity;for(const q of reference)nearest=Math.min(nearest,p.distanceToSquared(q));worst=Math.max(worst,Math.sqrt(nearest))}
+ assert.ok(worst<.012,'maximum border deviation '+worst+' mm')
+})
+
+
+test('curved horseshoe scan trims to a regular arch with a single boundary',()=>{
+ const positions=[],rows=32,columns=180,point=(r,t)=>[r*Math.cos(t),r*Math.sin(t),.8*Math.sin(t*2)+.15*(r-24)]
+ for(let j=0;j<rows;j++)for(let i=0;i<columns;i++){const r=18+j*12/rows,t=i*Math.PI/columns,a=point(r,t),b=point(r+12/rows,t),c=point(r,t+Math.PI/columns),d=point(r+12/rows,t+Math.PI/columns);positions.push(...a,...b,...c,...b,...d,...c)}
+ const geometry=new THREE.BufferGeometry().setAttribute('position',new THREE.Float32BufferAttribute(positions,3));geometry.computeVertexNormals();const mesh=new THREE.Mesh(geometry),context=helpers.buildTrimMeshContext(mesh),raw=[]
+ for(let i=0;i<=12;i++)raw.push(point(28,.16+i*(Math.PI-.32)/12))
+ for(let i=12;i>=0;i--)raw.push(point(20,.16+i*(Math.PI-.32)/12))
+ const controls=raw.map(p=>helpers.projectTrimPointToSurface(context,p)),segments=helpers.buildTrimSurfaceSplineSegments(context,controls,true,4),plan=helpers.buildTrimBoundaryPlan(context,segments),hit=helpers.projectTrimPointToSurface(context,point(24,1.5)),component=helpers.resolveTrimComponentFromHit(context,plan,hit),result=helpers.buildTrimmedGeometryForChild(context,plan,component,mesh.uuid),welded=indexed(result.attributes.position.array),topology=meshTopology(welded.vertices,welded.faces)
+ assert.equal(topology.nonManifold,0);assert.equal(topology.loops.length,1)
+ const curve=new THREE.CatmullRomCurve3(controls.map(c=>new THREE.Vector3(...c.point)),true,'centripetal',.28),reference=curve.getPoints(14000)
+ let worst=0
+ for(const id of topology.loops[0]){const p=new THREE.Vector3().fromArray(welded.vertices,id*3);let nearest=Infinity;for(const q of reference)nearest=Math.min(nearest,p.distanceToSquared(q));worst=Math.max(worst,Math.sqrt(nearest))}
+ assert.ok(worst<.035,'maximum curved border deviation '+worst+' mm')
 })

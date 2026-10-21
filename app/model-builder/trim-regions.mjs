@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-const pointKey=p=>p.map(v=>v.toFixed(6)).join('|')
+const pointKey=p=>p.map(v=>Number(v.toFixed(6))).join('|')
 const edgeKey=(a,b)=>{const x=pointKey(a),y=pointKey(b);return x<y?`${x}/${y}`:`${y}/${x}`}
 const vector=p=>new THREE.Vector3(...p)
 const clean=points=>points.filter((p,i)=>!i||vector(p).distanceToSquared(vector(points[i-1]))>1e-16)
