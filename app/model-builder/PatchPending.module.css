@@ -1,0 +1,6 @@
+.status { display: inline-flex; align-items: center; gap: 8px; color: #fff; }
+.spinner { display: inline-block; flex: 0 0 auto; width: 18px; height: 18px; box-sizing: border-box; border: 2px solid rgba(255,255,255,.24); border-top-color: #fff; border-right-color: #fff; border-radius: 50%; animation: patchSpin .8s linear infinite; }
+.surface { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; border: 1px solid rgba(255,255,255,.2); border-radius: 50%; background: rgba(12,12,12,.72); box-shadow: 0 3px 16px rgba(0,0,0,.25); }
+.surface .spinner { width: 24px; height: 24px; }
+@keyframes patchSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2s; } }

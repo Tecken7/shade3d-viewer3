@@ -57,3 +57,24 @@ test('trim crosses a locally remeshed patch and keeps a connected, correctly ori
  assert.ok(Math.abs(area-expected)<1e-4,`area ${area} expected ${expected}`)
 })
 
+
+
+test('replacement collar consumes a detached peninsula interior without leaving tiny open loops',()=>{
+ const polygon=[[0,0],[2,0],[2,1],[2.2,1],[2.2,.7],[3.2,.7],[3.2,1.7],[2.2,1.7],[2.2,1.3],[2,1.3],[2,3],[4,3],[4,0],[6,0],[6,5],[0,5]]
+ const inside=(x,y)=>{let on=false;for(let i=0,j=polygon.length-1;i<polygon.length;j=i++){const a=polygon[i],b=polygon[j];if((a[1]>y)!==(b[1]>y)&&x<(b[0]-a[0])*(y-a[1])/(b[1]-a[1])+a[0])on=!on}return on}
+ const positions=[]
+ for(let y=0;y<50;y++)for(let x=0;x<60;x++)if(inside((x+.5)*.1,(y+.5)*.1)){
+  const a=[x*.1,y*.1,0],b=[(x+1)*.1,y*.1,0],c=[x*.1,(y+1)*.1,0],d=[(x+1)*.1,(y+1)*.1,0];positions.push(...a,...b,...c,...b,...d,...c)
+ }
+ const geometry=new THREE.BufferGeometry().setAttribute('position',new THREE.Float32BufferAttribute(positions,3));geometry.computeVertexNormals()
+ const mesh=new THREE.Mesh(geometry),context=helpers.buildTrimMeshContext(mesh),neighbors=new Map()
+ for(const [key,list]of context.edgeTriangles)if(list.length===1){const[a,b]=key.split(':').map(Number);for(const[u,v]of[[a,b],[b,a]]){if(!neighbors.has(u))neighbors.set(u,[]);neighbors.get(u).push(v)}}
+ const ordered=[],start=neighbors.keys().next().value;let id=start,previous=-1
+ do{ordered.push(id);const next=neighbors.get(id).find(n=>n!==previous);previous=id;id=next}while(id!==start)
+ const loop={childUuid:mesh.uuid,materialIndex:0,boundary:ordered.map(nodeId=>({nodeId,position:context.nodes[nodeId],normal:new THREE.Vector3(0,0,1)}))},first=loop.boundary.findIndex(s=>Math.abs(s.position.x-2)<1e-5&&s.position.y===0),last=loop.boundary.findIndex(s=>Math.abs(s.position.x-4)<1e-5&&s.position.y===0)
+ const patch=patchWithCollar(context,loop,first,last,0)
+ applyPatches(context,[patch])
+ const welded=indexed(mesh.geometry.attributes.position.array),topology=meshTopology(welded.vertices,welded.faces)
+ assert.equal(topology.nonManifold,0);assert.equal(topology.loops.length,1)
+ const faces=new Set(patch.removeFaces.map(f=>f.faceIndex));assert.equal(faces.size,patch.removeFaces.length)
+})

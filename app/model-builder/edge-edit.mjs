@@ -92,7 +92,15 @@ export function buildEdgePatch(context, loop, first, last, bulge = 0, alternate 
     bridge.push(position.toArray())
   }
   bridge.push(a.toArray())
-  const projected = samples.map(s => { const p = s.position.clone().sub(a); return new THREE.Vector2(p.dot(axis), p.dot(inward)) })
+  // Use exact analytic coordinates for the straight free lip. Projecting its
+  // interpolated 3D positions introduces 1e-16 zigzags; earcut otherwise creates
+  // zero-area ears along that line and triggers expensive false fallbacks.
+  const projected = samples.map((s,i) => {
+    if(i===0)return new THREE.Vector2(0,0)
+    if(i===arc.length-1)return new THREE.Vector2(span,0)
+    if(i>=arc.length){const t=(i-arc.length+1)/count;return new THREE.Vector2(span*(1-t),-4*t*(1-t)*bulge)}
+    const p=s.position.clone().sub(a);return new THREE.Vector2(p.dot(axis),p.dot(inward))
+  })
   const cross = (p, q, r) => (q.x-p.x)*(r.y-p.y)-(q.y-p.y)*(r.x-p.x)
   const n = projected.length
   for (let i=0;i<n;i++) for(let j=i+2;j<n;j++) {
@@ -153,12 +161,40 @@ export function buildEdgePatch(context, loop, first, last, bulge = 0, alternate 
     }
     if(!fixed)throw new Error('Doplnění obsahuje zkolabovanou plochu. Upravte výběr.')
   }
-  faces=remeshPatch(samples,faces,n,spacing,axis,inward,normal,arc.length)
-  assertPatchClear(context,loop,samples,faces,spacing)
+  assertPatchClear(context,loop,samples,faces,spacing,false,!!context.patchCollar)
+  const refined=remeshPatch(samples,faces,n,spacing,axis,inward,normal,arc.length);faces=refined.faces
+  assertPatchClear(context,loop,samples,faces,refined.targetEdgeLength,true,!!context.patchCollar)
   const normals=samples.map(()=>new THREE.Vector3())
   faces.forEach(([u,v,w])=> { const face=samples[v].position.clone().sub(samples[u].position).cross(samples[w].position.clone().sub(samples[u].position));if(face.lengthSq()<1e-28) throw new Error('Doplnění obsahuje zkolabovanou plochu. Upravte výběr.');[u,v,w].forEach(id=>normals[id].add(face)) })
   const corners=samples.map((s,i)=>({sourcePos:s.position.toArray(),sourceNormal:normals[i].normalize().toArray(),color:s.color,uv:s.uv}))
-  return { targetEdgeLength:spacing, childUuid:loop.childUuid, materialIndex:loop.materialIndex, triangles:faces.map(f=>f.map(i=>corners[i])), bridge, arc:arc.map(s=>s.position.toArray()), normal:normal.toArray() }
+  return { targetEdgeLength:refined.targetEdgeLength, childUuid:loop.childUuid, materialIndex:loop.materialIndex, triangles:faces.map(f=>f.map(i=>corners[i])), bridge, arc:arc.map(s=>s.position.toArray()), normal:normal.toArray() }
+}
+
+// Infer the mouth from the outside envelope of the painted rim. Painting a
+// healthy shoulder beyond a notch must not force a chord through that shoulder.
+export function inferredNotchMouth(context,loop,first,last){
+ const arc=selectEdgeArc(loop,first,last),normal=new THREE.Vector3()
+ arc.forEach(s=>{if(s.normal)normal.add(s.normal)})
+ if(normal.lengthSq()<1e-12)return null
+ normal.normalize()
+ const axis=arc.at(-1).position.clone().sub(arc[0].position).normalize(),up=normal.clone().cross(axis).normalize()
+ if(up.lengthSq()<.5)return null
+ const points=arc.map((s,i)=>({x:s.position.dot(axis),y:s.position.dot(up),i})).sort((a,b)=>a.x-b.x||a.y-b.y)
+ const cross=(a,b,c)=>(b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x),half=pts=>{const h=[];for(const p of pts){while(h.length>1&&cross(h.at(-2),h.at(-1),p)<=0)h.pop();h.push(p)}return h}
+ const lower=half(points),upper=half(points.slice().reverse()),hull=[...lower.slice(0,-1),...upper.slice(0,-1)]
+ let best=null
+ for(let i=0;i<hull.length;i++){
+  let a=hull[i].i,b=hull[(i+1)%hull.length].i;if(a>b)[a,b]=[b,a]
+  if(b-a<3||a===0&&b===arc.length-1)continue
+  const source=context.edgeTriangles.get(key(arc[a].nodeId,arc[a+1].nodeId))?.[0],t=context.triangles[source]
+  if(!t)continue
+  const offset=t.nodeIds.indexOf(arc[a].nodeId),direction=t.nodeIds[(offset+1)%3]===arc[a+1].nodeId?-1:1
+  const area=new THREE.Vector3(),origin=arc[a].position
+  for(let j=a;j<b;j++)area.add(arc[j].position.clone().sub(origin).cross(arc[j+1].position.clone().sub(origin)))
+  const score=area.dot(normal)*direction*.5
+  if(score>.015&&(!best||score>best.score))best={first:loop.boundary.indexOf(arc[a]),last:loop.boundary.indexOf(arc[b]),score}
+ }
+ return best
 }
 
 // Extend a painted notch to nearby healthy rim, trying the smallest local
@@ -187,21 +223,23 @@ export function predictEdgePatch(context,loop,first,last,bulge=0) {
     return {a,b,score:(a.d+b.d)*.3+Math.abs(a.d-b.d)*.1+turn*2}
   })).sort((a,b)=>a.score-b.score)
   let error
-  for(const {a,b} of candidates.slice(0,2)){
-    const candidate=selectEdgeArc(loop,a.id,b.id)
-    if(!arc.every(sample=>candidate.includes(sample)))continue
-    try{return buildEdgePatch(context,loop,a.id,b.id,bulge)}catch(e){error=e}
+  const tried=new Set(),attempt=(a,b,bow,collar=false)=>{
+    const id=[a,b,bow,collar].join(':');if(tried.has(id))return null;tried.add(id)
+    try{return collar?patchWithCollar(context,loop,a,b,bow):buildEdgePatch(context,loop,a,b,bow)}catch(e){error=e;return null}
   }
-  // Curled scan margins may need the free lip moved outward as well as
-  // extended. Try a small automatic outward bow before asking for more paint.
-  if(bulge===0)for(const bow of [.5,1,2])for(const {a,b} of [{a:{id:start},b:{id:end}},...candidates.slice(0,1)]){
-    const candidate=selectEdgeArc(loop,a.id,b.id)
-    if(!arc.every(sample=>candidate.includes(sample)))continue
-    try{return {...buildEdgePatch(context,loop,a.id,b.id,bow),automaticBow:bow}}catch(e){error=e}
+  const mouth=inferredNotchMouth(context,loop,first,last)
+  const mouths=mouth?[{a:{id:mouth.first},b:{id:mouth.last}}]:[]
+  const ends=[...candidates.slice(0,2),{a:{id:start},b:{id:end}}].filter(({a,b})=>arc.every(sample=>selectEdgeArc(loop,a.id,b.id).includes(sample)))
+  for(const {a,b} of [...mouths,...ends]){const patch=attempt(a.id,b.id,bulge);if(patch)return patch}
+  // Rebuild a curled lip once, before spending time refining several outward
+  // bows that still intersect that same lip. This also repairs pinched collars.
+  if(context.nodes)for(const {a,b} of [...mouths,{a:{id:first},b:{id:last}}])for(const bow of bulge===0?[0,1]:[bulge]){
+    const patch=attempt(a.id,b.id,bow,true);if(patch)return patch
   }
-  if(context.nodes&&error?.message.includes('překrývalo')){
-    for(const bow of bulge===0?[0,1,2]:[bulge])try{return patchWithCollar(context,loop,first,last,bow)}catch(e){error=e}
+  if(bulge===0)for(const bow of [.5,1,2])for(const {a,b} of [ends[0],ends.at(-1)].filter(Boolean)){
+    const patch=attempt(a.id,b.id,bow);if(patch)return {...patch,automaticBow:bow}
   }
+  if(context.nodes&&bulge===0){const patch=attempt(first,last,2,true);if(patch)return patch}
   throw error||new Error('Označte okolí jednoho zářezu včetně jeho ústí.')
 }
 
@@ -232,35 +270,130 @@ export function smoothScanBorder(context,loops,passes=3) {
   return applySurfacePositions(context,targets)
 }
 
+function healRemovedFans(context,removedIds,incident){
+ const initialSize=removedIds.size
+ for(let pass=0;pass<16;pass++){
+  const rim=new Set();removedIds.forEach(i=>context.triangles[i].nodeIds.forEach(id=>rim.add(id)))
+  const add=new Set()
+  for(const id of rim){
+   const remaining=new Set(incident[id].filter(i=>!removedIds.has(i))),fans=[]
+   while(remaining.size){const seed=remaining.values().next().value,fan=[seed];remaining.delete(seed)
+    for(let j=0;j<fan.length;j++){const t=context.triangles[fan[j]];for(const next of t.nodeIds)if(next!==id)for(const i of context.edgeTriangles.get(key(id,next))||[])if(remaining.delete(i))fan.push(i)}
+    fans.push(fan)
+   }
+   fans.sort((a,b)=>b.length-a.length);fans.slice(1).flat().forEach(i=>add.add(i))
+  }
+  if(!add.size)break
+  add.forEach(i=>removedIds.add(i))
+  if(removedIds.size>Math.max(initialSize*4,initialSize+2000))throw new Error('Označte menší okolí jednoho zářezu.')
+ }
+}
+
+function retainAttachedRemoval(context,removedIds,arc){
+ const reached=new Set(),queue=[]
+ for(let i=1;i<arc.length;i++)for(const face of context.edgeTriangles.get(key(arc[i-1].nodeId,arc[i].nodeId))||[])if(removedIds.has(face)&&!reached.has(face)){reached.add(face);queue.push(face)}
+ for(let i=0;i<queue.length;i++){const t=context.triangles[queue[i]];t.nodeIds.forEach((a,j)=>{for(const face of context.edgeTriangles.get(key(a,t.nodeIds[(j+1)%3]))||[])if(removedIds.has(face)&&!reached.has(face)){reached.add(face);queue.push(face)}})}
+ for(const face of removedIds)if(!reached.has(face))removedIds.delete(face)
+}
+
 // A narrow replacement collar removes the curled original lip before rebuilding
 // it with the patch. The confirmed mesh contains one surface, not an overlay.
-export function patchWithCollar(context,loop,first,last,bulge){
+export function patchWithCollar(context,loop,first,last,bulge,forced=null,iteration=0){
+ const cacheKey=[loop.childUuid,first,last].join(':'),cached=context._edgePatchCollar
+ if(!forced&&cached?.key===cacheKey)return finishCollar(context,loop,first,last,bulge,cached,iteration)
+
  const arc=selectEdgeArc(loop,first,last),selected=new Set(arc.slice(1,-1).map(s=>s.nodeId)),area=new THREE.Vector3(),mean=new THREE.Vector3()
  arc.forEach((s,i)=>area.add(s.position.clone().cross(arc[(i+1)%arc.length].position)))
  const source=context.triangles.find(t=>t.nodeIds.includes(arc[0].nodeId)&&t.nodeIds.includes(arc[1].nodeId))
  if(!source)throw new Error('Doplnění nemá návaznost na okraj.')
  const offset=source.nodeIds.indexOf(arc[0].nodeId);if(source.nodeIds[(offset+1)%3]===arc[1].nodeId)area.negate()
- const near=new Map([...selected].map(id=>[id,0])),queue=[...selected],neighborsOf=context.nodes.map(()=>new Set())
- context.triangles.forEach(t=>t.nodeIds.forEach((a,i)=>{neighborsOf[a].add(t.nodeIds[(i+1)%3]);neighborsOf[a].add(t.nodeIds[(i+2)%3])}))
+ const near=new Map([...selected].map(id=>[id,0])),queue=[...selected],neighborsOf=context._edgePatchGraph||surfaceGraph(context)
+ context._edgePatchGraph=neighborsOf
  for(let i=0;i<queue.length;i++){const id=queue[i];for(const next of neighborsOf[id]){const d=near.get(id)+context.nodes[id].distanceTo(context.nodes[next]);if(d>.3||d>=(near.get(next)??Infinity))continue;near.set(next,d);selected.add(next);queue.push(next)}}
- const removed=[],triangles=[],attributes=new Map()
+ const removed=[],triangles=[],attributes=new Map(),removedIds=new Set()
+ const incident=context._edgePatchIncident||context.nodes.map(()=>[])
+ if(!context._edgePatchIncident){context.triangles.forEach((t,i)=>t.nodeIds.forEach(id=>incident[id].push(i)));context._edgePatchIncident=incident}
+ selected.forEach(id=>incident[id].forEach(i=>removedIds.add(i)))
+ if(forced)forced.forEach(i=>removedIds.add(i))
+ healRemovedFans(context,removedIds,incident)
+ retainAttachedRemoval(context,removedIds,arc)
+
  context.triangles.forEach((t,index)=>{
-  if(t.nodeIds.some(id=>selected.has(id))){
+  if(removedIds.has(index)){
    const points=t.nodeIds.map(id=>context.nodes[id]);mean.add(points[1].clone().sub(points[0]).cross(points[2].clone().sub(points[0])));removed.push({childUuid:t.childUuid||loop.childUuid,faceIndex:t.faceIndex??index})
   }else triangles.push(t)
   t.nodeIds.forEach((id,i)=>{if(!attributes.has(id))attributes.set(id,t.corners[i])})
  })
  if(area.normalize().dot(mean.normalize())<.1)throw new Error('Označená oblast je výstupek. Použijte Odstranit artefakt.')
- const edgeTriangles=new Map(),neighbors=new Map()
- triangles.forEach((t,i)=>t.nodeIds.forEach((a,j)=>{const b=t.nodeIds[(j+1)%3],k=key(a,b);if(!edgeTriangles.has(k))edgeTriangles.set(k,[]);edgeTriangles.get(k).push(i)}))
- for(const [k,list]of edgeTriangles)if(list.length===1){const [a,b]=k.split(':').map(Number);for(const [u,v]of [[a,b],[b,a]]){if(!neighbors.has(u))neighbors.set(u,[]);neighbors.get(u).push(v)}}
- const closest=point=>[...neighbors.keys()].reduce((best,id)=>context.nodes[id].distanceToSquared(point)<context.nodes[best].distanceToSquared(point)?id:best,neighbors.keys().next().value)
- const start=closest(arc[0].position),end=closest(arc.at(-1).position)
- if(start===end||context.nodes[start].distanceTo(arc[0].position)>1||context.nodes[end].distanceTo(arc.at(-1).position)>1)throw new Error('Označte i zdravé okolí obou konců zářezu.')
- const ordered=[];let id=start,previous=-1
- do{if(neighbors.get(id)?.length!==2)throw new Error('Okraj vyžaduje nejprve opravu sítě.');ordered.push(id);const next=neighbors.get(id).find(n=>n!==previous);previous=id;id=next;if(ordered.length>neighbors.size)throw new Error('Okraj nelze jednoznačně spojit.')}while(id!==start)
- const lastIndex=ordered.indexOf(end);if(lastIndex<0)throw new Error('Konce doplnění nejsou na stejném okraji.')
- const boundary=ordered.map(nodeId=>{const a=attributes.get(nodeId);return{nodeId,position:context.nodes[nodeId],color:a?.color,uv:a?.uv,normal:a?.sourceNormal?new THREE.Vector3(...a.sourceNormal):null}})
- const patch=buildEdgePatch({nodes:context.nodes,triangles,edgeTriangles},{...loop,boundary},0,lastIndex,bulge)
- return {...patch,removeFaces:removed}
+ let remaining=triangles,boundary,lastIndex,edgeTriangles
+ for(let pass=0;pass<24;pass++){
+  edgeTriangles=new Map();const neighbors=new Map(),faceMap=new Map()
+  const faceIndex=context._edgePatchFaceIndex||new Map(context.triangles.map((t,i)=>[t,i]));context._edgePatchFaceIndex=faceIndex
+  remaining.forEach((t,i)=>faceMap.set(faceIndex.get(t),i))
+  const originalRim=context._edgePatchRim||[...context.edgeTriangles].filter(([,list])=>list.length===1).map(([k])=>k);context._edgePatchRim=originalRim
+  const touched=new Set(originalRim)
+  removedIds.forEach(i=>context.triangles[i].nodeIds.forEach((a,j)=>touched.add(key(a,context.triangles[i].nodeIds[(j+1)%3]))))
+  for(const k of touched){const list=context.edgeTriangles.get(k).filter(i=>!removedIds.has(i));if(list.length===1)edgeTriangles.set(k,[faceMap.get(list[0])])}
+  for(const [k,list]of edgeTriangles)if(list.length===1){const [a,b]=k.split(':').map(Number);for(const [u,v]of [[a,b],[b,a]]){if(!neighbors.has(u))neighbors.set(u,[]);neighbors.get(u).push(v)}}
+  // A narrow cut can detach a tiny retained island inside its cavity. Replace
+  // that island too, so it cannot leave a second skin or an unstitched hole.
+  const oldRim=new Set(originalRim),checked=new Set(),islands=new Set(),groups=[]
+  for(const seed of neighbors.keys()){
+   if(checked.has(seed))continue
+   const nodes=[seed];checked.add(seed);let changed=false
+   for(let j=0;j<nodes.length;j++)for(const next of neighbors.get(nodes[j])){if(!oldRim.has(key(nodes[j],next)))changed=true;if(!checked.has(next)){checked.add(next);nodes.push(next)}}
+   if(changed)groups.push(nodes)
+  }
+  groups.sort((a,b)=>b.length-a.length)
+  // The main changed contour belongs to the scan body, even on a small mesh.
+  // Secondary changed contours can surround detached retained islands.
+  for(const nodes of groups.slice(1)){
+   const seed=nodes[0],firstEdge=key(seed,neighbors.get(seed)[0]),t=remaining[edgeTriangles.get(firstEdge)[0]],sourceIndex=faceIndex.get(t),faces=[sourceIndex],seen=new Set(faces)
+   for(let j=0;j<faces.length&&faces.length<=2000;j++){const t=context.triangles[faces[j]];t.nodeIds.forEach((a,e)=>{for(const i of context.edgeTriangles.get(key(a,t.nodeIds[(e+1)%3]))||[])if(!removedIds.has(i)&&!seen.has(i)){seen.add(i);faces.push(i)}})}
+   if(faces.length<=2000)faces.forEach(i=>islands.add(i))
+  }
+  if(islands.size){islands.forEach(i=>removedIds.add(i));remaining=context.triangles.filter((_,i)=>!removedIds.has(i));continue}
+  const closest=point=>[...neighbors.keys()].reduce((best,id)=>context.nodes[id].distanceToSquared(point)<context.nodes[best].distanceToSquared(point)?id:best,neighbors.keys().next().value)
+  const start=closest(arc[0].position),end=closest(arc.at(-1).position)
+  if(start===end||context.nodes[start].distanceTo(arc[0].position)>1||context.nodes[end].distanceTo(arc.at(-1).position)>1)throw new Error('Označte i zdravé okolí obou konců zářezu.')
+  const ordered=[];let id=start,previous=-1
+  do{if(neighbors.get(id)?.length!==2)throw new Error('Okraj vyžaduje nejprve opravu sítě.');ordered.push(id);const next=neighbors.get(id).find(n=>n!==previous);previous=id;id=next;if(ordered.length>neighbors.size)throw new Error('Okraj nelze jednoznačně spojit.')}while(id!==start)
+  lastIndex=ordered.indexOf(end);if(lastIndex<0)throw new Error('Konce doplnění nejsou na stejném okraji.')
+  boundary=ordered.map(nodeId=>{const a=attributes.get(nodeId);return{nodeId,position:context.nodes[nodeId],color:a?.color,uv:a?.uv,normal:a?.sourceNormal?new THREE.Vector3(...a.sourceNormal):null}})
+  // Peel tiny remaining ears whose three vertices lie on the replacement rim.
+  // Otherwise an ear can be triangulated backwards on top of the retained face.
+  const rim=new Set(selectEdgeArc({boundary},0,lastIndex).map(s=>s.nodeId)),ears=remaining.filter(t=>t.nodeIds.every(id=>rim.has(id)))
+  if(!ears.length)break
+  if(pass===23)throw new Error('Zkuste označit menší okolí zářezu.')
+  ears.forEach(t=>removedIds.add(faceIndex.get(t)))
+  healRemovedFans(context,removedIds,incident)
+ retainAttachedRemoval(context,removedIds,arc)
+  remaining=context.triangles.filter((_,i)=>!removedIds.has(i))
+ }
+ removed.splice(0,removed.length,...[...removedIds].map(i=>({childUuid:context.triangles[i].childUuid||loop.childUuid,faceIndex:context.triangles[i].faceIndex??i})))
+ const prepared={key:cacheKey,context:{nodes:context.nodes,triangles:remaining,edgeTriangles,patchCollar:true,collisionSource:context,excludedFaces:removedIds,collisionFaceMap:new Map(remaining.map((t,i)=>[context._edgePatchFaceIndex.get(t),i]))},loop:{...loop,boundary},lastIndex,removed,removedIds:[...removedIds]}
+ context._edgePatchCollar=prepared
+ return finishCollar(context,loop,first,last,bulge,prepared,iteration)
+
+}
+
+function finishCollar(context,loop,first,last,bulge,prepared,iteration){
+ const remaining=prepared.context.triangles,removedIds=new Set(prepared.removedIds),incident=context._edgePatchIncident,arc=selectEdgeArc(loop,first,last)
+ try{
+  const patch=buildEdgePatch(prepared.context,prepared.loop,0,prepared.lastIndex,bulge)
+  return {...patch,removeFaces:prepared.removed}
+ }catch(error){
+  const hits=(error.sourceTriangleIndices||[error.sourceTriangleIndex]).map(i=>remaining[i]).filter(Boolean)
+  if(!hits.length||iteration>=4)throw error
+  // Absorb only intersecting faces immediately beside the sewn rim. A curled
+  // microtriangle is replaced in the same cavity; remote overlaps stay errors.
+  const cut=selectEdgeArc(prepared.loop,0,prepared.lastIndex),distance=p=>Math.min(...cut.map(s=>s.position.distanceToSquared(p)))
+  for(const hit of hits){
+   const points=hit.nodeIds.map(id=>context.nodes[id]),center=points.reduce((sum,p)=>sum.add(p),new THREE.Vector3()).multiplyScalar(1/3)
+   if(distance(center)>.18**2||Math.min(...arc.map(s=>s.position.distanceToSquared(center)))>.8**2)throw error
+  }
+  hits.forEach(hit=>hit.nodeIds.forEach(id=>incident[id].forEach(i=>removedIds.add(i))))
+  context._edgePatchCollar=null
+  return patchWithCollar(context,loop,first,last,bulge,removedIds,iteration+1)
+ }
 }

@@ -22,6 +22,10 @@ export function patchSpacing(context,arc){
 
 export function remeshPatch(samples,input,boundaryCount,target,axis,inward,normal,arcCount){
  let faces=input
+ // A locally oversampled rim must not force the entire new patch to that
+ // density. Limit interior work by physical area; the sewn rim stays exact.
+ const area=input.reduce((sum,f)=>sum+Math.abs(cross(...f.map(i=>new THREE.Vector2(samples[i].position.dot(axis),samples[i].position.dot(inward)))))*.5,0)
+ target=Math.max(target,Math.sqrt(area/1600))
  const coords=samples.map(s=>new THREE.Vector2(s.position.dot(axis),s.position.dot(inward)))
  const sign=Math.sign(cross(...faces[0].map(i=>coords[i])))
  const quality=f=>{const [a,b,c]=f.map(i=>coords[i]);return Math.abs(cross(a,b,c))/(a.distanceToSquared(b)+b.distanceToSquared(c)+c.distanceToSquared(a))}
@@ -50,13 +54,18 @@ export function remeshPatch(samples,input,boundaryCount,target,axis,inward,norma
    samples.push({position:samples[a].position.clone().lerp(samples[b].position,.5),color:blend('color'),uv:blend('uv')});coords.push(coords[a].clone().lerp(coords[b],.5));marked.set(key,id)
   }
   if(!marked.size)break
-  if(faces.length+marked.size*2>40000)throw new Error('Oblast doplnění je příliš velká. Označte menší zářez.')
+  if(faces.length+marked.size*2>12000){
+   // Keep this valid disk and finish its relaxation, rather than rejecting an
+   // ordinary notch because tiny attachment edges consumed the work budget.
+   samples.splice(samples.length-marked.size);coords.splice(coords.length-marked.size);break
+  }
   faces=faces.flatMap(([a,b,c])=>{
    const ab=marked.get(edge(a,b)),bc=marked.get(edge(b,c)),ca=marked.get(edge(c,a)),mask=(ab!==undefined?1:0)|(bc!==undefined?2:0)|(ca!==undefined?4:0)
    return mask===0?[[a,b,c]]:mask===1?[[a,ab,c],[ab,b,c]]:mask===2?[[b,bc,a],[bc,c,a]]:mask===4?[[c,ca,b],[ca,a,b]]:mask===3?[[b,bc,ab],[a,ab,c],[ab,bc,c]]:mask===6?[[c,ca,bc],[b,bc,a],[bc,ca,a]]:mask===5?[[a,ab,ca],[c,ca,b],[ca,ab,b]]:[[a,ab,ca],[ab,b,bc],[ca,bc,c],[ab,bc,ca]]
   })
-  improve()
+  if(pass%2===1)improve()
  }
+ improve()
  // Remove short interior edges left by the initial constrained triangulation.
  // The link condition and signed-area check preserve a single sewn disk.
  for(let pass=0;pass<4;pass++){
@@ -108,5 +117,5 @@ export function remeshPatch(samples,input,boundaryCount,target,axis,inward,norma
   const next=r.reduce((s,v)=>s+v*v,0),beta=next/rr;direction=r.map((v,i)=>v+beta*direction[i]);rr=next
  }
  ids.forEach((id,i)=>samples[id].position.addScaledVector(normal,x[i]-heights[id]))
- return faces
+ return {faces,targetEdgeLength:target}
 }

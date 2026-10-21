@@ -2,13 +2,17 @@
 import { useMemo, useEffect } from 'react'
 import { useThree } from '@react-three/fiber'
 import * as THREE from 'three'
+import { Html } from '@react-three/drei'
+import styles from './PatchPending.module.css'
+
+export function PatchPendingIndicator(){return <span className={styles.status} role="status"><span className={styles.spinner} aria-hidden="true"/>Připravuji doplnění…</span>}
 
 function EdgeLine({ points, color, closed = false }) {
   const geometry = useMemo(() => new THREE.BufferGeometry().setFromPoints((closed ? [...points, points[0]] : points).map(p=>new THREE.Vector3(...p))), [points, closed])
   useEffect(()=>()=>geometry.dispose(),[geometry])
   return <line geometry={geometry} raycast={()=>null} renderOrder={2000}><lineBasicMaterial color={color} depthTest={false} transparent opacity={0.85}/></line>
 }
-export function EdgeEditOverlay({ context, loops, selection, patch, onPick, picking=true, painted=new Set() }) {
+export function EdgeEditOverlay({ context, loops, selection, patch, pending=false, onPick, picking=true, painted=new Set() }) {
   const {camera,gl}=useThree()
   useEffect(()=>{
     if(!context?.sourceObject||!picking) return
@@ -40,11 +44,17 @@ export function EdgeEditOverlay({ context, loops, selection, patch, onPick, pick
   },[loops,painted])
   useEffect(()=>()=>geometry?.dispose(),[geometry])
   useEffect(()=>()=>paintedGeometry.dispose(),[paintedGeometry])
+  const pendingPosition=useMemo(()=>{
+    if(!pending||selection.length!==2)return null
+    const a=loops[selection[0].loop]?.boundary[selection[0].index]?.position,b=loops[selection[1].loop]?.boundary[selection[1].index]?.position
+    return a&&b?a.clone().lerp(b,.5):null
+  },[pending,selection,loops])
   if(!context?.sourceObject) return null
   return <group matrix={context.sourceObject.matrix} matrixAutoUpdate={false}>
     {loops.map((loop,i)=><EdgeLine key={i} points={loop.points.map(p=>p.toArray())} color="#398b95" closed/>)}
     {selection.map((s,i)=><mesh key={i} position={loops[s.loop].boundary[s.index].position} raycast={()=>null} renderOrder={2001}><sphereGeometry args={[Math.max(0.18,context.diagonal*0.003),12,8]}/><meshBasicMaterial color={i?'#fbbf24':'#38bdf8'} depthTest={false}/></mesh>)}
     <points geometry={paintedGeometry} raycast={()=>null} renderOrder={2002}><pointsMaterial color="#fbbf24" size={4} sizeAttenuation={false} depthTest={false}/></points>
+    {pendingPosition&&<Html position={pendingPosition} center zIndexRange={[8,8]} style={{pointerEvents:'none'}}><span className={styles.surface} aria-hidden="true"><span className={styles.spinner}/></span></Html>}
     {patch&&<><mesh geometry={geometry} raycast={()=>null} renderOrder={1999}><meshStandardMaterial color="#49dbb1" side={THREE.DoubleSide} transparent opacity={0.8} polygonOffset polygonOffsetFactor={-2}/></mesh><EdgeLine points={patch.bridge} color="#a7f3d0"/><EdgeLine points={patch.arc} color="#fbbf24"/></>}
   </group>
 }

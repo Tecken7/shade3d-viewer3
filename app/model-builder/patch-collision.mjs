@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import {MeshBVH,ExtendedTriangle} from 'three-mesh-bvh'
 
 function collisionTree(context,loop){
+ if(context.collisionSource)return collisionTree(context.collisionSource,loop)
  if(context._patchCollision)return context._patchCollision
  const nodes=context.nodes||[]
  if(!nodes.length)loop.boundary.forEach(s=>nodes[s.nodeId]=s.position)
@@ -29,17 +30,21 @@ function overlapArea(one,two,normal){
 
 // Contacts on the welded attachment edge are expected. Positive-area overlap,
 // crossings away from that edge, and a second near-parallel skin are rejected.
-export function assertPatchClear(context,loop,samples,faces,spacing,checkNear=true){
+export function assertPatchClear(context,loop,samples,faces,spacing,checkNear=true,collect=false){
+ const collisions=new Set()
  const tree=collisionTree(context,loop),triangle=new ExtendedTriangle(),normal=new THREE.Vector3(),sourceNormal=new THREE.Vector3(),line=new THREE.Line3(),closest=new THREE.Vector3(),bary=new THREE.Vector3(),epsilon=2e-5
  const clearance=Math.min(.025,spacing*.12)
  for(const face of faces){
   const points=face.map(id=>samples[id].position);triangle.set(...points);triangle.needsUpdate=true;triangle.getNormal(normal)
   const box=new THREE.Box3().setFromPoints(points).expandByScalar(clearance),center=triangle.getMidpoint(new THREE.Vector3())
-  const collision=tree.shapecast({intersectsBounds:bounds=>bounds.intersectsBox(box),intersectsTriangle:source=>{
+  let sourceTriangleIndex=-1
+  const collision=tree.shapecast({intersectsBounds:bounds=>bounds.intersectsBox(box),intersectsTriangle:(source,index)=>{
+   if(context.excludedFaces?.has(index))return false
+   sourceTriangleIndex=context.collisionFaceMap?context.collisionFaceMap.get(index):index
    source.getNormal(sourceNormal)
    const parallel=Math.abs(sourceNormal.dot(normal)),planeDistance=Math.abs(sourceNormal.dot(triangle.a.clone().sub(source.a)))
    if(parallel>1-1e-6&&planeDistance<epsilon){
-    return overlapArea(triangle,source,normal)>Math.max(1e-11,Math.min(source.getArea(),triangle.getArea())*1e-5)
+    return overlapArea(triangle,source,normal)>Math.max(1e-11,Math.min(source.getArea(),triangle.getArea())*1e-5,epsilon*2*Math.min(source.a.distanceTo(source.b)+source.b.distanceTo(source.c)+source.c.distanceTo(source.a),triangle.a.distanceTo(triangle.b)+triangle.b.distanceTo(triangle.c)+triangle.c.distanceTo(triangle.a)))
    }
    if(triangle.intersectsTriangle(source,line,true)&&line.distance()>epsilon){
     const seam=face.map((id,i)=>[samples[id],samples[face[(i+1)%3]]]).filter(([a,b])=>a.nodeId!==undefined&&b.nodeId!==undefined&&context.edgeTriangles.get(a.nodeId<b.nodeId?`${a.nodeId}:${b.nodeId}`:`${b.nodeId}:${a.nodeId}`)?.length===1)
@@ -55,6 +60,12 @@ export function assertPatchClear(context,loop,samples,faces,spacing,checkNear=tr
    }
    return false
   }})
-  if(collision)throw new Error('Doplnění by překrývalo existující povrch. Pro výstupek použijte Odstranit artefakt, nebo upravte označení zářezu.')
+  if(collision&&collect){collisions.add(sourceTriangleIndex);continue}
+  if(collision){
+   const error=new Error('Doplnění by překrývalo existující povrch. Pro výstupek použijte Odstranit artefakt, nebo upravte označení zářezu.')
+   error.sourceTriangleIndex=sourceTriangleIndex
+   throw error
+  }
  }
+ if(collisions.size){const error=new Error('Doplnění by překrývalo existující povrch. Pro výstupek použijte Odstranit artefakt, nebo upravte označení zářezu.');error.sourceTriangleIndices=[...collisions];throw error}
 }

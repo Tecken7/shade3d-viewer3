@@ -21,7 +21,7 @@ import { prepareRepairVertices } from "./model-builder/mesh-preflight.mjs"
 import { orientRepairPatch } from "./model-builder/repair-orientation.mjs"
 import { predictEdgePatch, smoothScanBorder, paintedEdgeSelection } from "./model-builder/edge-edit.mjs"
 import { fairArtifact, applySurfacePositions } from "./model-builder/surface-edit.mjs"
-import { EdgeEditOverlay, SurfaceSelectionOverlay } from "./model-builder/EdgeEditOverlay"
+import { EdgeEditOverlay, SurfaceSelectionOverlay, PatchPendingIndicator } from "./model-builder/EdgeEditOverlay"
 import { buildTrimRegions } from "./model-builder/trim-regions.mjs"
 import { refreshLocalNormals } from "./model-builder/surface-edit.mjs"
 import { ScanBrush } from "./model-builder/ScanBrush"
@@ -12178,7 +12178,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     if(!['paint','erase'].includes(cadEditorTool)||cadEditorBusy||!cadEditContext||cadEffectiveSelection.length!==2){setCadEditPreview({patch:null,error:'',pending:false});if(cadEditWorkerRef.current)cadEditWorkerRef.current._edgeQueued=null;return}
     setCadEditPreview({patch:null,error:'',pending:true})
     const worker=cadEditWorkerRef.current,message={type:'preview',id,payload:{selection:cadEffectiveSelection,bulge:cadEditBulge}}
-    if(worker){if(worker._edgeBusy)worker._edgeQueued=message;else{worker._edgeBusy=true;worker.postMessage(message)}}
+    const timer=setTimeout(()=>{if(worker){if(worker._edgeBusy)worker._edgeQueued=message;else{worker._edgeBusy=true;worker.postMessage(message)}}},140)
+    return()=>clearTimeout(timer)
   },[cadEditContext,cadEditLoops,cadEffectiveSelection,cadEditBulge,cadEditorBusy,cadEditorTool])
   // Upper/Lower nejsou jen názvy souborů. Typ čelisti je součást CAD workflow,
   // protože určuje stranu okluzní roviny při orientaci a později i směr báze.
@@ -18641,7 +18642,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             </div>
             {(cadUpperUrl && cadLowerUrl) && <div style={{display:"flex",gap:8,marginTop:6}}>{["upper","lower"].map(arch=><button key={arch} disabled={cadEditorBusy} onClick={()=>{const url=arch==="upper"?cadUpperUrl:cadLowerUrl; const object=modelObjectsRef.current[url]; if(object){prepareRepairVertices(object);refreshCadEdit(object);setCadActiveArch(arch);setCadFileUrl(url);setCadFileName(arch==="upper"?cadUpperName:cadLowerName);setCadEditHistory([])}}}>{arch==="upper"?"Upper":"Lower"}</button>)}</div>}
             {cadEffectiveSelection.length===2 && <label style={{display:"flex",gap:10,alignItems:"center",marginTop:8}}>Prohnutí nové hrany <input aria-label="Prohnutí nové hrany" type="range" min="-2" max="6" step="0.1" value={cadEditBulge} onChange={e=>setCadEditBulge(Number(e.target.value))}/>{cadEditBulge.toFixed(1)} mm</label>}
-            {cadEditPreview.pending&&<div role="status">Připravuji síť doplnění…</div>}
+            {cadEditPreview.pending&&<PatchPendingIndicator/>}
             {['paint','erase'].includes(cadEditorTool)&&cadEditPreview.error && <div role="alert" style={{color:"#fbbf24"}}>{cadEditPreview.error}</div>}
             <div style={{display:"flex",gap:8,marginTop:8,flexWrap:"wrap"}}>
               {['paint','erase'].includes(cadEditorTool)&&<button disabled={!cadEditPreview.patch||cadEditorBusy} onClick={applyCadEdgePatch}>Doplnit plochu</button>}
@@ -20902,7 +20903,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             ))}
           </Suspense>
 
-          {cadStandalone && cadStage === "edit" && <>{['paint','erase'].includes(cadEditorTool)&&<EdgeEditOverlay context={cadEditContext} loops={cadEditLoops} selection={cadEffectiveSelection} patch={cadEditPreview.patch} picking={false} painted={cadEditPainted}/>}{cadEditorTool==='artifact'&&<SurfaceSelectionOverlay context={cadEditContext} selected={cadArtifactPainted}/>}<ScanBrush context={cadEditContext} tool={cadEditorTool} options={cadBrushOptions} paint={paintCadEdge} onStart={startCadSculpt} onEnd={endCadSculpt} onBusy={setCadEditorBusy} onMessage={setCadMessage} controlsRef={trackballRef}/></>}
+          {cadStandalone && cadStage === "edit" && <>{['paint','erase'].includes(cadEditorTool)&&<EdgeEditOverlay context={cadEditContext} loops={cadEditLoops} selection={cadEffectiveSelection} patch={cadEditPreview.patch} pending={cadEditPreview.pending} picking={false} painted={cadEditPainted}/>}{cadEditorTool==='artifact'&&<SurfaceSelectionOverlay context={cadEditContext} selected={cadArtifactPainted}/>}<ScanBrush context={cadEditContext} tool={cadEditorTool} options={cadBrushOptions} paint={paintCadEdge} onStart={startCadSculpt} onEnd={endCadSculpt} onBusy={setCadEditorBusy} onMessage={setCadMessage} controlsRef={trackballRef}/></>}
           {cadStandalone && cadStage === "orient" && !cadOrientationPrepared && cadOrientationPoints.map((point, index) => (
             <AlignmentMarker key={`cad-orient-${index}`} point={point} index={index} radius={cadMarkerRadius} />
           ))}

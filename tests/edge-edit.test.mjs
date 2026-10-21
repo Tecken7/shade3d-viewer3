@@ -81,3 +81,32 @@ test('collision check rejects both crossing triangles and a near-parallel duplic
  assert.throws(()=>assertPatchClear(context,loop,samples([[.2,.2,.001],[1.5,.2,.001],[.2,1.5,.001]]),[[0,1,2]],.15),/překrývalo/)
  assert.throws(()=>assertPatchClear(context,loop,samples([[.2,.2,-1],[1.5,.2,1],[.2,1.5,1]]),[[0,1,2]],.15),/překrývalo/)
 })
+
+
+test('straight free lip remains valid after a rotated and translated scan projection',()=>{
+ const {context,loop}=fixture([[0,0],[2,0],[2,3],[15,3],[15,0],[20,0],[20,8],[0,8]])
+ const matrix=new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(.6,.3,1.4)),normal=new THREE.Vector3(0,0,1).transformDirection(matrix)
+ loop.boundary.forEach(s=>{s.position.applyMatrix4(matrix).add(new THREE.Vector3(8.3,7.6,-3));s.normal=normal})
+ context.nodes=loop.boundary.map(s=>s.position)
+ const patch=buildEdgePatch(context,loop,1,4)
+ assert.ok(patch.triangles.length>100)
+ for(const t of patch.triangles){const [a,b,c]=t.map(c=>new THREE.Vector3(...c.sourcePos));assert.ok(b.sub(a).cross(c.sub(a)).dot(normal)>1e-12)}
+})
+
+test('interior patch budget adapts to area without discarding the sewn boundary',async()=>{
+ const {remeshPatch}=await import('../app/model-builder/patch-remesh.mjs')
+ const samples=[[0,0],[40,0],[40,10],[0,10]].map(p=>({position:new THREE.Vector3(...p,0)})),snapshot=samples.map(s=>s.position.toArray())
+ const {faces}=remeshPatch(samples,[[0,1,2],[0,2,3]],4,.06,new THREE.Vector3(1,0,0),new THREE.Vector3(0,1,0),new THREE.Vector3(0,0,1),4)
+ assert.ok(faces.length<12000);assert.ok(faces.length>1000)
+ assert.deepEqual(samples.slice(0,4).map(s=>s.position.toArray()),snapshot)
+ let area=0;const edges=new Map()
+ for(const f of faces){const [a,b,c]=f.map(i=>samples[i].position);const n=b.clone().sub(a).cross(c.clone().sub(a));assert.ok(n.z>0);area+=n.z*.5;f.forEach((a,i)=>{const k=edge(a,f[(i+1)%3]);edges.set(k,(edges.get(k)||0)+1)})}
+ assert.ok(Math.abs(area-400)<1e-6);assert.equal([...edges.values()].filter(n=>n===1).length,4);assert.ok([...edges.values()].every(n=>n<=2))
+})
+
+test('batched collision collection retains source face IDs and excludes only replaced faces',async()=>{
+ const {assertPatchClear}=await import('../app/model-builder/patch-collision.mjs'),{context,loop,faces}=fixture(),samples=loop.boundary.map(s=>({position:s.position}))
+ assert.throws(()=>assertPatchClear(context,loop,samples,faces,.15,false,true),error=>error.sourceTriangleIndices.length>1&&error.sourceTriangleIndices.every(i=>i>=0&&i<faces.length))
+ const replacement={...context,collisionSource:context,excludedFaces:new Set(faces.map((_,i)=>i)),collisionFaceMap:new Map()}
+ assert.doesNotThrow(()=>assertPatchClear(replacement,loop,samples,faces,.15,false,true))
+})
