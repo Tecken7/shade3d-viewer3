@@ -14139,7 +14139,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     const sourceObject = modelObjectsRef.current[cadFileUrl]
     if (!sourceObject || !rootGroupRef.current) { setCadMessage("Model ještě není připravený."); return }
     setCadBusy(true)
-    const nextOptions = { ...builderOptions, cutHoles: typeof request.cutHoles === "boolean" ? request.cutHoles : builderOptions.cutHoles }
+    const nextOptions = { ...builderOptions, cutHoles: typeof request.cutHoles === "boolean" ? request.cutHoles : builderOptions.cutHoles,
+      repairBoundary: typeof request.repairBoundary === "boolean" ? request.repairBoundary : builderOptions.repairBoundary }
+    if(typeof request.repairBoundary === "boolean"){
+      setBuilderOptions(previous=>({...previous,repairBoundary:request.repairBoundary}))
+      setCadPreviewActive(false)
+      setBuilderPlacing(false)
+    }
+    setBuilderDirty(true)
     const pending = { terminate() {} }
     builderWorkerRef.current = pending
     setCadMessage("Připravuji nový model…")
@@ -14174,7 +14181,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         setBuilderOptions(previous => ({ ...previous, holes: result.holes, cutHoles: nextOptions.cutHoles, bottomContour: result.placement.bottomContour, baseDirection:result.placement.direction }))
         setCadPreviewActive(true)
         setBuilderDirty(false)
-        setCadMessage(result.warnings?.length ? result.warnings.join(" ") : nextOptions.cutHoles ? "Otvory jsou vyříznuté. Zkontrolujte výsledek a dokončete model." : "Základna je připravena bez otvorů. Posuňte modré válce, nastavte průměr a hloubku, potom potvrďte vyříznutí otvorů.")
+        const repairNotice=result.stats.boundaryRepair?"Hranice opravena a vyhlazena. ":""
+        setCadMessage(repairNotice+(result.warnings?.length ? result.warnings.join(" ") : nextOptions.cutHoles ? "Otvory jsou vyříznuté. Zkontrolujte výsledek a dokončete model." : "Základna je připravena bez otvorů. Posuňte modré válce, nastavte průměr a hloubku, potom potvrďte vyříznutí otvorů."))
       }
       worker.onerror = (event) => {
         if (builderWorkerRef.current !== worker) return
@@ -18841,7 +18849,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         )}
 
         {cadStage === "base" && (
-          <div style={{ display:"grid", gridTemplateColumns:"minmax(0,1fr) auto", gap:14, alignItems:"center" }}>
+          <div style={{ display:"grid", gridTemplateColumns:"minmax(0,1fr)", gap:10, alignItems:"center" }}>
             <div style={{ display:"grid", gridTemplateColumns:"110px minmax(180px,1fr) 76px", gap:9, alignItems:"center", minWidth:0 }}>
               <div>
                 <div style={{ color:"#d1d1d1", fontSize:9.4, fontWeight:730 }}>Celková výška</div>
@@ -18874,7 +18882,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 <span style={{ position:"absolute", right:6, top:"50%", transform:"translateY(-50%)", color:"#666", fontSize:7.6, fontWeight:700, pointerEvents:"none" }}>mm</span>
               </div>
             </div>
-            <div style={{ display:"flex", alignItems:"center", gap:7 }}>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", flexWrap:"wrap", gap:7 }}>
+              <button type="button" disabled={cadBusy} aria-pressed={!!builderOptions.repairBoundary} onClick={()=>toggleCadPreview({repairBoundary:!builderOptions.repairBoundary})} title="Vratně opraví drobné větvení okraje a vyhladí jeho napojení na bázi. Původní scan zůstane zachovaný." style={{height:33,padding:"0 10px",borderRadius:9,border:"1px solid rgba(96,165,250,.25)",background:builderOptions.repairBoundary?"rgba(59,130,246,.18)":"rgba(255,255,255,.035)",color:"#bfdbfe",fontSize:9,fontWeight:720,cursor:cadBusy?"wait":"pointer"}}>{builderOptions.repairBoundary?"Vrátit úpravu hranice":"Opravit a vyhladit hranici"}</button>
               <button type="button" onClick={toggleCadPreview} disabled={cadBusy} title={cadPreviewActive ? "Ukončit Preview" : "Zobrazit Preview"} style={{
                 height:33, minWidth:84, padding:"0 10px", borderRadius:9, border:cadPreviewActive?"1px solid rgba(74,222,128,.28)":"1px solid rgba(255,255,255,.09)",
                 background:cadPreviewActive?"rgba(34,197,94,.11)":"rgba(255,255,255,.035)", color:cadPreviewActive?"#bbf7d0":"#c8c8c8",

@@ -8,6 +8,7 @@ import { drainPassage } from './drains.mjs'
 import { prepareSurface } from './prepare-surface.mjs'
 import { holeDirection, seatHoleOnContour } from './hole-placement.mjs'
 import { baseDirection } from './base-direction.mjs'
+import { repairBaseBoundary } from './boundary-repair.mjs'
 
 import { DEFAULTS } from "./defaults.mjs"
 export { DEFAULTS } from "./defaults.mjs"
@@ -262,7 +263,10 @@ export async function buildModel(M, input, options, fontData, progress = () => {
     // Worker input already contains shared Float32 coordinates. Do not round
     // nearby, distinct cut vertices into a pinched/branching boundary.
     const source = indexed(input, { exact: true })
-    const { vertices: v, faces: f } = prepareSurface(source.vertices, source.faces)
+    const prepared = prepareSurface(source.vertices, source.faces)
+    if(p.repairBoundary)progress('Opravuji a vyhlazuji hranici pro napojení báze…')
+    const boundaryRepair = p.repairBoundary ? repairBaseBoundary(prepared.vertices,prepared.faces) : null
+    const { vertices: v, faces: f } = boundaryRepair || prepared
     const topology = meshTopology(v, f)
     if (topology.nonManifold) throw new Error('Scan obsahuje neplatné nebo obrácené hrany. Nejprve použijte opravu sítě.')
     if (topology.loops.length !== 1) throw new Error(`Scan má ${topology.loops.length} otevřených hranic. Potřebuji jednu hlavní hranici; ostatní díry nejprve opravte.`)
@@ -532,7 +536,8 @@ export async function buildModel(M, input, options, fontData, progress = () => {
     if (stlCheck.openEdges || stlCheck.nonManifold) throw new Error('Při převodu do STL se dotýkají vnitřní plochy. Upravte tloušťku stěny o 0,1 mm a přepočítejte náhled.')
     const components = 1
     return { positions: new Float32Array(output.vertices), indices: new Uint32Array(output.faces), holes, placement, warnings: holes.map(h => h.warning).filter(Boolean),
-      stats: { triangles: output.faces.length / 3, totalHeight: p.totalHeight, wall: p.wall, openBoundaryLoops: 0, volume: signedVolume(output.vertices, output.faces), components, sealedPockets, separatedContacts } }
+      stats: { triangles: output.faces.length / 3, totalHeight: p.totalHeight, wall: p.wall, openBoundaryLoops: 0, volume: signedVolume(output.vertices, output.faces), components, sealedPockets, separatedContacts,
+        boundaryRepair: boundaryRepair ? {removedDegenerate:boundaryRepair.removedDegenerate,removedFans:boundaryRepair.removedFans,removedArea:boundaryRepair.removedArea} : null } }
   } finally {
     surfaceGeometry?.dispose(); closedGeometry?.dispose(); textSurfaceGeometry?.dispose(); drainGeometry?.dispose()
     for (const obj of allocated.reverse()) obj.delete()

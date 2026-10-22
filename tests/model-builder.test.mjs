@@ -22,6 +22,18 @@ for(const tri of THREE.ShapeUtils.triangulateShape(contour,[])){
 }
 const build=opts=>buildModel(M,new Float32Array(scan),{arch:'upper',smoothing:0,...opts},font)
 let baseline
+
+test('opt-in rim repair builds a closed base from a tiny pinched border and remains reversible',async()=>{
+ const damaged=new Float32Array([...scan,-20,0,-15,-20.1,0,-15,-20,0,-15.1]),before=damaged.slice()
+ const options={arch:'upper',smoothing:0,holes:[{enabled:false},{enabled:false}]}
+ await assert.rejects(buildModel(M,damaged,options,font),/větví/)
+ const result=await buildModel(M,damaged,{...options,repairBoundary:true},font)
+ assert.equal(result.stats.boundaryRepair.removedFans,1)
+ const topology=meshTopology(Array.from(result.positions),Array.from(result.indices))
+ assert.equal(topology.openEdges,0);assert.equal(topology.nonManifold,0);assert.equal(result.stats.components,1)
+ assert.deepEqual(damaged,before)
+ await assert.rejects(buildModel(M,damaged,options,font),/větví/)
+})
 test('base generation accepts reversed cut faces and duplicates without changing the resulting solid', async () => {
   const options = { arch:'upper', smoothing:0, holes:[{enabled:false},{enabled:false}] }
   const reference = await buildModel(M, new Float32Array(scan), options, font)
