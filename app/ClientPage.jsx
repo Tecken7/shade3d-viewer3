@@ -12924,6 +12924,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       control.axis = null
     })
   }, [])
+  const finishBuilderDrag = useCallback(() => {
+    cameraInteractingRef.current = false
+    setTrackballResetNonce(value => value + 1)
+  }, [])
   const [didInitialFrame, setDidInitialFrame] = useState(false)
   const [initialCameraState, setInitialCameraState] = useState(null)
   
@@ -20994,7 +20998,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             <CadOrientationReferencePlane center={cadOrientationPlaneCenter} y={cadOrientationPlaneY} size={cadOrientationPlaneSize} />
           )}
 
-          {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && <><HolePreview options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} /><BuilderHandle selected={builderSelected} options={builderOptions} change={changeBuilderOptions} dragging={setBuilderDragging} /></>}
+          {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && <><HolePreview options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} /><BuilderHandle selected={builderSelected} options={builderOptions} change={changeBuilderOptions} dragging={setBuilderDragging} /></>}
           {cadStandalone && (cadPreviewActive || cadStage === "result") && cadPreviewGeometry && (
             <BuilderPreview geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} />
           )}

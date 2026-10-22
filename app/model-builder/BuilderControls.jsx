@@ -19,6 +19,7 @@ export function BuilderControls({ options: p, change, selected, select, placing,
     {busy && <button type="button" style={button()} onClick={cancel}>Zrušit výpočet</button>}
     <fieldset disabled={busy} style={{ border: 0, minWidth: 0, padding: 0, margin: 0, display: 'grid', gap: 14 }}>
       <label style={{ fontSize: 13 }}><input type="checkbox" checked={p.hollow} onChange={e => change({ hollow: e.target.checked })} /> Dutý model</label>
+      <label style={{ fontSize: 12 }}><input type="checkbox" checked={!!p.flipBaseDirection} onChange={e => change({ flipBaseDirection:e.target.checked })} /> Obrátit směr tvorby báze</label>
       {p.hollow && <NumberField label="Tloušťka stěny (mm)" value={p.wall} min={0.8} max={10} onChange={wall => change({ wall })} />}
       <NumberField label="Spodní bevel (mm)" value={p.bevel} min={0} max={Math.min(2, p.wall * 0.7)} onChange={bevel => change({ bevel })} />
       <p style={{ margin: 0, fontSize: 11, color: '#aaa' }}>Výchozí bevel 1 mm / 45° odpovídá dodanému modelu z Meditu.</p>
@@ -48,6 +49,7 @@ export function BuilderControls({ options: p, change, selected, select, placing,
           <input aria-label="Poloha otvoru po spodním obvodu" type="range" min={0} max={100} step={0.1} value={nearestContourPosition(p.bottomContour, p.holes[hole].position).fraction * 100} onChange={e => editHole({ position: contourPosition(p.bottomContour, Number(e.target.value) / 100) })} />
         </label>}
         <NumberField label="Hloubka řezu otvoru (mm)" value={p.holes[hole].length} min={0.5} max={50} onChange={length => editHole({ length, autoDepth: false })} />
+        <NumberField label="Vnější délka válce (mm)" value={p.holes[hole].outerLength ?? p.holes[hole].length} min={0.5} max={50} onChange={outerLength => editHole({ outerLength })} />
         {p.hollow && p.holes[hole].enabled && p.holes[hole].through === false && p.cutHoles && !dirty && <p role="status" style={{ color: '#f4d28b', fontSize: 12, margin: 0 }}>Otvor není průchozí po celém průřezu. Prodlužte hloubku nebo posuňte válec a znovu potvrďte řez.</p>}
       </>}
       {hasPreview && <button type="button" style={button(true)} disabled={!p.holes.some(h => h.enabled) || p.cutHoles} onClick={cutHoles}>{p.cutHoles ? 'Otvory jsou vyříznuté' : 'Potvrdit a vyříznout otvory'}</button>}

@@ -1,63 +1,89 @@
 'use client'
-import React, { useEffect, useRef } from 'react'
+import React, { useCallback, useEffect, useRef } from 'react'
 import { Edges, Line } from '@react-three/drei'
 import * as THREE from 'three'
 import { nearestContourPosition, holeDirection } from './hole-placement.mjs'
 
-export function HolePreview({ options, selected, select, change, dragging, controlsRef }) {
-  const root = useRef(), active = useRef(null)
-  useEffect(() => () => {
-    if (active.current) {
-      if (controlsRef.current) controlsRef.current.enabled = true
-      dragging(false)
+const clamp=value=>Math.round(Math.max(.5,Math.min(50,value))*100)/100
+export function HolePreview({ options, selected, select, change, dragging, controlsRef, onDragEnd }) {
+  const root=useRef(),active=useRef(null)
+  const finish=useCallback(event=>{
+    const gesture=active.current
+    if(!gesture)return
+    active.current=null
+    event?.stopPropagation?.();event?.stopImmediatePropagation?.()
+    try{gesture.target.releasePointerCapture?.(gesture.pointerId)}catch{}
+    if(controlsRef.current)controlsRef.current.enabled=true
+    dragging(false);onDragEnd?.()
+  },[controlsRef,dragging,onDragEnd])
+  useEffect(()=>{
+    window.addEventListener('pointerup',finish,true)
+    window.addEventListener('pointercancel',finish,true)
+    window.addEventListener('blur',finish,true)
+    return()=>{
+      window.removeEventListener('pointerup',finish,true)
+      window.removeEventListener('pointercancel',finish,true)
+      window.removeEventListener('blur',finish,true)
+      if(active.current)finish()
     }
-  }, [controlsRef, dragging])
-  const contour = options.bottomContour
-  if (!contour?.length || options.cutHoles) return null
-  const localHit = (event, y) => {
-    root.current.updateWorldMatrix(true, false)
-    const ray = event.ray.clone().applyMatrix4(root.current.matrixWorld.clone().invert())
-    return ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), -y), new THREE.Vector3())
+  },[finish])
+  const contour=options.bottomContour
+  if(!contour?.length||options.cutHoles)return null
+  const localRay=event=>{
+    root.current.updateWorldMatrix(true,false)
+    return event.ray.clone().applyMatrix4(root.current.matrixWorld.clone().invert())
   }
-  const stop = event => {
-    if (!active.current) return
+  const begin=(event,index,side,hole,normal)=>{
+    if(event.button!==0)return
+    event.stopPropagation();event.nativeEvent?.preventDefault?.();event.nativeEvent?.stopImmediatePropagation?.()
+    const ray=localRay(event),anchor=new THREE.Vector3().fromArray(hole.position)
+    const planeNormal=side==='body'?new THREE.Vector3(0,1,0):ray.direction.clone().addScaledVector(normal,-ray.direction.dot(normal)).normalize()
+    if(planeNormal.lengthSq()<.1)return
+    const plane=new THREE.Plane().setFromNormalAndCoplanarPoint(planeNormal,anchor),hit=ray.intersectPlane(plane,new THREE.Vector3())
+    if(!hit)return
+    active.current={index,side,plane,anchor,normal,offset:anchor.clone().sub(hit),start:hit.dot(normal),length:hole.length,outer:hole.outerLength??hole.length,target:event.target,pointerId:event.pointerId}
+    select(`hole:${index}`)
+    if(controlsRef.current)controlsRef.current.enabled=false
+    dragging(true);event.target.setPointerCapture?.(event.pointerId)
+  }
+  const move=event=>{
+    const gesture=active.current;if(!gesture)return
     event.stopPropagation()
-    event.target.releasePointerCapture?.(event.pointerId)
-    active.current = null
-    if (controlsRef.current) controlsRef.current.enabled = true
-    dragging(false)
+    const hit=localRay(event).intersectPlane(gesture.plane,new THREE.Vector3());if(!hit)return
+    let patch
+    if(gesture.side==='body')patch={position:nearestContourPosition(contour,hit.add(gesture.offset).toArray()).position}
+    else{
+      const delta=hit.dot(gesture.normal)-gesture.start
+      patch=gesture.side==='outer'?{outerLength:clamp(gesture.outer+delta)}:{length:clamp(gesture.length-delta),autoDepth:false}
+    }
+    change({holes:options.holes.map((hole,i)=>i===gesture.index?{...hole,...patch,autoPosition:false,warning:null}:hole)})
   }
   return <group ref={root}>
-    <Line points={[...contour, contour[0]]} color="#60a5fa" transparent opacity={0.35} lineWidth={1} depthTest={false} />
-    {options.holes.map((hole, index) => {
-      if (!hole.enabled || !hole.position) return null
-      const normal = new THREE.Vector3().fromArray(holeDirection(contour,hole.position,options.holeYaw ?? 0))
-      const center = new THREE.Vector3().fromArray(hole.position).addScaledVector(normal, (1 - hole.length) / 2)
-      const rotation = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal.clone().negate())
-      return <mesh key={index} position={center} quaternion={rotation} renderOrder={80}
-        onPointerDown={event => {
-          if (event.button !== 0) return
-          event.stopPropagation()
-          const hit = localHit(event, hole.baseY)
-          if (!hit) return
-          active.current = { index, offset: new THREE.Vector3().fromArray(hole.position).sub(hit) }
-          select(`hole:${index}`)
-          if (controlsRef.current) controlsRef.current.enabled = false
-          dragging(true)
-          event.target.setPointerCapture?.(event.pointerId)
-        }}
-        onPointerMove={event => {
-          if (active.current?.index !== index) return
-          event.stopPropagation()
-          const hit = localHit(event, hole.baseY)
-          if (!hit) return
-          const position = nearestContourPosition(contour, hit.add(active.current.offset).toArray()).position
-          change({ holes: options.holes.map((item, i) => i === index ? { ...item, position, autoPosition: false, warning: null } : item) })
-        }} onPointerUp={stop} onPointerCancel={stop}>
-        <cylinderGeometry args={[hole.diameter / 2, hole.diameter / 2, hole.length + 1, 48]} />
-        <meshBasicMaterial color={selected === `hole:${index}` ? '#60a5fa' : '#2563eb'} transparent opacity={0.48} depthTest={false} depthWrite={false} />
-        <Edges color="#93c5fd" threshold={20} raycast={() => null} />
-      </mesh>
+    <Line points={[...contour,contour[0]]} color="#60a5fa" transparent opacity={.35} lineWidth={1} depthTest={false}/>
+    {options.holes.map((hole,index)=>{
+      if(!hole.enabled||!hole.position)return null
+      const normal=new THREE.Vector3().fromArray(holeDirection(contour,hole.position,options.holeYaw??0)),outer=hole.outerLength??hole.length
+      const anchor=new THREE.Vector3().fromArray(hole.position),center=anchor.clone().addScaledVector(normal,(outer-hole.length)/2)
+      const rotation=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),normal.clone().negate())
+      return <group key={index}>
+        <mesh position={center} quaternion={rotation} renderOrder={80} onPointerDown={e=>begin(e,index,'body',hole,normal)} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
+          <cylinderGeometry args={[hole.diameter/2,hole.diameter/2,hole.length+outer,48]}/>
+          <meshBasicMaterial color={selected===`hole:${index}`?'#60a5fa':'#2563eb'} transparent opacity={.48} depthTest={false} depthWrite={false}/>
+          <Edges color="#93c5fd" threshold={20} raycast={()=>null}/>
+        </mesh>
+        {[['outer',outer,1],['inner',hole.length,-1]].map(([side,length,sign])=>{
+          const endpoint=anchor.clone().addScaledVector(normal,sign*(length+.8)),axis=normal.clone().multiplyScalar(sign)
+          const quaternion=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),axis)
+          return <group key={side} position={endpoint} quaternion={quaternion}>
+            <mesh renderOrder={82} onPointerDown={e=>begin(e,index,side,hole,normal)} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
+              <coneGeometry args={[.65,1.6,16]}/><meshBasicMaterial color="#bfdbfe" depthTest={false} depthWrite={false}/>
+            </mesh>
+            <mesh position={[0,-1,0]} renderOrder={81} onPointerDown={e=>begin(e,index,side,hole,normal)} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
+              <cylinderGeometry args={[.18,.18,1.2,12]}/><meshBasicMaterial color="#93c5fd" depthTest={false} depthWrite={false}/>
+            </mesh>
+          </group>
+        })}
+      </group>
     })}
   </group>
 }

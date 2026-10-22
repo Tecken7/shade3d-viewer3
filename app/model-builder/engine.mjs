@@ -6,6 +6,7 @@ import { sampleContour, roundShoulder } from './transition.mjs'
 import { drainPassage } from './drains.mjs'
 import { prepareSurface } from './prepare-surface.mjs'
 import { nearestContourPosition, holeDirection } from './hole-placement.mjs'
+import { baseDirection } from './base-direction.mjs'
 
 import { DEFAULTS } from "./defaults.mjs"
 export { DEFAULTS } from "./defaults.mjs"
@@ -265,7 +266,7 @@ export async function buildModel(M, input, options, fontData, progress = () => {
     if (topology.nonManifold) throw new Error('Scan obsahuje neplatné nebo obrácené hrany. Nejprve použijte opravu sítě.')
     if (topology.loops.length !== 1) throw new Error(`Scan má ${topology.loops.length} otevřených hranic. Potřebuji jednu hlavní hranici; ostatní díry nejprve opravte.`)
     const bounds = new THREE.Box3().setFromBufferAttribute(new THREE.Float32BufferAttribute(v, 3))
-    const direction = options.arch === 'lower' ? -1 : 1
+    const direction = baseDirection(v,topology.loops[0],options.arch,p.flipBaseDirection)
     const naturalHeight = bounds.max.y - bounds.min.y
     if (!Number.isFinite(p.totalHeight) || p.totalHeight < naturalHeight + 1) throw new Error(`Celková výška musí být alespoň ${(naturalHeight + 1).toFixed(1)} mm. Scan se nezmenšuje.`)
     if (!(p.wall >= 0.8 && p.wall <= 10) || !(p.bevel >= 0 && p.bevel <= Math.min(2, p.wall * 0.7))) throw new Error('Neplatná tloušťka stěny nebo bevel. Bevel musí být menší než 70 % stěny.')
@@ -407,6 +408,7 @@ export async function buildModel(M, input, options, fontData, progress = () => {
         hole.position = nearestContourPosition(bottomContour, hole.position || defaultHoles[index % defaultHoles.length].position).position
         hole.warning = null
         hole.through = false
+        hole.outerLength = hole.outerLength ?? hole.length
         if (!p.holes.length) { hole.enabled = true; hole.autoDepth = false; hole.autoPosition = false }
       }
     }
@@ -482,15 +484,16 @@ export async function buildModel(M, input, options, fontData, progress = () => {
       if (h.length > 50) throw new Error(`Otvor ${i + 1}: průchozí řez vyžaduje více než 50 mm. Změňte polohu otvoru.`)
       // Confirm the entire end disk by a solid intersection as well. A tiny
       // obstacle between the sampled rays must not be accepted as clear.
-      let front = clearance.frontExtension
+      let front = Number.isFinite(h.outerLength) ? h.outerLength : clearance.frontExtension
+      if (!(front >= 0.15 && front <= 50)) throw new Error(`Otvor ${i + 1}: vnější délka musí být 0,15–50 mm.`)
       const probeAt = depth => {
         const probe = own(M.Manifold.cylinder(0.15, h.diameter / 2, h.diameter / 2, 64, false))
         const matrix = new THREE.Matrix4().compose(center.clone().addScaledVector(n, -depth), q, new THREE.Vector3(1, 1, 1))
         return own(result.intersect(own(probe.transform(matrix.toArray()))))
       }
-      const frontLimit = front + 2
+      const frontLimit = Number.isFinite(h.outerLength) ? front : front + 2
       while (!probeAt(-front).isEmpty() && front + 0.25 <= frontLimit) front += 0.25
-      if (!probeAt(-front).isEmpty()) throw new Error(`Otvor ${i + 1}: řez nezačíná celý mimo stěnu. Změňte polohu otvoru.`)
+      if (!probeAt(-front).isEmpty()) throw new Error(`Otvor ${i + 1}: vnější konec válce ještě zasahuje do stěny. Prodlužte vnější šipku nebo změňte polohu otvoru.`)
       let clearDisk = probeAt(h.length).isEmpty()
       if (p.hollow && h.autoDepth) {
         const limit = Math.min(50, Math.max(h.length, h.requiredLength) + 2)
