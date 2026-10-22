@@ -4,14 +4,15 @@ import { FontLoader } from 'three/examples/jsm/loaders/FontLoader.js'
 import { TextGeometry } from 'three/examples/jsm/geometries/TextGeometry.js'
 import { sampleContour, roundShoulder } from './transition.mjs'
 import { drainPassage } from './drains.mjs'
+import { prepareSurface } from './prepare-surface.mjs'
 
 import { DEFAULTS } from "./defaults.mjs"
 export { DEFAULTS } from "./defaults.mjs"
 
-export function indexed(positions) {
+export function indexed(positions, { exact = false } = {}) {
   const vertices = [], faces = [], map = new Map()
   for (let i = 0; i < positions.length; i += 3) {
-    const key = [0, 1, 2].map(k => Math.round(positions[i + k] * 100000)).join(',')
+    const key = [0, 1, 2].map(k => exact ? positions[i + k] : Math.round(positions[i + k] * 100000)).join(',')
     if (!map.has(key)) { map.set(key, vertices.length / 3); vertices.push(...positions.slice(i, i + 3)) }
     faces.push(map.get(key))
   }
@@ -235,7 +236,10 @@ export async function buildModel(M, input, options, fontData, progress = () => {
   const own = x => { allocated.push(x); return x }
   let surfaceGeometry, closedGeometry, textSurfaceGeometry, drainGeometry
   try {
-    const { vertices: v, faces: f } = indexed(input)
+    // Worker input already contains shared Float32 coordinates. Do not round
+    // nearby, distinct cut vertices into a pinched/branching boundary.
+    const source = indexed(input, { exact: true })
+    const { vertices: v, faces: f } = prepareSurface(source.vertices, source.faces)
     const topology = meshTopology(v, f)
     if (topology.nonManifold) throw new Error('Scan obsahuje neplatné nebo obrácené hrany. Nejprve použijte opravu sítě.')
     if (topology.loops.length !== 1) throw new Error(`Scan má ${topology.loops.length} otevřených hranic. Potřebuji jednu hlavní hranici; ostatní díry nejprve opravte.`)

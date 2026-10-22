@@ -21,6 +21,19 @@ for(const tri of THREE.ShapeUtils.triangulateShape(contour,[])){
 }
 const build=opts=>buildModel(M,new Float32Array(scan),{arch:'upper',smoothing:0,...opts},font)
 let baseline
+test('base generation accepts reversed cut faces and duplicates without changing the resulting solid', async () => {
+  const options = { arch:'upper', smoothing:0, holes:[{enabled:false},{enabled:false}] }
+  const reference = await buildModel(M, new Float32Array(scan), options, font)
+  const damaged = scan.slice()
+  for (let i = 0; i < damaged.length; i += 27) {
+    const b = damaged.slice(i + 3, i + 6), c = damaged.slice(i + 6, i + 9)
+    if (c.length === 3) damaged.splice(i + 3, 6, ...c, ...b)
+  }
+  damaged.push(...scan.slice(0,9))
+  const result = await buildModel(M, new Float32Array(damaged), options, font)
+  assert.ok(Math.abs(result.stats.volume - reference.stats.volume) < 0.001)
+  assert.equal(meshTopology(Array.from(result.positions), Array.from(result.indices)).nonManifold, 0)
+})
 function bvh(out){const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(out.positions,3));g.setIndex(new THREE.BufferAttribute(out.indices,1));return new MeshBVH(g)}
 test('open hollow horseshoe: requested height, unchanged outer footprint, wall thickness, manifold topology',async()=>{
  baseline=await build({holes:[{enabled:false},{enabled:false}]})
