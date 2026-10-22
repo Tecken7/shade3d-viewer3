@@ -164,6 +164,26 @@ function cap(v, f, rings, normalY) {
     }
     if (!inserted) throw new Error('Okraj báze obsahuje nejednoznačný bod. Změňte vyhlazení okraje nebo ořez.')
   }
+  // The scan may arrive with globally inverted winding. Stitching follows that
+  // winding, so the closing cap must follow its wall rather than assuming that
+  // Upper/Lower alone determines face orientation. The complete closed solid
+  // is oriented outward by signed volume afterwards.
+  const rim = new Set(ids), wallDirections = new Set()
+  for (let i = 0; i < f.length; i += 3) {
+    for (let j = 0; j < 3; j++) {
+      const a = f[i + j], b = f[i + (j + 1) % 3]
+      if (rim.has(a) && rim.has(b)) wallDirections.add(`${a}:${b}`)
+    }
+  }
+  let reverse = false, matched = false
+  for (let i = 0; i < triangles.length && !matched; i += 3) {
+    for (let j = 0; j < 3; j++) {
+      const a = triangles[i + j], b = triangles[i + (j + 1) % 3]
+      if (wallDirections.has(`${a}:${b}`)) { reverse = true; matched = true; break }
+      if (wallDirections.has(`${b}:${a}`)) { matched = true; break }
+    }
+  }
+  if (reverse) for (let i = 0; i < triangles.length; i += 3) [triangles[i + 1], triangles[i + 2]] = [triangles[i + 2], triangles[i + 1]]
   for (const id of triangles) f.push(id)
 }
 
@@ -383,8 +403,8 @@ export async function buildModel(M, input, options, fontData, progress = () => {
       position: hole.position ? [hole.position[0], hole.position[1] + (Number.isFinite(hole.baseY) ? baseY - hole.baseY : 0), hole.position[2]] : undefined,
       baseY, baseDirection: direction }))
     if (p.cutHoles === false) {
-      for (const hole of holes) {
-        hole.position = nearestContourPosition(bottomContour, hole.position).position
+      for (const [index, hole] of holes.entries()) {
+        hole.position = nearestContourPosition(bottomContour, hole.position || defaultHoles[index % defaultHoles.length].position).position
         hole.warning = null
         hole.through = false
         if (!p.holes.length) { hole.enabled = true; hole.autoDepth = false; hole.autoPosition = false }

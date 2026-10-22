@@ -50,6 +50,26 @@ test('open hollow horseshoe: requested height, unchanged outer footprint, wall t
  assert.ok(Math.abs(roof.point.y-2.5)<0.1,'no bottom lid; first surface is the inner roof')
  const chamfer=tree.raycastFirst(new THREE.Ray(new THREE.Vector3(-19.5,30,0),new THREE.Vector3(0,-1,0)),THREE.DoubleSide);assert.ok(Math.abs(chamfer.point.y-24.5)<0.05,'the exported bevel follows a 45 degree surface, not just smooth shading')
 })
+
+test('base cap follows wall winding for globally inverted upper and lower scans', async () => {
+  const inverted=scan.slice()
+  for(let i=0;i<inverted.length;i+=9){
+    const b=inverted.slice(i+3,i+6),c=inverted.slice(i+6,i+9)
+    inverted.splice(i+3,6,...c,...b)
+  }
+  for(const arch of ['upper','lower']){
+    const options={arch,smoothing:0,cutHoles:false,holes:[{enabled:false},{enabled:false}]}
+    const reference=await buildModel(M,new Float32Array(scan),options,font)
+    const result=await buildModel(M,new Float32Array(inverted),options,font)
+    // Reversing the contour can choose different loft diagonals and sampled
+    // cavity cells. Require the same volume within 0.1%, not identical floats.
+    assert.ok(Math.abs(result.stats.volume-reference.stats.volume)/reference.stats.volume<.001,`${arch}: winding must preserve the base volume`)
+    const topology=meshTopology(Array.from(result.positions),Array.from(result.indices))
+    assert.equal(topology.nonManifold,0)
+    assert.equal(topology.openEdges,0)
+    assert.equal(result.stats.components,1)
+  }
+})
 test('two independent vent cutters remove material and preserve a single closed mesh',async()=>{
  const out=await build({});assert.equal(out.holes.length,2);assert.ok(out.holes.every(h=>h.enabled&&h.diameter===4.5));assert.deepEqual(out.holes[0].normal,out.holes[1].normal);assert.ok(out.holes.every(h=>(h.baseY-h.position[1])*h.baseDirection<h.diameter/2),'cuts cross the beveled bottom rim');assert.ok(out.stats.volume<baseline.stats.volume)
  const changed=out.holes.map((h,i)=>({...h,diameter:i===0?6:4.5,length:i===0?10:8,autoDepth:false}))
