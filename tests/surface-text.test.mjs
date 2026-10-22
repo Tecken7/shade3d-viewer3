@@ -93,3 +93,32 @@ test('wrapped Czech lettering unions with a curved solid as one closed printable
   assert.equal(topology.openEdges,0);assert.equal(topology.nonManifold,0)
  }finally{for(const part of parts)part.delete();union?.delete();body.delete();letters.delete();surface.dispose();result.geometry.dispose()}
 })
+import {toCreasedNormals} from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+
+test('generated vertical walls stay developable despite smooth shading from a sloped shoulder',()=>{
+ const raw=new THREE.LatheGeometry([new THREE.Vector2(8,-5),new THREE.Vector2(8,4),new THREE.Vector2(7.7,5)],64),surface=tree(toCreasedNormals(raw,Math.PI/6)),theta=.025
+ for(const y of [-2,0,2]){
+  const hit=surface.boundsTree.raycastFirst(new THREE.Ray(new THREE.Vector3(Math.sin(theta)*12,y,Math.cos(theta)*12),new THREE.Vector3(-Math.sin(theta),0,-Math.cos(theta))),THREE.DoubleSide)
+  const result=projectSurfaceText(font,{...options,text:'Novák',textSize:2,baseDirection:-1},{position:hit.point.toArray(),normal:hit.face.normal.toArray()},surface)
+  assert.equal(result.valid,true,result.error)
+  const attr=result.geometry.attributes.position
+  for(let i=0;i<attr.count;i++)assert.ok(Number.isFinite(attr.getX(i)))
+  const data=indexed(attr.array,{exact:true}),topology=meshTopology(data.vertices,data.faces)
+  assert.equal(topology.openEdges,0);assert.equal(topology.nonManifold,0)
+  result.geometry.dispose()
+ }
+ raw.dispose();surface.dispose()
+})
+
+test('concave wall validation measures the visible letter face, not the wider root footprint',()=>{
+ const surface=new THREE.CylinderGeometry(3,3,20,256),ids=surface.index.array
+ for(let i=0;i<ids.length;i+=3)[ids[i],ids[i+1]]=[ids[i+1],ids[i]]
+ for(let i=0;i<surface.attributes.normal.array.length;i++)surface.attributes.normal.array[i]*=-1
+ tree(surface)
+ for(const preview of [false,true]){
+  const result=projectSurfaceText(font,{...options,text:'N',textSize:3,baseDirection:-1},{position:[0,0,3],normal:[0,0,-1]},surface,{preview})
+  assert.equal(result.valid,true,result.error)
+  result.geometry.dispose()
+ }
+ surface.dispose()
+})

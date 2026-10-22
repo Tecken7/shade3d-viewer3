@@ -6,14 +6,29 @@ const sharp='Na této hraně by se písmena zlomila nebo deformovala. Posuňte t
 // A small intrinsic chart: horizontal distance is travelled along the surface,
 // then vertical columns are transported with the local normal. Unlike a single
 // view-axis projection, millimetres of type remain millimetres on a cylinder.
-export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset=0){
+export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset=0,preferVertical=true){
  const step=.2,tree=surface.boundsTree,ray=new THREE.Ray(),rotation=new THREE.Quaternion()
  const normalAt=hit=>{
   const positions=surface.attributes.position,normals=surface.attributes.normal,index=surface.index
   if(!normals||!Number.isInteger(hit.faceIndex))return hit.face.normal.clone()
   const ids=[0,1,2].map(corner=>index?index.getX(hit.faceIndex*3+corner):hit.faceIndex*3+corner),triangle=new THREE.Triangle(...ids.map(id=>new THREE.Vector3().fromBufferAttribute(positions,id)))
   const bary=triangle.getBarycoord(hit.point,new THREE.Vector3())
-  return ids.reduce((normal,id,i)=>normal.addScaledVector(new THREE.Vector3().fromBufferAttribute(normals,id),bary.getComponent(i)),new THREE.Vector3()).normalize()
+  const normal=ids.reduce((normal,id,i)=>normal.addScaledVector(new THREE.Vector3().fromBufferAttribute(normals,id),bary.getComponent(i)),new THREE.Vector3()).normalize()
+  // Smooth shading at a bevel must not bend an otherwise vertical base wall.
+  if(preferVertical&&Math.abs(hit.face?.normal.y??1)<1e-5)normal.y=0
+  return normal.normalize()
+ }
+ // Pointer hits carry a flat triangle normal, while chart integration uses
+ // interpolated surface normals. Start in that same frame to avoid a false
+ // kink at the first step on a smooth, triangulated wall.
+ const nearest=tree.closestPointToPoint(anchor)
+ if(nearest&&nearest.distance<1e-4){
+  const positions=surface.attributes.position,index=surface.index,triangle=new THREE.Triangle(...[0,1,2].map(corner=>new THREE.Vector3().fromBufferAttribute(positions,index?index.getX(nearest.faceIndex*3+corner):nearest.faceIndex*3+corner)))
+  const smooth=normalAt({point:nearest.point,faceIndex:nearest.faceIndex,face:{normal:triangle.getNormal(new THREE.Vector3())}})
+  if(smooth.dot(normal)>.7){
+   const align=new THREE.Quaternion().setFromUnitVectors(normal,smooth)
+   normal=smooth;right=right.clone().applyQuaternion(align);up=up.clone().applyQuaternion(align)
+  }
  }
  const advance=(frame,direction,distance)=>{
   let point=frame.point.clone(),n=frame.normal.clone(),geometricNormal=(frame.faceNormal||frame.normal).clone(),tangent=direction.clone(),remaining=distance
@@ -65,15 +80,36 @@ export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,vis
   const previous=baseline.get(x-sign),frame=advance(previous,previous.tangent.clone().multiplyScalar(sign),step)
   frame.tangent.multiplyScalar(sign);baseline.set(x,frame)
  }
- for(let x=lowX;x<=highX;x++){
+ // Try the whole patch in the exact vertical-wall frame. Mixing transported
+ // and vertical columns would create an artificial seam near the shoulder.
+ let verticalWall=preferVertical
+ for(let x=lowX;x<=highX&&verticalWall;x++){
   const base=baseline.get(x),vertical=new THREE.Vector3().crossVectors(base.normal,base.tangent).normalize()
   if(vertical.dot(up)<0)vertical.negate()
-  const column=new Map([[0,{...base,tangent:vertical}]])
-  for(const sign of [-1,1])for(let y=sign;sign<0?y>=lowY:y<=highY;y+=sign){
-   const previous=column.get(y-sign),frame=advance(previous,previous.tangent.clone().multiplyScalar(sign),step)
-   frame.tangent.multiplyScalar(sign);column.set(y,frame)
+  if(Math.abs(base.normal.y)>1e-6||Math.abs(vertical.y)<.999999){verticalWall=false;break}
+  const column=new Map()
+  for(let y=lowY;y<=highY;y++){
+   const point=base.point.clone().addScaledVector(vertical,y*step),hit=tree.closestPointToPoint(point,{},0,1e-4)
+   if(!hit||hit.distance>1e-4){verticalWall=false;break}
+   const positions=surface.attributes.position,index=surface.index,triangle=new THREE.Triangle(...[0,1,2].map(corner=>new THREE.Vector3().fromBufferAttribute(positions,index?index.getX(hit.faceIndex*3+corner):hit.faceIndex*3+corner)))
+   if(Math.abs(triangle.getNormal(new THREE.Vector3()).y)>1e-5){verticalWall=false;break}
+   column.set(y,{...base,point,tangent:vertical})
   }
   columns.set(x,column)
+ }
+ if(!verticalWall&&preferVertical)return createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset,false)
+ if(!verticalWall){
+  columns.clear()
+  for(let x=lowX;x<=highX;x++){
+   const base=baseline.get(x),vertical=new THREE.Vector3().crossVectors(base.normal,base.tangent).normalize()
+   if(vertical.dot(up)<0)vertical.negate()
+   const column=new Map([[0,{...base,tangent:vertical}]])
+   for(const sign of [-1,1])for(let y=sign;sign<0?y>=lowY:y<=highY;y+=sign){
+    const previous=column.get(y-sign),frame=advance(previous,previous.tangent.clone().multiplyScalar(sign),step)
+    frame.tangent.multiplyScalar(sign);column.set(y,frame)
+   }
+   columns.set(x,column)
+  }
  }
  // Curved sheets cannot always accept flat lettering without strain (e.g. a
  // large word on a tiny spherical cusp). Reject it instead of stretching ink.
