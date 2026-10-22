@@ -122,3 +122,18 @@ test('concave wall validation measures the visible letter face, not the wider ro
  }
  surface.dispose()
 })
+
+test('small strain on a gently changing surface is accepted while pronounced distortion is rejected',()=>{
+ for(const [bend,valid]of [[.15,true],[.25,false]]){
+  const surface=new THREE.PlaneGeometry(40,20,120,60),positions=surface.attributes.position
+  for(let i=0;i<positions.count;i++)positions.setZ(i,bend*positions.getX(i)*positions.getY(i))
+  surface.computeVertexNormals();tree(surface)
+  const result=projectSurfaceText(font,{...options,text:'Novák',textSize:2,baseDirection:-1},{position:[0,0,0],normal:[0,0,1]},surface)
+  assert.equal(result.valid,valid,result.error)
+  if(valid){
+   const mesh=indexed(result.geometry.attributes.position.array,{exact:true}),topology=meshTopology(mesh.vertices,mesh.faces)
+   assert.equal(topology.openEdges,0);assert.equal(topology.nonManifold,0)
+  }else assert.match(result.error,/proporce/)
+  result.geometry.dispose();surface.dispose()
+ }
+})

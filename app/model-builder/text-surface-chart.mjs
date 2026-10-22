@@ -30,6 +30,9 @@ export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,vis
    normal=smooth;right=right.clone().applyQuaternion(align);up=up.clone().applyQuaternion(align)
   }
  }
+ // Curved crowns, sloped walls and rotated labels cannot use the vertical
+ // shortcut. Do not trace their entire baseline twice before discovering it.
+ if(preferVertical&&(Math.abs(normal.y)>1e-6||Math.abs(right.y)>1e-6||Math.abs(up.y)<.999999))return createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset,false)
  const advance=(frame,direction,distance)=>{
   let point=frame.point.clone(),n=frame.normal.clone(),geometricNormal=(frame.faceNormal||frame.normal).clone(),tangent=direction.clone(),remaining=distance
   while(remaining>1e-7){
@@ -116,7 +119,7 @@ export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,vis
  for(let x=lowX;x<highX;x++)for(let y=lowY;y<highY;y++){
   const visible=frame=>frame.point.clone().addScaledVector(frame.normal,visibleOffset)
   const p=visible(columns.get(x).get(y)),dx=visible(columns.get(x+1).get(y)).sub(p),dy=visible(columns.get(x).get(y+1)).sub(p)
-  if(Math.abs(dx.length()/step-1)>.1||Math.abs(dy.length()/step-1)>.1||Math.abs(dx.dot(dy))/(dx.length()*dy.length())>.12)throw new Error('Zakřivení by změnilo proporce písmen. Zmenšete text nebo vyberte rovnoměrnější povrch.')
+  if(Math.abs(dx.length()/step-1)>.13||Math.abs(dy.length()/step-1)>.13||Math.abs(dx.dot(dy))/(dx.length()*dy.length())>.16)throw new Error('Zakřivení by příliš změnilo proporce písmen. Zmenšete text nebo vyberte rovnoměrnější povrch.')
  }
  return (x,y)=>{
   const fx=Math.max(lowX,Math.min(highX,x/step)),fy=Math.max(lowY,Math.min(highY,y/step)),ix=Math.min(highX-1,Math.floor(fx)),iy=Math.min(highY-1,Math.floor(fy)),tx=fx-ix,ty=fy-iy

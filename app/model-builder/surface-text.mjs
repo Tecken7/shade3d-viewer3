@@ -64,7 +64,7 @@ export function projectSurfaceText(font,options,placement,surface,{preview=false
    let previous=visible(ax,ay)
    for(let k=1;k<=steps;k++){
     const point=visible(ax+(bx-ax)*k/steps,ay+(by-ay)*k/steps)
-    if(point.distanceTo(previous)>step*1.12+.005)throw new Error('Text přemosťuje mezeru nebo příliš prudkou změnu povrchu. Posuňte jej nebo zmenšete písmo.')
+    if(point.distanceTo(previous)>step*1.16+.005)throw new Error('Text přemosťuje mezeru nebo příliš prudkou změnu povrchu. Posuňte jej nebo zmenšete písmo.')
     previous=point
    }
   }

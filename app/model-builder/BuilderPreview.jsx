@@ -9,6 +9,7 @@ import { Html, useCursor } from '@react-three/drei'
 import { useBuilderGestureGuard } from './useBuilderGestureGuard'
 import { projectSurfaceText } from './surface-text.mjs'
 import { beginSurfaceTextDrag,moveSurfaceTextDrag } from './text-drag.mjs'
+import { createTextPreviewCache,createTextFrameQueue } from './text-preview-cache.mjs'
 
 let fontRequest
 function TextShape({result,handlers,hovered}){
@@ -39,12 +40,12 @@ export function BuilderPreview({geometry,placing,onSurfaceClick,overlayDragging=
  useEffect(()=>()=>{display?.dispose();if(display)display.boundsTree=null},[display])
  const committed=useMemo(()=>options?.textPosition&&options?.textNormal?{position:options.textPosition,normal:options.textNormal}:null,[options?.textPosition,options?.textNormal])
  const placement=candidate||(placing?null:committed)
- const project=useCallback(point=>projectSurfaceText(font,options,point,display,{preview:true}),[font,options?.text,options?.textSize,options?.textDepth,options?.textRotation,options?.textMode,options?.baseDirection,display])
+ const previewCache=useMemo(()=>createTextPreviewCache(point=>projectSurfaceText(font,options,point,display,{preview:true})),[font,options?.text,options?.textSize,options?.textDepth,options?.textRotation,options?.textMode,options?.baseDirection,display])
+ const project=useCallback(point=>previewCache.get(point),[previewCache])
+ useEffect(()=>()=>previewCache.dispose(),[previewCache])
  const result=useMemo(()=>project(placement),[project,placement])
  const hasCandidate=!!candidate
  const previous=useMemo(()=>hasCandidate&&!result.valid&&committed?project(committed):null,[hasCandidate,result.valid,committed,project])
- useEffect(()=>()=>result.geometry?.dispose(),[result.geometry])
- useEffect(()=>()=>previous?.geometry?.dispose(),[previous?.geometry])
  const error=notice||result.error
  useEffect(()=>{onTextStatus?.({valid:!!result.valid&&!notice,error})},[result.valid,notice,error,onTextStatus])
  useEffect(()=>{if(overlayDragging&&!textDrag.current)setTextHovered(false)},[overlayDragging])
@@ -52,19 +53,24 @@ export function BuilderPreview({geometry,placing,onSurfaceClick,overlayDragging=
  useEffect(()=>{if(!placing&&!textDrag.current)setCandidate(null)},[placing])
  const validate=useCallback(point=>{
   if(!font){setNotice('Načítám písmo. Zkuste umístění za okamžik.');return false}
-  const check=project(point);check.geometry?.dispose();setNotice(check.error)
+  const check=project(point);setNotice(check.error)
   return check.valid
  },[font,project])
+ const dragQueue=useMemo(()=>createTextFrameQueue(point=>{
+  setCandidate(point)
+  if(validate(point))change?.({textPosition:point.position,textNormal:point.normal})
+ },callback=>requestAnimationFrame(callback),id=>cancelAnimationFrame(id)),[validate,change])
  const finishText=useCallback(()=>{
   const gesture=textDrag.current;if(!gesture)return
+  dragQueue.flush()
   textDrag.current=null;setTextHovered(false);setCandidate(null)
   try{gesture.target.releasePointerCapture?.(gesture.pointerId)}catch{}
   if(controlsRef?.current)controlsRef.current.enabled=false
   dragging?.(false);onDragEnd?.()
- },[controlsRef,dragging,onDragEnd])
+ },[controlsRef,dragging,onDragEnd,dragQueue])
  useEffect(()=>{
   window.addEventListener('pointerup',finishText,true);window.addEventListener('pointercancel',finishText,true);window.addEventListener('blur',finishText,true)
-  return()=>{window.removeEventListener('pointerup',finishText,true);window.removeEventListener('pointercancel',finishText,true);window.removeEventListener('blur',finishText,true);finishText()}
+  return()=>{window.removeEventListener('pointerup',finishText,true);window.removeEventListener('pointercancel',finishText,true);window.removeEventListener('blur',finishText,true);dragQueue.clear();finishText()}
  },[finishText])
  const textHandlers={
   onPointerOver:event=>{event.stopPropagation();if(!textDrag.current&&!overlayDragging)setTextHovered(true)},
@@ -83,9 +89,8 @@ export function BuilderPreview({geometry,placing,onSurfaceClick,overlayDragging=
    const gesture=textDrag.current;if(!gesture)return
    event.stopPropagation();mesh.current.updateWorldMatrix(true,false)
    const ray=event.ray.clone().applyMatrix4(mesh.current.matrixWorld.clone().invert()),point=moveSurfaceTextDrag(display,ray,gesture)
-   if(!point){setNotice('Kurzor je mimo souvislý povrch. Poslední platná poloha textu zůstala zachovaná.');return}
-   setCandidate(point)
-   if(validate(point))change({textPosition:point.position,textNormal:point.normal})
+   if(!point){dragQueue.clear();setNotice('Kurzor je mimo souvislý povrch. Poslední platná poloha textu zůstala zachovaná.');return}
+   dragQueue.push(point)
   },
   onPointerUp:finishText,onPointerCancel:finishText,
  }
