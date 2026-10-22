@@ -6,7 +6,7 @@ const fieldStyle = { width: '100%', boxSizing: 'border-box', background: '#25252
 function NumberField({ label, value, onChange, min, max, step = 0.1 }) {
   return <label style={{ display: 'grid', gap: 5, fontSize: 12 }}>{label}<input aria-label={label} style={fieldStyle} type="number" min={min} max={max} step={step} value={value} onChange={e => { if (e.target.value !== '' && Number.isFinite(e.target.valueAsNumber)) onChange(e.target.valueAsNumber) }} /></label>
 }
-export function BuilderControls({ options: p, change, selected, select, placing, setPlacing, dirty, busy, cancel, hasPreview, cutHoles }) {
+export function BuilderControls({ options: p, change, selected, select, placing, setPlacing, dirty, busy, cancel, hasPreview, cutHoles, textStatus }) {
   const hole = selected?.startsWith('hole:') ? Number(selected.split(':')[1]) : -1
   const editHole = patch => change({ holes: p.holes.map((h, i) => i === hole ? { ...h, ...patch, autoPosition: false, warning: null } : h) })
   const button = (active = false) => ({ ...fieldStyle, width: 'auto', cursor: 'pointer', background: active ? '#3b5645' : '#303030', fontSize: 12 })
@@ -32,7 +32,9 @@ export function BuilderControls({ options: p, change, selected, select, placing,
       <NumberField label="Vystoupení / hloubka textu (mm)" value={p.textDepth} min={0.1} max={3} onChange={textDepth => change({ textDepth })} />
       <NumberField label="Velikost textu (mm)" value={p.textSize} min={1} max={12} onChange={textSize => change({ textSize })} />
       <NumberField label="Otočení textu (°)" value={p.textRotation} min={-180} max={180} step={5} onChange={textRotation => change({ textRotation })} />
-      <button disabled={!hasPreview || !p.text.trim()} type="button" style={button(selected === 'text' && placing)} onClick={() => { select('text'); setPlacing(!(selected === 'text' && placing)) }}>Umístit popisek na stěnu</button>
+      <button disabled={!hasPreview || !p.text.trim()} type="button" style={button(selected === 'text' && placing)} onClick={() => { select('text'); setPlacing(!(selected === 'text' && placing)) }}>Umístit popisek na povrch</button>
+      {p.text.trim()&&textStatus?.error&&<p role="status" style={{margin:0,color:'#fca5a5',fontSize:12,lineHeight:1.5}}>{textStatus.error} Poslední platná poloha zůstává zachovaná.</p>}
+      {p.text.trim()&&textStatus?.valid&&<p role="status" style={{margin:0,color:'#93c5fd',fontSize:11}}>Text má vhodný povrch. Modrý náhled lze umístit nebo táhnout po modelu.</p>}
       <hr style={{ width: '100%', border: 0, borderTop: '1px solid #444' }} />
       <strong style={{ fontSize: 13 }}>Odtokové otvory</strong>
       <p style={{ margin: 0, fontSize: 11, color: '#aaa', lineHeight: 1.5 }}>Modré válce jsou pouze náhled. Táhněte je podél spodního obvodu a nastavte průměr i hloubku. Model se vyřízne až po potvrzení.</p>
@@ -43,7 +45,7 @@ export function BuilderControls({ options: p, change, selected, select, placing,
       {hole >= 0 && p.holes[hole] && <>
         <label style={{ fontSize: 12 }}><input type="checkbox" checked={p.holes[hole].enabled} onChange={e => editHole({ enabled: e.target.checked })} /> Aktivní otvor</label>
         <NumberField label="Průměr otvoru (mm)" value={p.holes[hole].diameter} min={1} max={15} onChange={diameter => editHole({ diameter })} />
-        <NumberField label="Zapuštění od spodní hrany (mm)" value={p.holes[hole].heightOffset ?? p.holes[hole].diameter/2+.5} min={0} max={25} onChange={heightOffset => editHole({ heightOffset, position:seatHoleOnContour(p.bottomContour,{...p.holes[hole],heightOffset}) })} />
+        <NumberField label="Zapuštění od spodní hrany (mm)" value={p.holes[hole].heightOffset ?? .5} min={0} max={25} onChange={heightOffset => editHole({ heightOffset, position:seatHoleOnContour(p.bottomContour,{...p.holes[hole],heightOffset}) })} />
         <NumberField label="Natočení vybraného válce (°)" value={p.holes[hole].yaw ?? 0} min={-180} max={180} step={1} onChange={yaw => editHole({ yaw })} />
         {p.bottomContour?.length > 0 && <label style={{ display: 'grid', gap: 5, fontSize: 12 }}>Poloha po spodním obvodu
           <input aria-label="Poloha otvoru po spodním obvodu" type="range" min={0} max={100} step={0.1} value={nearestContourPosition(p.bottomContour, p.holes[hole].position).fraction * 100} onChange={e => editHole({ position: seatHoleOnContour(p.bottomContour,p.holes[hole],contourPosition(p.bottomContour, Number(e.target.value) / 100)) })} />
@@ -54,7 +56,7 @@ export function BuilderControls({ options: p, change, selected, select, placing,
       </>}
       {hasPreview && <button type="button" style={button(true)} disabled={!p.holes.some(h => h.enabled) || p.cutHoles} onClick={cutHoles}>{p.cutHoles ? 'Otvory jsou vyříznuté' : 'Potvrdit a vyříznout otvory'}</button>}
 
-      {selected === "text" && hasPreview && <p style={{ fontSize: 12, color: '#bfe5c8', margin: 0 }}>Popisek posunete tažením přímo po stěně báze. Tlačítkem umístění jej můžete přenést na jinou stranu.</p>}
+      {selected === "text" && hasPreview && <p style={{ fontSize: 12, color: '#bfe5c8', margin: 0 }}>Popisek posunete tažením přímo po povrchu modelu. Tlačítkem umístění jej můžete přenést na jinou stranu.</p>}
     </fieldset>
     <p role="status" style={{ color: dirty ? '#f4d28b' : '#bfe5c8', fontSize: 12, lineHeight: 1.5 }}>{dirty && hasPreview ? 'Změny otvorů potvrďte tlačítkem „Potvrdit a vyříznout otvory“. Změny samotné základny přepočítejte v horní liště.' : hasPreview ? p.cutHoles ? 'Otvory jsou součástí modelu.' : 'Základna je bez otvorů. Modré válce čekají na potvrzení.' : 'Nastavte výšku a vytvořte první náhled.'}</p>
   </aside>

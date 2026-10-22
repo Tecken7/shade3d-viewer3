@@ -120,7 +120,7 @@ test('blue cylinder drafts leave the base intact until explicit confirmation', a
   const draft = await build({ cutHoles:false, followContour:true })
   assert.equal(draft.holes.length, 2)
   assert.ok(draft.holes.every(hole => hole.length===5 && hole.outerLength===3))
-  assert.ok(draft.holes.every(hole => hole.enabled && Math.abs(hole.position[1]-(draft.placement.baseY-draft.placement.direction*(hole.diameter/2+.5)))<1e-8))
+  assert.ok(draft.holes.every(hole => hole.enabled && Math.abs(hole.position[1]-(draft.placement.baseY-draft.placement.direction*.5))<1e-8))
   const without = await build({ holes:[{enabled:false}, {enabled:false}] })
   assert.ok(Math.abs(draft.stats.volume - without.stats.volume) < .001)
   const changed = draft.holes.map((hole,i) => ({ ...hole, diameter:3, length:12, autoDepth:false, yaw:i?8:-8 }))
@@ -140,11 +140,19 @@ test('embossed and engraved Czech text modify the exported solid in opposite dir
  assert.equal(embossed.stats.components,1);assert.equal(engraved.stats.components,1)
  const minX=Math.min(...embossed.positions.filter((_,i)=>i%3===0));assert.ok(Math.abs(minX+20.5)<0.01)
 })
+
+test('a label on a horizontal exterior surface is built as a connected closed solid',async()=>{
+ const options={holes:[{enabled:false},{enabled:false}]},plain=await build(options)
+ const result=await build({...options,text:'A',textSize:1,textDepth:.4,textPosition:[-18.25,25,0],textNormal:[0,1,0]})
+ assert.ok(result.stats.volume>plain.stats.volume)
+ const topology=meshTopology(Array.from(result.positions),Array.from(result.indices))
+ assert.equal(topology.nonManifold,0);assert.equal(topology.openEdges,0);assert.equal(result.stats.components,1)
+})
 test('invalid dimensions and floating text fail instead of exporting stale or invalid geometry',async()=>{
  await assert.rejects(build({totalHeight:0}),/výška/)
  await assert.rejects(build({wall:-1}),/tloušťka/)
  await assert.rejects(build({text:'TEST'}),/umístěte/)
- await assert.rejects(build({text:'TEST',textPosition:[-80,12,0],textNormal:[-1,0,0]}),/stěně/)
+ await assert.rejects(build({text:'TEST',textPosition:[-80,12,0],textNormal:[-1,0,0]}),/povrch/)
 })
 
 test('margin smoothing rounds the edge without changing total height or expanding the base',async()=>{

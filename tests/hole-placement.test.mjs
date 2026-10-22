@@ -3,11 +3,11 @@ import assert from 'node:assert/strict'
 import { contourPosition, nearestContourPosition, holeDirection, seatHoleOnContour } from '../app/model-builder/hole-placement.mjs'
 
 const contour = [[0,25,0], [10,25,0], [10,25,10], [0,25,10]]
-test('cylinders sit inside the wall for both base directions and keep height while moving',()=>{
+test('cylinder centres keep their requested rim offset for both base directions while moving',()=>{
  for(const baseDirection of [-1,1]){
   const hole={diameter:4.5,baseDirection,position:[5,25,0]}
   const seated=seatHoleOnContour(contour,hole)
-  assert.equal(seated[1],25-baseDirection*(hole.diameter/2+.5))
+  assert.equal(seated[1],25-baseDirection*.5)
   assert.deepEqual(seatHoleOnContour(contour,{...hole,position:seated}),seated)
   assert.deepEqual(seatHoleOnContour(contour,{...hole,heightOffset:4},[10,100,5]),[10,25-baseDirection*4,5])
  }

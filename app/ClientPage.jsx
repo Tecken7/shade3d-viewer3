@@ -12255,6 +12255,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [builderOptions, setBuilderOptions] = useState(() => ({ ...BUILDER_DEFAULTS, cutHoles: false, followContour: true }))
   const [builderDirty, setBuilderDirty] = useState(true)
   const [builderSelected, setBuilderSelected] = useState(null)
+  const [builderTextStatus, setBuilderTextStatus] = useState({valid:false,error:''})
   const [builderPlacing, setBuilderPlacing] = useState(false)
   const [builderDragging, setBuilderDragging] = useState(false)
   const [cadSnapshotBusy, setCadSnapshotBusy] = useState(false)
@@ -12287,7 +12288,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     event.stopPropagation()
     const position = event.object.worldToLocal(event.point.clone()).toArray()
     const normal = event.face.normal.clone().normalize().toArray()
-    if (Math.abs(normal[1]) > 0.8) { setCadMessage("Vyberte boční stěnu báze."); return }
     if (builderSelected === "text") changeBuilderOptions({ textPosition: position, textNormal: normal })
     else if (builderSelected?.startsWith("hole:")) {
       const index = Number(builderSelected.split(":")[1])
@@ -18903,7 +18903,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         )}
       </div>
 
-      {cadStage === "base" && <BuilderControls options={builderOptions} change={changeBuilderOptions} selected={builderSelected} select={setBuilderSelected} placing={builderPlacing} setPlacing={setBuilderPlacing} dirty={builderDirty} busy={cadBusy} cancel={cancelBuilder} hasPreview={cadPreviewActive} cutHoles={() => toggleCadPreview({ cutHoles: true })} />}
+      {cadStage === "base" && <BuilderControls options={builderOptions} change={changeBuilderOptions} textStatus={builderTextStatus} selected={builderSelected} select={setBuilderSelected} placing={builderPlacing} setPlacing={setBuilderPlacing} dirty={builderDirty} busy={cadBusy} cancel={cancelBuilder} hasPreview={cadPreviewActive} cutHoles={() => toggleCadPreview({ cutHoles: true })} />}
       {cadStage === "result" && <button type="button" onClick={() => setCadStage("base")} style={{ position: "absolute", top: 160, right: 18, zIndex: 80, padding: 12, background: "#333", color: "white", border: "1px solid #555", borderRadius: 8, cursor: "pointer" }}>Zpět k nastavení modelu</button>}
       {cadStage === "scan" && cadEmbedded && (
         <div style={{position:"absolute",bottom:24,left:"50%",transform:"translateX(-50%)",zIndex:20,width:"min(740px,calc(100vw - 32px))",padding:20,borderRadius:16,background:"rgba(15,15,15,.95)",border:"1px solid #333",color:"#ddd"}}>
@@ -21034,7 +21034,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
           {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && <><HolePreview options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} interactionLocked={builderDragging} /></>}
           {cadStandalone && (cadPreviewActive || cadStage === "result") && cadPreviewGeometry && (
-            <BuilderPreview geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} overlayDragging={builderDragging} editable={cadStage === "base" && !cadBusy} options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} />
+            <BuilderPreview geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} onTextStatus={setBuilderTextStatus} overlayDragging={builderDragging} editable={cadStage === "base" && !cadBusy} options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} />
           )}
 
           {trimMode && trimContext && trimSelection && trimStage !== "result" && (

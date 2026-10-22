@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { MeshBVH } from 'three-mesh-bvh'
 import { FontLoader } from 'three/examples/jsm/loaders/FontLoader.js'
-import { TextGeometry } from 'three/examples/jsm/geometries/TextGeometry.js'
+import { projectSurfaceText } from './surface-text.mjs'
 import { sampleContour, roundShoulder } from './transition.mjs'
 import { drainPassage } from './drains.mjs'
 import { prepareSurface } from './prepare-surface.mjs'
@@ -415,48 +415,26 @@ export async function buildModel(M, input, options, fontData, progress = () => {
     progress({ preparedHoles: holes })
     progress('Přidávám popisek na stěnu modelu…')
     if (p.text.trim()) {
-      if (!p.textPosition || !p.textNormal) throw new Error('Nejprve umístěte popisek kliknutím na stěnu modelu.')
+      if (!p.textPosition || !p.textNormal) throw new Error('Nejprve umístěte popisek kliknutím na povrch modelu.')
       if (!(p.textDepth > 0 && p.textDepth <= 3)) throw new Error('Hloubka textu musí být větší než 0 a nejvýše 3 mm.')
       const font = new FontLoader().parse(fontData)
       for (const char of p.text) if (!font.data.glyphs[char]) throw new Error(`Písmo nepodporuje znak „${char}“. Použijte podporované písmeno nebo číslici.`)
       if (!(p.textSize >= 1 && p.textSize <= 12)) throw new Error('Velikost textu musí být 1–12 mm.')
-      const text = new TextGeometry(p.text.slice(0, 60), { font, size: p.textSize, depth: p.textDepth + 0.2, curveSegments: 5, bevelEnabled: false })
+      const shell = fromManifold(result)
+      textSurfaceGeometry = bufferGeometry(shell.vertices, shell.faces)
+      textSurfaceGeometry.boundsTree = new MeshBVH(textSurfaceGeometry)
+      const projected = projectSurfaceText(font,{...p,baseDirection:direction},{position:p.textPosition,normal:p.textNormal},textSurfaceGeometry)
+      const text = projected.geometry
       try {
-        const shell = fromManifold(result)
-        textSurfaceGeometry = bufferGeometry(shell.vertices, shell.faces)
-        const textBVH = new MeshBVH(textSurfaceGeometry)
-        text.computeBoundingBox()
-        text.translate(-(text.boundingBox.max.x + text.boundingBox.min.x) / 2, -(text.boundingBox.max.y + text.boundingBox.min.y) / 2, p.textMode === 'engrave' ? -p.textDepth : -0.2)
-        const n = new THREE.Vector3().fromArray(p.textNormal).normalize()
-        if (Math.abs(n.y) > 0.8) throw new Error('Popisek umístěte na boční stěnu modelu.')
-        const up = new THREE.Vector3(0, -direction, 0)
-        const right = new THREE.Vector3().crossVectors(up, n).normalize()
-        up.crossVectors(n, right).normalize()
-        const rotation = p.textRotation * Math.PI / 180, co = Math.cos(rotation), si = Math.sin(rotation)
-        const anchor = new THREE.Vector3().fromArray(p.textPosition), vertex = new THREE.Vector3(), plane = new THREE.Vector3()
-        const attr = text.attributes.position
-        // Project each glyph onto the actual wall. The complete inscription
-        // follows a curved horseshoe instead of leaving end letters floating.
-        for (let i = 0; i < attr.count; i++) {
-          vertex.fromBufferAttribute(attr, i)
-          plane.copy(anchor).addScaledVector(right, co * vertex.x - si * vertex.y).addScaledVector(up, si * vertex.x + co * vertex.y)
-          ray.origin.copy(plane).addScaledVector(n, 15); ray.direction.copy(n).negate()
-          const candidates = textBVH.raycast(ray, THREE.DoubleSide).filter(hit => hit.face.normal.dot(n) > 0.25)
-          candidates.sort((a, b) => a.point.distanceToSquared(plane) - b.point.distanceToSquared(plane))
-          const hit = candidates[0]
-          if (!hit || hit.point.distanceTo(plane) > 8) throw new Error('Celý popisek musí ležet na stěně báze. Posuňte jej nebo zmenšete písmo.')
-          plane.copy(hit.point).addScaledVector(n, vertex.z)
-          if (direction * (plane.y - baseY) > 0 || direction * (plane.y - (direction > 0 ? bounds.min.y : bounds.max.y)) < 0) throw new Error('Popisek přesahuje výšku modelu. Posuňte jej na stěnu báze.')
-          attr.setXYZ(i, plane.x, plane.y, plane.z)
-        }
+        if(!projected.valid)throw new Error(projected.error || 'Popisek nelze na tento povrch umístit.')
         const expanded = text.index ? text.toNonIndexed() : text
         const t = indexed(expanded.attributes.position.array)
         if (expanded !== text) expanded.dispose()
         const textSolid = asSolid(M, t.vertices, t.faces, own)
         const overlap = own(result.intersect(textSolid))
-        if (overlap.isEmpty()) throw new Error('Popisek není spojený se stěnou. Umístěte jej znovu na povrch.')
+        if (overlap.isEmpty()) throw new Error('Popisek není spojený s povrchem. Umístěte jej znovu na povrch.')
         result = own(p.textMode === 'engrave' ? result.subtract(textSolid) : result.add(textSolid))
-      } finally { text.dispose() }
+      } finally { text?.dispose() }
     }
     progress('Vyřezávám odtokové otvory přes spodní bevel…')
     const drainShell = fromManifold(result)
