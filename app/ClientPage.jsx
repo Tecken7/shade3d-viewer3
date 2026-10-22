@@ -11,6 +11,7 @@ import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader"
 import { STLExporter } from "three/examples/jsm/exporters/STLExporter"
 import { PLYExporter } from "three/examples/jsm/exporters/PLYExporter"
 import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter"
+import { HolePreview } from "./model-builder/HolePreview"
 import { BuilderPreview } from "./model-builder/BuilderPreview"
 import { collectTrianglesInRoot } from "./model-builder/scene-input.mjs"
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, SAH } from "three-mesh-bvh"
@@ -12224,14 +12225,26 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadPreviewActive, setCadPreviewActive] = useState(false)
   const [cadPreviewGeometry, setCadPreviewGeometry] = useState(null)
   const [cadPreviewStats, setCadPreviewStats] = useState(null)
-  const [builderOptions, setBuilderOptions] = useState(() => ({ ...BUILDER_DEFAULTS }))
+  const [builderOptions, setBuilderOptions] = useState(() => ({ ...BUILDER_DEFAULTS, cutHoles: false }))
   const [builderDirty, setBuilderDirty] = useState(true)
   const [builderSelected, setBuilderSelected] = useState(null)
   const [builderPlacing, setBuilderPlacing] = useState(false)
   const [builderDragging, setBuilderDragging] = useState(false)
   const builderWorkerRef = useRef(null)
+  const builderUncutRef = useRef(null)
+  const builderHasCutPreviewRef = useRef(false)
+  useEffect(() => () => {
+    builderUncutRef.current?.dispose()
+    builderUncutRef.current = null
+    builderHasCutPreviewRef.current = false
+  }, [cadFileUrl])
   const changeBuilderOptions = useCallback((patch) => {
-    setBuilderOptions(previous => ({ ...previous, ...patch }))
+    if (builderHasCutPreviewRef.current && builderUncutRef.current) {
+      const restored = builderUncutRef.current.clone()
+      setCadPreviewGeometry(previous => { previous?.dispose(); return restored })
+      builderHasCutPreviewRef.current = false
+    }
+    setBuilderOptions(previous => ({ ...previous, ...patch, cutHoles: false }))
     setBuilderDirty(true)
   }, [])
   const cancelBuilder = useCallback(() => {
@@ -13719,7 +13732,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadMessage("Nahrajte Upper a/nebo Lower scan.")
     setCadNaturalHeight(20)
     setCadTotalHeight(25)
-    setBuilderOptions({ ...BUILDER_DEFAULTS })
+    setBuilderOptions({ ...BUILDER_DEFAULTS, cutHoles: false })
     setBuilderDirty(true)
     setBuilderSelected(null)
     setBuilderPlacing(false)
@@ -13996,7 +14009,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadTotalHeight(Math.max(25, Math.ceil((naturalHeight + 1.5) * 10) / 10))
     setCadOrientationPoints([])
     setCadTrimBoundaryPoints([])
-    setBuilderOptions({ ...BUILDER_DEFAULTS })
+    setBuilderOptions({ ...BUILDER_DEFAULTS, cutHoles: false })
     setBuilderDirty(true)
     setBuilderSelected(null)
     setBuilderPlacing(false)
@@ -14073,11 +14086,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     handleCadTotalHeightChange(parsed)
   }, [cadTotalHeight, handleCadTotalHeightChange])
 
-  const toggleCadPreview = useCallback(async () => {
+  const toggleCadPreview = useCallback(async (request = {}) => {
     if (cadStage !== "base" || cadBusy || !cadFileUrl) return
     const sourceObject = modelObjectsRef.current[cadFileUrl]
     if (!sourceObject || !rootGroupRef.current) { setCadMessage("Model ještě není připravený."); return }
     setCadBusy(true)
+    const nextOptions = { ...builderOptions, cutHoles: typeof request.cutHoles === "boolean" ? request.cutHoles : builderOptions.cutHoles }
     const pending = { terminate() {} }
     builderWorkerRef.current = pending
     setCadMessage("Připravuji nový model…")
@@ -14102,19 +14116,24 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         geometry.setIndex(new THREE.BufferAttribute(result.indices, 1))
         geometry.computeVertexNormals()
         geometry.computeBoundingBox()
+        if (!nextOptions.cutHoles) {
+          builderUncutRef.current?.dispose()
+          builderUncutRef.current = geometry.clone()
+        }
+        builderHasCutPreviewRef.current = !!nextOptions.cutHoles
         setCadPreviewGeometry(previous => { previous?.dispose?.(); return geometry })
         setCadPreviewStats(result.stats)
-        setBuilderOptions(previous => ({ ...previous, holes: result.holes }))
+        setBuilderOptions(previous => ({ ...previous, holes: result.holes, cutHoles: nextOptions.cutHoles, bottomContour: result.placement.bottomContour }))
         setCadPreviewActive(true)
         setBuilderDirty(false)
-        setCadMessage(result.warnings?.length ? result.warnings.join(" ") : "Náhled je připravený. Zkontrolujte dutinu, polohu otvorů a popisku. Změny před exportem přepočítejte.")
+        setCadMessage(result.warnings?.length ? result.warnings.join(" ") : nextOptions.cutHoles ? "Otvory jsou vyříznuté. Zkontrolujte výsledek a dokončete model." : "Základna je připravena bez otvorů. Posuňte modré válce, nastavte průměr a hloubku, potom potvrďte vyříznutí otvorů.")
       }
       worker.onerror = (event) => {
         if (builderWorkerRef.current !== worker) return
         worker.terminate(); builderWorkerRef.current = null; setCadBusy(false); setBuilderDirty(true)
         setCadMessage(event.message || "Výpočet selhal. Zkuste menší model nebo upravte ořez.")
       }
-      worker.postMessage({ positions, options: { ...builderOptions, totalHeight: cadTotalHeight, arch: cadActiveArch }, font }, [positions.buffer])
+      worker.postMessage({ positions, options: { ...nextOptions, totalHeight: cadTotalHeight, arch: cadActiveArch }, font }, [positions.buffer])
     } catch (error) { if (builderWorkerRef.current !== pending) return; builderWorkerRef.current = null; setCadBusy(false); setBuilderDirty(true); setCadMessage(error.message) }
   }, [cadStage, cadBusy, cadFileUrl, cadTotalHeight, cadActiveArch, builderOptions])
 
@@ -18775,7 +18794,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 background:cadPreviewActive?"rgba(34,197,94,.11)":"rgba(255,255,255,.035)", color:cadPreviewActive?"#bbf7d0":"#c8c8c8",
                 display:"inline-flex", alignItems:"center", justifyContent:"center", gap:6, fontSize:9, fontWeight:720, cursor:cadBusy?"wait":"pointer",
               }}><CadEyeIcon active={cadPreviewActive}/><span>{builderDirty && cadPreviewActive ? "Přepočítat náhled" : "Vytvořit náhled"}</span></button>
-              {cadPreviewActive && !builderDirty && <button className="artheticCadPrimary artheticCadReady" type="button" onClick={applyCadBase} disabled={cadBusy} style={{ height:33, padding:"0 13px", borderRadius:9, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:"pointer" }}>Dokončit model</button>}
+              {cadPreviewActive && !builderDirty && <button className="artheticCadPrimary artheticCadReady" type="button" onClick={applyCadBase} disabled={cadBusy} style={{ height:33, padding:"0 13px", borderRadius:9, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:"pointer" }}>{builderOptions.cutHoles ? "Dokončit model" : "Dokončit bez otvorů"}</button>}
             </div>
           </div>
         )}
@@ -18798,7 +18817,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         )}
       </div>
 
-      {cadStage === "base" && <BuilderControls options={builderOptions} change={changeBuilderOptions} selected={builderSelected} select={setBuilderSelected} placing={builderPlacing} setPlacing={setBuilderPlacing} dirty={builderDirty} busy={cadBusy} cancel={cancelBuilder} hasPreview={cadPreviewActive} />}
+      {cadStage === "base" && <BuilderControls options={builderOptions} change={changeBuilderOptions} selected={builderSelected} select={setBuilderSelected} placing={builderPlacing} setPlacing={setBuilderPlacing} dirty={builderDirty} busy={cadBusy} cancel={cancelBuilder} hasPreview={cadPreviewActive} cutHoles={() => toggleCadPreview({ cutHoles: true })} />}
       {cadStage === "result" && <button type="button" onClick={() => setCadStage("base")} style={{ position: "absolute", top: 160, right: 18, zIndex: 80, padding: 12, background: "#333", color: "white", border: "1px solid #555", borderRadius: 8, cursor: "pointer" }}>Zpět k nastavení modelu</button>}
       {cadStage === "scan" && cadEmbedded && (
         <div style={{position:"absolute",bottom:24,left:"50%",transform:"translateX(-50%)",zIndex:20,width:"min(740px,calc(100vw - 32px))",padding:20,borderRadius:16,background:"rgba(15,15,15,.95)",border:"1px solid #333",color:"#ddd"}}>
@@ -20925,7 +20944,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             <CadOrientationReferencePlane center={cadOrientationPlaneCenter} y={cadOrientationPlaneY} size={cadOrientationPlaneSize} />
           )}
 
-          {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && <BuilderHandle selected={builderSelected} options={builderOptions} change={changeBuilderOptions} dragging={setBuilderDragging} />}
+          {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && <><HolePreview options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} /><BuilderHandle selected={builderSelected} options={builderOptions} change={changeBuilderOptions} dragging={setBuilderDragging} /></>}
           {cadStandalone && (cadPreviewActive || cadStage === "result") && cadPreviewGeometry && (
             <BuilderPreview geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} />
           )}

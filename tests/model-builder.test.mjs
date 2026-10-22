@@ -94,6 +94,22 @@ test('failed automatic drain leaves a valid preview and can be placed manually a
   assert.ok(repaired.stats.volume < fallback.stats.volume)
   await assert.rejects(() => build({ holes: [{ ...failed, autoPosition: false }] }), /Otvor 1/)
 })
+
+test('blue cylinder drafts leave the base intact until explicit confirmation', async () => {
+  const draft = await build({ cutHoles:false })
+  assert.equal(draft.holes.length, 2)
+  assert.ok(draft.holes.every(hole => hole.enabled && hole.position[1] === draft.placement.baseY))
+  const without = await build({ holes:[{enabled:false}, {enabled:false}] })
+  assert.ok(Math.abs(draft.stats.volume - without.stats.volume) < .001)
+  const changed = draft.holes.map(hole => ({ ...hole, diameter:3, length:12, autoDepth:false }))
+  const beforeConfirmation = await build({ cutHoles:false, holes:changed })
+  assert.ok(Math.abs(beforeConfirmation.stats.volume - without.stats.volume) < .001)
+  const confirmed = await build({ cutHoles:true, holes:beforeConfirmation.holes })
+  assert.ok(confirmed.stats.volume < beforeConfirmation.stats.volume)
+  const topology = meshTopology(Array.from(confirmed.positions), Array.from(confirmed.indices))
+  assert.equal(topology.nonManifold, 0)
+  assert.equal(topology.openEdges, 0)
+})
 test('embossed and engraved Czech text modify the exported solid in opposite directions',async()=>{
  const params={holes:[{enabled:false},{enabled:false}],text:'Žluť',textSize:2.5,textDepth:0.5,textPosition:[-20,12,0],textNormal:[-1,0,0]}
  const embossed=await build({...params,textMode:'emboss'});const engraved=await build({...params,textMode:'engrave'})

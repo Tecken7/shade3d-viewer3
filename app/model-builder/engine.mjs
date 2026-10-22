@@ -5,6 +5,7 @@ import { TextGeometry } from 'three/examples/jsm/geometries/TextGeometry.js'
 import { sampleContour, roundShoulder } from './transition.mjs'
 import { drainPassage } from './drains.mjs'
 import { prepareSurface } from './prepare-surface.mjs'
+import { nearestContourPosition } from './hole-placement.mjs'
 
 import { DEFAULTS } from "./defaults.mjs"
 export { DEFAULTS } from "./defaults.mjs"
@@ -367,7 +368,8 @@ export async function buildModel(M, input, options, fontData, progress = () => {
       cavityParts = openParts
       for (const part of openParts) result = own(result.subtract(part))
     }
-    const placement = { baseY, direction, min: bounds.min.toArray(), max: bounds.max.toArray(), boundary: boundary.map(id => v.slice(id * 3, id * 3 + 3)) }
+    const bottomContour = baseRings[0].map(id => v.slice(id * 3, id * 3 + 3))
+    const placement = { baseY, direction, bottomContour, min: bounds.min.toArray(), max: bounds.max.toArray(), boundary: boundary.map(id => v.slice(id * 3, id * 3 + 3)) }
     // Defaults are found by raycasting onto each distal end of the actual base.
     const defaultHoles = [-1, 1].map(side => {
       const x = (bounds.min.x + bounds.max.x) / 2 + side * (bounds.max.x - bounds.min.x) * 0.34
@@ -380,6 +382,14 @@ export async function buildModel(M, input, options, fontData, progress = () => {
     const holes = (p.holes.length ? p.holes : defaultHoles).map(hole => ({ ...hole,
       position: hole.position ? [hole.position[0], hole.position[1] + (Number.isFinite(hole.baseY) ? baseY - hole.baseY : 0), hole.position[2]] : undefined,
       baseY, baseDirection: direction }))
+    if (p.cutHoles === false) {
+      for (const hole of holes) {
+        hole.position = nearestContourPosition(bottomContour, hole.position).position
+        hole.warning = null
+        hole.through = false
+        if (!p.holes.length) { hole.enabled = true; hole.autoDepth = false; hole.autoPosition = false }
+      }
+    }
     progress({ preparedHoles: holes })
     progress('Přidávám popisek na stěnu modelu…')
     if (p.text.trim()) {
@@ -433,7 +443,7 @@ export async function buildModel(M, input, options, fontData, progress = () => {
     const reach = bounds.getSize(new THREE.Vector3()).length() + 20
     for (let i = 0; i < holes.length; i++) {
       const h = holes[i]
-      if (!h.enabled) continue
+      if (!h.enabled || p.cutHoles === false) continue
       if (!(h.diameter >= 1 && h.diameter <= 15 && h.length >= 0.5 && h.length <= 50)) throw new Error(`Otvor ${i + 1}: neplatný průměr nebo hloubka.`)
       const originalLength = h.length
       try {

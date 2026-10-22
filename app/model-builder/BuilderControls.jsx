@@ -3,12 +3,13 @@ import React, { useMemo } from 'react'
 import { createPortal, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 import { TransformControls, Html } from '@react-three/drei'
+import { contourPosition, nearestContourPosition } from './hole-placement.mjs'
 
 const fieldStyle = { width: '100%', boxSizing: 'border-box', background: '#252525', color: '#eee', border: '1px solid #484848', padding: '7px 8px', borderRadius: 6 }
 function NumberField({ label, value, onChange, min, max, step = 0.1 }) {
   return <label style={{ display: 'grid', gap: 5, fontSize: 12 }}>{label}<input aria-label={label} style={fieldStyle} type="number" min={min} max={max} step={step} value={value} onChange={e => { if (e.target.value !== '' && Number.isFinite(e.target.valueAsNumber)) onChange(e.target.valueAsNumber) }} /></label>
 }
-export function BuilderControls({ options: p, change, selected, select, placing, setPlacing, dirty, busy, cancel, hasPreview }) {
+export function BuilderControls({ options: p, change, selected, select, placing, setPlacing, dirty, busy, cancel, hasPreview, cutHoles }) {
   const hole = selected?.startsWith('hole:') ? Number(selected.split(':')[1]) : -1
   const editHole = patch => change({ holes: p.holes.map((h, i) => i === hole ? { ...h, ...patch, autoPosition: false, warning: null } : h) })
   const button = (active = false) => ({ ...fieldStyle, width: 'auto', cursor: 'pointer', background: active ? '#3b5645' : '#303030', fontSize: 12 })
@@ -34,27 +35,26 @@ export function BuilderControls({ options: p, change, selected, select, placing,
       <NumberField label="Otočení textu (°)" value={p.textRotation} min={-180} max={180} step={5} onChange={textRotation => change({ textRotation })} />
       <button disabled={!hasPreview || !p.text.trim()} type="button" style={button(selected === 'text' && placing)} onClick={() => { select('text'); setPlacing(!(selected === 'text' && placing)) }}>Umístit popisek na stěnu</button>
       <hr style={{ width: '100%', border: 0, borderTop: '1px solid #444' }} />
-      <strong style={{ fontSize: 13 }}>Odtokové zářezy · poslední krok</strong>
-      {p.holes.some(h => h.warning) && <p role="status" style={{ margin: 0, fontSize: 12, color: '#f4d28b', lineHeight: 1.5 }}>Některé otvory se nepodařilo automaticky umístit a zůstaly vypnuté. Vyberte otvor a použijte „Umístit otvor na stěnu“, potom přepočítejte náhled.</p>}
-      <p style={{ margin: 0, fontSize: 11, color: '#aaa' }}>Oba řezy jsou rovnoběžné. Výchozí poloha protíná spodní hranu i bevel.</p>
+      <strong style={{ fontSize: 13 }}>Odtokové otvory</strong>
+      <p style={{ margin: 0, fontSize: 11, color: '#aaa', lineHeight: 1.5 }}>Modré válce jsou pouze náhled. Táhněte je podél spodního obvodu a nastavte průměr i hloubku. Model se vyřízne až po potvrzení.</p>
       <NumberField label="Společný směr otvorů (°)" value={p.holeYaw ?? 0} min={-90} max={90} step={1} onChange={holeYaw => change({ holeYaw })} />
-      {hasPreview && <button type="button" style={button()} onClick={() => { change({ holes: [] }); select(null) }}>Obnovit výchozí odtokové zářezy</button>}
+      {hasPreview && <button type="button" style={button()} onClick={() => { change({ holes: [] }); select(null) }}>Obnovit návrh otvorů</button>}
       {!p.holes.length && <span style={{ fontSize: 12 }}>První náhled navrhne dva otvory Ø 4,5 mm. Jejich polohu zkontrolujte.</span>}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{p.holes.map((h, i) => <button key={i} type="button" style={button(hole === i)} onClick={() => { select(`hole:${i}`); setPlacing(false) }}>Otvor {i + 1}{h.enabled ? '' : ' (vyp.)'}</button>)}</div>
       {hole >= 0 && p.holes[hole] && <>
         <label style={{ fontSize: 12 }}><input type="checkbox" checked={p.holes[hole].enabled} onChange={e => editHole({ enabled: e.target.checked })} /> Aktivní otvor</label>
         <NumberField label="Průměr otvoru (mm)" value={p.holes[hole].diameter} min={1} max={15} onChange={diameter => editHole({ diameter })} />
-        <label style={{ fontSize: 12 }}><input type="checkbox" checked={p.holes[hole].autoDepth !== false} onChange={e => editHole({ autoDepth: e.target.checked })} /> Automaticky otevřít celý průřez</label>
+        {p.bottomContour?.length > 0 && <label style={{ display: 'grid', gap: 5, fontSize: 12 }}>Poloha po spodním obvodu
+          <input aria-label="Poloha otvoru po spodním obvodu" type="range" min={0} max={100} step={0.1} value={nearestContourPosition(p.bottomContour, p.holes[hole].position).fraction * 100} onChange={e => editHole({ position: contourPosition(p.bottomContour, Number(e.target.value) / 100) })} />
+        </label>}
         <NumberField label="Hloubka řezu otvoru (mm)" value={p.holes[hole].length} min={0.5} max={50} onChange={length => editHole({ length, autoDepth: false })} />
-        <p style={{ margin: 0, fontSize: 11, color: '#aaa' }}>Automatika podle potřeby prodlouží řez do dutiny. Ruční změna hloubky ji vypne.</p>
-        {p.holes[hole].baseY != null && <NumberField label="Výška středu nad spodkem (mm)" value={Math.round((p.holes[hole].baseY - p.holes[hole].position[1]) * p.holes[hole].baseDirection * 100) / 100} min={0} max={25} onChange={height => editHole({ position: p.holes[hole].position.map((value, axis) => axis === 1 ? p.holes[hole].baseY - p.holes[hole].baseDirection * height : value) })} />}
-        {p.hollow && p.holes[hole].enabled && p.holes[hole].through === false && !dirty && <p role="status" style={{ color: '#f4d28b', fontSize: 12, margin: 0 }}>Otvor není průchozí po celém průřezu. Zapněte automatické otevření, prodlužte řez nebo změňte polohu.</p>}
-        <button disabled={!hasPreview} type="button" style={button(placing)} onClick={() => setPlacing(!placing)}>{placing ? 'Klikněte na boční stěnu…' : 'Umístit otvor na stěnu'}</button>
+        {p.hollow && p.holes[hole].enabled && p.holes[hole].through === false && p.cutHoles && !dirty && <p role="status" style={{ color: '#f4d28b', fontSize: 12, margin: 0 }}>Otvor není průchozí po celém průřezu. Prodlužte hloubku nebo posuňte válec a znovu potvrďte řez.</p>}
       </>}
+      {hasPreview && <button type="button" style={button(true)} disabled={!p.holes.some(h => h.enabled) || p.cutHoles} onClick={cutHoles}>{p.cutHoles ? 'Otvory jsou vyříznuté' : 'Potvrdit a vyříznout otvory'}</button>}
 
-      {selected && hasPreview && <p style={{ fontSize: 12, color: '#bfe5c8', margin: 0 }}>Polohu vybraného prvku můžete posunout tažením barevných os v modelu. Kliknutím na stěnu prvek přemístíte; směr otvorů nastavíte společně.</p>}
+      {selected === "text" && hasPreview && <p style={{ fontSize: 12, color: '#bfe5c8', margin: 0 }}>Polohu vybraného prvku můžete posunout tažením barevných os v modelu. Kliknutím na stěnu prvek přemístíte; směr otvorů nastavíte společně.</p>}
     </fieldset>
-    <p role="status" style={{ color: dirty ? '#f4d28b' : '#bfe5c8', fontSize: 12, lineHeight: 1.5 }}>{dirty && hasPreview ? 'Změny čekají na přepočet. Použijte „Přepočítat náhled“ v horní liště.' : hasPreview ? 'Náhled odpovídá nastavení.' : 'Nastavte výšku a vytvořte první náhled.'}</p>
+    <p role="status" style={{ color: dirty ? '#f4d28b' : '#bfe5c8', fontSize: 12, lineHeight: 1.5 }}>{dirty && hasPreview ? 'Změny otvorů potvrďte tlačítkem „Potvrdit a vyříznout otvory“. Změny samotné základny přepočítejte v horní liště.' : hasPreview ? p.cutHoles ? 'Otvory jsou součástí modelu.' : 'Základna je bez otvorů. Modré válce čekají na potvrzení.' : 'Nastavte výšku a vytvořte první náhled.'}</p>
   </aside>
 }
 
@@ -63,7 +63,7 @@ export function BuilderHandle({ selected, options, change, dragging }) {
   const { scene } = useThree()
   const index = selected?.startsWith('hole:') ? Number(selected.split(':')[1]) : -1
   const position = index >= 0 ? options.holes[index]?.position : selected === 'text' ? options.textPosition : null
-  if (!position) return null
+  if (!position || index >= 0) return null
   const commit = () => {
     const next = target.position.toArray()
     if (index >= 0) change({ holes: options.holes.map((h, i) => i === index ? { ...h, position: next, enabled: true, autoPosition: false, warning: null } : h) })
