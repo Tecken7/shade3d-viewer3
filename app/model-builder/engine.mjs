@@ -375,7 +375,7 @@ export async function buildModel(M, input, options, fontData, progress = () => {
       ray.origin.set(x, baseY - direction * 1.5, posterior > 0 ? bounds.max.z + 10 : bounds.min.z - 10)
       ray.direction.set(0, 0, -posterior)
       const hit = outerBVH.raycastFirst(ray, THREE.DoubleSide)
-      return { enabled: !!hit, diameter: 4.5, length: 8, autoDepth: true, position: hit ? hit.point.toArray() : [x, baseY - direction * 1.5, (bounds.max.z + bounds.min.z) / 2], normal: [0, 0, posterior] }
+      return { enabled: !!hit, autoPosition: true, warning: hit ? null : `Otvor ${side < 0 ? 1 : 2} se nepodařilo automaticky umístit. Základna je vytvořena bez něj; umístěte ho ručně na její stěnu.`, diameter: 4.5, length: 8, autoDepth: true, position: hit ? hit.point.toArray() : [x, baseY - direction * 1.5, (bounds.max.z + bounds.min.z) / 2], normal: [0, 0, posterior] }
     })
     const holes = (p.holes.length ? p.holes : defaultHoles).map(hole => ({ ...hole,
       position: hole.position ? [hole.position[0], hole.position[1] + (Number.isFinite(hole.baseY) ? baseY - hole.baseY : 0), hole.position[2]] : undefined,
@@ -435,6 +435,8 @@ export async function buildModel(M, input, options, fontData, progress = () => {
       const h = holes[i]
       if (!h.enabled) continue
       if (!(h.diameter >= 1 && h.diameter <= 15 && h.length >= 0.5 && h.length <= 50)) throw new Error(`Otvor ${i + 1}: neplatný průměr nebo hloubka.`)
+      const originalLength = h.length
+      try {
       const yaw = (p.holeYaw ?? 0) * Math.PI / 180
       const posterior = direction > 0 ? 1 : -1
       h.normal = [posterior * Math.sin(yaw), 0, posterior * Math.cos(yaw)]
@@ -475,7 +477,22 @@ export async function buildModel(M, input, options, fontData, progress = () => {
       if (p.hollow && h.autoDepth && !h.through) throw new Error(`Otvor ${i + 1}: nepodařilo se ověřit úplné otevření do dutiny. Změňte polohu otvoru.`)
       const intersection = own(result.intersect(positioned))
       if (intersection.isEmpty()) throw new Error(`Otvor ${i + 1} neprotíná model. Upravte jeho polohu.`)
-      result = own(result.subtract(positioned))
+      const cut = own(result.subtract(positioned))
+      if (cut.status() !== 'NoError' || cut.isEmpty()) throw new Error(`Otvor ${i + 1}: řez nelze bezpečně vytvořit.`)
+      if (h.autoPosition && cut.decompose().map(own).filter(part => part.volume() > 0).length !== 1) throw new Error(`Otvor ${i + 1}: řez by oddělil část modelu.`)
+      result = cut
+      h.warning = null
+      } catch (error) {
+        // Automatic placement is optional. Keep the uncut solid for this hole,
+        // expose the disabled candidate, and let the user place it on the preview.
+        // Explicit manual edits still report their error instead of silently
+        // accepting a different result than requested.
+        if (!h.autoPosition) throw error
+        h.enabled = false
+        h.through = false
+        h.length = originalLength
+        h.warning = `Otvor ${i + 1} se nepodařilo automaticky umístit. Základna je vytvořena bez něj; umístěte ho ručně na její stěnu.`
+      }
     }
     if (result.status() !== 'NoError' || result.isEmpty()) throw new Error('Výsledek operace není platná uzavřená síť.')
     result = own(result.simplify(0.0001))
@@ -498,7 +515,7 @@ export async function buildModel(M, input, options, fontData, progress = () => {
     const welded = indexed(expanded), stlCheck = meshTopology(welded.vertices, welded.faces)
     if (stlCheck.openEdges || stlCheck.nonManifold) throw new Error('Při převodu do STL se dotýkají vnitřní plochy. Upravte tloušťku stěny o 0,1 mm a přepočítejte náhled.')
     const components = 1
-    return { positions: new Float32Array(output.vertices), indices: new Uint32Array(output.faces), holes, placement,
+    return { positions: new Float32Array(output.vertices), indices: new Uint32Array(output.faces), holes, placement, warnings: holes.map(h => h.warning).filter(Boolean),
       stats: { triangles: output.faces.length / 3, totalHeight: p.totalHeight, wall: p.wall, openBoundaryLoops: 0, volume: signedVolume(output.vertices, output.faces), components, sealedPockets, separatedContacts } }
   } finally {
     surfaceGeometry?.dispose(); closedGeometry?.dispose(); textSurfaceGeometry?.dispose(); drainGeometry?.dispose()

@@ -12250,7 +12250,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     if (builderSelected === "text") changeBuilderOptions({ textPosition: position, textNormal: normal })
     else if (builderSelected?.startsWith("hole:")) {
       const index = Number(builderSelected.split(":")[1])
-      changeBuilderOptions({ holes: builderOptions.holes.map((hole, i) => i === index ? { ...hole, position, normal, enabled: true } : hole) })
+      changeBuilderOptions({ holes: builderOptions.holes.map((hole, i) => i === index ? { ...hole, position, normal, enabled: true, autoPosition: false, warning: null } : hole) })
     }
     setBuilderPlacing(false)
   }, [builderPlacing, builderSelected, builderOptions.holes, cadBusy, changeBuilderOptions])
@@ -14107,7 +14107,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         setBuilderOptions(previous => ({ ...previous, holes: result.holes }))
         setCadPreviewActive(true)
         setBuilderDirty(false)
-        setCadMessage("Náhled je připravený. Zkontrolujte dutinu, polohu otvorů a popisku. Změny před exportem přepočítejte.")
+        setCadMessage(result.warnings?.length ? result.warnings.join(" ") : "Náhled je připravený. Zkontrolujte dutinu, polohu otvorů a popisku. Změny před exportem přepočítejte.")
       }
       worker.onerror = (event) => {
         if (builderWorkerRef.current !== worker) return

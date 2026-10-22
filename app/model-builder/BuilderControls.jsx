@@ -10,7 +10,7 @@ function NumberField({ label, value, onChange, min, max, step = 0.1 }) {
 }
 export function BuilderControls({ options: p, change, selected, select, placing, setPlacing, dirty, busy, cancel, hasPreview }) {
   const hole = selected?.startsWith('hole:') ? Number(selected.split(':')[1]) : -1
-  const editHole = patch => change({ holes: p.holes.map((h, i) => i === hole ? { ...h, ...patch } : h) })
+  const editHole = patch => change({ holes: p.holes.map((h, i) => i === hole ? { ...h, ...patch, autoPosition: false, warning: null } : h) })
   const button = (active = false) => ({ ...fieldStyle, width: 'auto', cursor: 'pointer', background: active ? '#3b5645' : '#303030', fontSize: 12 })
   return <aside aria-label="Nastavení Model Builderu" style={{ position: 'absolute', top: 160, right: 18, bottom: 20, width: 292, overflowY: 'auto', overflowX: 'hidden', zIndex: 80, background: 'rgba(22,22,22,.96)', border: '1px solid #444', borderRadius: 12, padding: 16, color: '#ddd', fontFamily: 'system-ui', boxSizing: 'border-box' }}>
     <h2 style={{ fontSize: 16, margin: '0 0 10px' }}>Nastavení modelu</h2>
@@ -35,6 +35,7 @@ export function BuilderControls({ options: p, change, selected, select, placing,
       <button disabled={!hasPreview || !p.text.trim()} type="button" style={button(selected === 'text' && placing)} onClick={() => { select('text'); setPlacing(!(selected === 'text' && placing)) }}>Umístit popisek na stěnu</button>
       <hr style={{ width: '100%', border: 0, borderTop: '1px solid #444' }} />
       <strong style={{ fontSize: 13 }}>Odtokové zářezy · poslední krok</strong>
+      {p.holes.some(h => h.warning) && <p role="status" style={{ margin: 0, fontSize: 12, color: '#f4d28b', lineHeight: 1.5 }}>Některé otvory se nepodařilo automaticky umístit a zůstaly vypnuté. Vyberte otvor a použijte „Umístit otvor na stěnu“, potom přepočítejte náhled.</p>}
       <p style={{ margin: 0, fontSize: 11, color: '#aaa' }}>Oba řezy jsou rovnoběžné. Výchozí poloha protíná spodní hranu i bevel.</p>
       <NumberField label="Společný směr otvorů (°)" value={p.holeYaw ?? 0} min={-90} max={90} step={1} onChange={holeYaw => change({ holeYaw })} />
       {hasPreview && <button type="button" style={button()} onClick={() => { change({ holes: [] }); select(null) }}>Obnovit výchozí odtokové zářezy</button>}
@@ -65,7 +66,7 @@ export function BuilderHandle({ selected, options, change, dragging }) {
   if (!position) return null
   const commit = () => {
     const next = target.position.toArray()
-    if (index >= 0) change({ holes: options.holes.map((h, i) => i === index ? { ...h, position: next } : h) })
+    if (index >= 0) change({ holes: options.holes.map((h, i) => i === index ? { ...h, position: next, enabled: true, autoPosition: false, warning: null } : h) })
     else change({ textPosition: next })
   }
   return <>

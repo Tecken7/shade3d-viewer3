@@ -72,6 +72,28 @@ test('drain clearance detects a blocked crescent even when the centre line is cl
  assert.ok(clearance.requiredLength>9.8&&clearance.requiredLength<10,'8 mm clears the centre but not the disk edge')
  assert.ok(clearance.intersectingRays>300);geometry.dispose()
 })
+
+test('failed automatic drain leaves a valid preview and can be placed manually afterwards', async () => {
+  const defaults = await build({})
+  const valid = { ...defaults.holes[0], enabled: true }
+  const failed = { ...defaults.holes[1], enabled: true, autoPosition: true, position: [1000, 1000, 1000] }
+  const expected = await build({ holes: [valid, { ...failed, enabled: false }] })
+  const fallback = await build({ holes: [valid, failed] })
+  assert.equal(fallback.holes[0].enabled, true)
+  assert.equal(fallback.holes[1].enabled, false)
+  assert.equal(fallback.warnings.length, 1)
+  assert.match(fallback.warnings[0], /ručně/)
+  assert.ok(Math.abs(fallback.stats.volume - expected.stats.volume) < 0.001, 'failed cutter must not remove any material')
+  const topology = meshTopology(Array.from(fallback.positions), Array.from(fallback.indices))
+  assert.equal(topology.nonManifold, 0)
+  assert.equal(topology.openEdges, 0)
+  const manual = { ...fallback.holes[1], ...defaults.holes[1], enabled: true, autoPosition: false, warning: null }
+  const repaired = await build({ holes: [valid, manual] })
+  assert.equal(repaired.warnings.length, 0)
+  assert.equal(repaired.holes[1].through, true)
+  assert.ok(repaired.stats.volume < fallback.stats.volume)
+  await assert.rejects(() => build({ holes: [{ ...failed, autoPosition: false }] }), /Otvor 1/)
+})
 test('embossed and engraved Czech text modify the exported solid in opposite directions',async()=>{
  const params={holes:[{enabled:false},{enabled:false}],text:'Žluť',textSize:2.5,textDepth:0.5,textPosition:[-20,12,0],textNormal:[-1,0,0]}
  const embossed=await build({...params,textMode:'emboss'});const engraved=await build({...params,textMode:'engrave'})
