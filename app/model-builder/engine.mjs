@@ -408,8 +408,8 @@ export async function buildModel(M, input, options, fontData, progress = () => {
         hole.position = nearestContourPosition(bottomContour, hole.position || defaultHoles[index % defaultHoles.length].position).position
         hole.warning = null
         hole.through = false
-        hole.outerLength = hole.outerLength ?? hole.length
-        if (!p.holes.length) { hole.enabled = true; hole.autoDepth = false; hole.autoPosition = false }
+        hole.outerLength = hole.outerLength ?? (p.holes.length ? hole.length : 3)
+        if (!p.holes.length) { hole.length = 5; hole.enabled = true; hole.autoDepth = false; hole.autoPosition = false }
       }
     }
     progress({ preparedHoles: holes })

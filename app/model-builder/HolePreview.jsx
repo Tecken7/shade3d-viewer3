@@ -1,12 +1,16 @@
 'use client'
-import React, { useCallback, useEffect, useRef } from 'react'
-import { Edges, Line } from '@react-three/drei'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { Edges, Line, useCursor } from '@react-three/drei'
 import * as THREE from 'three'
 import { nearestContourPosition, holeDirection } from './hole-placement.mjs'
 
 const clamp=value=>Math.round(Math.max(.5,Math.min(50,value))*100)/100
 export function HolePreview({ options, selected, select, change, dragging, controlsRef, onDragEnd }) {
   const root=useRef(),active=useRef(null)
+  const [hovered,setHovered]=useState(null)
+  useCursor(hovered!==null,'grab')
+  const hover=(event,key)=>{event.stopPropagation();setHovered(key)}
+  const unhover=(event,key)=>{event.stopPropagation();setHovered(previous=>previous===key?null:previous)}
   const finish=useCallback(event=>{
     const gesture=active.current
     if(!gesture)return
@@ -59,27 +63,28 @@ export function HolePreview({ options, selected, select, change, dragging, contr
     change({holes:options.holes.map((hole,i)=>i===gesture.index?{...hole,...patch,autoPosition:false,warning:null}:hole)})
   }
   return <group ref={root}>
-    <Line points={[...contour,contour[0]]} color="#60a5fa" transparent opacity={.35} lineWidth={1} depthTest={false}/>
+    <Line points={[...contour,contour[0]]} color="#60a5fa" transparent opacity={.35} lineWidth={1} depthTest depthWrite={false}/>
     {options.holes.map((hole,index)=>{
       if(!hole.enabled||!hole.position)return null
       const normal=new THREE.Vector3().fromArray(holeDirection(contour,hole.position,options.holeYaw??0)),outer=hole.outerLength??hole.length
       const anchor=new THREE.Vector3().fromArray(hole.position),center=anchor.clone().addScaledVector(normal,(outer-hole.length)/2)
       const rotation=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),normal.clone().negate())
       return <group key={index}>
-        <mesh position={center} quaternion={rotation} renderOrder={80} onPointerDown={e=>begin(e,index,'body',hole,normal)} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
+        <mesh position={center} quaternion={rotation} renderOrder={80} onPointerOver={e=>hover(e,`${index}:body`)} onPointerOut={e=>unhover(e,`${index}:body`)} onPointerDown={e=>begin(e,index,'body',hole,normal)} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
           <cylinderGeometry args={[hole.diameter/2,hole.diameter/2,hole.length+outer,48]}/>
-          <meshBasicMaterial color={selected===`hole:${index}`?'#60a5fa':'#2563eb'} transparent opacity={.48} depthTest={false} depthWrite={false}/>
+          <meshBasicMaterial color={hovered===`${index}:body`?'#93c5fd':selected===`hole:${index}`?'#60a5fa':'#2563eb'} depthTest depthWrite/>
           <Edges color="#93c5fd" threshold={20} raycast={()=>null}/>
         </mesh>
         {[['outer',outer,1],['inner',hole.length,-1]].map(([side,length,sign])=>{
           const endpoint=anchor.clone().addScaledVector(normal,sign*(length+.8)),axis=normal.clone().multiplyScalar(sign)
           const quaternion=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),axis)
-          return <group key={side} position={endpoint} quaternion={quaternion}>
-            <mesh renderOrder={82} onPointerDown={e=>begin(e,index,side,hole,normal)} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
-              <coneGeometry args={[.65,1.6,16]}/><meshBasicMaterial color="#bfdbfe" depthTest={false} depthWrite={false}/>
+          const key=`${index}:${side}`,lit=hovered===key
+          return <group key={side} position={endpoint} quaternion={quaternion} scale={lit?1.18:1}>
+            <mesh renderOrder={82} onPointerOver={e=>hover(e,key)} onPointerOut={e=>unhover(e,key)} onPointerDown={e=>begin(e,index,side,hole,normal)} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
+              <coneGeometry args={[.65,1.6,16]}/><meshBasicMaterial color={lit?'#ffffff':'#bfdbfe'} depthTest depthWrite/>
             </mesh>
-            <mesh position={[0,-1,0]} renderOrder={81} onPointerDown={e=>begin(e,index,side,hole,normal)} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
-              <cylinderGeometry args={[.18,.18,1.2,12]}/><meshBasicMaterial color="#93c5fd" depthTest={false} depthWrite={false}/>
+            <mesh position={[0,-1,0]} renderOrder={81} onPointerOver={e=>hover(e,key)} onPointerOut={e=>unhover(e,key)} onPointerDown={e=>begin(e,index,side,hole,normal)} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
+              <cylinderGeometry args={[.18,.18,1.2,12]}/><meshBasicMaterial color={lit?'#ffffff':'#93c5fd'} depthTest depthWrite/>
             </mesh>
           </group>
         })}

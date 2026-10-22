@@ -3,7 +3,7 @@
 import React, { Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react"
 import { Canvas, useThree, useFrame } from "@react-three/fiber"
 import * as THREE from "three"
-import { Html, TransformControls } from "@react-three/drei"
+import { Html, TransformControls, useCursor } from "@react-three/drei"
 import { TrackballControls } from "three/examples/jsm/controls/TrackballControls"
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader"
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader"
@@ -1262,6 +1262,8 @@ function TrimSurfaceOverlay({
 }) {
   const groupRef = useRef(null)
   const firstPointClickAtRef = useRef(null)
+  const [hoveredPoint,setHoveredPoint] = useState(null)
+  useCursor(hoveredPoint!=null,'grab')
   useEffect(() => {
     const group = groupRef.current
     if (!group) return
@@ -1297,12 +1299,16 @@ function TrimSurfaceOverlay({
         if (!point) return null
         const isFirst = index === 0
         const active = draggingPoint === index
+        const hovered = hoveredPoint === index
         return (
           <mesh
             key={index}
             position={point}
             renderOrder={1510}
+            onPointerOver={event=>{if(event.intersections[0]?.distance < event.distance-1e-4)return;event.stopPropagation();setHoveredPoint(index)}}
+            onPointerOut={()=>setHoveredPoint(previous=>previous===index?null:previous)}
             onPointerDown={(event) => {
+              if(event.intersections[0]?.distance < event.distance-1e-4)return
               event.stopPropagation()
               event.nativeEvent?.preventDefault?.()
               // R3F a TrackballControls poslouchají stejný canvas. Zastav další
@@ -1328,9 +1334,9 @@ function TrimSurfaceOverlay({
             } : undefined}
             onClick={(event) => event.stopPropagation()}
           >
-            <sphereGeometry args={[pointRadius * (active ? 1.16 : 1), 20, 16]} />
+            <sphereGeometry args={[pointRadius * (active ? 1.16 : hovered ? 1.2 : 1), 20, 16]} />
             <meshPhysicalMaterial
-              color={active ? "#6fa9d1" : isFirst ? "#f3bd32" : "#4f82aa"}
+              color={active ? "#6fa9d1" : hovered ? (isFirst ? "#ffe7a0" : "#b9e6ff") : isFirst ? "#f3bd32" : "#4f82aa"}
               roughness={isFirst ? 0.24 : 0.20}
               metalness={isFirst ? 0.16 : 0.22}
               clearcoat={0.72}
@@ -1340,9 +1346,8 @@ function TrimSurfaceOverlay({
               iridescenceIOR={1.34}
               iridescenceThicknessRange={[120, 460]}
               depthTest
-              depthWrite={false}
-              transparent
-              opacity={isFirst ? 0.94 : 0.88}
+              depthWrite
+              opacity={1}
             />
           </mesh>
         )
@@ -5066,11 +5071,11 @@ async function computeAlignmentMetrics(meshA, meshB, tolerance = 0.25, maxSample
   }
 }
 
-function AlignmentMarker({ point, index, radius = 0.8, muted = false }) {
+function AlignmentMarker({ point, index, radius = 0.8, muted = false, occlude=false }) {
   const color = ALIGNMENT_POINT_COLORS[index % ALIGNMENT_POINT_COLORS.length]
   return (
     <group position={point}>
-      <mesh renderOrder={1000}>
+      <mesh renderOrder={1000} raycast={()=>null}>
         <sphereGeometry args={[radius, 20, 14]} />
         <meshPhysicalMaterial
           color={color}
@@ -5079,13 +5084,13 @@ function AlignmentMarker({ point, index, radius = 0.8, muted = false }) {
           clearcoat={0.58}
           clearcoatRoughness={0.18}
           ior={1.46}
-          transparent
-          opacity={muted ? 0.62 : 0.94}
-          depthTest={false}
-          depthWrite={false}
+          transparent={!occlude}
+          opacity={occlude ? 1 : muted ? 0.62 : 0.94}
+          depthTest={occlude}
+          depthWrite={occlude}
         />
       </mesh>
-      <Html center style={{ pointerEvents: "none" }} zIndexRange={[1000, 0]}>
+      <Html occlude={occlude} center style={{ pointerEvents: "none" }} zIndexRange={[1000, 0]}>
         <div style={{
           width: 22, height: 22, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
           background: color, color: "#050505", fontFamily: "sans-serif", fontSize: 11, fontWeight: 900,
@@ -18653,6 +18658,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         .artheticCadNumber:focus { border-color:rgba(255,255,255,.22) !important; background:rgba(255,255,255,.055) !important; box-shadow:0 0 0 2px rgba(255,255,255,.035); }
         .artheticEdgeEdit button { padding:7px 11px; color:#d1fae5; background:#16392f; border:1px solid #32634f; border-radius:8px; cursor:pointer; font-size:11px; }
         .artheticEdgeEdit button:disabled { opacity:.35; cursor:default; }
+        .artheticEdgeEdit button:not(:disabled):hover { filter:brightness(1.25); border-color:#93c5fd; }
         .artheticCadUpload:hover { border-color:rgba(255,255,255,.20) !important; background:rgba(255,255,255,.045) !important; transform:translateY(-1px); }
         .artheticCadOrthoViews { width:min(250px, 22vw); }
         @media (max-width:1100px) { .artheticCadOrthoViews { width:205px !important; } .artheticCadOrthoView { height:112px !important; } }
@@ -20991,7 +20997,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
           {cadStandalone && cadStage === "edit" && <>{['paint','erase'].includes(cadEditorTool)&&<EdgeEditOverlay context={cadEditContext} loops={cadEditLoops} selection={cadEffectiveSelection} patch={cadEditPreview.patch} pending={cadEditPreview.pending} picking={false} painted={cadEditPainted}/>}{cadEditorTool==='artifact'&&<SurfaceSelectionOverlay context={cadEditContext} selected={cadArtifactPainted}/>}<ScanBrush context={cadEditContext} tool={cadEditorTool} options={cadBrushOptions} paint={paintCadEdge} onStart={startCadSculpt} onEnd={endCadSculpt} onBusy={setCadEditorBusy} onMessage={setCadMessage} controlsRef={trackballRef}/></>}
           {cadStandalone && cadStage === "orient" && !cadOrientationPrepared && cadOrientationPoints.map((point, index) => (
-            <AlignmentMarker key={`cad-orient-${index}`} point={point} index={index} radius={cadMarkerRadius} />
+            <AlignmentMarker occlude key={`cad-orient-${index}`} point={point} index={index} radius={cadMarkerRadius} />
           ))}
 
           {cadStandalone && cadStage === "orient" && cadOrientationPrepared && (
@@ -21000,7 +21006,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
           {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && <><HolePreview options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} /><BuilderHandle selected={builderSelected} options={builderOptions} change={changeBuilderOptions} dragging={setBuilderDragging} /></>}
           {cadStandalone && (cadPreviewActive || cadStage === "result") && cadPreviewGeometry && (
-            <BuilderPreview geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} />
+            <BuilderPreview geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} overlayDragging={builderDragging} />
           )}
 
           {trimMode && trimContext && trimSelection && trimStage !== "result" && (

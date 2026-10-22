@@ -112,5 +112,5 @@ export function ScanBrush({context,tool,options,paint,onStart,onEnd,onBusy,onMes
     return()=>{unlock();worker?.terminate();canvas.removeEventListener('pointerdown',down,true);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',cancel)}
   },[context,camera,gl])
   if(!cursor||tool==='navigate')return null
-  return <group matrix={context.sourceObject.matrix} matrixAutoUpdate={false}><mesh position={cursor.point} quaternion={cursor.quaternion} raycast={noRaycast} renderOrder={2100}><ringGeometry args={[options.radius*.97,options.radius,64]}/><meshBasicMaterial color={tool==='artifact'?'#c4b5fd':tool==='erase'?'#fb7185':tool==='paint'?'#fbbf24':tool==='subtract'?'#fb7185':'#38bdf8'} side={THREE.DoubleSide} depthTest={false}/></mesh></group>
+  return <group matrix={context.sourceObject.matrix} matrixAutoUpdate={false}><mesh position={cursor.point} quaternion={cursor.quaternion} raycast={noRaycast} renderOrder={2100}><ringGeometry args={[options.radius*.97,options.radius,64]}/><meshBasicMaterial color={tool==='artifact'?'#c4b5fd':tool==='erase'?'#fb7185':tool==='paint'?'#fbbf24':tool==='subtract'?'#fb7185':'#38bdf8'} side={THREE.DoubleSide} depthTest/></mesh></group>
 }

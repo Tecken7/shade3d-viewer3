@@ -119,6 +119,7 @@ test('failed automatic drain leaves a valid preview and can be placed manually a
 test('blue cylinder drafts leave the base intact until explicit confirmation', async () => {
   const draft = await build({ cutHoles:false, followContour:true })
   assert.equal(draft.holes.length, 2)
+  assert.ok(draft.holes.every(hole => hole.length===5 && hole.outerLength===3))
   assert.ok(draft.holes.every(hole => hole.enabled && hole.position[1] === draft.placement.baseY))
   const without = await build({ holes:[{enabled:false}, {enabled:false}] })
   assert.ok(Math.abs(draft.stats.volume - without.stats.volume) < .001)

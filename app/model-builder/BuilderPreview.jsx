@@ -5,7 +5,7 @@ import * as THREE from 'three'
 import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { MeshBVH } from 'three-mesh-bvh'
 
-export function BuilderPreview({ geometry, placing, onSurfaceClick }) {
+export function BuilderPreview({ geometry, placing, onSurfaceClick, overlayDragging=false }) {
   const mesh = useRef()
   const { camera, gl } = useThree()
   const display = useMemo(() => {
@@ -38,7 +38,9 @@ export function BuilderPreview({ geometry, placing, onSurfaceClick }) {
     return () => gl.domElement.removeEventListener('pointerdown', pick, true)
   }, [placing, display, gl, camera, onSurfaceClick])
   if (!display) return null
-  return <mesh ref={mesh} geometry={display} dispose={null} renderOrder={50}>
+  const blockHidden = event => { if (!overlayDragging) event.stopPropagation() }
+  return <mesh ref={mesh} geometry={display} dispose={null} renderOrder={50}
+    onPointerOver={blockHidden} onPointerMove={blockHidden} onPointerDown={blockHidden} onClick={blockHidden}>
     <meshStandardMaterial color="#AAA08E" roughness={0.55} metalness={0} side={THREE.DoubleSide} />
   </mesh>
 }

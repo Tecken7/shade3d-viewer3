@@ -13,7 +13,8 @@ export function BuilderControls({ options: p, change, selected, select, placing,
   const hole = selected?.startsWith('hole:') ? Number(selected.split(':')[1]) : -1
   const editHole = patch => change({ holes: p.holes.map((h, i) => i === hole ? { ...h, ...patch, autoPosition: false, warning: null } : h) })
   const button = (active = false) => ({ ...fieldStyle, width: 'auto', cursor: 'pointer', background: active ? '#3b5645' : '#303030', fontSize: 12 })
-  return <aside aria-label="Nastavení Model Builderu" style={{ position: 'absolute', top: 160, right: 18, bottom: 20, width: 292, overflowY: 'auto', overflowX: 'hidden', zIndex: 80, background: 'rgba(22,22,22,.96)', border: '1px solid #444', borderRadius: 12, padding: 16, color: '#ddd', fontFamily: 'system-ui', boxSizing: 'border-box' }}>
+  return <aside className="artheticBuilderControls" aria-label="Nastavení Model Builderu" style={{ position: 'absolute', top: 160, right: 18, bottom: 20, width: 292, overflowY: 'auto', overflowX: 'hidden', zIndex: 80, background: 'rgba(22,22,22,.96)', border: '1px solid #444', borderRadius: 12, padding: 16, color: '#ddd', fontFamily: 'system-ui', boxSizing: 'border-box' }}>
+    <style>{`.artheticBuilderControls button:not(:disabled):hover {filter:brightness(1.25);border-color:#93c5fd!important}.artheticBuilderControls input:hover,.artheticBuilderControls select:hover {border-color:#93c5fd!important}.artheticBuilderControls button {transition:filter .12s,border-color .12s}`}</style>
     <h2 style={{ fontSize: 16, margin: '0 0 10px' }}>Nastavení modelu</h2>
     <p style={{ fontSize: 12, color: '#bbb', lineHeight: 1.5 }}>Dutina je zespodu otevřená. Bez rozšíření báze a bez výplně.</p>
     {busy && <button type="button" style={button()} onClick={cancel}>Zrušit výpočet</button>}
@@ -73,9 +74,9 @@ export function BuilderHandle({ selected, options, change, dragging }) {
   }
   return <>
     <primitive object={target} position={position}>
-      <mesh><sphereGeometry args={[0.65, 12, 12]} /><meshBasicMaterial color="#8eeeb1" depthTest={false} transparent opacity={0.9} /></mesh>
-      <Html position={[0, 1.5, 0]} center style={{ pointerEvents: 'none', fontSize: 11, whiteSpace: 'nowrap', background: '#222', color: '#cfeeda', padding: 4, borderRadius: 4 }}>{index >= 0 ? `Otvor ${index + 1}` : 'Popisek'}</Html>
+      <mesh raycast={()=>null}><sphereGeometry args={[0.65, 12, 12]} /><meshBasicMaterial color="#8eeeb1" depthTest transparent opacity={0.9} /></mesh>
+      <Html occlude position={[0, 1.5, 0]} center style={{ pointerEvents: 'none', fontSize: 11, whiteSpace: 'nowrap', background: '#222', color: '#cfeeda', padding: 4, borderRadius: 4 }}>{index >= 0 ? `Otvor ${index + 1}` : 'Popisek'}</Html>
     </primitive>
-    {createPortal(<TransformControls object={target} mode="translate" showX showY showZ size={0.65} onMouseDown={() => dragging(true)} onMouseUp={() => { commit(); dragging(false) }} />, scene)}
+    {createPortal(<TransformControls onUpdate={control=>control.traverse?.(child=>{for(const material of Array.isArray(child.material)?child.material:[child.material])if(material)material.depthTest=true})} object={target} mode="translate" showX showY showZ size={0.65} onMouseDown={() => dragging(true)} onMouseUp={() => { commit(); dragging(false) }} />, scene)}
   </>
 }
