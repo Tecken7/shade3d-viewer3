@@ -14167,7 +14167,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         builderHasCutPreviewRef.current = !!nextOptions.cutHoles
         setCadPreviewGeometry(previous => { previous?.dispose?.(); return geometry })
         setCadPreviewStats(result.stats)
-        setBuilderOptions(previous => ({ ...previous, holes: result.holes, cutHoles: nextOptions.cutHoles, bottomContour: result.placement.bottomContour }))
+        setBuilderOptions(previous => ({ ...previous, holes: result.holes, cutHoles: nextOptions.cutHoles, bottomContour: result.placement.bottomContour, baseDirection:result.placement.direction }))
         setCadPreviewActive(true)
         setBuilderDirty(false)
         setCadMessage(result.warnings?.length ? result.warnings.join(" ") : nextOptions.cutHoles ? "Otvory jsou vyříznuté. Zkontrolujte výsledek a dokončete model." : "Základna je připravena bez otvorů. Posuňte modré válce, nastavte průměr a hloubku, potom potvrďte vyříznutí otvorů.")
@@ -21028,7 +21028,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
           {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && <><HolePreview options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} /><BuilderHandle selected={builderSelected} options={builderOptions} change={changeBuilderOptions} dragging={setBuilderDragging} /></>}
           {cadStandalone && (cadPreviewActive || cadStage === "result") && cadPreviewGeometry && (
-            <BuilderPreview geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} overlayDragging={builderDragging} />
+            <BuilderPreview geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} overlayDragging={builderDragging} options={builderOptions} selected={builderSelected} />
           )}
 
           {trimMode && trimContext && trimSelection && trimStage !== "result" && (

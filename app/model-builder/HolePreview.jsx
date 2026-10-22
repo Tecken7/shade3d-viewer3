@@ -2,19 +2,20 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Edges, Line, useCursor } from '@react-three/drei'
 import * as THREE from 'three'
-import { nearestContourPosition, holeDirection } from './hole-placement.mjs'
+import { seatHoleOnContour, holeDirection } from './hole-placement.mjs'
 
 const clamp=value=>Math.round(Math.max(.5,Math.min(50,value))*100)/100
 export function HolePreview({ options, selected, select, change, dragging, controlsRef, onDragEnd }) {
   const root=useRef(),active=useRef(null)
   const [hovered,setHovered]=useState(null)
   useCursor(hovered!==null,'grab')
-  const hover=(event,key)=>{event.stopPropagation();setHovered(key)}
-  const unhover=(event,key)=>{event.stopPropagation();setHovered(previous=>previous===key?null:previous)}
+  const hover=(event,key)=>{event.stopPropagation();if(!active.current)setHovered(key)}
+  const unhover=(event,key)=>{event.stopPropagation();if(!active.current)setHovered(previous=>previous===key?null:previous)}
   const finish=useCallback(event=>{
     const gesture=active.current
     if(!gesture)return
     active.current=null
+    setHovered(null)
     event?.stopPropagation?.();event?.stopImmediatePropagation?.()
     try{gesture.target.releasePointerCapture?.(gesture.pointerId)}catch{}
     if(controlsRef.current)controlsRef.current.enabled=true
@@ -38,7 +39,7 @@ export function HolePreview({ options, selected, select, change, dragging, contr
     return event.ray.clone().applyMatrix4(root.current.matrixWorld.clone().invert())
   }
   const begin=(event,index,side,hole,normal)=>{
-    if(event.button!==0)return
+    if(event.button!==0||active.current)return
     event.stopPropagation();event.nativeEvent?.preventDefault?.();event.nativeEvent?.stopImmediatePropagation?.()
     const ray=localRay(event),anchor=new THREE.Vector3().fromArray(hole.position)
     const planeNormal=side==='body'?new THREE.Vector3(0,1,0):ray.direction.clone().addScaledVector(normal,-ray.direction.dot(normal)).normalize()
@@ -46,6 +47,7 @@ export function HolePreview({ options, selected, select, change, dragging, contr
     const plane=new THREE.Plane().setFromNormalAndCoplanarPoint(planeNormal,anchor),hit=ray.intersectPlane(plane,new THREE.Vector3())
     if(!hit)return
     active.current={index,side,plane,anchor,normal,offset:anchor.clone().sub(hit),start:hit.dot(normal),length:hole.length,outer:hole.outerLength??hole.length,target:event.target,pointerId:event.pointerId}
+    setHovered(`${index}:${side}`)
     select(`hole:${index}`)
     if(controlsRef.current)controlsRef.current.enabled=false
     dragging(true);event.target.setPointerCapture?.(event.pointerId)
@@ -55,7 +57,7 @@ export function HolePreview({ options, selected, select, change, dragging, contr
     event.stopPropagation()
     const hit=localRay(event).intersectPlane(gesture.plane,new THREE.Vector3());if(!hit)return
     let patch
-    if(gesture.side==='body')patch={position:nearestContourPosition(contour,hit.add(gesture.offset).toArray()).position}
+    if(gesture.side==='body')patch={position:seatHoleOnContour(contour,options.holes[gesture.index],hit.add(gesture.offset).toArray())}
     else{
       const delta=hit.dot(gesture.normal)-gesture.start
       patch=gesture.side==='outer'?{outerLength:clamp(gesture.outer+delta)}:{length:clamp(gesture.length-delta),autoDepth:false}
@@ -66,7 +68,7 @@ export function HolePreview({ options, selected, select, change, dragging, contr
     <Line points={[...contour,contour[0]]} color="#60a5fa" transparent opacity={.35} lineWidth={1} depthTest depthWrite={false}/>
     {options.holes.map((hole,index)=>{
       if(!hole.enabled||!hole.position)return null
-      const normal=new THREE.Vector3().fromArray(holeDirection(contour,hole.position,options.holeYaw??0)),outer=hole.outerLength??hole.length
+      const normal=new THREE.Vector3().fromArray(holeDirection(contour,hole.position,(options.holeYaw??0)+(hole.yaw??0))),outer=hole.outerLength??hole.length
       const anchor=new THREE.Vector3().fromArray(hole.position),center=anchor.clone().addScaledVector(normal,(outer-hole.length)/2)
       const rotation=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),normal.clone().negate())
       return <group key={index}>

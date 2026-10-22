@@ -5,7 +5,7 @@ import { TextGeometry } from 'three/examples/jsm/geometries/TextGeometry.js'
 import { sampleContour, roundShoulder } from './transition.mjs'
 import { drainPassage } from './drains.mjs'
 import { prepareSurface } from './prepare-surface.mjs'
-import { nearestContourPosition, holeDirection } from './hole-placement.mjs'
+import { holeDirection, seatHoleOnContour } from './hole-placement.mjs'
 import { baseDirection } from './base-direction.mjs'
 
 import { DEFAULTS } from "./defaults.mjs"
@@ -405,7 +405,7 @@ export async function buildModel(M, input, options, fontData, progress = () => {
       baseY, baseDirection: direction }))
     if (p.cutHoles === false) {
       for (const [index, hole] of holes.entries()) {
-        hole.position = nearestContourPosition(bottomContour, hole.position || defaultHoles[index % defaultHoles.length].position).position
+        hole.position = seatHoleOnContour(bottomContour, hole, hole.position || defaultHoles[index % defaultHoles.length].position)
         hole.warning = null
         hole.through = false
         hole.outerLength = hole.outerLength ?? (p.holes.length ? hole.length : 3)
@@ -469,9 +469,9 @@ export async function buildModel(M, input, options, fontData, progress = () => {
       if (!(h.diameter >= 1 && h.diameter <= 15 && h.length >= 0.5 && h.length <= 50)) throw new Error(`Otvor ${i + 1}: neplatný průměr nebo hloubka.`)
       const originalLength = h.length
       try {
-      const yaw = (p.holeYaw ?? 0) * Math.PI / 180
+      const yaw = ((p.holeYaw ?? 0)+(h.yaw ?? 0)) * Math.PI / 180
       const posterior = direction > 0 ? 1 : -1
-      h.normal = p.followContour ? holeDirection(bottomContour,h.position,p.holeYaw ?? 0) : [posterior * Math.sin(yaw), 0, posterior * Math.cos(yaw)]
+      h.normal = p.followContour ? holeDirection(bottomContour,h.position,(p.holeYaw ?? 0)+(h.yaw ?? 0)) : [posterior * Math.sin(yaw), 0, posterior * Math.cos(yaw)]
       const n = new THREE.Vector3().fromArray(h.normal).normalize(), center = new THREE.Vector3().fromArray(h.position)
       if (Math.abs(n.y) > 0.8) throw new Error(`Otvor ${i + 1} umístěte na boční stěnu.`)
       const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n.clone().negate())

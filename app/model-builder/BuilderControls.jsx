@@ -3,7 +3,7 @@ import React, { useMemo } from 'react'
 import { createPortal, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 import { TransformControls, Html } from '@react-three/drei'
-import { contourPosition, nearestContourPosition } from './hole-placement.mjs'
+import { contourPosition, nearestContourPosition, seatHoleOnContour } from './hole-placement.mjs'
 
 const fieldStyle = { width: '100%', boxSizing: 'border-box', background: '#252525', color: '#eee', border: '1px solid #484848', padding: '7px 8px', borderRadius: 6 }
 function NumberField({ label, value, onChange, min, max, step = 0.1 }) {
@@ -46,8 +46,10 @@ export function BuilderControls({ options: p, change, selected, select, placing,
       {hole >= 0 && p.holes[hole] && <>
         <label style={{ fontSize: 12 }}><input type="checkbox" checked={p.holes[hole].enabled} onChange={e => editHole({ enabled: e.target.checked })} /> Aktivní otvor</label>
         <NumberField label="Průměr otvoru (mm)" value={p.holes[hole].diameter} min={1} max={15} onChange={diameter => editHole({ diameter })} />
+        <NumberField label="Zapuštění od spodní hrany (mm)" value={p.holes[hole].heightOffset ?? 0.5} min={0} max={15} onChange={heightOffset => editHole({ heightOffset, position:seatHoleOnContour(p.bottomContour,{...p.holes[hole],heightOffset}) })} />
+        <NumberField label="Natočení vybraného válce (°)" value={p.holes[hole].yaw ?? 0} min={-180} max={180} step={1} onChange={yaw => editHole({ yaw })} />
         {p.bottomContour?.length > 0 && <label style={{ display: 'grid', gap: 5, fontSize: 12 }}>Poloha po spodním obvodu
-          <input aria-label="Poloha otvoru po spodním obvodu" type="range" min={0} max={100} step={0.1} value={nearestContourPosition(p.bottomContour, p.holes[hole].position).fraction * 100} onChange={e => editHole({ position: contourPosition(p.bottomContour, Number(e.target.value) / 100) })} />
+          <input aria-label="Poloha otvoru po spodním obvodu" type="range" min={0} max={100} step={0.1} value={nearestContourPosition(p.bottomContour, p.holes[hole].position).fraction * 100} onChange={e => editHole({ position: seatHoleOnContour(p.bottomContour,p.holes[hole],contourPosition(p.bottomContour, Number(e.target.value) / 100)) })} />
         </label>}
         <NumberField label="Hloubka řezu otvoru (mm)" value={p.holes[hole].length} min={0.5} max={50} onChange={length => editHole({ length, autoDepth: false })} />
         <NumberField label="Vnější délka válce (mm)" value={p.holes[hole].outerLength ?? p.holes[hole].length} min={0.5} max={50} onChange={outerLength => editHole({ outerLength })} />
