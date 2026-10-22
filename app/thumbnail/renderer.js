@@ -65,15 +65,19 @@ export async function renderAttachmentThumbnail(buffer, fileName, turntable = fa
         camera.lookAt(0, 0, 0)
         renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true, powerPreference: "low-power" })
         renderer.setPixelRatio(1)
-        const resolution = turntable && thumbnailVersion === 3 ? 768 : 256
+        const resolution = turntable && thumbnailVersion >= 3 ? 768 : 256
         renderer.setSize(resolution, resolution)
         renderer.outputColorSpace = THREE.SRGBColorSpace
         renderer.toneMapping = THREE.ACESFilmicToneMapping
         const frames = turntable ? 24 : 1
         const atlas = document.createElement("canvas")
-        const columns = turntable && thumbnailVersion === 3 ? 6 : frames
+        const columns = turntable && thumbnailVersion >= 3 ? 6 : frames
         const rows = Math.ceil(frames / columns)
         atlas.width = resolution * columns; atlas.height = resolution * rows
+        const smallAtlas = thumbnailVersion === 4 && turntable ? document.createElement("canvas") : null
+        if (smallAtlas) { smallAtlas.width = columns * 192; smallAtlas.height = rows * 192 }
+        const smallContext = smallAtlas?.getContext("2d")
+        if (smallAtlas && !smallContext) throw new Error("Small atlas canvas unavailable")
         const context = atlas.getContext("2d")
         if (!context) throw new Error("Canvas unavailable")
         const rotationAxis = new THREE.Vector3(...[[1,0,0],[0,1,0],[0,0,1]][thinAxis])
@@ -81,10 +85,16 @@ export async function renderAttachmentThumbnail(buffer, fileName, turntable = fa
             root.quaternion.setFromAxisAngle(rotationAxis, frame * Math.PI * 2 / frames)
             renderer.render(scene, camera)
             context.drawImage(renderer.domElement, (frame % columns) * resolution, Math.floor(frame / columns) * resolution)
+            smallContext?.drawImage(renderer.domElement, (frame % columns) * 192, Math.floor(frame / columns) * 192, 192, 192)
             await new Promise(resolve => setTimeout(resolve, 0))
         }
         const blob = await new Promise(resolve => atlas.toBlob(resolve, "image/jpeg", .92))
         if (!blob || blob.size > 2 * 1024 * 1024) throw new Error("Thumbnail export failed")
+        if (smallAtlas) {
+            const smallBlob = await new Promise(resolve => smallAtlas.toBlob(resolve, "image/jpeg", .82))
+            if (!smallBlob || smallBlob.size > 512 * 1024) throw new Error("Small thumbnail export failed")
+            return { thumbnail: smallBlob, preview: blob }
+        }
         return blob
     } finally {
         geometries.forEach(geometry => geometry.dispose())
