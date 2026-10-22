@@ -8,6 +8,7 @@ import { FontLoader } from 'three/examples/jsm/loaders/FontLoader.js'
 import { Html, useCursor } from '@react-three/drei'
 import { useBuilderGestureGuard } from './useBuilderGestureGuard'
 import { projectSurfaceText } from './surface-text.mjs'
+import { beginSurfaceTextDrag,moveSurfaceTextDrag } from './text-drag.mjs'
 
 let fontRequest
 function TextShape({result,handlers,hovered}){
@@ -71,20 +72,18 @@ export function BuilderPreview({geometry,placing,onSurfaceClick,overlayDragging=
   onPointerDown:event=>{
    if(event.button!==0||!editable||placing||overlayDragging||!change||!committed)return
    event.stopPropagation()
-   const offset=new THREE.Vector3(...committed.position).sub(mesh.current.worldToLocal(event.point.clone())),n=new THREE.Vector3(...committed.normal).normalize()
-   offset.addScaledVector(n,-offset.dot(n))
-   textDrag.current={offset,target:event.target,pointerId:event.pointerId};select?.('text')
+   mesh.current.updateWorldMatrix(true,false)
+   const ray=event.ray.clone().applyMatrix4(mesh.current.matrixWorld.clone().invert()),grab=beginSurfaceTextDrag(display,ray,committed)
+   if(!grab)return
+   textDrag.current={...grab,target:event.target,pointerId:event.pointerId};select?.('text')
    if(controlsRef?.current)controlsRef.current.enabled=false
    dragging?.(true);event.target.setPointerCapture?.(event.pointerId)
   },
   onPointerMove:event=>{
    const gesture=textDrag.current;if(!gesture)return
    event.stopPropagation();mesh.current.updateWorldMatrix(true,false)
-   const ray=event.ray.clone().applyMatrix4(mesh.current.matrixWorld.clone().invert()),hit=display.boundsTree.raycastFirst(ray,THREE.DoubleSide)
-   if(!hit){setNotice('Kurzor je mimo povrch. Poslední platná poloha textu zůstala zachovaná.');return}
-   const closest=display.boundsTree.closestPointToPoint(hit.point.clone().add(gesture.offset))
-   if(!closest)return
-   const point={position:closest.point.toArray(),normal:hit.face.normal.toArray()}
+   const ray=event.ray.clone().applyMatrix4(mesh.current.matrixWorld.clone().invert()),point=moveSurfaceTextDrag(display,ray,gesture)
+   if(!point){setNotice('Kurzor je mimo souvislý povrch. Poslední platná poloha textu zůstala zachovaná.');return}
    setCandidate(point)
    if(validate(point))change({textPosition:point.position,textNormal:point.normal})
   },
