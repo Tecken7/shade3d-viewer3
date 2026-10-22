@@ -7,7 +7,7 @@ test('cylinders sit inside the wall for both base directions and keep height whi
  for(const baseDirection of [-1,1]){
   const hole={diameter:4.5,baseDirection,position:[5,25,0]}
   const seated=seatHoleOnContour(contour,hole)
-  assert.equal(seated[1],25-baseDirection*0.5)
+  assert.equal(seated[1],25-baseDirection*(hole.diameter/2+.5))
   assert.deepEqual(seatHoleOnContour(contour,{...hole,position:seated}),seated)
   assert.deepEqual(seatHoleOnContour(contour,{...hole,heightOffset:4},[10,100,5]),[10,25-baseDirection*4,5])
  }

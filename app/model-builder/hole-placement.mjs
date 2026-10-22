@@ -45,7 +45,7 @@ export function holeDirection(contour, position, yawDegrees = 0) {
 
 export function seatHoleOnContour(contour, hole, point = hole.position) {
  const position=nearestContourPosition(contour,point).position
- const offset=hole.heightOffset ?? 0.5
+ const offset=hole.heightOffset ?? hole.diameter/2+.5
  position[1]-=(hole.baseDirection ?? 1)*offset
  return position
 }

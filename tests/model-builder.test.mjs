@@ -120,7 +120,7 @@ test('blue cylinder drafts leave the base intact until explicit confirmation', a
   const draft = await build({ cutHoles:false, followContour:true })
   assert.equal(draft.holes.length, 2)
   assert.ok(draft.holes.every(hole => hole.length===5 && hole.outerLength===3))
-  assert.ok(draft.holes.every(hole => hole.enabled && Math.abs(hole.position[1]-(draft.placement.baseY-draft.placement.direction*0.5))<1e-8))
+  assert.ok(draft.holes.every(hole => hole.enabled && Math.abs(hole.position[1]-(draft.placement.baseY-draft.placement.direction*(hole.diameter/2+.5)))<1e-8))
   const without = await build({ holes:[{enabled:false}, {enabled:false}] })
   assert.ok(Math.abs(draft.stats.volume - without.stats.volume) < .001)
   const changed = draft.holes.map((hole,i) => ({ ...hole, diameter:3, length:12, autoDepth:false, yaw:i?8:-8 }))

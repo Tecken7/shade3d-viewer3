@@ -3,22 +3,23 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Edges, Line, useCursor } from '@react-three/drei'
 import * as THREE from 'three'
 import { seatHoleOnContour, holeDirection } from './hole-placement.mjs'
+import { useBuilderGestureGuard } from './useBuilderGestureGuard'
 
 const clamp=value=>Math.round(Math.max(.5,Math.min(50,value))*100)/100
-export function HolePreview({ options, selected, select, change, dragging, controlsRef, onDragEnd }) {
+export function HolePreview({ options, selected, select, change, dragging, controlsRef, onDragEnd, interactionLocked=false }) {
   const root=useRef(),active=useRef(null)
   const [hovered,setHovered]=useState(null)
+  useBuilderGestureGuard(root,controlsRef,!options.cutHoles)
   useCursor(hovered!==null,'grab')
-  const hover=(event,key)=>{event.stopPropagation();if(!active.current)setHovered(key)}
+  const hover=(event,key)=>{event.stopPropagation();if(!active.current&&!interactionLocked)setHovered(key)}
   const unhover=(event,key)=>{event.stopPropagation();if(!active.current)setHovered(previous=>previous===key?null:previous)}
   const finish=useCallback(event=>{
     const gesture=active.current
     if(!gesture)return
     active.current=null
     setHovered(null)
-    event?.stopPropagation?.();event?.stopImmediatePropagation?.()
     try{gesture.target.releasePointerCapture?.(gesture.pointerId)}catch{}
-    if(controlsRef.current)controlsRef.current.enabled=true
+    if(controlsRef.current)controlsRef.current.enabled=false
     dragging(false);onDragEnd?.()
   },[controlsRef,dragging,onDragEnd])
   useEffect(()=>{
@@ -38,15 +39,16 @@ export function HolePreview({ options, selected, select, change, dragging, contr
     root.current.updateWorldMatrix(true,false)
     return event.ray.clone().applyMatrix4(root.current.matrixWorld.clone().invert())
   }
-  const begin=(event,index,side,hole,normal)=>{
+  const begin=(event,index,side,hole,normal,pivot=null)=>{
     if(event.button!==0||active.current)return
     event.stopPropagation();event.nativeEvent?.preventDefault?.();event.nativeEvent?.stopImmediatePropagation?.()
-    const ray=localRay(event),anchor=new THREE.Vector3().fromArray(hole.position)
-    const planeNormal=side==='body'?new THREE.Vector3(0,1,0):ray.direction.clone().addScaledVector(normal,-ray.direction.dot(normal)).normalize()
+    const ray=localRay(event),anchor=pivot||new THREE.Vector3().fromArray(hole.position)
+    const axis=side==='height'?new THREE.Vector3(0,1,0):normal
+    const planeNormal=side==='body'||side==='rotate'?new THREE.Vector3(0,1,0):ray.direction.clone().addScaledVector(axis,-ray.direction.dot(axis)).normalize()
     if(planeNormal.lengthSq()<.1)return
     const plane=new THREE.Plane().setFromNormalAndCoplanarPoint(planeNormal,anchor),hit=ray.intersectPlane(plane,new THREE.Vector3())
     if(!hit)return
-    active.current={index,side,plane,anchor,normal,offset:anchor.clone().sub(hit),start:hit.dot(normal),length:hole.length,outer:hole.outerLength??hole.length,target:event.target,pointerId:event.pointerId}
+    active.current={index,side,plane,anchor,normal:axis,offset:anchor.clone().sub(hit),start:hit.dot(axis),angle:Math.atan2(hit.z-anchor.z,hit.x-anchor.x),yaw:hole.yaw??0,heightOffset:hole.heightOffset??hole.diameter/2+.5,length:hole.length,outer:hole.outerLength??hole.length,target:event.target,pointerId:event.pointerId}
     setHovered(`${index}:${side}`)
     select(`hole:${index}`)
     if(controlsRef.current)controlsRef.current.enabled=false
@@ -58,6 +60,15 @@ export function HolePreview({ options, selected, select, change, dragging, contr
     const hit=localRay(event).intersectPlane(gesture.plane,new THREE.Vector3());if(!hit)return
     let patch
     if(gesture.side==='body')patch={position:seatHoleOnContour(contour,options.holes[gesture.index],hit.add(gesture.offset).toArray())}
+    else if(gesture.side==='rotate'){
+      const angle=Math.atan2(hit.z-gesture.anchor.z,hit.x-gesture.anchor.x)
+      const delta=Math.atan2(Math.sin(gesture.angle-angle),Math.cos(gesture.angle-angle))*180/Math.PI
+      patch={yaw:Math.round((gesture.yaw+delta)*10)/10}
+    }
+    else if(gesture.side==='height'){
+      const hole=options.holes[gesture.index],heightOffset=Math.round(Math.max(0,Math.min(25,gesture.heightOffset-(hole.baseDirection??1)*(hit.y-gesture.start)))*100)/100
+      patch={heightOffset,position:seatHoleOnContour(contour,{...hole,heightOffset})}
+    }
     else{
       const delta=hit.dot(gesture.normal)-gesture.start
       patch=gesture.side==='outer'?{outerLength:clamp(gesture.outer+delta)}:{length:clamp(gesture.length-delta),autoDepth:false}
@@ -71,6 +82,7 @@ export function HolePreview({ options, selected, select, change, dragging, contr
       const normal=new THREE.Vector3().fromArray(holeDirection(contour,hole.position,(options.holeYaw??0)+(hole.yaw??0))),outer=hole.outerLength??hole.length
       const anchor=new THREE.Vector3().fromArray(hole.position),center=anchor.clone().addScaledVector(normal,(outer-hole.length)/2)
       const rotation=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),normal.clone().negate())
+      const gizmo=anchor.clone().addScaledVector(normal,outer+2.5),radius=Math.max(3,hole.diameter*.7)
       return <group key={index}>
         <mesh position={center} quaternion={rotation} renderOrder={80} onPointerOver={e=>hover(e,`${index}:body`)} onPointerOut={e=>unhover(e,`${index}:body`)} onPointerDown={e=>begin(e,index,'body',hole,normal)} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
           <cylinderGeometry args={[hole.diameter/2,hole.diameter/2,hole.length+outer,48]}/>
@@ -90,6 +102,22 @@ export function HolePreview({ options, selected, select, change, dragging, contr
             </mesh>
           </group>
         })}
+        {selected===`hole:${index}`&&<>
+          <mesh position={gizmo} rotation={[Math.PI/2,0,0]} onPointerOver={e=>hover(e,`${index}:rotate`)} onPointerOut={e=>unhover(e,`${index}:rotate`)} onPointerDown={e=>begin(e,index,'rotate',hole,normal,gizmo)} onPointerMove={move} onPointerUp={finish}>
+            <torusGeometry args={[radius,hovered===`${index}:rotate` ? .23 : .16,10,64]}/><meshBasicMaterial color={hovered===`${index}:rotate`?'#ffffff':'#60a5fa'} depthTest depthWrite/>
+          </mesh>
+          {[-1,1].map(sign=>{
+            const key=`${index}:height`,lit=hovered===key,point=gizmo.clone().add(new THREE.Vector3(0,sign*(hole.diameter/2+1.5),0))
+            return <group key={sign} position={point} rotation={[0,0,sign<0?Math.PI:0]} scale={lit?1.18:1}>
+              <mesh onPointerOver={e=>hover(e,key)} onPointerOut={e=>unhover(e,key)} onPointerDown={e=>begin(e,index,'height',hole,normal)} onPointerMove={move} onPointerUp={finish}>
+                <coneGeometry args={[.65,1.5,16]}/><meshBasicMaterial color={lit?'#ffffff':'#bfdbfe'} depthTest depthWrite/>
+              </mesh>
+              <mesh position={[0,-.9,0]} onPointerOver={e=>hover(e,key)} onPointerOut={e=>unhover(e,key)} onPointerDown={e=>begin(e,index,'height',hole,normal)} onPointerMove={move} onPointerUp={finish}>
+                <cylinderGeometry args={[.16,.16,1,12]}/><meshBasicMaterial color={lit?'#ffffff':'#93c5fd'} depthTest depthWrite/>
+              </mesh>
+            </group>
+          })}
+        </>}
       </group>
     })}
   </group>

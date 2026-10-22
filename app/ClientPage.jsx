@@ -13,6 +13,7 @@ import { PLYExporter } from "three/examples/jsm/exporters/PLYExporter"
 import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter"
 import { HolePreview } from "./model-builder/HolePreview"
 import { BuilderPreview } from "./model-builder/BuilderPreview"
+import { FrontDirectionLabel } from "./model-builder/FrontDirectionLabel"
 import { collectTrianglesInRoot } from "./model-builder/scene-input.mjs"
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, SAH } from "three-mesh-bvh"
 import { Unzip, UnzipInflate } from "fflate"
@@ -28,7 +29,7 @@ import { isClosingPointPress, validateClosedTrimPlan, isNearTrimStart } from './
 import { buildTrimRegions } from "./model-builder/trim-regions.mjs"
 import { refreshLocalNormals } from "./model-builder/surface-edit.mjs"
 import { ScanBrush } from "./model-builder/ScanBrush"
-import { BuilderControls, BuilderHandle } from "./model-builder/BuilderControls"
+import { BuilderControls } from "./model-builder/BuilderControls"
 
 // DICOM podpora vyžaduje v projektu balíčky: fflate a dicom-parser.
 
@@ -6352,7 +6353,7 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], onInterac
     c.update()
   }, [target])
   
-  useFrame(() => { controlsRef.current?.update() })
+  useFrame(() => { if(controlsRef.current?.enabled)controlsRef.current.update() })
   useEffect(() => { controlsRef.current?.handleResize() }, [size.width, size.height])
   return null
 })
@@ -11594,7 +11595,7 @@ function CadEyeIcon({ active = false }) {
   )
 }
 
-function CadOrientationReferencePlane({ center = [0, 0, 0], y = 0, size = 80, compact = false }) {
+function CadOrientationReferencePlane({ center = [0, 0, 0], y = 0, size = 80, compact = false, frontSign = 1 }) {
   const gridRef = useRef(null)
   useEffect(() => {
     const helper = gridRef.current
@@ -11616,6 +11617,7 @@ function CadOrientationReferencePlane({ center = [0, 0, 0], y = 0, size = 80, co
         <meshBasicMaterial color="#60a5fa" transparent opacity={compact ? 0.035 : 0.055} side={THREE.DoubleSide} depthWrite={false} />
       </mesh>
       <gridHelper ref={gridRef} args={[Math.max(1, size), compact ? 8 : 14, "#93c5fd", "#2563eb"]} position={[0, 0.002, 0]} renderOrder={3} />
+      <FrontDirectionLabel size={size} compact={compact} frontSign={frontSign}/>
     </group>
   )
 }
@@ -11638,7 +11640,7 @@ function CadOrientationMiniModel({ sourceObject, modelMatrix }) {
   return <primitive object={clone} />
 }
 
-function CadOrientationMiniCamera({ rootRef, view, modelMatrix }) {
+function CadOrientationMiniCamera({ rootRef, view, modelMatrix, planeCenter, planeSize, frontSign=1 }) {
   const { camera, size: canvasSize, invalidate } = useThree()
 
   useEffect(() => {
@@ -11649,6 +11651,7 @@ function CadOrientationMiniCamera({ rootRef, view, modelMatrix }) {
       root.updateMatrixWorld(true)
       const box = new THREE.Box3().setFromObject(root)
       if (box.isEmpty()) return
+      if(view==='top'&&planeCenter&&planeSize)box.expandByPoint(new THREE.Vector3(planeCenter[0],box.getCenter(new THREE.Vector3()).y,planeCenter[2]+frontSign*planeSize*.48))
       const center = box.getCenter(new THREE.Vector3())
       const dims = box.getSize(new THREE.Vector3())
       const aspect = Math.max(0.35, (canvasSize.width || 1) / Math.max(1, canvasSize.height || 1))
@@ -11692,12 +11695,12 @@ function CadOrientationMiniCamera({ rootRef, view, modelMatrix }) {
     }
     raf = requestAnimationFrame(frame)
     return () => cancelAnimationFrame(raf)
-  }, [camera, canvasSize.width, canvasSize.height, view, modelMatrix, rootRef, invalidate])
+  }, [camera, canvasSize.width, canvasSize.height, view, modelMatrix, rootRef, invalidate, planeCenter, planeSize, frontSign])
 
   return null
 }
 
-function CadOrientationMiniView({ label, view, sourceObject, modelMatrix, planeCenter, planeY, planeSize, onDrag, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 } }) {
+function CadOrientationMiniView({ label, view, sourceObject, modelMatrix, planeCenter, planeY, planeSize, frontSign = 1, onDrag, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 } }) {
   const rootRef = useRef(null)
   const dragRef = useRef(null)
 
@@ -11756,12 +11759,12 @@ function CadOrientationMiniView({ label, view, sourceObject, modelMatrix, planeC
         <group ref={rootRef}>
           <CadOrientationMiniModel sourceObject={sourceObject} modelMatrix={modelMatrix} />
         </group>
-        <CadOrientationReferencePlane center={planeCenter} y={planeY} size={planeSize} compact />
-        <CadOrientationMiniCamera rootRef={rootRef} view={view} modelMatrix={modelMatrix} />
+        <CadOrientationReferencePlane center={planeCenter} y={planeY} size={planeSize} compact frontSign={frontSign} />
+        <CadOrientationMiniCamera rootRef={rootRef} view={view} modelMatrix={modelMatrix} planeCenter={planeCenter} planeSize={planeSize} frontSign={frontSign} />
       </Canvas>
       <div style={{ position:"absolute", left:8, top:7, zIndex:4, padding:"4px 6px", borderRadius:7, background:"rgba(0,0,0,.54)", border:"1px solid rgba(255,255,255,.06)", color:"#d7d7d7", fontSize:8.1, fontWeight:760, letterSpacing:".015em", pointerEvents:"none" }}>{label}</div>
       <div style={{ position:"absolute", left:8, right:8, bottom:7, zIndex:4, display:"flex", justifyContent:"space-between", alignItems:"center", color:"#606060", fontSize:7.4, pointerEvents:"none" }}>
-        <span>tažením doladit</span><span style={{ color:"#8c8c8c" }}>{view === "top" ? "Y" : view === "front" ? "Z" : view === "side-left" ? "−X" : "+X"}</span>
+        <span>tažením doladit</span><span style={{ color:"#8c8c8c" }}>{view === "top" ? "↻" : view === "front" ? "Z" : view === "side-left" ? "−X" : "+X"}</span>
       </div>
       <div
         onPointerDown={beginDrag}
@@ -12314,6 +12317,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       window.setTimeout(() => setCadOrientationMiniCount(1), 70),
       window.setTimeout(() => setCadOrientationMiniCount(2), 165),
       window.setTimeout(() => setCadOrientationMiniCount(3), 280),
+      window.setTimeout(() => setCadOrientationMiniCount(4), 390),
     ]
     return () => timers.forEach((timer) => window.clearTimeout(timer))
   }, [cadStandalone, cadStage, cadOrientationPrepared, cadFileUrl])
@@ -18802,6 +18806,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               </>}
               {!cadOrientationPrepared && cadOrientationPoints.length > 0 && <button type="button" onClick={undoCadOrientationPoint} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:9, fontWeight:690, cursor:"pointer" }}>Zpět bod</button>}
               {cadOrientationPrepared && <button type="button" onClick={resetCadOrientationFineTune} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:9, fontWeight:690, cursor:"pointer" }}>Reset sklonu</button>}
+              {cadOrientationPrepared && <label style={{display:'flex',gap:6,alignItems:'center',fontSize:10,color:'#bfdbfe'}}>Natočení shora (°)<input aria-label="Natočení modelu shora (°)" type="number" step="1" disabled={cadBusy} value={Math.round(cadOrientationAdjust.y*180/Math.PI*10)/10} onChange={event=>{if(event.target.value!==''&&Number.isFinite(event.target.valueAsNumber))setCadOrientationAdjust(previous=>({...previous,y:event.target.valueAsNumber*Math.PI/180}))}} style={{width:65,background:'#202020',border:'1px solid #444',borderRadius:6,color:'#eee',padding:6}} /></label>}
               {cadOrientationPrepared && <button type="button" onClick={restartCadOrientationPoints} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#888", fontSize:9, fontWeight:690, cursor:"pointer" }}>Znovu 3 body</button>}
               {cadOrientationPrepared && <button className="artheticCadPrimary artheticCadReady" type="button" onClick={confirmCadOrientation} disabled={cadBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:cadBusy?"wait":"pointer" }}>Potvrdit orientaci</button>}
             </div>
@@ -18936,14 +18941,15 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         <div className="artheticCadOrthoViews" style={{
           position:"absolute", right:20, top:132, zIndex:84,
           width:"clamp(300px, 22vw, 380px)",
-          display:"grid", gap:10, fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif",
+          display:"grid", gap:10, maxHeight:"calc(100vh - 150px)", overflowY:"auto", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif",
         }}>
           <div style={{ padding:"0 3px 3px", color:"#666", fontSize:8.4, lineHeight:1.4 }}>
-            Kontrolní pohledy · levý bok, fronta a pravý bok · tažením model jemně dolaďte vůči rovině
+            Kontrolní pohledy · shora, levý bok, fronta a pravý bok · tažením dolaďte směr a sklon
           </div>
-          {cadOrientationMiniCount >= 1 ? <CadOrientationMiniView label="Levý bok" view="side-left" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Levý bok" />}
-          {cadOrientationMiniCount >= 2 ? <CadOrientationMiniView label="Frontální" view="front" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Frontální" />}
-          {cadOrientationMiniCount >= 3 ? <CadOrientationMiniView label="Pravý bok" view="side-right" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Pravý bok" />}
+          {cadOrientationMiniCount >= 1 ? <CadOrientationMiniView label="Shora · směr FRONT" view="top" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Shora" />}
+          {cadOrientationMiniCount >= 2 ? <CadOrientationMiniView label="Levý bok" view="side-left" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Levý bok" />}
+          {cadOrientationMiniCount >= 3 ? <CadOrientationMiniView label="Frontální" view="front" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Frontální" />}
+          {cadOrientationMiniCount >= 4 ? <CadOrientationMiniView label="Pravý bok" view="side-right" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Pravý bok" />}
         </div>
       )}
     </>
@@ -21023,12 +21029,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           ))}
 
           {cadStandalone && cadStage === "orient" && cadOrientationPrepared && (
-            <CadOrientationReferencePlane center={cadOrientationPlaneCenter} y={cadOrientationPlaneY} size={cadOrientationPlaneSize} />
+            <CadOrientationReferencePlane center={cadOrientationPlaneCenter} y={cadOrientationPlaneY} size={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} />
           )}
 
-          {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && <><HolePreview options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} /><BuilderHandle selected={builderSelected} options={builderOptions} change={changeBuilderOptions} dragging={setBuilderDragging} /></>}
+          {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && <><HolePreview options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} interactionLocked={builderDragging} /></>}
           {cadStandalone && (cadPreviewActive || cadStage === "result") && cadPreviewGeometry && (
-            <BuilderPreview geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} overlayDragging={builderDragging} options={builderOptions} selected={builderSelected} />
+            <BuilderPreview geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} overlayDragging={builderDragging} editable={cadStage === "base" && !cadBusy} options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} />
           )}
 
           {trimMode && trimContext && trimSelection && trimStage !== "result" && (

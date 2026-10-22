@@ -1,8 +1,5 @@
 'use client'
-import React, { useMemo } from 'react'
-import { createPortal, useThree } from '@react-three/fiber'
-import * as THREE from 'three'
-import { TransformControls, Html } from '@react-three/drei'
+import React from 'react'
 import { contourPosition, nearestContourPosition, seatHoleOnContour } from './hole-placement.mjs'
 
 const fieldStyle = { width: '100%', boxSizing: 'border-box', background: '#252525', color: '#eee', border: '1px solid #484848', padding: '7px 8px', borderRadius: 6 }
@@ -46,7 +43,7 @@ export function BuilderControls({ options: p, change, selected, select, placing,
       {hole >= 0 && p.holes[hole] && <>
         <label style={{ fontSize: 12 }}><input type="checkbox" checked={p.holes[hole].enabled} onChange={e => editHole({ enabled: e.target.checked })} /> Aktivní otvor</label>
         <NumberField label="Průměr otvoru (mm)" value={p.holes[hole].diameter} min={1} max={15} onChange={diameter => editHole({ diameter })} />
-        <NumberField label="Zapuštění od spodní hrany (mm)" value={p.holes[hole].heightOffset ?? 0.5} min={0} max={15} onChange={heightOffset => editHole({ heightOffset, position:seatHoleOnContour(p.bottomContour,{...p.holes[hole],heightOffset}) })} />
+        <NumberField label="Zapuštění od spodní hrany (mm)" value={p.holes[hole].heightOffset ?? p.holes[hole].diameter/2+.5} min={0} max={25} onChange={heightOffset => editHole({ heightOffset, position:seatHoleOnContour(p.bottomContour,{...p.holes[hole],heightOffset}) })} />
         <NumberField label="Natočení vybraného válce (°)" value={p.holes[hole].yaw ?? 0} min={-180} max={180} step={1} onChange={yaw => editHole({ yaw })} />
         {p.bottomContour?.length > 0 && <label style={{ display: 'grid', gap: 5, fontSize: 12 }}>Poloha po spodním obvodu
           <input aria-label="Poloha otvoru po spodním obvodu" type="range" min={0} max={100} step={0.1} value={nearestContourPosition(p.bottomContour, p.holes[hole].position).fraction * 100} onChange={e => editHole({ position: seatHoleOnContour(p.bottomContour,p.holes[hole],contourPosition(p.bottomContour, Number(e.target.value) / 100)) })} />
@@ -57,28 +54,8 @@ export function BuilderControls({ options: p, change, selected, select, placing,
       </>}
       {hasPreview && <button type="button" style={button(true)} disabled={!p.holes.some(h => h.enabled) || p.cutHoles} onClick={cutHoles}>{p.cutHoles ? 'Otvory jsou vyříznuté' : 'Potvrdit a vyříznout otvory'}</button>}
 
-      {selected === "text" && hasPreview && <p style={{ fontSize: 12, color: '#bfe5c8', margin: 0 }}>Polohu vybraného prvku můžete posunout tažením barevných os v modelu. Kliknutím na stěnu prvek přemístíte; směr otvorů nastavíte společně.</p>}
+      {selected === "text" && hasPreview && <p style={{ fontSize: 12, color: '#bfe5c8', margin: 0 }}>Popisek posunete tažením přímo po stěně báze. Tlačítkem umístění jej můžete přenést na jinou stranu.</p>}
     </fieldset>
     <p role="status" style={{ color: dirty ? '#f4d28b' : '#bfe5c8', fontSize: 12, lineHeight: 1.5 }}>{dirty && hasPreview ? 'Změny otvorů potvrďte tlačítkem „Potvrdit a vyříznout otvory“. Změny samotné základny přepočítejte v horní liště.' : hasPreview ? p.cutHoles ? 'Otvory jsou součástí modelu.' : 'Základna je bez otvorů. Modré válce čekají na potvrzení.' : 'Nastavte výšku a vytvořte první náhled.'}</p>
   </aside>
-}
-
-export function BuilderHandle({ selected, options, change, dragging }) {
-  const target = useMemo(() => new THREE.Group(), [])
-  const { scene } = useThree()
-  const index = selected?.startsWith('hole:') ? Number(selected.split(':')[1]) : -1
-  const position = index >= 0 ? options.holes[index]?.position : selected === 'text' ? options.textPosition : null
-  if (!position || index >= 0) return null
-  const commit = () => {
-    const next = target.position.toArray()
-    if (index >= 0) change({ holes: options.holes.map((h, i) => i === index ? { ...h, position: next, enabled: true, autoPosition: false, warning: null } : h) })
-    else change({ textPosition: next })
-  }
-  return <>
-    <primitive object={target} position={position}>
-      <mesh raycast={()=>null}><sphereGeometry args={[0.65, 12, 12]} /><meshBasicMaterial color="#8eeeb1" depthTest transparent opacity={0.9} /></mesh>
-      <Html occlude position={[0, 1.5, 0]} center style={{ pointerEvents: 'none', fontSize: 11, whiteSpace: 'nowrap', background: '#222', color: '#cfeeda', padding: 4, borderRadius: 4 }}>{index >= 0 ? `Otvor ${index + 1}` : 'Popisek'}</Html>
-    </primitive>
-    {createPortal(<TransformControls onUpdate={control=>control.traverse?.(child=>{for(const material of Array.isArray(child.material)?child.material:[child.material])if(material)material.depthTest=true})} object={target} mode="translate" showX showY showZ size={0.65} onMouseDown={() => dragging(true)} onMouseUp={() => { commit(); dragging(false) }} />, scene)}
-  </>
 }
