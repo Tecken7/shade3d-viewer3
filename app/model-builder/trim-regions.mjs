@@ -3,6 +3,19 @@ const pointKey=p=>p.map(v=>Number(v.toFixed(6))).join('|')
 const edgeKey=(a,b)=>{const x=pointKey(a),y=pointKey(b);return x<y?`${x}/${y}`:`${y}/${x}`}
 const vector=p=>new THREE.Vector3(...p)
 const clean=points=>points.filter((p,i)=>!i||vector(p).distanceToSquared(vector(points[i-1]))>1e-16)
+// A chain that follows the triangle perimeter through a corner can produce
+// an out-and-back polygon. It encloses no surface and has no region to label.
+// Use cancellation-relative roundoff, rather than a minimum patch area, so
+// genuinely small cut fragments are retained.
+function hasSurfaceArea(polygon){
+ if(polygon.length<3)return false
+ const origin=vector(polygon[0]),area=new THREE.Vector3();let magnitude=0
+ for(let i=1;i<polygon.length-1;i++){
+  const cross=vector(polygon[i]).sub(origin).cross(vector(polygon[i+1]).sub(origin))
+  area.add(cross);magnitude+=cross.length()
+ }
+ return area.length()>magnitude*Number.EPSILON*64
+}
 function chains(pieces){
  const edges=new Map(),points=new Map()
  for(const piece of pieces){const a=pointKey(piece.a),b=pointKey(piece.b);if(a===b)continue;points.set(a,piece.a);points.set(b,piece.b);for(const [u,v]of [[a,b],[b,a]]){if(!edges.has(u))edges.set(u,new Set());edges.get(u).add(v)}}
@@ -31,7 +44,7 @@ function split(poly,chain){
  const walk=(a,b)=>{const result=[copy[a]];for(let i=(a+1)%copy.length;i!==b;i=(i+1)%copy.length)result.push(copy[i]);result.push(copy[b]);return result}
  const a=clean([...chain,...walk(end,start).slice(1)]),b=clean([...chain].reverse().concat(walk(start,end).slice(1)))
  const trim=p=>pointKey(p[0])===pointKey(p.at(-1))?p.slice(0,-1):p
- return [trim(a),trim(b)].filter(p=>p.length>=3)
+ return [trim(a),trim(b)].filter(hasSurfaceArea)
 }
 
 // A curve may enter the same triangle more than once, especially after a
