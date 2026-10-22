@@ -24,7 +24,7 @@ import { predictEdgePatch, smoothScanBorder, paintedEdgeSelection } from "./mode
 import { fairArtifact, applySurfacePositions } from "./model-builder/surface-edit.mjs"
 import { EdgeEditOverlay, SurfaceSelectionOverlay, PatchPendingIndicator } from "./model-builder/EdgeEditOverlay"
 import { trimPlaneSurfacePath } from './model-builder/trim-surface-path.mjs'
-import { isClosingPointPress, validateClosedTrimPlan } from './model-builder/trim-interaction.mjs'
+import { isClosingPointPress, validateClosedTrimPlan, isNearTrimStart } from './model-builder/trim-interaction.mjs'
 import { buildTrimRegions } from "./model-builder/trim-regions.mjs"
 import { refreshLocalNormals } from "./model-builder/surface-edit.mjs"
 import { ScanBrush } from "./model-builder/ScanBrush"
@@ -1333,6 +1333,13 @@ function TrimSurfaceOverlay({
               if (previous && event.nativeEvent?.buttons === 1 && Math.hypot(event.nativeEvent.clientX - previous.x,event.nativeEvent.clientY - previous.y) > 5) firstPointClickAtRef.current = null
             } : undefined}
             onClick={(event) => event.stopPropagation()}
+            onDoubleClick={isFirst && !closed && controlNodes.length >= 3 ? (event) => {
+              if(event.intersections[0]?.distance < event.distance-1e-4)return
+              event.stopPropagation()
+              event.nativeEvent?.preventDefault?.()
+              firstPointClickAtRef.current = null
+              onCloseLoop?.()
+            } : undefined}
           >
             <sphereGeometry args={[pointRadius * (active ? 1.16 : hovered ? 1.2 : 1), 20, 16]} />
             <meshPhysicalMaterial
@@ -5807,6 +5814,7 @@ function AnyModel({
   onAlignmentSelect,
   onAlignmentHover,
   onTrimSurfaceClick,
+  onTrimSurfaceDoubleClick,
   onTrimSurfaceMove,
   onTrimSurfaceOut,
   onRepairSurfaceDown,
@@ -6146,7 +6154,10 @@ function AnyModel({
         if (onRepairSurfaceOut) onRepairSurfaceOut(url)
         if (onRepairHoleOut) onRepairHoleOut(url)
       } : undefined}
-      onDoubleClick={analysisMode && onPinNote ? (e) => {
+      onDoubleClick={onTrimSurfaceDoubleClick ? (e) => {
+        e.stopPropagation()
+        onTrimSurfaceDoubleClick(url,e)
+      } : analysisMode && onPinNote ? (e) => {
         e.stopPropagation();
         const distAttr = e.object.geometry.getAttribute('_analysisDist');
         let dist = null;
@@ -13491,6 +13502,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     if (cameraInteractingRef.current || now < trimSuppressClickUntilRef.current) return
     const hit = resolveTrimHit(trimContext, modelObjectsRef.current[url], event)
     if (!hit) return
+    if (!trimClosed && isNearTrimStart(trimContext.diagonal,trimControlNodes,hit.point)) {
+      if (nativeEvent?.detail >= 2) closeTrimLoop()
+      return
+    }
     if (!trimClosed) {
       addTrimControlNode(hit)
       return
@@ -13513,7 +13528,13 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setTrimReadyActionLeaving(false)
     setTrimStage("region")
     setTrimMessage("Oblast je vybraná. Zkontrolujte zelený náhled a klikněte na Oříznout.")
-  }, [trimMode, trimContext, trimSelection, trimBusy, trimDraggingPoint, trimClosed, trimBoundaryPlan, trimHoverComponent, addTrimControlNode])
+  }, [trimMode, trimContext, trimSelection, trimBusy, trimDraggingPoint, trimClosed, trimBoundaryPlan, trimHoverComponent, addTrimControlNode, trimControlNodes, closeTrimLoop])
+
+  const handleTrimSurfaceDoubleClick = useCallback((url,event) => {
+    if (!trimMode || !trimContext || url!==trimSelection || trimBusy || trimClosed) return
+    const hit=resolveTrimHit(trimContext,modelObjectsRef.current[url],event)
+    if (hit && isNearTrimStart(trimContext.diagonal,trimControlNodes,hit.point)) closeTrimLoop()
+  },[trimMode,trimContext,trimSelection,trimBusy,trimClosed,trimControlNodes,closeTrimLoop])
 
   const handleTrimSurfaceMove = useCallback((url, event) => {
     if (!trimMode || !trimContext || url !== trimSelection || trimBusy) return
@@ -20982,6 +21003,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                   ? handleAlignmentSceneHover
                   : null}
                 onTrimSurfaceClick={trimMode && trimSelection === f.url && trimStage !== "result" ? handleTrimSurfaceClick : null}
+                onTrimSurfaceDoubleClick={trimMode && trimSelection === f.url && trimStage !== "result" ? handleTrimSurfaceDoubleClick : null}
                 onTrimSurfaceMove={trimMode && trimSelection === f.url && trimStage !== "result" ? handleTrimSurfaceMove : null}
                 onTrimSurfaceOut={trimMode && trimSelection === f.url && trimStage !== "result" ? handleTrimSurfaceOut : null}
                 onRepairSurfaceDown={repairMode && repairVariant === "manual" && repairSelection === f.url && repairStage === "paint" ? handleRepairSurfaceDown : null}
