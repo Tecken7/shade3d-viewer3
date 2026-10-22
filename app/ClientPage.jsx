@@ -12230,6 +12230,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [builderSelected, setBuilderSelected] = useState(null)
   const [builderPlacing, setBuilderPlacing] = useState(false)
   const [builderDragging, setBuilderDragging] = useState(false)
+  const [cadSnapshotBusy, setCadSnapshotBusy] = useState(false)
   const builderWorkerRef = useRef(null)
   const builderUncutRef = useRef(null)
   const builderHasCutPreviewRef = useRef(false)
@@ -14165,6 +14166,39 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setCadMessage(error?.message || "STL se nepodařilo exportovat.")
     }
   }, [cadPreviewGeometry, cadFileName, builderDirty, cadBusy])
+
+  const downloadCadSnapshot = useCallback(async () => {
+    if (cadSnapshotBusy || cadBusy || cadEditorBusy || repairBusy || trimBusy) return
+    const context = {
+      createdAt:new Date().toISOString(), stage:cadStage, activeArch:cadActiveArch,
+      messages:{ modelBuilder:cadMessage, repair:repairMessage, trim:trimMessage },
+      previewDirty:builderDirty, previewStats:cadPreviewStats, options:builderOptions,
+      totalHeight:cadTotalHeight, orientationPoints:cadOrientationPoints,
+      trim:{ controlNodes:trimControlNodes, closed:trimClosed },
+      edit:{ selection:cadEffectiveSelection, bulge:cadEditBulge },
+      repair:{ completedHoleIds:repairCompletedHoleIds, holes:repairHoles.map(h => ({id:h.id, perimeter:h.perimeter, area:h.area})) },
+    }
+    setCadSnapshotBusy(true)
+    try {
+      await repairWaitForBusyPaint()
+      const { createDebugSnapshot } = await import("./model-builder/debug-snapshot.mjs")
+      const scans = []
+      for (const [arch, url, name] of [["upper",cadUpperUrl,cadUpperName],["lower",cadLowerUrl,cadLowerName]]) {
+        const object = url && modelObjectsRef.current[url]
+        if (object && rootGroupRef.current) scans.push({ arch, name, positions:cadCollectTrianglesInRoot(object, rootGroupRef.current) })
+      }
+      const preview = (cadStage === "base" || cadStage === "result") ? cadPreviewGeometry : null
+      const archive = createDebugSnapshot(scans, preview, context)
+      const objectUrl = URL.createObjectURL(new Blob([archive], {type:"application/zip"}))
+      const anchor = document.createElement("a")
+      anchor.href = objectUrl
+      anchor.download = `ARTHETIC_rozpracovany_${cadStage}_${new Date().toISOString().replace(/[:.]/g,"-")}.zip`
+      document.body.appendChild(anchor); anchor.click(); anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1500)
+    } catch (error) {
+      setCadMessage(error?.message || "Rozpracovaný scan se nepodařilo stáhnout.")
+    } finally { setCadSnapshotBusy(false) }
+  }, [cadSnapshotBusy,cadBusy,cadEditorBusy,repairBusy,trimBusy,cadStage,cadActiveArch,cadMessage,repairMessage,trimMessage,builderDirty,cadPreviewStats,builderOptions,cadTotalHeight,cadOrientationPoints,trimControlNodes,trimClosed,cadEffectiveSelection,cadEditBulge,repairCompletedHoleIds,repairHoles,cadUpperUrl,cadLowerUrl,cadUpperName,cadLowerName,cadPreviewGeometry])
 
 
   const clearRepairWorkingState = useCallback(() => {
@@ -18636,6 +18670,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           </div>
 
           <div style={{display:"flex",gap:6}}>
+          <button type="button" onClick={downloadCadSnapshot} disabled={!(cadUpperUrl||cadLowerUrl||cadPreviewGeometry)||cadSnapshotBusy||cadBusy||cadEditorBusy||repairBusy||trimBusy} title="Dočasný diagnostický export: aktuální STL scany, poslední náhled základny a záznam kroku i hlášek v jednom ZIPu." style={{height:31,padding:"0 10px",borderRadius:9,border:"1px solid rgba(96,165,250,.25)",background:"rgba(59,130,246,.08)",color:"#bfdbfe",fontSize:9,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+            {cadSnapshotBusy ? "Připravuji ZIP…" : "Stáhnout rozpracovaný scan"}
+          </button>
           {cadEmbedded && <button type="button" onClick={closeCadEmbedded} disabled={cadBusy||cadEditorBusy} style={{padding:"0 10px",borderRadius:9,border:"1px solid #444",background:"#222",color:"#ddd",cursor:"pointer"}}>Zpět do prohlížeče</button>}
           <button type="button" onClick={resetCadBuilder} disabled={cadBusy||cadEditorBusy} style={{
             height:31, padding:"0 10px", borderRadius:9, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.035)",
