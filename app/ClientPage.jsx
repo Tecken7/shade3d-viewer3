@@ -14230,7 +14230,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [repairBusy, repairContext, repairHoles, repairVariant, repairSelectedHoleIds, repairCompletedHoleIds])
 
 
-  const selectRepairModel = useCallback(async (url, { skipWeld = false } = {}) => {
+  const selectRepairModel = useCallback(async (url, { skipWeld = false, preserveMainBoundary = cadStandalone && cadStage === "repair" } = {}) => {
     if (repairBusy || !url) return
     const object = modelObjectsRef.current[url]
     if (!object) {
@@ -14271,7 +14271,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       // báze. Jeho identita nezávisí na délce vůči diagonále ani orientaci.
       // Obecná oprava sítě nadále používá konzervativní detekci níže.
       const classified = classifyRepairBoundaryLoops(context, rawHoles, {
-        preserveMainBoundary: cadStandalone && cadStage === "repair",
+        preserveMainBoundary,
       })
       const holes = classified.visible
 
@@ -14324,12 +14324,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     clearRepairWorkingState()
     setRepairVariant("auto")
     setRepairMode(true)
-    setCadMessage(`Oprava sítě · ${arch === "upper" ? "Upper" : "Lower"}. Nejdřív opravte všechny nalezené otevřené hranice; spodní otevřená boundary scanu se ignoruje.`)
+    setCadMessage(`Oprava sítě · ${arch === "upper" ? "Upper" : "Lower"}. Opravte požadované otvory, nebo pokračujte na orientaci. Hlavní okraj pro bázi zůstává otevřený.`)
 
     // Model se může po uploadu ještě dokončovat v loaderu. Krátké čekání drží
     // přechod plynulý; pokud objekt ještě není připravený, selectRepairModel
     // uživateli korektně řekne, že má zkusit znovu.
-    window.setTimeout(() => selectRepairModel(url), 80)
+    window.setTimeout(() => selectRepairModel(url, { preserveMainBoundary: true }), 80)
   }, [cadStandalone, cadBusy, repairBusy, cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName, clearRepairWorkingState, selectRepairModel])
 
   const refreshCadEdit = useCallback((object) => {
@@ -14466,13 +14466,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [cadStandalone, cadStage, repairSelection, repairContext, repairBusy, repairStage, repairHoles, repairCompletedHoleIds, cadUpperUrl, cadLowerUrl])
 
   const continueCadAfterRepair = useCallback(() => {
-    const loadedUpperOk = !cadUpperUrl || cadArchRepairDone.upper
-    const loadedLowerOk = !cadLowerUrl || cadArchRepairDone.lower
-    if (!loadedUpperOk || !loadedLowerOk) {
-      const missing = [cadUpperUrl && !cadArchRepairDone.upper ? "Upper" : "", cadLowerUrl && !cadArchRepairDone.lower ? "Lower" : ""].filter(Boolean).join(" a ")
-      setCadMessage(`Nejdřív dokončete kontrolu sítě: ${missing}.`)
-      return
-    }
+    if (cadBusy || repairBusy || (!cadUpperUrl && !cadLowerUrl)) return
 
     const arch = cadActiveArch === "lower" && cadLowerUrl ? "lower" : cadUpperUrl ? "upper" : "lower"
     const url = arch === "upper" ? cadUpperUrl : cadLowerUrl
@@ -14494,7 +14488,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadOrientationMiniCount(0)
     setCadMessage(`Orientace · ${arch === "upper" ? "Upper" : "Lower"}. Klikněte na levý zadní bod, pravý zadní bod a potom na střed fronty.`)
     // Kamera z Opravy zůstává přesně tam, kde ji uživatel nechal.
-  }, [cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName, cadActiveArch, cadArchRepairDone, clearRepairWorkingState])
+  }, [cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName, cadActiveArch, cadBusy, repairBusy, clearRepairWorkingState])
 
   const changeRepairVariant = useCallback((variant) => {
     if (variant !== "auto" && variant !== "manual") return
@@ -18570,7 +18564,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const cadStepOrder = ["scan", "edit", "trim", "repair", "orient", "base", "result"]
   const cadStepLabels = { scan: "Scan", edit: "Úprava", repair: "Oprava", orient: "Orientace", trim: "Ořez", base: "Báze", result: "Výsledek" }
   const cadLoadedArchCount = (cadUpperUrl ? 1 : 0) + (cadLowerUrl ? 1 : 0)
-  const cadRepairAllReady = cadLoadedArchCount > 0 && (!cadUpperUrl || cadArchRepairDone.upper) && (!cadLowerUrl || cadArchRepairDone.lower)
+  const cadRepairCanContinue = cadLoadedArchCount > 0 && !cadBusy && !repairBusy
   const cadStepDone = (step) => cadStepOrder.indexOf(cadStage) > cadStepOrder.indexOf(step) || (step === "result" && cadStage === "result")
   const cadMinHeight = Math.ceil(Math.max(1, cadNaturalHeight + 1.5) * 10) / 10
   const cadMaxHeight = Math.max(cadMinHeight + 4, cadNaturalHeight + 35)
@@ -18678,14 +18672,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
             <div style={{ minWidth:0 }}>
               <div style={{ color:"#858585", fontSize:9.35, lineHeight:1.45 }}>
-                Před dalšími CAD kroky musí být scan bez opravovatelných děr. Vyberte čelist a dokončete její kontrolu v panelu Oprava sítě vpravo.
+                Vyberte otvory, které chcete opravit. Spodní okraj pro bázi ponechte otevřený. Na orientaci můžete pokračovat i bez opravy všech otvorů.
               </div>
               <div style={{ marginTop:7, display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
                 {cadUpperUrl && <button type="button" onClick={() => startCadRepairForArch("upper")} disabled={repairBusy} style={{ height:28, padding:"0 10px", borderRadius:8, border:cadActiveArch==="upper"?"1px solid rgba(96,165,250,.28)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="upper"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadArchRepairDone.upper?"#9ad9ad":cadActiveArch==="upper"?"#bfdbfe":"#999", fontSize:8.8, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{cadArchRepairDone.upper?"✓ ":""}Upper</button>}
                 {cadLowerUrl && <button type="button" onClick={() => startCadRepairForArch("lower")} disabled={repairBusy} style={{ height:28, padding:"0 10px", borderRadius:8, border:cadActiveArch==="lower"?"1px solid rgba(96,165,250,.28)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="lower"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadArchRepairDone.lower?"#9ad9ad":cadActiveArch==="lower"?"#bfdbfe":"#999", fontSize:8.8, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{cadArchRepairDone.lower?"✓ ":""}Lower</button>}
               </div>
             </div>
-            <button className={cadRepairAllReady?"artheticCadPrimary artheticCadReady":"artheticCadPrimary"} type="button" onClick={continueCadAfterRepair} disabled={!cadRepairAllReady || repairBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:cadRepairAllReady?"1px solid rgba(74,222,128,.24)":"1px solid rgba(255,255,255,.07)", background:cadRepairAllReady?"rgba(34,197,94,.11)":"rgba(255,255,255,.025)", color:cadRepairAllReady?"#bbf7d0":"#555", fontSize:9, fontWeight:740, cursor:!cadRepairAllReady||repairBusy?"default":"pointer", whiteSpace:"nowrap" }}>
+            <button className={cadRepairCanContinue?"artheticCadPrimary artheticCadReady":"artheticCadPrimary"} type="button" onClick={continueCadAfterRepair} disabled={!cadRepairCanContinue || repairBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:cadRepairCanContinue?"1px solid rgba(74,222,128,.24)":"1px solid rgba(255,255,255,.07)", background:cadRepairCanContinue?"rgba(34,197,94,.11)":"rgba(255,255,255,.025)", color:cadRepairCanContinue?"#bbf7d0":"#555", fontSize:9, fontWeight:740, cursor:!cadRepairCanContinue||repairBusy?"default":"pointer", whiteSpace:"nowrap" }}>
               Pokračovat · Orientace
             </button>
           </div>

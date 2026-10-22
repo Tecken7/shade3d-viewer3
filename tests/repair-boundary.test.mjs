@@ -39,3 +39,44 @@ test('closed scan and missing context remain safe', () => {
   assert.deepEqual(classify({ diagonal: 60 }, [], { preserveMainBoundary: true }), { visible: [], hiddenBottom: null })
   assert.deepEqual(classify(null, [hole]), { visible: [hole], hiddenBottom: null })
 })
+
+function callback(name, args, environment) {
+  const start = source.indexOf(`  const ${name} = useCallback(`)
+  const end = source.indexOf('\n  }, [', start)
+  const expression = source.slice(start, end).split('useCallback(')[1] + '\n  }'
+  return new Function(...Object.keys(environment), `return (${expression})`)(...Object.values(environment))(...args)
+}
+
+test('transition from trim explicitly protects the base rim before React updates the stage', () => {
+  let options
+  const environment = {
+    cadStandalone: true, cadBusy: false, repairBusy: false,
+    cadUpperUrl: 'upper', cadLowerUrl: '', cadUpperName: 'scan', cadLowerName: '',
+    clearRepairWorkingState() {},
+    window: { setTimeout(fn) { fn() } },
+    selectRepairModel(url, value) { assert.equal(url, 'upper'); options = value },
+  }
+  for (const name of ['setCadActiveArch', 'setCadFileUrl', 'setCadFileName', 'setCadStage', 'setIsAutoRotating', 'setRepairVariant', 'setRepairMode', 'setCadMessage']) environment[name] = () => {}
+  callback('startCadRepairForArch', ['upper'], environment)
+  assert.equal(options.preserveMainBoundary, true)
+})
+
+test('orientation can follow repair with unfinished holes, but never during a calculation', () => {
+  let stage, cleared = 0
+  const environment = {
+    cadUpperUrl: 'upper', cadLowerUrl: '', cadUpperName: 'scan', cadLowerName: '',
+    cadActiveArch: 'upper', cadBusy: false, repairBusy: false,
+    cadArchRepairDone: { upper: false, lower: false },
+    clearRepairWorkingState() { cleared++ },
+  }
+  const body = source.slice(source.indexOf('  const continueCadAfterRepair ='), source.indexOf('  const changeRepairVariant ='))
+  for (const name of body.match(/\bset\w+(?=\()/g)) environment[name] = () => {}
+  environment.setCadStage = value => { stage = value }
+  callback('continueCadAfterRepair', [], environment)
+  assert.equal(stage, 'orient')
+  assert.equal(cleared, 1)
+  stage = null
+  callback('continueCadAfterRepair', [], { ...environment, repairBusy: true })
+  assert.equal(stage, null)
+  assert.equal(cleared, 1)
+})
