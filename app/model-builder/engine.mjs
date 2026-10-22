@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { MeshBVH } from 'three-mesh-bvh'
 import { FontLoader } from 'three/examples/jsm/loaders/FontLoader.js'
 import { projectSurfaceText } from './surface-text.mjs'
+import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { sampleContour, roundShoulder } from './transition.mjs'
 import { drainPassage } from './drains.mjs'
 import { prepareSurface } from './prepare-surface.mjs'
@@ -421,7 +422,11 @@ export async function buildModel(M, input, options, fontData, progress = () => {
       for (const char of p.text) if (!font.data.glyphs[char]) throw new Error(`Písmo nepodporuje znak „${char}“. Použijte podporované písmeno nebo číslici.`)
       if (!(p.textSize >= 1 && p.textSize <= 12)) throw new Error('Velikost textu musí být 1–12 mm.')
       const shell = fromManifold(result)
-      textSurfaceGeometry = bufferGeometry(shell.vertices, shell.faces)
+      const textSurface = bufferGeometry(shell.vertices, shell.faces)
+      // Match preview normals: keep the real bevel/cap creases, smooth only
+      // gradual curvature. Letter dimensions must not depend on shading setup.
+      try { textSurfaceGeometry = toCreasedNormals(textSurface,Math.PI/6) }
+      finally { textSurface.dispose() }
       textSurfaceGeometry.boundsTree = new MeshBVH(textSurfaceGeometry)
       const projected = projectSurfaceText(font,{...p,baseDirection:direction},{position:p.textPosition,normal:p.textNormal},textSurfaceGeometry)
       const text = projected.geometry
