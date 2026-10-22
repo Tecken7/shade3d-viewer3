@@ -2,7 +2,7 @@
 import React, { useEffect, useRef } from 'react'
 import { Edges, Line } from '@react-three/drei'
 import * as THREE from 'three'
-import { nearestContourPosition } from './hole-placement.mjs'
+import { nearestContourPosition, holeDirection } from './hole-placement.mjs'
 
 export function HolePreview({ options, selected, select, change, dragging, controlsRef }) {
   const root = useRef(), active = useRef(null)
@@ -31,8 +31,7 @@ export function HolePreview({ options, selected, select, change, dragging, contr
     <Line points={[...contour, contour[0]]} color="#60a5fa" transparent opacity={0.35} lineWidth={1} depthTest={false} />
     {options.holes.map((hole, index) => {
       if (!hole.enabled || !hole.position) return null
-      const direction = hole.baseDirection > 0 ? 1 : -1, yaw = (options.holeYaw ?? 0) * Math.PI / 180
-      const normal = new THREE.Vector3(direction * Math.sin(yaw), 0, direction * Math.cos(yaw))
+      const normal = new THREE.Vector3().fromArray(holeDirection(contour,hole.position,options.holeYaw ?? 0))
       const center = new THREE.Vector3().fromArray(hole.position).addScaledVector(normal, (1 - hole.length) / 2)
       const rotation = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal.clone().negate())
       return <mesh key={index} position={center} quaternion={rotation} renderOrder={80}

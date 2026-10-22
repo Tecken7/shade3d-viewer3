@@ -24,6 +24,7 @@ import { predictEdgePatch, smoothScanBorder, paintedEdgeSelection } from "./mode
 import { fairArtifact, applySurfacePositions } from "./model-builder/surface-edit.mjs"
 import { EdgeEditOverlay, SurfaceSelectionOverlay, PatchPendingIndicator } from "./model-builder/EdgeEditOverlay"
 import { trimPlaneSurfacePath } from './model-builder/trim-surface-path.mjs'
+import { isClosingPointPress, validateClosedTrimPlan } from './model-builder/trim-interaction.mjs'
 import { buildTrimRegions } from "./model-builder/trim-regions.mjs"
 import { refreshLocalNormals } from "./model-builder/surface-edit.mjs"
 import { ScanBrush } from "./model-builder/ScanBrush"
@@ -1260,7 +1261,7 @@ function TrimSurfaceOverlay({
   onCloseLoop,
 }) {
   const groupRef = useRef(null)
-  const firstPointClickAtRef = useRef(0)
+  const firstPointClickAtRef = useRef(null)
   useEffect(() => {
     const group = groupRef.current
     if (!group) return
@@ -1298,7 +1299,7 @@ function TrimSurfaceOverlay({
         const active = draggingPoint === index
         return (
           <mesh
-            key={`${index}-${trimPointKey(point)}`}
+            key={index}
             position={point}
             renderOrder={1510}
             onPointerDown={(event) => {
@@ -1308,29 +1309,24 @@ function TrimSurfaceOverlay({
               // nativní listener na tomto pointerdownu, aby kliknutí/drag kuličky
               // nikdy současně nespustilo orbit kamery.
               event.nativeEvent?.stopImmediatePropagation?.()
+              if (isFirst && !closed && controlNodes.length >= 3) {
+                const now = typeof performance !== "undefined" ? performance.now() : Date.now()
+                const x = event.nativeEvent?.clientX ?? 0, y = event.nativeEvent?.clientY ?? 0
+                const previous = firstPointClickAtRef.current
+                firstPointClickAtRef.current = { time:now, x, y }
+                if (isClosingPointPress(previous, {time:now,x,y})) {
+                  firstPointClickAtRef.current = null
+                  onCloseLoop?.()
+                  return
+                }
+              }
               onBeginPointDrag?.(index, event)
             }}
-            onClick={isFirst ? (event) => {
-              event.stopPropagation()
-              if (event.delta != null && event.delta > 5) {
-                firstPointClickAtRef.current = 0
-                return
-              }
-              const now = typeof performance !== "undefined" ? performance.now() : Date.now()
+            onPointerMove={isFirst ? (event) => {
               const previous = firstPointClickAtRef.current
-              firstPointClickAtRef.current = now
-              if (controlNodes.length >= 3 && previous > 0 && now - previous <= 420) {
-                firstPointClickAtRef.current = 0
-                onCloseLoop?.()
-              }
-            } : (event) => {
-              event.stopPropagation()
-            }}
-            onDoubleClick={isFirst && controlNodes.length >= 3 ? (event) => {
-              event.stopPropagation()
-              firstPointClickAtRef.current = 0
-              onCloseLoop?.()
+              if (previous && event.nativeEvent?.buttons === 1 && Math.hypot(event.nativeEvent.clientX - previous.x,event.nativeEvent.clientY - previous.y) > 5) firstPointClickAtRef.current = null
             } : undefined}
+            onClick={(event) => event.stopPropagation()}
           >
             <sphereGeometry args={[pointRadius * (active ? 1.16 : 1), 20, 16]} />
             <meshPhysicalMaterial
@@ -12146,11 +12142,23 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const trimPendingDragHitRef = useRef(null)
   const trimSuppressClickUntilRef = useRef(0)
   const trimPointerGestureRef = useRef(null)
+  const trimBoundaryPlanCacheRef = useRef(null)
   const trimBoundaryPlan = useMemo(() => {
     if (!trimClosed || !trimContext || !trimSegments.length) return null
-    try { return buildTrimBoundaryPlan(trimContext, trimSegments) }
-    catch (error) { console.warn("Trim boundary plan failed:", error); return null }
+    const cached = trimBoundaryPlanCacheRef.current
+    if (cached?.context === trimContext && cached.segments === trimSegments) return cached.plan
+    try {
+      const plan = buildTrimBoundaryPlan(trimContext, trimSegments)
+      trimBoundaryPlanCacheRef.current = {context:trimContext, segments:trimSegments, plan}
+      return plan
+    } catch (error) {
+      trimBoundaryPlanCacheRef.current = {context:trimContext, segments:trimSegments, plan:null, error:error.message}
+      return null
+    }
   }, [trimClosed, trimContext, trimSegments])
+  useEffect(() => {
+    if (trimClosed && !trimBoundaryPlan && trimBoundaryPlanCacheRef.current?.error) setTrimMessage(trimBoundaryPlanCacheRef.current.error)
+  }, [trimClosed,trimBoundaryPlan])
 
   // -- ARTHETIC CAD Tools · Model Builder V13 --
   const [cadStage, setCadStage] = useState("scan") // scan | repair | orient | trim | base | result
@@ -12225,7 +12233,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadPreviewActive, setCadPreviewActive] = useState(false)
   const [cadPreviewGeometry, setCadPreviewGeometry] = useState(null)
   const [cadPreviewStats, setCadPreviewStats] = useState(null)
-  const [builderOptions, setBuilderOptions] = useState(() => ({ ...BUILDER_DEFAULTS, cutHoles: false }))
+  const [builderOptions, setBuilderOptions] = useState(() => ({ ...BUILDER_DEFAULTS, cutHoles: false, followContour: true }))
   const [builderDirty, setBuilderDirty] = useState(true)
   const [builderSelected, setBuilderSelected] = useState(null)
   const [builderPlacing, setBuilderPlacing] = useState(false)
@@ -12245,7 +12253,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setCadPreviewGeometry(previous => { previous?.dispose(); return restored })
       builderHasCutPreviewRef.current = false
     }
-    setBuilderOptions(previous => ({ ...previous, ...patch, cutHoles: false }))
+    setBuilderOptions(previous => ({ ...previous, ...patch, cutHoles: false, followContour: true }))
     setBuilderDirty(true)
   }, [])
   const cancelBuilder = useCallback(() => {
@@ -13354,6 +13362,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         setTrimMessage("Uzavřenou hladkou hranici se nepodařilo promítnout na povrch.")
         return
       }
+      const plan = validateClosedTrimPlan(buildTrimBoundaryPlan(trimContext, smoothSegments))
+      trimBoundaryPlanCacheRef.current = {context:trimContext, segments:smoothSegments, plan}
+      trimPendingDragHitRef.current = null
+      setTrimDraggingPoint(null)
+      cameraInteractingRef.current = false
       setTrimSegments(smoothSegments)
       setTrimClosed(true)
       setTrimKeepComponent(null)
@@ -13733,7 +13746,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadMessage("Nahrajte Upper a/nebo Lower scan.")
     setCadNaturalHeight(20)
     setCadTotalHeight(25)
-    setBuilderOptions({ ...BUILDER_DEFAULTS, cutHoles: false })
+    setBuilderOptions({ ...BUILDER_DEFAULTS, cutHoles: false, followContour: true })
     setBuilderDirty(true)
     setBuilderSelected(null)
     setBuilderPlacing(false)
@@ -14010,7 +14023,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadTotalHeight(Math.max(25, Math.ceil((naturalHeight + 1.5) * 10) / 10))
     setCadOrientationPoints([])
     setCadTrimBoundaryPoints([])
-    setBuilderOptions({ ...BUILDER_DEFAULTS, cutHoles: false })
+    setBuilderOptions({ ...BUILDER_DEFAULTS, cutHoles: false, followContour: true })
     setBuilderDirty(true)
     setBuilderSelected(null)
     setBuilderPlacing(false)
@@ -14134,7 +14147,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         worker.terminate(); builderWorkerRef.current = null; setCadBusy(false); setBuilderDirty(true)
         setCadMessage(event.message || "Výpočet selhal. Zkuste menší model nebo upravte ořez.")
       }
-      worker.postMessage({ positions, options: { ...nextOptions, totalHeight: cadTotalHeight, arch: cadActiveArch }, font }, [positions.buffer])
+      worker.postMessage({ positions, options: { ...nextOptions, followContour: true, totalHeight: cadTotalHeight, arch: cadActiveArch }, font }, [positions.buffer])
     } catch (error) { if (builderWorkerRef.current !== pending) return; builderWorkerRef.current = null; setCadBusy(false); setBuilderDirty(true); setCadMessage(error.message) }
   }, [cadStage, cadBusy, cadFileUrl, cadTotalHeight, cadActiveArch, builderOptions])
 
@@ -18849,7 +18862,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         {(cadBusy || cadMessage) && (
           <div style={{ marginTop:9, paddingTop:8, borderTop:"1px solid rgba(255,255,255,.055)", display:"flex", alignItems:"center", gap:8, minHeight:18 }}>
             {cadBusy && <span style={{ width:11, height:11, borderRadius:"50%", border:"1.5px solid rgba(255,255,255,.12)", borderTopColor:"#f4f4f4", animation:"artheticCadSpin .75s linear infinite", flex:"0 0 auto" }} />}
-            <span style={{ color:cadBusy?"#c7c7c7":"#696969", fontSize:8.7, lineHeight:1.35 }}>{cadMessage}</span>
+            <span style={{ color:cadBusy?"#c7c7c7":"#696969", fontSize:8.7, lineHeight:1.35 }}>{cadStage === "trim" ? (trimMessage || cadMessage) : cadMessage}</span>
           </div>
         )}
       </div>

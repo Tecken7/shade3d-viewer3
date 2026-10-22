@@ -12,6 +12,7 @@ import { drainPassage } from '../app/model-builder/drains.mjs'
 import { prepareRepairVertices, weldByDistance } from '../app/model-builder/mesh-preflight.mjs'
 import { orientRepairPatch } from '../app/model-builder/repair-orientation.mjs'
 import { buildModel, meshTopology, indexed } from '../app/model-builder/engine.mjs'
+import { holeDirection } from '../app/model-builder/hole-placement.mjs'
 const M=await Module();M.setup()
 const font=JSON.parse(fs.readFileSync(new URL('../public/wasm/model-builder/font.json',import.meta.url)))
 const contour=[[-20,-15],[-8,-15],[-8,4],[-5,9],[5,9],[8,4],[8,-15],[20,-15],[20,6],[13,18],[-13,18],[-20,6]].map(p=>new THREE.Vector2(...p))
@@ -116,15 +117,16 @@ test('failed automatic drain leaves a valid preview and can be placed manually a
 })
 
 test('blue cylinder drafts leave the base intact until explicit confirmation', async () => {
-  const draft = await build({ cutHoles:false })
+  const draft = await build({ cutHoles:false, followContour:true })
   assert.equal(draft.holes.length, 2)
   assert.ok(draft.holes.every(hole => hole.enabled && hole.position[1] === draft.placement.baseY))
   const without = await build({ holes:[{enabled:false}, {enabled:false}] })
   assert.ok(Math.abs(draft.stats.volume - without.stats.volume) < .001)
   const changed = draft.holes.map(hole => ({ ...hole, diameter:3, length:12, autoDepth:false }))
-  const beforeConfirmation = await build({ cutHoles:false, holes:changed })
+  const beforeConfirmation = await build({ cutHoles:false, followContour:true, holes:changed })
   assert.ok(Math.abs(beforeConfirmation.stats.volume - without.stats.volume) < .001)
-  const confirmed = await build({ cutHoles:true, holes:beforeConfirmation.holes })
+  const confirmed = await build({ cutHoles:true, followContour:true, holes:beforeConfirmation.holes })
+  for(const hole of confirmed.holes) assert.deepEqual(hole.normal,holeDirection(confirmed.placement.bottomContour,hole.position))
   assert.ok(confirmed.stats.volume < beforeConfirmation.stats.volume)
   const topology = meshTopology(Array.from(confirmed.positions), Array.from(confirmed.indices))
   assert.equal(topology.nonManifold, 0)

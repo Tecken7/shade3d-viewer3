@@ -25,3 +25,20 @@ export function nearestContourPosition(contour, point) {
   }
   return { position, fraction: traversed ? along / traversed : 0 }
 }
+
+export function holeDirection(contour, position, yawDegrees = 0) {
+  if (!contour?.length) return [0,0,1]
+  let perimeter=0,area=0
+  for(let i=0;i<contour.length;i++){
+    const a=contour[i],b=contour[(i+1)%contour.length]
+    perimeter+=Math.hypot(b[0]-a[0],b[2]-a[2]);area+=a[0]*b[2]-b[0]*a[2]
+  }
+  if(perimeter<1e-9)return [0,0,1]
+  const fraction=nearestContourPosition(contour,position).fraction
+  const offset=Math.min(.5,perimeter*.01)/perimeter
+  const before=contourPosition(contour,(fraction-offset+1)%1),after=contourPosition(contour,(fraction+offset)%1)
+  const dx=after[0]-before[0],dz=after[2]-before[2],length=Math.hypot(dx,dz)
+  if(length<1e-9)return [0,0,1]
+  const sign=area>=0?1:-1,x=sign*dz/length,z=-sign*dx/length,yaw=yawDegrees*Math.PI/180
+  return [x*Math.cos(yaw)+z*Math.sin(yaw),0,z*Math.cos(yaw)-x*Math.sin(yaw)]
+}

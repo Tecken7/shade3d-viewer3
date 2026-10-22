@@ -37,7 +37,7 @@ export function BuilderControls({ options: p, change, selected, select, placing,
       <hr style={{ width: '100%', border: 0, borderTop: '1px solid #444' }} />
       <strong style={{ fontSize: 13 }}>Odtokové otvory</strong>
       <p style={{ margin: 0, fontSize: 11, color: '#aaa', lineHeight: 1.5 }}>Modré válce jsou pouze náhled. Táhněte je podél spodního obvodu a nastavte průměr i hloubku. Model se vyřízne až po potvrzení.</p>
-      <NumberField label="Společný směr otvorů (°)" value={p.holeYaw ?? 0} min={-90} max={90} step={1} onChange={holeYaw => change({ holeYaw })} />
+      <NumberField label="Odklon otvorů od stěny (°)" value={p.holeYaw ?? 0} min={-75} max={75} step={1} onChange={holeYaw => change({ holeYaw })} />
       {hasPreview && <button type="button" style={button()} onClick={() => { change({ holes: [] }); select(null) }}>Obnovit návrh otvorů</button>}
       {!p.holes.length && <span style={{ fontSize: 12 }}>První náhled navrhne dva otvory Ø 4,5 mm. Jejich polohu zkontrolujte.</span>}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{p.holes.map((h, i) => <button key={i} type="button" style={button(hole === i)} onClick={() => { select(`hole:${i}`); setPlacing(false) }}>Otvor {i + 1}{h.enabled ? '' : ' (vyp.)'}</button>)}</div>

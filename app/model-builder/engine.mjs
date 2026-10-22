@@ -5,7 +5,7 @@ import { TextGeometry } from 'three/examples/jsm/geometries/TextGeometry.js'
 import { sampleContour, roundShoulder } from './transition.mjs'
 import { drainPassage } from './drains.mjs'
 import { prepareSurface } from './prepare-surface.mjs'
-import { nearestContourPosition } from './hole-placement.mjs'
+import { nearestContourPosition, holeDirection } from './hole-placement.mjs'
 
 import { DEFAULTS } from "./defaults.mjs"
 export { DEFAULTS } from "./defaults.mjs"
@@ -469,7 +469,7 @@ export async function buildModel(M, input, options, fontData, progress = () => {
       try {
       const yaw = (p.holeYaw ?? 0) * Math.PI / 180
       const posterior = direction > 0 ? 1 : -1
-      h.normal = [posterior * Math.sin(yaw), 0, posterior * Math.cos(yaw)]
+      h.normal = p.followContour ? holeDirection(bottomContour,h.position,p.holeYaw ?? 0) : [posterior * Math.sin(yaw), 0, posterior * Math.cos(yaw)]
       const n = new THREE.Vector3().fromArray(h.normal).normalize(), center = new THREE.Vector3().fromArray(h.position)
       if (Math.abs(n.y) > 0.8) throw new Error(`Otvor ${i + 1} umístěte na boční stěnu.`)
       const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n.clone().negate())
