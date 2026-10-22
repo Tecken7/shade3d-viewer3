@@ -4,7 +4,7 @@ import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js"
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js"
 
 // Independent from the editable scene: no camera, patient metadata or model state is changed.
-export async function renderAttachmentThumbnail(buffer, fileName) {
+export async function renderAttachmentThumbnail(buffer, fileName, turntable = false) {
     const extension = String(fileName).split(".").pop().toLowerCase()
     if (!["ply", "stl", "obj"].includes(extension)) throw new Error("Unsupported model format")
     if (!(buffer instanceof ArrayBuffer) || !buffer.byteLength || buffer.byteLength > 80 * 1024 * 1024) throw new Error("Model exceeds thumbnail limits")
@@ -35,8 +35,8 @@ export async function renderAttachmentThumbnail(buffer, fileName) {
             const oldMaterials = Array.isArray(child.material) ? child.material : [child.material]
             oldMaterials.filter(Boolean).forEach(material => materials.add(material))
             child.material = child.isPoints
-                ? new THREE.PointsMaterial({ color: "#d4d4d8", size: .012, vertexColors: !!geometry.getAttribute("color") })
-                : new THREE.MeshStandardMaterial({ color: geometry.getAttribute("color") ? "#ffffff" : "#d4d4d8", vertexColors: !!geometry.getAttribute("color"), roughness: .75, metalness: 0, side: THREE.DoubleSide })
+                ? new THREE.PointsMaterial({ color: geometry.getAttribute("color") ? "#ffffff" : "#AFA28A", size: .012, vertexColors: !!geometry.getAttribute("color") })
+                : new THREE.MeshStandardMaterial({ color: geometry.getAttribute("color") ? "#ffffff" : "#AFA28A", vertexColors: !!geometry.getAttribute("color"), roughness: geometry.getAttribute("color") ? .75 : .42, metalness: geometry.getAttribute("color") ? 0 : .51, side: THREE.DoubleSide })
             materials.add(child.material)
         })
         if (!vertexCount) throw new Error("No renderable geometry")
@@ -68,9 +68,20 @@ export async function renderAttachmentThumbnail(buffer, fileName) {
         renderer.setSize(256, 256)
         renderer.outputColorSpace = THREE.SRGBColorSpace
         renderer.toneMapping = THREE.ACESFilmicToneMapping
-        renderer.render(scene, camera)
-        const blob = await new Promise(resolve => renderer.domElement.toBlob(resolve, "image/jpeg", .85))
-        if (!blob || blob.size > 512 * 1024) throw new Error("Thumbnail export failed")
+        const frames = turntable ? 24 : 1
+        const atlas = document.createElement("canvas")
+        atlas.width = 256 * frames; atlas.height = 256
+        const context = atlas.getContext("2d")
+        if (!context) throw new Error("Canvas unavailable")
+        const rotationAxis = new THREE.Vector3(...[[1,0,0],[0,1,0],[0,0,1]][thinAxis])
+        for (let frame = 0; frame < frames; frame++) {
+            root.quaternion.setFromAxisAngle(rotationAxis, frame * Math.PI * 2 / frames)
+            renderer.render(scene, camera)
+            context.drawImage(renderer.domElement, frame * 256, 0)
+            await new Promise(resolve => setTimeout(resolve, 0))
+        }
+        const blob = await new Promise(resolve => atlas.toBlob(resolve, "image/jpeg", .85))
+        if (!blob || blob.size > 2 * 1024 * 1024) throw new Error("Thumbnail export failed")
         return blob
     } finally {
         geometries.forEach(geometry => geometry.dispose())

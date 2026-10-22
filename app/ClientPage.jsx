@@ -5212,7 +5212,7 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, active, mute
 
   useEffect(() => {
     if (!object3D) return
-    const baseColor = new THREE.Color(color || "#ffffff")
+    const baseColor = new THREE.Color(color || "#AFA28A")
     const mutedColor = baseColor.clone().lerp(new THREE.Color("#62666a"), 0.86)
     object3D.traverse((child) => {
       if (!child.isMesh || !child.material) return
@@ -16805,12 +16805,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
         const applyFiles = (Fs, titleStr, logoUrl, headlight, camState, viewerState = null) => {
           setFiles(Fs)
-          const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
+          const palette = ["#AFA28A"]
           setColors(Fs.map((f, i) => f.c || palette[i % palette.length]))
           setOpacities(Fs.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
           setVisibles(Fs.map((f) => (typeof f.v === "boolean" ? f.v : true)))
-          setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
-          setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
+          setRoughnesses(Fs.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.42)))
+          setMetalnesses(Fs.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.51)))
           setVertexColors(Fs.map(() => false))
           setWireframes(Fs.map((f) => !!f.wf))
           setGhostModes(Fs.map((f) => !!f.gh))
@@ -16961,12 +16961,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         const urlsChanged = filesChanged(files, newFiles)
 
         setFiles(newFiles)
-        const palette = ["#f5f5dc", "#8e8e8e", "#ffffff", "#ffd7a8", "#c0c0c0", "#e6f0ff", "#ffeedd"]
+        const palette = ["#AFA28A"]
         setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
         setOpacities(newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
         setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
-        setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.5)))
-        setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.5)))
+        setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.42)))
+        setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.51)))
         
         // ÚPRAVA 6: Správné načítání textur a wireframe místo fixní hodnoty
         setVertexColors(newFiles.map((f) => !!hasTexMap[f.url] && f.vc !== false))
@@ -17386,15 +17386,15 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 }}>
                   <label style={{ display: "block", minWidth: 0 }}>
                     <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 7, marginBottom: 5, color: "#969696", fontSize: 9.5, fontWeight: 650 }}>
-                      <span>Roughness</span><span style={{ color: "#d7d7d7", fontVariantNumeric: "tabular-nums" }}>{Math.round((roughnesses[i] ?? 0.25) * 100)}%</span>
+                      <span>Roughness</span><span style={{ color: "#d7d7d7", fontVariantNumeric: "tabular-nums" }}>{Math.round((roughnesses[i] ?? 0.42) * 100)}%</span>
                     </span>
-                    <input type="range" min={0} max={1} step={0.01} value={roughnesses[i] ?? 0.25} onChange={(e) => { const v = parseFloat(e.target.value); setRoughnesses((prev) => prev.map((x, idx) => idx === i ? v : x)) }} style={{ width: "100%", accentColor: "#a3a3a3" }} aria-label={`${f.name} roughness`} />
+                    <input type="range" min={0} max={1} step={0.01} value={roughnesses[i] ?? 0.42} onChange={(e) => { const v = parseFloat(e.target.value); setRoughnesses((prev) => prev.map((x, idx) => idx === i ? v : x)) }} style={{ width: "100%", accentColor: "#a3a3a3" }} aria-label={`${f.name} roughness`} />
                   </label>
                   <label style={{ display: "block", minWidth: 0 }}>
                     <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 7, marginBottom: 5, color: "#969696", fontSize: 9.5, fontWeight: 650 }}>
-                      <span>Metalness</span><span style={{ color: "#d7d7d7", fontVariantNumeric: "tabular-nums" }}>{Math.round((metalnesses[i] ?? 0.12) * 100)}%</span>
+                      <span>Metalness</span><span style={{ color: "#d7d7d7", fontVariantNumeric: "tabular-nums" }}>{Math.round((metalnesses[i] ?? 0.51) * 100)}%</span>
                     </span>
-                    <input type="range" min={0} max={1} step={0.01} value={metalnesses[i] ?? 0.12} onChange={(e) => { const v = parseFloat(e.target.value); setMetalnesses((prev) => prev.map((x, idx) => idx === i ? v : x)) }} style={{ width: "100%", accentColor: "#a3a3a3" }} aria-label={`${f.name} metalness`} />
+                    <input type="range" min={0} max={1} step={0.01} value={metalnesses[i] ?? 0.51} onChange={(e) => { const v = parseFloat(e.target.value); setMetalnesses((prev) => prev.map((x, idx) => idx === i ? v : x)) }} style={{ width: "100%", accentColor: "#a3a3a3" }} aria-label={`${f.name} metalness`} />
                   </label>
                 </div>
               </div>
@@ -20993,8 +20993,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 smoothAngle={DEFAULT_SMOOTH_ANGLE}
                 wireframe={wireframes[i] || false}
                 ghost={!!ghostModes[i]}
-                roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.25)}
-                metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.12)}
+                roughness={roughnesses[i] ?? (typeof f.r === "number" ? f.r : 0.42)}
+                metalness={metalnesses[i] ?? (typeof f.m === "number" ? f.m : 0.51)}
                 useVertexColors={vertexColors[i]}
                 keepMaterials={!!f.km}
                 renderOrder={i}
