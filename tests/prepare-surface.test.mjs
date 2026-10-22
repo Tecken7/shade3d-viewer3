@@ -40,3 +40,55 @@ test('genuine branching is not hidden by the winding repair', () => {
   const prepared = prepareSurface(vertices, [0,1,2, 0,3,4])
   assert.throws(() => meshTopology(vertices, prepared.faces), /větví/)
 })
+
+test('every combination of inverted faces on a curved open scan is normalized without changing its shape', () => {
+  const vertices=[]
+  for(let z=0;z<3;z++)for(let x=0;x<3;x++){
+    // Curved and tilted: orientation must follow shared edges, not a fixed axis.
+    vertices.push(x*.7+z*.3, x*x*.2+z*.4, z*.9-x*.1)
+  }
+  const original=[]
+  for(let z=0;z<2;z++)for(let x=0;x<2;x++){
+    const a=z*3+x;original.push(a,a+1,a+4,a,a+4,a+3)
+  }
+  for(let mask=0;mask<256;mask++){
+    const damaged=original.slice()
+    for(let face=0;face<8;face++)if(mask&(1<<face)){
+      const offset=face*3;[damaged[offset+1],damaged[offset+2]]=[damaged[offset+2],damaged[offset+1]]
+    }
+    const prepared=prepareSurface(vertices,damaged)
+    const topology=meshTopology(prepared.vertices,prepared.faces)
+    assert.equal(topology.nonManifold,0,`mask ${mask}`)
+    assert.equal(topology.loops.length,1,`mask ${mask}`)
+    assert.equal(topology.openEdges,8,`mask ${mask}`)
+    assert.equal(prepared.vertices,vertices)
+    assert.deepEqual(prepared.faces.slice().sort((a,b)=>a-b),original.slice().sort((a,b)=>a-b))
+    assert.deepEqual(prepareSurface(vertices,prepared.faces).faces,prepared.faces)
+  }
+})
+
+test('all inverted-face combinations on a closed surface remain closed after preparation',()=>{
+  const vertices=[0,0,0, 2,0,0, 0,2,0, 0,0,2],original=[0,2,1, 0,1,3, 1,2,3, 2,0,3]
+  for(let mask=0;mask<16;mask++){
+    const faces=original.slice()
+    for(let face=0;face<4;face++)if(mask&(1<<face)){
+      const offset=face*3;[faces[offset+1],faces[offset+2]]=[faces[offset+2],faces[offset+1]]
+    }
+    const prepared=prepareSurface(vertices,faces),topology=meshTopology(vertices,prepared.faces)
+    assert.equal(topology.openEdges,0)
+    assert.equal(topology.nonManifold,0)
+  }
+})
+
+test('a non-orientable strip is rejected instead of silently changing connectivity',()=>{
+  const vertices=[],faces=[],count=5
+  for(let i=0;i<count;i++){
+    const t=2*Math.PI*i/count
+    for(const w of [-.2,.2])vertices.push((1+w*Math.cos(t/2))*Math.cos(t),w*Math.sin(t/2),(1+w*Math.cos(t/2))*Math.sin(t))
+    const a=2*i,b=a+1,nextA=i===count-1?1:a+2,nextB=i===count-1?0:a+3
+    faces.push(a,nextA,nextB,a,nextB,b)
+  }
+  const before=faces.slice()
+  assert.throws(()=>prepareSurface(vertices,faces),/překřížené napojení/)
+  assert.deepEqual(faces,before)
+})

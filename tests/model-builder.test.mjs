@@ -57,8 +57,8 @@ test('base cap follows wall winding for globally inverted upper and lower scans'
     const b=inverted.slice(i+3,i+6),c=inverted.slice(i+6,i+9)
     inverted.splice(i+3,6,...c,...b)
   }
-  for(const arch of ['upper','lower']){
-    const options={arch,smoothing:0,cutHoles:false,holes:[{enabled:false},{enabled:false}]}
+  for(const [arch,bevel] of [['upper',1],['lower',1],['upper',0],['lower',0]]){
+    const options={arch,bevel,smoothing:0,cutHoles:false,holes:[{enabled:false},{enabled:false}]}
     const reference=await buildModel(M,new Float32Array(scan),options,font)
     const result=await buildModel(M,new Float32Array(inverted),options,font)
     // Reversing the contour can choose different loft diagonals and sampled
