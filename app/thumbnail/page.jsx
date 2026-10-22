@@ -17,10 +17,10 @@ export default function ThumbnailPage() {
             busy = true
             try {
                 const baking = message.task === "bake"
-                const blob = baking ? null : await renderAttachmentThumbnail(message.buffer, message.fileName, message.turntable === true)
+                const blob = baking ? null : await renderAttachmentThumbnail(message.buffer, message.fileName, message.turntable === true, message.thumbnailVersion)
                 const buffer = baking ? await bakePlyTexture(message.buffer, message.imageBuffer, message.imageMime) : await blob.arrayBuffer()
                 if (buffer.byteLength > (baking ? 160 : 2) * 1024 * 1024) throw new Error("Result too large")
-                if (!cancelled) window.parent.postMessage({ type: "CASE_CLOUD_THUMBNAIL_RESULT", id: message.id, buffer, frames: !baking && message.turntable === true ? 24 : 1, mime: baking ? "application/octet-stream" : "image/jpeg" }, parentOrigin, [buffer])
+                if (!cancelled) window.parent.postMessage({ type: "CASE_CLOUD_THUMBNAIL_RESULT", id: message.id, buffer, thumbnailVersion: message.thumbnailVersion === 3 ? 3 : 2, frames: !baking && message.turntable === true ? 24 : 1, mime: baking ? "application/octet-stream" : "image/jpeg" }, parentOrigin, [buffer])
             } catch (error) {
                 console.error("Thumbnail processing failed", error)
                 if (!cancelled) window.parent.postMessage({ type: "CASE_CLOUD_THUMBNAIL_ERROR", id: message.id }, parentOrigin)

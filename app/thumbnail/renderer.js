@@ -4,7 +4,7 @@ import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js"
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js"
 
 // Independent from the editable scene: no camera, patient metadata or model state is changed.
-export async function renderAttachmentThumbnail(buffer, fileName, turntable = false) {
+export async function renderAttachmentThumbnail(buffer, fileName, turntable = false, thumbnailVersion = 2) {
     const extension = String(fileName).split(".").pop().toLowerCase()
     if (!["ply", "stl", "obj"].includes(extension)) throw new Error("Unsupported model format")
     if (!(buffer instanceof ArrayBuffer) || !buffer.byteLength || buffer.byteLength > 80 * 1024 * 1024) throw new Error("Model exceeds thumbnail limits")
@@ -65,22 +65,25 @@ export async function renderAttachmentThumbnail(buffer, fileName, turntable = fa
         camera.lookAt(0, 0, 0)
         renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true, powerPreference: "low-power" })
         renderer.setPixelRatio(1)
-        renderer.setSize(256, 256)
+        const resolution = turntable && thumbnailVersion === 3 ? 768 : 256
+        renderer.setSize(resolution, resolution)
         renderer.outputColorSpace = THREE.SRGBColorSpace
         renderer.toneMapping = THREE.ACESFilmicToneMapping
         const frames = turntable ? 24 : 1
         const atlas = document.createElement("canvas")
-        atlas.width = 256 * frames; atlas.height = 256
+        const columns = turntable && thumbnailVersion === 3 ? 6 : frames
+        const rows = Math.ceil(frames / columns)
+        atlas.width = resolution * columns; atlas.height = resolution * rows
         const context = atlas.getContext("2d")
         if (!context) throw new Error("Canvas unavailable")
         const rotationAxis = new THREE.Vector3(...[[1,0,0],[0,1,0],[0,0,1]][thinAxis])
         for (let frame = 0; frame < frames; frame++) {
             root.quaternion.setFromAxisAngle(rotationAxis, frame * Math.PI * 2 / frames)
             renderer.render(scene, camera)
-            context.drawImage(renderer.domElement, frame * 256, 0)
+            context.drawImage(renderer.domElement, (frame % columns) * resolution, Math.floor(frame / columns) * resolution)
             await new Promise(resolve => setTimeout(resolve, 0))
         }
-        const blob = await new Promise(resolve => atlas.toBlob(resolve, "image/jpeg", .85))
+        const blob = await new Promise(resolve => atlas.toBlob(resolve, "image/jpeg", .92))
         if (!blob || blob.size > 2 * 1024 * 1024) throw new Error("Thumbnail export failed")
         return blob
     } finally {
