@@ -1,5 +1,8 @@
 "use client"
 
+import { inferSceneOrientation, fitOrientedBounds } from "./viewer/scan-orientation.mjs"
+import { cameraChanged } from "./viewer/camera-sync.mjs"
+import { createViewerReceiver } from "../public/integrations/viewer-bridge-v1.mjs"
 import ViewerToolsPanel from "./ViewerToolsPanel"
 import ViewerToolIcon from "./ViewerToolIcon"
 import React, { Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react"
@@ -5910,6 +5913,7 @@ function AnyModel({
           })
           setObject3D(obj)
           onLoaded && onLoaded(url)
+          obj.userData.scanName = name || url
           onObjectReady && onObjectReady(obj, url)
           
           let foundMesh = null;
@@ -6454,7 +6458,7 @@ function RightButtonPan({ setTarget, trackballRef, onInteractionChange }) {
 }
 
 /* ---------- AutoCenter & AutoFrame ---------- */
-function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined", setTarget }) {
+function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMobile = false, desktopScale = 1.0, mobileScale = 1.0, centerMode = "combined", setTarget, orientDental = false }) {
   const { camera, size } = useThree()
   
   useEffect(() => {
@@ -6486,8 +6490,12 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
     const dims2 = new THREE.Vector3(), ctr = new THREE.Vector3()
     after.getSize(dims2); after.getCenter(ctr)
 
-    const objW = Math.max(dims2.x, 1e-6)
-    const objH = Math.max(dims2.y, 1e-6)
+    const orientation = orientDental ? inferSceneOrientation(root) : null
+    const front = orientation?.front || new THREE.Vector3(0, 0, 1)
+    const up = orientation?.up || new THREE.Vector3(0, 1, 0)
+    const fitted = fitOrientedBounds(after, front, up)
+    const objW = Math.max(fitted.width, 1e-6)
+    const objH = Math.max(fitted.height, 1e-6)
     const zoomX = size.width / (objW * margin)
     const zoomY = size.height / (objH * margin)
     let newZoom = Math.min(zoomX, zoomY) * (isMobile ? mobileScale : desktopScale)
@@ -6496,8 +6504,9 @@ function AutoCenterAndFrame({ rootRef, triggerKey, onFramed, margin = 1.12, isMo
     const safeDist = depth * 10
     camera.near = Math.max(0.01, safeDist * 0.001)
     camera.far = safeDist * 80 + 200
-    camera.position.set(ctr.x, ctr.y, ctr.z + safeDist)
-    camera.up.set(0, 1, 0)
+    camera.position.copy(ctr).addScaledVector(front, safeDist)
+    camera.up.copy(up)
+    camera.lookAt(ctr)
     camera.zoom = Math.max(newZoom, 0.01)
     camera.updateProjectionMatrix()
       
@@ -6548,32 +6557,23 @@ function CustomCameraSetter({ camState, triggerKey, onFramed, setTarget }) {
 function ViewStateSync({ trackballRef, getViewerState }) {
   const { gl, camera, size } = useThree()
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (typeof window === "undefined" || !trackballRef?.current) return
-      
-      const c = trackballRef.current
-      camera.updateMatrixWorld(true)
-      
-      const camData = {
-        matrix: camera.matrix.toArray(),
-        up: [camera.up.x, camera.up.y, camera.up.z],
-        zoom: camera.zoom,
-        canvasSize: [size.width, size.height],
-        target: [c.target.x, c.target.y, c.target.z] 
-      }
-      
-      const targetWindow = window.top || window.parent;
-      if (targetWindow) {
-        targetWindow.postMessage({
-          type: "SHADE3D_VIEW_SYNC",
-          payload: { camera: camData }
-        }, "*")
-      }
-    }, 500)
-
-    return () => clearInterval(interval)
-  }, [camera, trackballRef, size.width, size.height])
+  const sync = useRef({ observed: null, sent: null, lastSend: -Infinity, lastChange: 0, dirty: false })
+  useFrame(() => {
+    const control = trackballRef?.current
+    if (!control || window.parent === window) return
+    camera.updateMatrixWorld(true)
+    const next = { matrix: camera.matrix.toArray(), up: camera.up.toArray(), zoom: camera.zoom, canvasSize: [size.width, size.height], target: control.target.toArray() }
+    const state = sync.current, now = performance.now()
+    if (cameraChanged(state.observed, next)) { state.observed = next; state.lastChange = now; state.dirty = true }
+    if (!state.dirty) return
+    if (now - state.lastSend < 200 && now - state.lastChange < 120) return
+    state.dirty = false
+    if (!cameraChanged(state.sent, next)) return
+    state.sent = next; state.lastSend = now
+    let origin = "*"
+    try { origin = new URL(document.referrer).origin } catch {}
+    window.parent.postMessage({ type: "SHADE3D_VIEW_SYNC", payload: { camera: next } }, origin)
+  })
 
   useEffect(() => {
     const handleMessage = (e) => {
@@ -16926,6 +16926,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     })()
   }, [applyDicomSource])
 
+  const liveApplyRef = useRef(null)
+  const liveFilesRef = useRef([])
   useEffect(() => {
     const applyLivePayload = (p) => {
       if (!p) return
@@ -16989,7 +16991,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         // ÚPRAVA 7: Zachování kamery, pokud posíláme keepCamera: true
         if (urlsChanged && !p.keepCamera) { 
             setDidInitialFrame(false); 
-            setInitialCameraState(null); 
+            setInitialCameraState(previous => p.preserveSavedCamera ? previous : null);
             isPlaneInitialized.current = false;
             isHorizontalPlaneInitialized.current = false;
             isSliceRigInitialized.current = false;
@@ -17006,10 +17008,21 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         }
       }
     }
-    const onMsg = (e) => { const d = e.data; if (d && LIVE_MSG_TYPES.has(d.type) && d.payload) applyLivePayload(d.payload) }
+    liveFilesRef.current = files.map(file => ({ u: file.url, n: file.rawName || file.name, c: file.c, o: file.o, v: file.v, r: file.r, m: file.m, vc: file.vc, wf: file.wf, gh: file.gh }))
+    liveApplyRef.current = payload => {
+      applyLivePayload(payload)
+      if (Array.isArray(payload.files)) liveFilesRef.current = payload.files
+    }
+    const onMsg = (e) => { const d = e.data; if (d && d.protocolVersion !== 1 && LIVE_MSG_TYPES.has(d.type) && d.payload) liveApplyRef.current(d.payload) }
     window.addEventListener("message", onMsg)
     return () => window.removeEventListener("message", onMsg)
   }, [files, applyDicomSource, hasTexMap])
+
+  useEffect(() => createViewerReceiver({
+    apply: payload => liveApplyRef.current?.(payload),
+    getFiles: () => liveFilesRef.current,
+  }), [])
+
 
   useEffect(() => {
     const onDicomCommand = (event) => {
@@ -21075,6 +21088,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             desktopScale={1.0}
             mobileScale={1.0}
             centerMode={dicomSource ? "combined" : centerMode}
+            orientDental={!alignmentMode && !dicomSource}
             setTarget={setCameraTarget}
           />
         )}

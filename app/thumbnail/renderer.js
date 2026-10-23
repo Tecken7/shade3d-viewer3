@@ -1,4 +1,5 @@
 import * as THREE from "three"
+import { inferSceneOrientation } from "../viewer/scan-orientation.mjs"
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader.js"
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js"
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js"
@@ -40,6 +41,8 @@ export async function renderAttachmentThumbnail(buffer, fileName, turntable = fa
             materials.add(child.material)
         })
         if (!vertexCount) throw new Error("No renderable geometry")
+        object.userData.scanName = fileName
+        const orientation = inferSceneOrientation(object)
         const box = new THREE.Box3().setFromObject(object)
         const size = box.getSize(new THREE.Vector3())
         const largest = Math.max(size.x, size.y, size.z)
@@ -51,7 +54,8 @@ export async function renderAttachmentThumbnail(buffer, fileName, turntable = fa
         root.scale.setScalar(2 / largest)
         // Look toward the broad surface of a scan, avoiding an edge-on thumbnail.
         const thinAxis = [size.x, size.y, size.z].indexOf(Math.min(size.x, size.y, size.z))
-        const direction = [new THREE.Vector3(1, .35, .45), new THREE.Vector3(.35, 1, .45), new THREE.Vector3(.35, .45, 1)][thinAxis].normalize()
+        const up = orientation?.up || new THREE.Vector3(...[[1,0,0],[0,1,0],[0,0,1]][thinAxis])
+        const direction = orientation ? orientation.front.clone().addScaledVector(up, .12).normalize() : [new THREE.Vector3(1, .35, .45), new THREE.Vector3(.35, 1, .45), new THREE.Vector3(.35, .45, 1)][thinAxis].normalize()
         const scene = new THREE.Scene()
         scene.background = new THREE.Color("#111112")
         scene.add(root, new THREE.HemisphereLight(0xffffff, 0x444450, 2.5))
@@ -61,7 +65,8 @@ export async function renderAttachmentThumbnail(buffer, fileName, turntable = fa
         const camera = new THREE.PerspectiveCamera(35, 1, .01, 100)
         const radius = new THREE.Box3().setFromObject(root).getBoundingSphere(new THREE.Sphere()).radius
         camera.position.copy(direction).multiplyScalar(radius / Math.sin(THREE.MathUtils.degToRad(17.5)) * 1.12)
-        if (thinAxis === 1) camera.up.set(0, 0, -1)
+        if (orientation) camera.up.copy(up)
+        else if (thinAxis === 1) camera.up.set(0, 0, -1)
         camera.lookAt(0, 0, 0)
         renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true, powerPreference: "low-power" })
         renderer.setPixelRatio(1)
@@ -80,7 +85,7 @@ export async function renderAttachmentThumbnail(buffer, fileName, turntable = fa
         if (smallAtlas && !smallContext) throw new Error("Small atlas canvas unavailable")
         const context = atlas.getContext("2d")
         if (!context) throw new Error("Canvas unavailable")
-        const rotationAxis = new THREE.Vector3(...[[1,0,0],[0,1,0],[0,0,1]][thinAxis])
+        const rotationAxis = up
         for (let frame = 0; frame < frames; frame++) {
             root.quaternion.setFromAxisAngle(rotationAxis, frame * Math.PI * 2 / frames)
             renderer.render(scene, camera)

@@ -84,3 +84,12 @@ Doplnění používá místní délku hran (0,06–0,30 mm), společné půlení
 Před potvrzením se kontrolují průniky, koplanární překrytí a blízké souběžné vrstvy. Kontakty na společném švu mají toleranci 0,001 mm. Nejde o kompletní detekci všech možných samoprůniků celého vstupního scanu. Výpočet náhledu běží v pracovním vlákně; z čekajících požadavků se zpracuje jen poslední označení.
 
 Ořez zachovává identitu trojúhelníků při vytváření BVH a rozděluje i více samostatných průchodů jednou face. Nejednoznačná nebo vadná křivka se odmítne, místo exportu roztržené plochy. Testy ověřují plochu skutečné ořezové cesty a odstranění původních faces při náhradě lemu.
+
+
+## Komunikace vloženého prohlížeče a první pohled
+
+`public/integrations/viewer-bridge-v1.mjs` je společný transport pro Framer komponenty LabCaseForm a LabCaseDetail. Inicializuje se pro konkrétní iframe, používá HELLO/READY, očíslované aktualizace a ACK po přijetí stavu. ACK nepotvrzuje dokončení načtení geometrie ani uložení. Rychlé změny se slučují, po potvrzení se posílají pouze změny souborů. Opakování bez ACK je omezené; starší viewer má kompatibilní jednorázový fallback. Při zavření editoru je potřeba zavolat `dispose()`. `next.config.mjs` povoluje načítání tohoto veřejného ES modulu z Frameru. Komponenty ve Frameru je potřeba aktualizovat zvlášť; původní komponenty nadále fungují přes původní zprávy.
+
+`app/viewer/scan-orientation.mjs` používají první pohled scény i generátor nových miniatur. Z maximálně 6 000 vrcholů referenčního skenu odhadne rovinu oblouku, uzavřený přední konec a symetrii obrysu. Odhad je heuristický; nejednoznačné geometrie používají původní orientaci. Horní/dolní názvy a jejich vzájemná poloha nebo dostupné normály pomáhají určit směr nahoru. Kamera se natočí bez změny geometrie či vzájemné registrace skenů. Uložená kamera má přednost a DICOM/zarovnávací workspace tuto heuristiku nepoužívá. Spin zůstává standardně zapnutý. Existující uložené miniatury se samy nepřegenerují.
+
+Kamera posílá synchronizaci pouze při změně, maximálně přibližně 5× za sekundu během pohybu a po jeho skončení. Snímek pro uložení nadále zachycuje aktuální kameru na vyžádání. Regrese komunikace a orientace ověřují `tests/viewer-bridge.test.mjs` a `tests/scan-orientation.test.mjs`.
