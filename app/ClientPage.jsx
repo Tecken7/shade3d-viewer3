@@ -1,5 +1,7 @@
 "use client"
 
+import ViewerToolsPanel from "./ViewerToolsPanel"
+import ViewerToolIcon from "./ViewerToolIcon"
 import React, { Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react"
 import { Canvas, useThree, useFrame } from "@react-three/fiber"
 import * as THREE from "three"
@@ -11812,6 +11814,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
   // ÚPRAVA 2: Zapnutý auto-spin ve výchozím stavu a rychlost nastavena na 0.25
   const [isAutoRotating, setIsAutoRotating] = useState(true)
+  const [toolsPanelExpanded, setToolsPanelExpanded] = useState(false)
+  const [spinSettingsOpen, setSpinSettingsOpen] = useState(false)
   const [spinSpeed, setSpinSpeed] = useState(0.25)
   const [spinIconNonce, setSpinIconNonce] = useState(0)
 
@@ -17600,13 +17604,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       position: "absolute",
       top: isMobile ? "auto" : 10,
       bottom: isMobile ? 10 : "auto",
-      right: isMobile ? 10 : (dicomLayoutActive ? "auto" : 10),
-      left: isMobile ? 10 : (dicomLayoutActive ? `calc((100vw - ${dicomPanelWidth} + clamp(260px, 28vw, 420px) + 20px) / 2)` : "auto"),
-      transform: isMobile ? "none" : (dicomLayoutActive ? "translateX(-50%)" : "none"),
+      right: isMobile ? 10 : 80,
+      left: isMobile ? 10 : "auto",
+      transform: "none",
       zIndex: isMobile ? 460 : 10,
-      display: "flex",
-      flexDirection: isMobile ? "column" : (dicomLayoutActive ? "row" : "column"),
-      alignItems: isMobile ? "stretch" : "flex-start",
+      display: !isMobile && toolsPanelExpanded ? "none" : "flex",
+      flexDirection: "column",
+      alignItems: isMobile ? "stretch" : "flex-end",
+      maxHeight: "calc(100dvh - 20px)", overflowY: "auto", overscrollBehavior: "contain",
       gap: isMobile ? 0 : (dicomLayoutActive ? 8 : 10),
       fontFamily: "sans-serif",
       color: "white",
@@ -17614,70 +17619,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       maxWidth: "calc(100vw - 20px)",
     }}>
       
-      <div style={{ width: dicomLayoutActive ? 120 : 270, display: isMobile ? "none" : "block" }}>
-        <button
-          onClick={openAlignmentMode}
-          disabled={files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url))).length < 2}
-          style={{
-            ...viewerToolbarButtonStyle(files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url))).length < 2),
-            opacity: files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url))).length < 2 ? 0.45 : 1,
-          }}
-          title="Zarovnání dvou 3D modelů pomocí bodů a robustního Best Fit"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="8" cy="8" r="3"/><circle cx="16" cy="16" r="3"/><path d="M10.5 10.5l3 3"/><path d="M14 5h5v5"/><path d="M10 19H5v-5"/>
-          </svg>
-          Zarovnání
-        </button>
-      </div>
-
-      <div style={{ width: dicomLayoutActive ? 120 : 270, display: isMobile ? "none" : "block" }}>
-        <button
-          onClick={openTrimMode}
-          disabled={analysisEligibleFiles.length < 1}
-          style={{ ...viewerToolbarButtonStyle(analysisEligibleFiles.length < 1), opacity: analysisEligibleFiles.length < 1 ? 0.45 : 1 }}
-          title="Ořezat jeden 3D scan pomocí uzavřené křivky vedené po povrchu"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M5 6.5c3.5-2 10.5-2 14 0M5 17.5c3.5 2 10.5 2 14 0"/>
-            <path d="M7 5l-2 1.5L7 8M17 16l2 1.5-2 1.5"/>
-            <path d="M8.5 10.5l7 3M15.5 10.5l-7 3"/>
-          </svg>
-          Ořez
-        </button>
-      </div>
-
-      <div style={{ width: dicomLayoutActive ? 120 : 270, display: isMobile ? "none" : "block" }}>
-        <button
-          onClick={openRepairMode}
-          disabled={analysisEligibleFiles.length < 1}
-          style={{ ...viewerToolbarButtonStyle(analysisEligibleFiles.length < 1), opacity: analysisEligibleFiles.length < 1 ? 0.45 : 1 }}
-          title="Automaticky nebo ručně vyhledat a uzavřít díry a trhliny ve scanu"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M4 12c0-4.4 3.6-8 8-8s8 3.6 8 8-3.6 8-8 8"/>
-            <path d="M8.2 12.2c0-2.1 1.7-3.8 3.8-3.8 1.5 0 2.8.8 3.4 2"/>
-            <path d="M12 20H5v-7"/>
-            <path d="M5 20l5-5"/>
-          </svg>
-          Oprava sítě
-        </button>
-      </div>
-
-      <div style={{ width: dicomLayoutActive ? 120 : 270, display: isMobile ? "none" : "block" }}>
-        <button
-          onClick={openCadEmbedded}
-          style={viewerToolbarButtonStyle()}
-          title="Vytvořit tiskový model z nahraných scanů"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M4 9l8-5 8 5v9l-8 4-8-4V9z"/>
-            <path d="M4 9l8 4 8-4M12 13v9M4 15l8 4 8-4"/>
-          </svg>
-          Model Builder
-        </button>
-      </div>
-
       <style dangerouslySetInnerHTML={{__html:`
         @keyframes artheticAnalysisMenuIn { from { opacity:0; transform:translateY(-5px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
         @keyframes artheticAlignMenuIn { from { opacity:0; transform:translateY(-4px) scale(.985); } to { opacity:1; transform:translateY(0) scale(1); } }
@@ -17702,7 +17643,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
       <div style={{
         width: isMobile ? "100%" : (dicomLayoutActive ? 120 : 270),
-        display: isMobile && !heatmapMenuOpen ? "none" : "flex",
+        display: heatmapMenuOpen ? "flex" : "none",
         flexDirection: "column",
         alignItems: "flex-end",
         position: "relative",
@@ -17847,7 +17788,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
       <div style={{
         width: isMobile ? "100%" : (dicomLayoutActive ? 120 : 270),
-        display: isMobile && !comparisonMenuOpen ? "none" : "flex",
+        display: comparisonMenuOpen ? "flex" : "none",
         flexDirection: "column",
         alignItems: "flex-end",
         position: "relative",
@@ -18036,27 +17977,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         </div>
       </div>
 
-      <div style={{ width: dicomLayoutActive ? 120 : 270, display: isMobile ? "none" : "block" }}>
+      <div style={{ width: 270, display: !isMobile && isAutoRotating && spinSettingsOpen ? "block" : "none" }}>
         <button 
           onClick={() => setIsAutoRotating(p => !p)}
           style={viewerToolbarButtonStyle(false, isAutoRotating)}
         >
-          <svg 
-            key={`spin-icon-${isAutoRotating}-${spinIconNonce}`}
-            width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" 
-            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" 
-            style={{
-              animation: isAutoRotating ? "shade3dSpin360 4s linear infinite" : "none",
-              transformOrigin: "50% 50%",
-              transformBox: "fill-box",
-              willChange: "transform",
-            }}
-          >
-            <g transform="translate(24 0) scale(-1 1)">
-              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-              <path d="M3 3v5h5" />
-            </g>
-          </svg>
+          <ViewerToolIcon name="360-spin" />
           360° Spin
         </button>
 
@@ -18093,7 +18019,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       <div
         data-slice-window-anchor="true"
         style={{
-        width: dicomLayoutActive ? 190 : 270, boxSizing: "border-box", display: isMobile ? "none" : "block",
+        width: 270, boxSizing: "border-box", display: !isMobile && clippingEnabled ? "block" : "none",
         background: "rgba(12,12,12,.72)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
         border: clippingEnabled ? "1px solid rgba(74,222,128,.20)" : "1px solid rgba(255,255,255,.10)",
         borderRadius: 11, padding: clippingEnabled ? (dicomLayoutActive ? 8 : "8px 12px") : (dicomLayoutActive ? 8 : "8px 12px"),
@@ -20356,6 +20282,24 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       {alignmentDemoWorkspace}
       {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && !mobileSliceSplitActive && logoEl}
       {!standaloneToolMode && !hideSidebar && !alignmentMode && !trimMode && !repairMode && sidebar}
+      {!standaloneToolMode && !isMobile && !alignmentMode && !trimMode && !repairMode && (
+        <ViewerToolsPanel
+          onExpandedChange={setToolsPanelExpanded}
+          tools={[
+            { id: "zarovnani", label: "Zarovnání", description: "Zarovnat dva modely pomocí bodů a Best Fit.", disabled: analysisEligibleFiles.length < 2, onClick: openAlignmentMode },
+            { id: "orez", label: "Ořez", description: "Odstranit část skenu křivkou po povrchu.", disabled: analysisEligibleFiles.length < 1, onClick: openTrimMode },
+            { id: "oprava-site", label: "Oprava sítě", description: "Vyhledat a uzavřít otvory ve skenu.", disabled: analysisEligibleFiles.length < 1, onClick: openRepairMode },
+            { id: "model-builder", label: "Model Builder", description: "Vytvořit model s bází pro 3D tisk.", onClick: openCadEmbedded },
+            { id: "okluze", label: "Okluze", description: "Změřit kontakty a mezery mezi skeny.", disabled: analysisEligibleFiles.length < 2, active: heatmapMenuOpen || showHeatmap, toggle: true, onClick: () => { setHeatmapMenuOpen(previous => !previous); setComparisonMenuOpen(false) } },
+            { id: "porovnani", label: "Porovnání", description: "Porovnat povrchové odchylky dvou modelů.", disabled: analysisEligibleFiles.length < 2, active: comparisonMenuOpen || showComparison, toggle: true, onClick: () => { setComparisonMenuOpen(previous => !previous); setHeatmapMenuOpen(false) } },
+            { id: "360-spin", label: "360° Spin", description: "Spustit nebo zastavit otáčení modelu.", active: isAutoRotating, toggle: true, onClick: () => { setSpinSettingsOpen(!isAutoRotating); setIsAutoRotating(previous => !previous) } },
+            { id: "prurez", label: "Průřez", description: "Zobrazit řez modelem a nastavit rovinu.", active: clippingEnabled, toggle: true, onClick: () => {
+              if (clippingEnabled && dicomSettings.viewMode === "only2d") setDicomSettings(previous => ({ ...previous, viewMode: "solid" }))
+              setClippingEnabled(previous => !previous)
+            } },
+          ]}
+        />
+      )}
       {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && topBarRight}
 
       {!standaloneToolMode && isMobile && mobileFunctionsOpen && !alignmentMode && (
