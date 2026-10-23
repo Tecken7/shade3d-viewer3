@@ -5,12 +5,11 @@ import { createPortal } from "react-dom"
 import ViewerToolIcon from "./ViewerToolIcon"
 import styles from "./ViewerToolsPanel.module.css"
 
-export default function ViewerToolsPanel({ tools, onExpandedChange }) {
-  const [expanded, setExpanded] = useState(false)
+export default function ViewerToolsPanel({ tools, expanded, onExpandedChange, sliceActive }) {
   const [tooltip, setTooltip] = useState(null)
   const toggleRef = useRef(null)
 
-  useEffect(() => { onExpandedChange?.(expanded) }, [expanded, onExpandedChange])
+  const setExpanded = onExpandedChange
 
   useEffect(() => {
     function onKeyDown(event) {
@@ -23,7 +22,7 @@ export default function ViewerToolsPanel({ tools, onExpandedChange }) {
     }
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
-  }, [expanded])
+  }, [expanded, setExpanded])
 
   function reveal(event, label) {
     if (expanded) return
@@ -32,13 +31,13 @@ export default function ViewerToolsPanel({ tools, onExpandedChange }) {
   }
 
   return (
-    <aside className={`${styles.panel} ${expanded ? styles.expanded : ""}`} aria-label="Nástroje prohlížeče">
+    <aside data-slice-window-anchor="true" style={{ height: 66 + tools.length * (expanded ? 68 : 48) - 4 + (expanded ? tools.reduce((height, tool) => height + (tool.active && tool.controls ? tool.controlsHeight || 70 : 0), 0) : 0), maxHeight: sliceActive ? "calc(100dvh - 190px)" : "calc(100dvh - 20px)" }} className={`${styles.panel} ${expanded ? styles.expanded : ""}`} aria-label="Nástroje prohlížeče">
       <header className={styles.header}>
         <span className={styles.heading} aria-hidden={!expanded}>Nástroje</span>
         <button ref={toggleRef} type="button" className={styles.expandButton}
           aria-label={expanded ? "Sbalit panel nástrojů" : "Rozbalit panel nástrojů"}
           aria-expanded={expanded} aria-controls="viewer-tools-list"
-          onClick={() => { setExpanded(value => !value); setTooltip(null) }}
+          onClick={() => { setExpanded(!expanded); setTooltip(null) }}
           onMouseEnter={event => reveal(event, "Rozbalit panel")}
           onMouseLeave={() => setTooltip(null)}
           onFocus={event => reveal(event, "Rozbalit panel")}
@@ -52,15 +51,14 @@ export default function ViewerToolsPanel({ tools, onExpandedChange }) {
       </header>
       <div id="viewer-tools-list" className={styles.list} onScroll={() => setTooltip(null)}>
         {tools.map(tool => (
-          <button key={tool.id} type="button"
+          <div key={tool.id} className={styles.item}>
+          <button type="button"
             className={`${styles.tool} ${tool.active ? styles.active : ""}`}
             aria-label={tool.label} aria-disabled={!!tool.disabled}
             aria-pressed={tool.toggle ? !!tool.active : undefined}
             onClick={() => {
               if (tool.disabled) return
               setTooltip(null)
-              // Collapse before opening tool settings so the model keeps its space.
-              setExpanded(false)
               tool.onClick()
             }}
             onMouseEnter={event => reveal(event, tool.label)}
@@ -74,6 +72,10 @@ export default function ViewerToolsPanel({ tools, onExpandedChange }) {
             </span>
             {tool.active && <span className={styles.activeDot} aria-hidden="true" />}
           </button>
+          {tool.controls && <div className={styles.controls} style={{ height: expanded && tool.active ? tool.controlsHeight || 70 : 0, opacity: expanded && tool.active ? 1 : 0 }} inert={expanded && tool.active ? undefined : ""} aria-hidden={!expanded || !tool.active}>
+            <div className={styles.controlsInner}>{tool.controls}</div>
+          </div>}
+          </div>
         ))}
       </div>
       {!expanded && tooltip && createPortal(

@@ -6661,22 +6661,26 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
   const userResizedRef = useRef(false)
 
   const setDefaultWindowSize = useCallback(() => {
-    if (embedded || userResizedRef.current || typeof window === "undefined") return
+    if (embedded || typeof window === "undefined") return
     const anchor = document.querySelector('[data-slice-window-anchor="true"]')
     const anchorBottom = anchor?.getBoundingClientRect().bottom ?? 140
-    const availableHeight = window.innerHeight - anchorBottom - 30
-    setWinSize({
-      w: Math.min(550, Math.max(320, window.innerWidth - 40)),
-      h: Math.max(220, availableHeight),
-    })
+    const availableHeight = Math.max(0, window.innerHeight - anchorBottom - 30)
+    setWinSize(previous => ({
+      w: Math.min(userResizedRef.current ? previous.w : 550, Math.max(0, window.innerWidth - 40)),
+      h: userResizedRef.current ? Math.min(previous.h, availableHeight) : availableHeight,
+    }))
   }, [embedded])
 
   useEffect(() => {
     if (embedded) return
     const frame = requestAnimationFrame(setDefaultWindowSize)
     window.addEventListener("resize", setDefaultWindowSize)
+    const anchor = document.querySelector('[data-slice-window-anchor="true"]')
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(setDefaultWindowSize) : null
+    if (anchor) observer?.observe(anchor)
     return () => {
       cancelAnimationFrame(frame)
+      observer?.disconnect()
       window.removeEventListener("resize", setDefaultWindowSize)
     }
   }, [embedded, setDefaultWindowSize])
@@ -6856,7 +6860,9 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
           if (dir.includes('right')) newW = startW + (me.clientX - startX)
           if (dir.includes('top')) newH = startH + (startY - me.clientY)
 
-          setWinSize({ w: Math.max(250, newW), h: Math.max(200, newH) })
+          const anchor = document.querySelector('[data-slice-window-anchor="true"]')
+          const maxHeight = Math.max(0, window.innerHeight - (anchor?.getBoundingClientRect().bottom ?? 0) - 30)
+          setWinSize({ w: Math.min(window.innerWidth - 40, Math.max(250, newW)), h: Math.min(maxHeight, Math.max(160, newH)) })
       }
       let finished = false
       const onUp = (upEvent) => {
@@ -11815,7 +11821,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   // ÚPRAVA 2: Zapnutý auto-spin ve výchozím stavu a rychlost nastavena na 0.25
   const [isAutoRotating, setIsAutoRotating] = useState(true)
   const [toolsPanelExpanded, setToolsPanelExpanded] = useState(false)
-  const [spinSettingsOpen, setSpinSettingsOpen] = useState(false)
   const [spinSpeed, setSpinSpeed] = useState(0.25)
   const [spinIconNonce, setSpinIconNonce] = useState(0)
 
@@ -17977,90 +17982,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         </div>
       </div>
 
-      <div style={{ width: 270, display: !isMobile && isAutoRotating && spinSettingsOpen ? "block" : "none" }}>
-        <button 
-          onClick={() => setIsAutoRotating(p => !p)}
-          style={viewerToolbarButtonStyle(false, isAutoRotating)}
-        >
-          <ViewerToolIcon name="360-spin" />
-          360° Spin
-        </button>
 
-        <div style={{
-          width: dicomLayoutActive ? 266 : "auto",
-          maxHeight: isAutoRotating ? "100px" : "0px",
-          opacity: isAutoRotating ? 1 : 0,
-          overflow: "hidden",
-          transition: "max-height 0.4s ease-in-out, opacity 0.3s ease",
-          pointerEvents: isAutoRotating ? "auto" : "none"
-        }}>
-          <div style={{
-            marginTop: 8,
-            background: "rgba(0,0,0,.85)", backdropFilter: "blur(8px)",
-            border: "1px solid rgba(255,255,255,.2)", borderRadius: 10,
-            padding: 12, width: 240, color: "white", boxShadow: "0 10px 30px rgba(0,0,0,0.5)"
-          }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 12, fontWeight: "bold", color: "#ccc" }}>
-              <span>Rychlost rotace</span>
-              <span>{Math.round(spinSpeed * 100)}%</span>
-            </div>
-            <input 
-              className="slider" 
-              type="range" 
-              min={0.05} max={1} step={0.05} 
-              value={spinSpeed} 
-              onChange={(e) => setSpinSpeed(parseFloat(e.target.value))} 
-              style={{ width: "100%" }} 
-            />
-          </div>
-        </div>
-      </div>
-
-      <div
-        data-slice-window-anchor="true"
-        style={{
-        width: 270, boxSizing: "border-box", display: !isMobile && clippingEnabled ? "block" : "none",
-        background: "rgba(12,12,12,.72)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
-        border: clippingEnabled ? "1px solid rgba(74,222,128,.20)" : "1px solid rgba(255,255,255,.10)",
-        borderRadius: 11, padding: clippingEnabled ? (dicomLayoutActive ? 8 : "8px 12px") : (dicomLayoutActive ? 8 : "8px 12px"),
-        color: clippingEnabled ? "#c8f8d5" : "#ededed",
-        fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
-        transition: "background .16s ease, border-color .16s ease, color .16s ease",
-      }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: dicomLayoutActive ? "space-between" : "center", gap: 7, position: "relative", minHeight: 22, fontSize: 12, fontWeight: 680, letterSpacing: "-.01em" }}>
-          <Switch
-            checked={clippingEnabled}
-            onChange={(checked) => {
-              if (!checked && dicomSettings.viewMode === "only2d") {
-                setDicomSettings((previous) => ({ ...previous, viewMode: "solid" }))
-              }
-              setClippingEnabled(checked)
-            }}
-            label="Průřez"
-          />
-          {clippingEnabled && (
-            <button 
-              onClick={handleResetPlane}
-              style={{
-                position: dicomLayoutActive ? "static" : "absolute", right: dicomLayoutActive ? "auto" : 0,
-                background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.09)",
-                borderRadius: 8, color: "#bdbdbd", padding: "4px 8px", fontSize: 9.5, fontWeight: 650, cursor: "pointer",
-                transition: "background .16s ease, color .16s ease, border-color .16s ease"
-              }}
-              title="Vrátí průřez do výchozí pozice uprostřed modelu"
-            >
-              Reset
-            </button>
-          )}
-        </div>
-        {clippingEnabled && !dicomLayoutActive && (
-          <div style={{ marginTop: 12, fontSize: 12, width: 220 }}>
-            <p style={{ margin: 0, color: "#ccc", lineHeight: 1.4 }}>
-              Táhněte za <b>modrou osu</b> pro posun nebo za barevný kruh pro natočení roviny řezu.
-            </p>
-          </div>
-        )}
-      </div>
     </div>
   )
 
@@ -20284,7 +20206,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       {!standaloneToolMode && !hideSidebar && !alignmentMode && !trimMode && !repairMode && sidebar}
       {!standaloneToolMode && !isMobile && !alignmentMode && !trimMode && !repairMode && (
         <ViewerToolsPanel
+          expanded={toolsPanelExpanded}
           onExpandedChange={setToolsPanelExpanded}
+          sliceActive={clippingEnabled && !dicomLayoutActive}
           tools={[
             { id: "zarovnani", label: "Zarovnání", description: "Zarovnat dva modely pomocí bodů a Best Fit.", disabled: analysisEligibleFiles.length < 2, onClick: openAlignmentMode },
             { id: "orez", label: "Ořez", description: "Odstranit část skenu křivkou po povrchu.", disabled: analysisEligibleFiles.length < 1, onClick: openTrimMode },
@@ -20292,8 +20216,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             { id: "model-builder", label: "Model Builder", description: "Vytvořit model s bází pro 3D tisk.", onClick: openCadEmbedded },
             { id: "okluze", label: "Okluze", description: "Změřit kontakty a mezery mezi skeny.", disabled: analysisEligibleFiles.length < 2, active: heatmapMenuOpen || showHeatmap, toggle: true, onClick: () => { setHeatmapMenuOpen(previous => !previous); setComparisonMenuOpen(false) } },
             { id: "porovnani", label: "Porovnání", description: "Porovnat povrchové odchylky dvou modelů.", disabled: analysisEligibleFiles.length < 2, active: comparisonMenuOpen || showComparison, toggle: true, onClick: () => { setComparisonMenuOpen(previous => !previous); setHeatmapMenuOpen(false) } },
-            { id: "360-spin", label: "360° Spin", description: "Spustit nebo zastavit otáčení modelu.", active: isAutoRotating, toggle: true, onClick: () => { setSpinSettingsOpen(!isAutoRotating); setIsAutoRotating(previous => !previous) } },
-            { id: "prurez", label: "Průřez", description: "Zobrazit řez modelem a nastavit rovinu.", active: clippingEnabled, toggle: true, onClick: () => {
+            { id: "360-spin", label: "360° Spin", description: "Spustit nebo zastavit otáčení modelu.", active: isAutoRotating, toggle: true, onClick: () => setIsAutoRotating(previous => !previous), controlsHeight: 76, controls: <><div style={{ display: "flex", justifyContent: "space-between" }}><span>Rychlost rotace</span><span>{Math.round(spinSpeed * 100)} %</span></div><input aria-label="Rychlost rotace" type="range" min={0.05} max={1} step={0.05} value={spinSpeed} onChange={event => setSpinSpeed(Number(event.target.value))} /></> },
+            { id: "prurez", label: "Průřez", description: "Zobrazit řez modelem a nastavit rovinu.", active: clippingEnabled, toggle: true, controlsHeight: 54, controls: <button type="button" onClick={handleResetPlane}>Reset průřezu</button>, onClick: () => {
               if (clippingEnabled && dicomSettings.viewMode === "only2d") setDicomSettings(previous => ({ ...previous, viewMode: "solid" }))
               setClippingEnabled(previous => !previous)
             } },
