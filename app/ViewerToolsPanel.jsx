@@ -31,7 +31,7 @@ export default function ViewerToolsPanel({ tools, expanded, onExpandedChange, sl
   }
 
   return (
-    <aside data-slice-window-anchor="true" style={{ height: 66 + tools.length * (expanded ? 68 : 48) - 4 + (expanded ? tools.reduce((height, tool) => height + (tool.active && tool.controls ? tool.controlsHeight || 70 : 0), 0) : 0), maxHeight: sliceActive ? "calc(100dvh - 190px)" : "calc(100dvh - 20px)" }} className={`${styles.panel} ${expanded ? styles.expanded : ""}`} aria-label="Nástroje prohlížeče">
+    <aside data-slice-window-anchor="true" style={{ height: 66 + tools.length * (expanded ? 68 : 48) - 4, maxHeight: sliceActive ? "calc(100dvh - 190px)" : "calc(100dvh - 20px)" }} className={`${styles.panel} ${expanded ? styles.expanded : ""}`} aria-label="Nástroje prohlížeče">
       <header className={styles.header}>
         <span className={styles.heading} aria-hidden={!expanded}>Nástroje</span>
         <button ref={toggleRef} type="button" className={styles.expandButton}
@@ -66,13 +66,13 @@ export default function ViewerToolsPanel({ tools, expanded, onExpandedChange, sl
             onFocus={event => reveal(event, tool.label)}
             onBlur={() => setTooltip(null)}>
             <span className={styles.icon}><ViewerToolIcon name={tool.id} /></span>
-            <span className={styles.copy} aria-hidden={!expanded}>
+            <span className={`${styles.copy} ${tool.controls ? styles.withControls : ""}`} aria-hidden={!expanded}>
               <span className={styles.name}>{tool.label}</span>
-              <span className={styles.description}>{tool.description}</span>
+              {tool.description && <span className={styles.description}>{tool.description}</span>}
             </span>
             {tool.active && <span className={styles.activeDot} aria-hidden="true" />}
           </button>
-          {tool.controls && <div className={styles.controls} style={{ height: expanded && tool.active ? tool.controlsHeight || 70 : 0, opacity: expanded && tool.active ? 1 : 0 }} inert={expanded && tool.active ? undefined : ""} aria-hidden={!expanded || !tool.active}>
+          {tool.controls && <div className={styles.controls} style={{ opacity: expanded && tool.active ? 1 : 0, visibility: expanded && tool.active ? "visible" : "hidden" }} inert={expanded && tool.active ? undefined : ""} aria-hidden={!expanded || !tool.active}>
             <div className={styles.controlsInner}>{tool.controls}</div>
           </div>}
           </div>
