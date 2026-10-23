@@ -68,7 +68,7 @@ export default function ViewerToolsPanel({ tools, expanded, onExpandedChange, sl
             <span className={styles.icon}><ViewerToolIcon name={tool.id} /></span>
             <span className={`${styles.copy} ${tool.controls ? styles.withControls : ""}`} aria-hidden={!expanded}>
               <span className={styles.name}>{tool.label}</span>
-              {tool.description && <span className={styles.description}>{tool.description}</span>}
+              {tool.description && <span className={`${styles.description} ${tool.controls && tool.active ? styles.descriptionHidden : ""}`} aria-hidden={!!(tool.controls && tool.active)}>{tool.description}</span>}
             </span>
             {tool.active && <span className={styles.activeDot} aria-hidden="true" />}
           </button>
