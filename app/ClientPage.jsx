@@ -5839,7 +5839,7 @@ function AnyModel({
     const abort = new AbortController()
     ;(async () => {
       try {
-        const prepared = await loadPreparedSceneModel({ url, ext, autoSmooth, smoothAngle }, progress => onLoadProgress?.(url, progress), abort.signal).catch(error => {
+        const prepared = await loadPreparedSceneModel({ url, ext, autoSmooth, smoothAngle }, (progress, stage) => onLoadProgress?.(url, progress, stage), abort.signal).catch(error => {
           if (error.name === "AbortError") throw error
           console.warn("Falling back to main-thread model loader:", error.message)
           return null
@@ -13024,7 +13024,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   
   const [loadedUrls, setLoadedUrls] = useState(new Set())
   const [modelLoadProgress, setModelLoadProgress] = useState({})
-  const handleModelLoadProgress = useCallback((url, progress) => {
+  const [modelLoadStages, setModelLoadStages] = useState({})
+  const handleModelLoadProgress = useCallback((url, progress, stage) => {
+    if (stage) setModelLoadStages(previous => previous[url] === stage ? previous : { ...previous, [url]: stage })
     const value = Math.floor(Math.max(0, Math.min(.95, progress)) * 100) / 100
     setModelLoadProgress(previous => previous[url] === value ? previous : { ...previous, [url]: value })
   }, [])
@@ -20607,7 +20609,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
       {/* OVERLAY BĚHEM NAČÍTÁNÍ MODELŮ */}
       {sceneLoaderVisible && (() => {
-        const loadedCount = files.filter((file) => loadedUrls.has(file.url)).length
+        const pendingStages = files.filter(file => !loadedUrls.has(file.url)).map(file => modelLoadStages[file.url])
+        const loadStatus = !sceneIsLoading ? "Připraveno" : sceneManifestLoading ? "Načítám scénu…"
+          : pendingStages.includes("optimizing") ? "Připravuji geometrii…"
+          : pendingStages.includes("parsing") ? "Zpracovávám modely…"
+          : pendingStages.includes("finalizing") ? "Připravuji scénu…" : "Načítám modely…"
         const loadPercent = sceneIsLoading ? Math.round(files.reduce((sum, file) => sum + (loadedUrls.has(file.url) ? 1 : modelLoadProgress[file.url] || 0), 0) / Math.max(1, files.length) * 100) : 100
         return (
           <div data-scene-loader="true" style={{
@@ -20618,8 +20624,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             pointerEvents: sceneLoaderExiting ? "none" : "auto",
             color: "white", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
           }}>
-            <div role="status" aria-live="polite" aria-label={`Načítání 3D scény: ${loadPercent} %`} style={{
-              width: 292, maxWidth: "calc(100vw - 40px)", padding: "28px 26px 22px", borderRadius: 16,
+            <div role="status" aria-live="polite" aria-label={`${loadStatus} ${loadPercent} %`} style={{
+              boxSizing: "border-box", width: 266, maxWidth: "calc(100vw - 40px)", padding: 22, borderRadius: 16,
               background: "rgba(12,12,12,.96)", border: "1px solid rgba(255,255,255,.09)",
               boxShadow: "0 24px 70px rgba(0,0,0,.52)",
               transform: sceneLoaderExiting ? "translateY(-6px) scale(.985)" : "translateY(0) scale(1)",
@@ -20634,7 +20640,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                   <span className="scene-loading-fill" style={{ transform: `scaleX(${loadPercent / 100})` }} />
                   <span className="scene-loading-activity" aria-hidden="true" />
                 </div>
-                <div style={{ marginTop: 10, textAlign: "right", color: "#a3a3a3", fontSize: 10, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{loadPercent} %</div>
+                <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, color: "#a3a3a3", fontSize: 10, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+                  <span>{loadStatus}</span><span style={{ flexShrink: 0 }}>{loadPercent} %</span>
+                </div>
               </div>
             </div>
           </div>

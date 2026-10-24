@@ -14,7 +14,7 @@ export function loadPreparedSceneModel(options,onProgress,signal){
     worker=new Worker(new URL('../workers/scene-loading.worker.js',import.meta.url),{type:'module'})
     signal?.addEventListener('abort',abort,{once:true})
     worker.onmessage=({data})=>{
-     if(data.type==='progress')onProgress?.(data.progress)
+     if(data.type==='progress')onProgress?.(data.progress,data.stage)
      else if(data.type==='error')finish(new Error(data.error))
      else if(data.type==='result'){try{const r=data.result;finish(null,r.object?{object:unpackObject(r.object)}:{geometry:unpackGeometry(r.geometry),base:r.base?unpackGeometry(r.base):null})}catch(e){finish(e)}}
     }

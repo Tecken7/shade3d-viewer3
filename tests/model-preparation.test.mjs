@@ -23,10 +23,10 @@ test('actual preparation worker parses STL, PLY and OBJ and reports progress',as
  const script=`const {parentPort}=require('node:worker_threads');globalThis.self={postMessage:(data,transfer)=>parentPort.postMessage(data,transfer)};import(${JSON.stringify(entry)}).then(()=>parentPort.on('message',data=>self.onmessage({data})));`
  const fixtures={obj:triangle,stl:'solid scan\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid scan',ply:'ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nelement face 1\nproperty list uchar int vertex_indices\nend_header\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n'}
  for(const [ext,text]of Object.entries(fixtures)){
-  const worker=new Worker(script,{eval:true});const progress=[]
-  try{const result=await new Promise((resolve,reject)=>{worker.on('error',reject);worker.on('message',data=>{if(data.type==='progress')progress.push(data.progress);if(data.type==='error')reject(new Error(data.error));if(data.type==='result')resolve(data.result)});worker.postMessage({url:'data:application/octet-stream;base64,'+Buffer.from(text).toString('base64'),ext,autoSmooth:true,smoothAngle:30})})
+  const worker=new Worker(script,{eval:true});const progress=[],stages=[]
+  try{const result=await new Promise((resolve,reject)=>{worker.on('error',reject);worker.on('message',data=>{if(data.type==='progress'){progress.push(data.progress);stages.push(data.stage);}if(data.type==='error')reject(new Error(data.error));if(data.type==='result')resolve(data.result)});worker.postMessage({url:'data:application/octet-stream;base64,'+Buffer.from(text).toString('base64'),ext,autoSmooth:true,smoothAngle:30})})
    const geometry=ext==='obj'?unpackObject(result.object).children[0].geometry:unpackGeometry(result.base||result.geometry)
-   assert.equal(geometry.attributes.position.count,3);assert(geometry.attributes.normal);assert(progress.includes(.9))
+   assert.equal(geometry.attributes.position.count,3);assert(geometry.attributes.normal);assert(progress.includes(.9));assert.deepEqual([...new Set(stages)],['downloading','parsing','optimizing','finalizing'])
   }finally{await worker.terminate()}
  }
 })
