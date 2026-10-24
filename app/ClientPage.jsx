@@ -12067,7 +12067,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [clippingEnabled, setClippingEnabled] = useState(false)
   const [sliceDefined, setSliceDefined] = useState(false)
   const [sliceDrawing, setSliceDrawing] = useState(false)
-  const sliceAwaiting = clippingEnabled && !dicomSource && !sliceDefined
+  const sliceAwaiting = clippingEnabled && !sliceDefined
   useEffect(() => { if (!clippingEnabled) setSliceDefined(false) }, [clippingEnabled])
   const [sliceRigGroup, setSliceRigGroup] = useState(null)
   const [planeGroup, setPlaneGroup] = useState(null) 
@@ -12094,16 +12094,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [horizontalSliceBBox, setHorizontalSliceBBox] = useState(null)
   const [horizontalDicomSlice2D, setHorizontalDicomSlice2D] = useState(null)
   const [horizontalMeasureState, setHorizontalMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
-
-  // DICOM rozvržení používá oba řezy automaticky. Efekt se spustí při dokončení
-  // načtení CT, uživatel ale může průřezy následně ručně vypnout.
-  useEffect(() => {
-    if (dicomSource && dicomStatus === "ready") setClippingEnabled(true)
-  }, [dicomSource, dicomStatus])
-
-  useEffect(() => {
-    if (dicomSource && dicomSettings.viewMode === "only2d") setClippingEnabled(true)
-  }, [dicomSource, dicomSettings.viewMode])
 
   const [mobileFunctionsOpen, setMobileFunctionsOpen] = useState(false)
   const [mobileFunctionsSheetHeight, setMobileFunctionsSheetHeight] = useState(null)
@@ -16377,9 +16367,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
     rootGroupRef.current.updateMatrixWorld(true)
     const dicomSceneMatrix = rootGroupRef.current.matrixWorld
-    const dicomSlice = dicomVolume && dicomSettings.visible !== false
-      ? buildDicomSliceImage(dicomVolume, dicomSettings, planeMatrix, dicomResolution, dicomSceneMatrix)
-      : null
+    const dicomSlice = null // Solid CT is sliced as a surface, just like the other models.
 
     if (dicomSlice?.bounds) {
       const bounds = dicomSlice.bounds
@@ -16519,7 +16507,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       }))
     }
 
-    if (pendingViewerState.clipping?.enabled || pendingViewerState.dicom || dicomSource) {
+    if (pendingViewerState.clipping?.enabled) {
       if (pendingViewerState.clipping) pendingClipStateRef.current = pendingViewerState.clipping
       setSliceDefined(!!pendingViewerState.clipping?.enabled)
       setClippingEnabled(true)
@@ -16610,7 +16598,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
   useEffect(() => {
     const savedClip = pendingClipStateRef.current
-    if (!savedClip || !clippingEnabled || !sliceRigGroup || !planeGroup || (dicomSource && !isMobile && !horizontalPlaneGroup)) return
+    if (!savedClip || !clippingEnabled || !sliceRigGroup || !planeGroup) return
 
     const compatibleRig = savedClip.rigVersion === 1 && Array.isArray(savedClip.rigMatrix) && savedClip.rigMatrix.length === 16
     if (compatibleRig) {
@@ -16734,58 +16722,17 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [sliceRigGroup, planeGroup, getSliceSceneBounds, updateClippingLogic])
 
   const handleResetPlane = useCallback(() => {
-    if (!dicomSource) {
-      setSliceDefined(false)
-      setSliceSegments([]); setSliceBBox(null); setDicomSlice2D(null)
-      setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
-      return
-    }
-    if (!rootGroupRef.current || !sliceRigGroup || !planeGroup) {
-       isPlaneInitialized.current = false;
-       isHorizontalPlaneInitialized.current = false;
-       isSliceRigInitialized.current = false;
-       return;
-    }
-    const box = getSliceSceneBounds()
-    if (!box.isEmpty()) {
-       const center = new THREE.Vector3()
-       box.getCenter(center)
-
-       sliceRigGroup.position.copy(center)
-       sliceRigGroup.rotation.set(0, 0, 0)
-       sliceRigGroup.scale.set(1, 1, 1)
-
-       planeGroup.position.set(0, 0, 0)
-       planeGroup.rotation.set(0, Math.PI / 2, 0)
-       planeGroup.scale.set(1, 1, 1)
-
-       if (horizontalPlaneGroup) {
-         horizontalPlaneGroup.position.set(0, 0, 0)
-         horizontalPlaneGroup.rotation.set(0, 0, 0)
-         horizontalPlaneGroup.scale.set(1, 1, 1)
-       }
-
-       sliceRigGroup.updateMatrixWorld(true)
-       sliceRigMatrixRef.current.copy(sliceRigGroup.matrix)
-       planeMatrixRef.current.copy(planeGroup.matrix)
-       if (horizontalPlaneGroup) horizontalPlaneMatrixRef.current.copy(horizontalPlaneGroup.matrix)
-       isSliceRigInitialized.current = true
-       isPlaneInitialized.current = true
-       isHorizontalPlaneInitialized.current = !!horizontalPlaneGroup
-       updateClippingLogic()
-       if (horizontalPlaneGroup) updateHorizontalClippingLogic()
-
-       setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
-       setHorizontalMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
-    }
-  }, [dicomSource, sliceRigGroup, planeGroup, horizontalPlaneGroup, getSliceSceneBounds, updateClippingLogic, updateHorizontalClippingLogic])
+    setSliceDefined(false)
+    setSliceSegments([]); setSliceBBox(null); setDicomSlice2D(null)
+    setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
+  }, [])
 
   useEffect(() => {
-    const ready = clippingEnabled && !sliceAwaiting && rootGroupRef.current && sliceRigGroup && planeGroup && (!dicomSource || isMobile || horizontalPlaneGroup)
+    const ready = clippingEnabled && !sliceAwaiting && rootGroupRef.current && sliceRigGroup && planeGroup
     if (ready) {
       // Drawn scans already have their exact world plane. Initialization is for
       // DICOM/default/restored planes; it must not overwrite a drawing or gizmo.
-      if (!dicomSource && sliceDefined) {
+      if (sliceDefined) {
         sliceRigGroup.updateWorldMatrix(true, true)
         updateClippingLogic()
         return
@@ -17455,7 +17402,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     </>
   )
 
-  const dicomLayoutActive = !!dicomSource && dicomStatus === "ready" && !isMobile && !alignmentMode
+  const dicomLayoutActive = false // CT uses the same user-drawn single section as scans.
   const dicomPanelWidth = "clamp(360px, 34vw, 560px)"
   const activePlaneGroup = activeSlice === "horizontal" ? horizontalPlaneGroup : planeGroup
 
@@ -18037,7 +17984,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
   const alignmentBottomHeight = "38vh"
   const alignmentSceneInsetActive = alignmentMode && alignmentTransition !== "exiting"
-  const mobileSliceSplitActive = isMobile && clippingEnabled && !dicomLayoutActive && !dicomSource && !alignmentMode
+  const mobileSliceSplitActive = isMobile && clippingEnabled && !dicomLayoutActive && !alignmentMode
   const mobileSlicePaneHeight = "min(40dvh, 390px)"
   const alignmentEligibleFiles = files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url)))
   const alignmentPair = getAlignmentPair()
@@ -20776,7 +20723,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       )}
 
       {!alignmentMode && !dicomLayoutActive && clippingEnabled && !isMobile && (
-        <Overlay2D awaitingDraw={sliceAwaiting} onRedraw={!dicomSource && !toolsPanelExpanded ? handleResetPlane : undefined} segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />
+        <Overlay2D awaitingDraw={sliceAwaiting} onRedraw={!toolsPanelExpanded ? handleResetPlane : undefined} segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />
       )}
 
       {mobileSliceSplitActive && (
@@ -20813,7 +20760,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           touchAction: "none", overscrollBehavior: "contain",
         }}>
           <Overlay2D
-            embedded mobile awaitingDraw={sliceAwaiting} onRedraw={!dicomSource && !toolsPanelExpanded ? handleResetPlane : undefined} title="Průřez · 2D"
+            embedded mobile awaitingDraw={sliceAwaiting} onRedraw={!toolsPanelExpanded ? handleResetPlane : undefined} title="Průřez · 2D"
             segments={sliceSegments}
             modelColors={colors}
             boundingBox={sliceBBox}
