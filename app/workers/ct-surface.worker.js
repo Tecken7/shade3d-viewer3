@@ -5,7 +5,7 @@ self.onmessage=({data})=>{
  try {
   if(data.type==='init'){volume=data.volume;fields.clear();return}
   if(!volume)throw Error('CT volume unavailable')
-  const started=performance.now(),levels=[Math.min(128,data.detail),data.detail].filter((v,i,a)=>a.indexOf(v)===i)
+  const started=performance.now(),levels=[data.detail]
   for(let i=0;i<levels.length;i++){
    let resolution=levels[i],surface
    while(true){

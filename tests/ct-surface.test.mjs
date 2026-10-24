@@ -35,8 +35,8 @@ test('engine transfers the source once, coalesces thresholds, and caches the fin
  request(100);request(110);request(120);assert.equal(worker.messages.length,2);worker.reply();assert.equal(worker.messages.at(-1).iso,120);assert.equal(received.length,0);worker.reply();assert.deepEqual(received,[[120,true]])
  const count=worker.messages.length;request(120);assert.equal(worker.messages.length,count);assert.equal(received.length,2);engine.dispose();assert(worker.terminated)
 })
-test('actual worker returns progressive meshes with conserved dimensions',async()=>{
+test('actual worker returns one stable mesh with conserved dimensions',async()=>{
  const entry=new URL('../app/workers/ct-surface.worker.js',import.meta.url).href,script=`const {parentPort}=require('node:worker_threads');globalThis.self={postMessage:(data,transfer)=>parentPort.postMessage(data,transfer)};import(${JSON.stringify(entry)}).then(()=>parentPort.on('message',data=>self.onmessage({data})));`
  const worker=new Worker(script,{eval:true}),surfaces=[]
- try{const result=await new Promise((resolve,reject)=>{worker.on('error',reject);worker.on('message',data=>{if(data.type==='error')reject(Error(data.error));if(data.type==='surface'){surfaces.push(data);if(data.final)resolve(data.surface)}});worker.postMessage({type:'init',volume:sphere(40)});worker.postMessage({type:'build',id:1,iso:100,detail:160})});assert(result.triangles>0);assert.equal(surfaces.length,2);assert.equal(surfaces[0].final,false);assert.equal(surfaces[1].final,true);assert(result.positions.buffer.byteLength>0)}finally{await worker.terminate()}
+ try{const result=await new Promise((resolve,reject)=>{worker.on('error',reject);worker.on('message',data=>{if(data.type==='error')reject(Error(data.error));if(data.type==='surface'){surfaces.push(data);if(data.final)resolve(data.surface)}});worker.postMessage({type:'init',volume:sphere(40)});worker.postMessage({type:'build',id:1,iso:100,detail:160})});assert(result.triangles>0);assert.equal(surfaces.length,1);assert.equal(surfaces[0].final,true);assert(result.positions.buffer.byteLength>0)}finally{await worker.terminate()}
 })

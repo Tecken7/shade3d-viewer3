@@ -3538,7 +3538,7 @@ function DicomVolume({ volume, settings, interactive = false, sceneRootRef = nul
     syncWorldMatrix()
     const moving = interactive || !!cameraInteractingRef?.current
     if (solid && surfaceGeometries.preview && meshRef.current) {
-      meshRef.current.geometry = moving ? surfaceGeometries.preview : (surfaceGeometries.fine || surfaceGeometries.preview)
+      meshRef.current.geometry = surfaceGeometries.fine || surfaceGeometries.preview
     } else if (material && volume) {
       material.uniforms.uInteractive.value = moving && settings.viewMode === "light" ? 1 : 0
       material.uniforms.uStep.value = (moving ? 1.5 : .9) / Math.max(volume.width, volume.height, volume.depth)
@@ -11954,7 +11954,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [dicomVolume, setDicomVolume] = useState(null)
   const [dicomSurfaceStatus, setDicomSurfaceStatus] = useState("idle")
   const [dicomConversionDraft, setDicomConversionDraft] = useState(null)
-  useEffect(() => { setDicomConversionDraft(null) }, [dicomSource?.u, dicomVolume])
+  const pendingDicomPreparationRef = useRef(null)
+  useEffect(() => {
+    setDicomConversionDraft(null)
+    if (dicomVolume && pendingDicomPreparationRef.current === dicomSource?.u) {
+      pendingDicomPreparationRef.current = null
+      setDicomConversionDraft({ densityMin: dicomSettings.densityMin, densityMax: dicomSettings.densityMax, preset: dicomSettings.preset })
+    }
+  }, [dicomSource?.u, dicomVolume])
   const dicomSurfaceMeshRef = useRef(null)
   const [dicomStatus, setDicomStatus] = useState("idle")
   const [dicomProgress, setDicomProgress] = useState(0)
@@ -11968,6 +11975,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const applyDicomSource = useCallback((source) => {
     const changed = sliceSourceChanged(appliedDicomSourceRef.current, source)
     appliedDicomSourceRef.current = source?.u ? source : null
+    if (changed) pendingDicomPreparationRef.current = source?.u && source.prepareSurface !== false ? source.u : null
     if (!source?.u && !changed) return
     if (!source?.u) {
       dicomAbortRef.current?.abort()
@@ -16906,7 +16914,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf, gh: x.gh !== undefined ? !!x.gh : undefined
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera, m?.viewer_state)
-          applyDicomSource(m?.dicom || null)
+          applyDicomSource(m?.dicom ? { ...m.dicom, prepareSurface: false } : null)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -16923,7 +16931,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf, gh: x.gh !== undefined ? !!x.gh : undefined
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera, m?.viewer_state)
-          applyDicomSource(m?.dicom || null)
+          applyDicomSource(m?.dicom ? { ...m.dicom, prepareSurface: false } : null)
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
