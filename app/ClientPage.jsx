@@ -13,6 +13,8 @@ import { placeDrawnSlice, sliceSourceChanged, sliceSurfaceFit } from "./viewer/s
 import SliceEmptyState from "./SliceEmptyState"
 import { DICOM_VERTEX_SHADER, DICOM_FRAGMENT_SHADER } from "./viewer/dicom-shaders.mjs"
 import AnimatedSceneLoader, { useLoaderPresence } from "./AnimatedSceneLoader"
+import { ctIsoLevel } from "./viewer/ct-surface-options.mjs"
+import { createCtSurfaceEngine } from "./viewer/ct-surface-engine.js"
 import { sampleDicomTrilinear } from "./viewer/dicom-sampling.mjs"
 import { makeDicomPreview } from "./viewer/dicom-preview.mjs"
 import { createSliceEngine } from "./viewer/slice-engine.js"
@@ -3355,9 +3357,72 @@ function expandBoxByDicomVolume(box, volume, settings, sceneMatrix = null) {
 }
 
 
-function DicomVolume({ volume, settings, interactive = false, sceneRootRef = null }) {
+function DicomVolume({ volume, settings, interactive = false, sceneRootRef = null, cameraInteractingRef = null, onSurfaceStatus }) {
   const { camera } = useThree()
   const meshRef = useRef(null)
+  const engineRef = useRef(null)
+  const [surface, setSurface] = useState(null)
+  const iso = ctIsoLevel(settings.densityMin, settings.densityMax)
+  const solid = settings.viewMode === "solid"
+  const detail = typeof window !== "undefined" && window.innerWidth < 768 ? 160 : 256
+  useEffect(() => {
+    setSurface(null)
+    if (!volume) return
+    const engine = createCtSurfaceEngine(volume)
+    engineRef.current = engine
+    return () => { engine.dispose(); if (engineRef.current === engine) engineRef.current = null }
+  }, [volume])
+  useEffect(() => {
+    if (!solid || !volume || settings.visible === false) { onSurfaceStatus?.("idle"); return }
+    onSurfaceStatus?.("preparing")
+    let cancel = null
+    const timer = setTimeout(() => {
+      cancel = engineRef.current?.request({ iso, detail,
+        onSurface: (value, final) => {
+          setSurface(previous => ({ volume, iso, preview: final ? (previous?.volume === volume && previous.iso === iso ? previous.preview : value) : value, fine: final ? value : null }))
+          onSurfaceStatus?.(final ? "ready" : "preparing")
+        },
+        onError: (error) => { console.warn("CT surface fallback:", error.message); onSurfaceStatus?.("fallback") },
+      })
+    }, 140)
+    return () => { clearTimeout(timer); cancel?.() }
+  }, [volume, iso, detail, solid, settings.visible, onSurfaceStatus])
+  const currentSurface = surface?.volume === volume && surface.iso === iso ? surface : null
+  const surfaceGeometries = useMemo(() => {
+    const make = value => {
+      if (!value) return null
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute("position", new THREE.BufferAttribute(value.positions, 3))
+      geometry.setAttribute("normal", new THREE.BufferAttribute(value.normals, 3))
+      geometry.setIndex(new THREE.BufferAttribute(value.index, 1))
+      if (value.bounds) {
+        geometry.boundingBox = new THREE.Box3(new THREE.Vector3().fromArray(value.bounds.min), new THREE.Vector3().fromArray(value.bounds.max))
+        geometry.boundingSphere = new THREE.Sphere(geometry.boundingBox.getCenter(new THREE.Vector3()), geometry.boundingBox.getSize(new THREE.Vector3()).length() / 2)
+      }
+      return geometry
+    }
+    return { preview: make(currentSurface?.preview), fine: make(currentSurface?.fine) }
+  }, [currentSurface])
+  useEffect(() => () => { surfaceGeometries.preview?.dispose(); surfaceGeometries.fine?.dispose() }, [surfaceGeometries])
+  const cropUniforms = useMemo(() => ({ min: { value: 0 }, max: { value: 1 }, size: { value: volume?.size[2] || 1 } }), [volume])
+  const shellMaterial = useMemo(() => {
+    const value = new THREE.MeshStandardMaterial({ color: "#807E76", roughness: .9, metalness: 0, side: THREE.DoubleSide })
+    value.onBeforeCompile = shader => {
+      shader.uniforms.uCtCropMin = cropUniforms.min; shader.uniforms.uCtCropMax = cropUniforms.max; shader.uniforms.uCtSizeZ = cropUniforms.size
+      shader.vertexShader = "uniform float uCtSizeZ; varying float vCtZ;\n" + shader.vertexShader.replace("#include <begin_vertex>", "#include <begin_vertex>\nvCtZ = position.z / uCtSizeZ + 0.5;")
+      shader.fragmentShader = "uniform float uCtCropMin; uniform float uCtCropMax; varying float vCtZ;\n" + shader.fragmentShader.replace("#include <clipping_planes_fragment>", "#include <clipping_planes_fragment>\nif (vCtZ < uCtCropMin || vCtZ > uCtCropMax) discard;")
+    }
+    value.customProgramCacheKey = () => "ct-shell-crop-v1"
+    return value
+  }, [cropUniforms])
+  useEffect(() => () => shellMaterial.dispose(), [shellMaterial])
+  useEffect(() => {
+    cropUniforms.min.value = Math.min(settings.cropMin, settings.cropMax - .01)
+    cropUniforms.max.value = Math.max(settings.cropMax, settings.cropMin + .01)
+    const opacity = Math.max(.08, Math.min(1, settings.opacity * 1.2))
+    configureMaterialTransparency(shellMaterial, opacity)
+    shellMaterial.depthWrite = opacity >= .98
+  }, [shellMaterial, cropUniforms, settings.cropMin, settings.cropMax, settings.opacity])
   const texture = useMemo(() => {
     if (!volume) return null
     const value = new THREE.Data3DTexture(volume.data, volume.width, volume.height, volume.depth)
@@ -3416,6 +3481,12 @@ function DicomVolume({ volume, settings, interactive = false, sceneRootRef = nul
     material.uniforms.uStep.value = (interactive ? 2.5 : 0.9) / Math.max(volume.width, volume.height, volume.depth)
   }, [material, volume, interactive, settings.viewMode, settings.densityMin, settings.densityMax, settings.opacity, settings.cropMin, settings.cropMax])
 
+  useEffect(() => {
+    if (!texture) return
+    if (solid && currentSurface) texture.dispose()
+    else texture.needsUpdate = true
+  }, [texture, solid, currentSurface])
+
   const localMatrix = useMemo(() => getDicomLocalMatrix(volume, settings), [
     volume,
     settings.position?.[0], settings.position?.[1], settings.position?.[2],
@@ -3437,9 +3508,19 @@ function DicomVolume({ volume, settings, interactive = false, sceneRootRef = nul
   }, [localMatrix, sceneRootRef])
 
   useEffect(() => { syncWorldMatrix() }, [syncWorldMatrix])
-  useFrame(() => { syncWorldMatrix() })
+  useFrame(() => {
+    syncWorldMatrix()
+    const moving = interactive || !!cameraInteractingRef?.current
+    if (solid && surfaceGeometries.preview && meshRef.current) {
+      meshRef.current.geometry = moving ? surfaceGeometries.preview : (surfaceGeometries.fine || surfaceGeometries.preview)
+    } else if (material && volume) {
+      material.uniforms.uInteractive.value = moving && settings.viewMode === "light" ? 1 : 0
+      material.uniforms.uStep.value = (moving ? 1.5 : .9) / Math.max(volume.width, volume.height, volume.depth)
+    }
+  })
 
-  if (!volume || !material || settings.visible === false) return null
+  if (!volume || !material || settings.visible === false || settings.viewMode === "only2d") return null
+  if (solid && surfaceGeometries.preview) return <mesh ref={meshRef} matrixAutoUpdate={false} geometry={surfaceGeometries.fine || surfaceGeometries.preview} material={shellMaterial} renderOrder={-1000} />
   return (
     <mesh
       ref={meshRef}
@@ -11793,6 +11874,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [dicomSource, setDicomSource] = useState(null)
   const [dicomSettings, setDicomSettings] = useState(DEFAULT_DICOM_SETTINGS)
   const [dicomVolume, setDicomVolume] = useState(null)
+  const [dicomSurfaceStatus, setDicomSurfaceStatus] = useState("idle")
   const [dicomStatus, setDicomStatus] = useState("idle")
   const [dicomProgress, setDicomProgress] = useState(0)
   const dicomLoading = dicomStatus === "downloading" || dicomStatus === "processing"
@@ -16978,6 +17060,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         )}
       </div>
 
+      {dicomStatus === "ready" && dicomSettings.viewMode === "solid" && dicomSurfaceStatus === "preparing" && <div role="status" style={{ fontSize: 10, color: "#a1a1aa", marginBottom: 8 }}>Připravuji hladký povrch…</div>}
+
       {dicomStatus !== "ready" ? (
         <div>
           <div style={{ padding: "8px 9px", borderRadius: 7, background: "rgba(96,165,250,.1)", color: "#dbeafe", fontSize: 11, lineHeight: 1.4 }}>
@@ -20871,12 +20955,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           ))}
         </group>
 
-        {!alignmentMode && !trimMode && !repairMode && dicomVolume && dicomSettings.viewMode !== "only2d" && (
+        {!alignmentMode && !trimMode && !repairMode && dicomVolume && (
           <DicomVolume
             volume={dicomVolume}
             settings={dicomSettings}
             interactive={false}
             sceneRootRef={rootGroupRef}
+            cameraInteractingRef={cameraInteractingRef}
+            onSurfaceStatus={setDicomSurfaceStatus}
           />
         )}
 
