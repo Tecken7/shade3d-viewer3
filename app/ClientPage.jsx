@@ -16639,7 +16639,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       })
     }
     if (savedClip.activeSlice === "horizontal" || savedClip.activeSlice === "vertical") {
-      setActiveSlice(savedClip.activeSlice)
+      setActiveSlice("vertical")
     }
     pendingClipStateRef.current = null
     requestClipUpdate()
