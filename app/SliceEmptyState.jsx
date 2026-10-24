@@ -9,6 +9,6 @@ export default function SliceEmptyState({ awaiting = true }) {
       <g className={styles.cursor}><path d="m0 0 2 19 5-6 7 1Z" fill="#dfe9e2" stroke="#171c19" strokeWidth="1.5"/></g>
     </svg>}
     <strong>{awaiting ? "Nakreslete čáru přes sken" : "Řez neprotíná viditelný model"}</strong>
-    <span>{awaiting ? "Tažením v 3D pohledu určíte směr průřezu." : "Posuňte rovinu nebo nakreslete nový řez."}</span>
+    <span>{awaiting ? "Tažením nakreslíte řez. Shift + tažení otočí model." : "Posuňte rovinu nebo nakreslete nový řez."}</span>
   </div>
 }
