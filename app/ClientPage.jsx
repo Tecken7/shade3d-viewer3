@@ -6,7 +6,7 @@ import { createViewerReceiver } from "../public/integrations/viewer-bridge-v1.mj
 import ViewerToolsPanel from "./ViewerToolsPanel"
 import ViewerToolIcon from "./ViewerToolIcon"
 import SliceDrawController from "./SliceDrawController"
-import { placeDrawnSlice, sliceSourceChanged } from "./viewer/slice-drawing.mjs"
+import { placeDrawnSlice, sliceSourceChanged, sliceSurfaceFit } from "./viewer/slice-drawing.mjs"
 import SliceEmptyState from "./SliceEmptyState"
 import React, { Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react"
 import { Canvas, useThree, useFrame } from "@react-three/fiber"
@@ -5712,7 +5712,35 @@ function SliceLineGroup({ points, color }) {
   )
 }
 
-function SliceOutline3D({ segments, color = "#dfb967" }) {
+function AdaptiveSliceSurface({ bounds, fallbackRadius, color, opacity }) {
+  const mesh = useRef(null)
+  const initialized = useRef(false)
+  const fit = useMemo(() => sliceSurfaceFit(bounds, fallbackRadius), [bounds, fallbackRadius])
+  useFrame((_, delta) => {
+    const surface = mesh.current
+    if (!surface) return
+    const amount = 1 - Math.exp(-16 * Math.min(delta, .1))
+    if (fit) {
+      if (!initialized.current) {
+        surface.position.set(fit.x, fit.y, 0)
+        surface.scale.setScalar(fit.radius)
+        initialized.current = true
+      } else {
+        surface.position.x = THREE.MathUtils.lerp(surface.position.x, fit.x, amount)
+        surface.position.y = THREE.MathUtils.lerp(surface.position.y, fit.y, amount)
+        surface.scale.setScalar(THREE.MathUtils.lerp(surface.scale.x, fit.radius, amount))
+      }
+    }
+    surface.material.opacity = THREE.MathUtils.lerp(surface.material.opacity, fit ? opacity : 0, amount)
+    surface.visible = surface.material.opacity > .001
+  })
+  return <mesh ref={mesh} visible={false}>
+    <circleGeometry args={[1, 64]} />
+    <meshBasicMaterial color={color} transparent opacity={0} side={THREE.DoubleSide} depthWrite={false} />
+  </mesh>
+}
+
+function SliceOutline3D({ segments, color = "#e4a64e" }) {
   const groups = useMemo(() => {
     const grouped = new Map()
     for (let i = 0; i < segments.length; i++) {
@@ -7069,7 +7097,7 @@ function ThickRotationGizmo({ controlRef }) {
       const points = []
       for (let i = 0; i < position.count; i++) points.push(new THREE.Vector3().fromBufferAttribute(position, i))
       const curve = new THREE.CatmullRomCurve3(points, false, "centripetal")
-      const geometry = new THREE.TubeGeometry(curve, Math.max(32, position.count * 2), 0.034, 8, false)
+      const geometry = new THREE.TubeGeometry(curve, Math.max(32, position.count * 2), 0.024, 8, false)
       const material = new THREE.MeshBasicMaterial({
         color: child.material?.color || "#ffffff",
         transparent: true,
@@ -7110,7 +7138,7 @@ function ThickRotationGizmo({ controlRef }) {
     hiddenAxisLinesRef.current.forEach(({ line }) => { line.visible = false })
     hiddenAccentsRef.current.forEach(({ material }) => { material.visible = false })
     helpersRef.current.forEach(({ source, helper }) => {
-      const palette = { X: "#c58d82", Y: "#a6b991", Z: "#8fadd0", E: "#a7afb8", XYZE: "#a7afb8" }
+      const palette = { X: "#d88f78", Y: "#a6ca80", Z: "#8ba7df", E: "#a7afb8", XYZE: "#a7afb8" }
       helper.material.color.set(palette[source.name] || "#a7afb8")
       if (controlRef.current?.axis === source.name) helper.material.color.lerp(new THREE.Color("#f1eee8"), .45)
       helper.material.opacity = source.material?.opacity ?? 1
@@ -7130,16 +7158,16 @@ function SliceTranslationStyle({ controlRef }) {
       if (child.name !== "Z" || !child.material?.color) return
       const material = child.material
       changed.push({ material, color: material.color.clone(), cached: material._color?.clone(), temporary: material.tempColor?.clone(), visible: material.visible })
-      material.color.set("#92abc8")
-      if (material._color) material._color.set("#92abc8")
-      if (material.tempColor) material.tempColor.set("#92abc8")
+      material.color.set("#8ba7df")
+      if (material._color) material._color.set("#8ba7df")
+      if (material.tempColor) material.tempColor.set("#8ba7df")
       const positions = child.isLine && child.geometry?.attributes?.position
       if (positions?.count >= 2) {
         const from = new THREE.Vector3().fromBufferAttribute(positions, 0)
         const to = new THREE.Vector3().fromBufferAttribute(positions, positions.count - 1)
         if (from.distanceToSquared(to) > 1e-8) {
-          const geometry = new THREE.TubeGeometry(new THREE.LineCurve3(from, to), 1, .014, 8, false)
-          const tube = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: "#92abc8", depthTest: false, depthWrite: false, transparent: true, toneMapped: false }))
+          const geometry = new THREE.TubeGeometry(new THREE.LineCurve3(from, to), 1, .011, 8, false)
+          const tube = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: "#8ba7df", depthTest: false, depthWrite: false, transparent: true, toneMapped: false }))
           tube.name = "_sliceTranslationBar"; tube.raycast = () => {}
           material.visible = false; child.add(tube); bars.push({ child, tube })
         }
@@ -7152,7 +7180,7 @@ function SliceTranslationStyle({ controlRef }) {
       helpers.current = []
     }
   }, [controlRef])
-  useFrame(() => helpers.current.forEach(({ child, tube }) => { tube.material.opacity = child.material.opacity; tube.material.color.set(controlRef.current?.axis === "Z" ? "#c4d4e7" : "#92abc8") }))
+  useFrame(() => helpers.current.forEach(({ child, tube }) => { tube.material.opacity = child.material.opacity; tube.material.color.set(controlRef.current?.axis === "Z" ? "#c4d4e7" : "#8ba7df") }))
   return null
 }
 
@@ -21114,10 +21142,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         {!alignmentMode && !trimMode && !repairMode && clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && (
           <group ref={setSliceRigGroup}>
             <group ref={setPlaneGroup} visible={!sliceAwaiting && (!dicomLayoutActive || activeSlice === "vertical")}>
-              <mesh>
-                <circleGeometry args={[planeRadius, 64]} />
-                <meshBasicMaterial color="#ad9690" transparent opacity={0.12} side={THREE.DoubleSide} depthWrite={false} />
-              </mesh>
+              <AdaptiveSliceSurface bounds={sliceBBox} fallbackRadius={planeRadius} color="#bf776d" opacity={0.14} />
               {mobileSliceSplitActive && (
                 <MobileSlicePlaneTouchController
                   radius={planeRadius}
@@ -21127,18 +21152,15 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 />
               )}
               {dicomSlice2D && <DicomSlicePlane3D slice={dicomSlice2D} />}
-              <SliceOutline3D segments={sliceSegments} color="#dfb967" />
+              <SliceOutline3D segments={sliceSegments} color="#e4a64e" />
               <Measurement3D measureState={measureState} boundingBox={sliceBBox} />
             </group>
 
             {dicomLayoutActive && (
               <group ref={setHorizontalPlaneGroup} visible={activeSlice === "horizontal"}>
-                <mesh>
-                  <circleGeometry args={[planeRadius, 64]} />
-                  <meshBasicMaterial color="#5b9bb8" transparent opacity={0.23} side={THREE.DoubleSide} depthWrite={false} />
-                </mesh>
+                <AdaptiveSliceSurface bounds={horizontalSliceBBox} fallbackRadius={planeRadius} color="#5b9bb8" opacity={0.23} />
                 {horizontalDicomSlice2D && <DicomSlicePlane3D slice={horizontalDicomSlice2D} />}
-                <SliceOutline3D segments={horizontalSliceSegments} color="#dfb967" />
+                <SliceOutline3D segments={horizontalSliceSegments} color="#e4a64e" />
                 <Measurement3D measureState={horizontalMeasureState} boundingBox={horizontalSliceBBox} />
               </group>
             )}

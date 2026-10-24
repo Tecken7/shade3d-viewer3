@@ -41,3 +41,13 @@ export function placeDrawnSlice({ rig, plane, worldMatrix, center }) {
   plane.updateWorldMatrix(true, true)
   return { rigMatrix: rig.matrix.clone(), planeMatrix: plane.matrix.clone() }
 }
+
+// Fit the visible disk to section-local bounds without moving the cut plane.
+export function sliceSurfaceFit(bounds, fallbackRadius = 100) {
+  if (!bounds || ![bounds.minX, bounds.minY, bounds.width, bounds.height].every(Number.isFinite) || bounds.width < 0 || bounds.height < 0) return null
+  return {
+    x: bounds.minX + bounds.width / 2,
+    y: bounds.minY + bounds.height / 2,
+    radius: Math.max(Math.hypot(bounds.width, bounds.height) * .56, fallbackRadius * .025, .1),
+  }
+}

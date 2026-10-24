@@ -68,3 +68,15 @@ test("repeated missing DICOM payloads never reset scan section matrices", async 
  assert.equal(sliceSourceChanged(null,{u:"ct.zip"}),true)
  assert.equal(sliceSourceChanged({u:"a.zip"},{u:"b.zip"}),true)
 })
+
+test("section surface follows offset and size without changing the plane", async () => {
+ const {sliceSurfaceFit}=await import("../app/viewer/slice-drawing.mjs")
+ const small=sliceSurfaceFit({minX:20,minY:-8,width:6,height:10},100)
+ const large=sliceSurfaceFit({minX:-30,minY:-20,width:60,height:40},100)
+ assert.equal(small.x,23);assert.equal(small.y,-3)
+ assert(large.radius>small.radius)
+ assert(small.radius>=Math.hypot(3,5))
+ assert.equal(sliceSurfaceFit(null),null)
+ assert.equal(sliceSurfaceFit({minX:NaN,minY:0,width:1,height:1}),null)
+ assert(sliceSurfaceFit({minX:0,minY:0,width:0,height:0}).radius>0)
+})
