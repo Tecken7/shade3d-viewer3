@@ -5,6 +5,9 @@ import { cameraChanged } from "./viewer/camera-sync.mjs"
 import { createViewerReceiver } from "../public/integrations/viewer-bridge-v1.mjs"
 import ViewerToolsPanel from "./ViewerToolsPanel"
 import ViewerToolIcon from "./ViewerToolIcon"
+import { autoSmoothGeometry } from "./viewer/model-preparation.mjs"
+import { loadPreparedSceneModel } from "./viewer/model-loading.js"
+import "./SceneLoader.css"
 import SliceDrawController from "./SliceDrawController"
 import { placeDrawnSlice, sliceSourceChanged, sliceSurfaceFit } from "./viewer/slice-drawing.mjs"
 import SliceEmptyState from "./SliceEmptyState"
@@ -2955,54 +2958,6 @@ function PreloadIcons() {
 
 /* ---------- Auto Smooth ---------- */
 const DEFAULT_SMOOTH_ANGLE = 30
-function autoSmoothGeometry(geometry, angleDeg = DEFAULT_SMOOTH_ANGLE) {
-  const angle = Math.max(0, Math.min(89.9, angleDeg))
-  const angleRad = (angle * Math.PI) / 180
-  const g = geometry.index ? geometry.toNonIndexed() : geometry.clone()
-  const pos = g.getAttribute("position")
-  const triCount = pos.count / 3
-  const faceNormals = new Array(triCount)
-  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3()
-  const cb = new THREE.Vector3(), ab = new THREE.Vector3()
-  for (let f = 0; f < triCount; f++) {
-    const i0 = f * 3, i1 = i0 + 1, i2 = i0 + 2
-    a.fromBufferAttribute(pos, i0)
-    b.fromBufferAttribute(pos, i1)
-    c.fromBufferAttribute(pos, i2)
-    cb.subVectors(c, b)
-    ab.subVectors(a, b)
-    cb.cross(ab).normalize()
-    faceNormals[f] = cb.clone()
-  }
-  const groups = new Map()
-  const keyOf = (ix) => `${pos.getX(ix).toFixed(5)},${pos.getY(ix).toFixed(5)},${pos.getZ(ix).toFixed(5)}`
-  for (let i = 0; i < pos.count; i++) {
-    const k = keyOf(i)
-    let arr = groups.get(k); if (!arr) { arr = []; groups.set(k, arr) }
-    arr.push(i)
-  }
-  const normals = new Float32Array(pos.count * 3)
-  const tmp = new THREE.Vector3()
-  const cosThresh = Math.cos(angleRad)
-  groups.forEach((cornerIndices) => {
-    const localFaceNs = cornerIndices.map((ci) => faceNormals[Math.floor(ci / 3)])
-    for (let idx = 0; idx < cornerIndices.length; idx++) {
-      const ci = cornerIndices[idx]
-      const nRef = localFaceNs[idx]
-      let nx = 0, ny = 0, nz = 0
-      for (let j = 0; j < localFaceNs.length; j++) {
-        const nj = localFaceNs[j]
-        if (nRef.dot(nj) >= cosThresh) { nx += nj.x; ny += nj.y; nz += nj.z }
-      }
-      tmp.set(nx, ny, nz); if (tmp.lengthSq() === 0) tmp.copy(nRef); tmp.normalize()
-      const w = ci * 3; normals[w] = tmp.x; normals[w+1] = tmp.y; normals[w+2] = tmp.z
-    }
-  })
-  g.setAttribute("normal", new THREE.BufferAttribute(normals, 3))
-  g.computeBoundingBox(); g.computeBoundingSphere()
-  return g
-}
-
 /* ---------- Analýzy povrchu a heatmapy ---------- */
 function rememberOriginalColors(mesh) {
   if (mesh.userData._originalColors !== undefined) return
@@ -5837,7 +5792,7 @@ function AlignmentFastRaycast({ enabled = false }) {
 function AnyModel({
   name, url,
   color, opacity, visible,
-  onLoaded, onMeshReady, onObjectReady, autoSmooth, smoothAngle = DEFAULT_SMOOTH_ANGLE,
+  onLoaded, onLoadProgress, onMeshReady, onObjectReady, autoSmooth, smoothAngle = DEFAULT_SMOOTH_ANGLE,
   roughness = 0.5, metalness = 0.5,
   useVertexColors = false,
   keepMaterials = false,
@@ -5881,23 +5836,31 @@ function AnyModel({
 
   useEffect(() => {
     let cancelled = false
+    const abort = new AbortController()
     ;(async () => {
       try {
+        const prepared = await loadPreparedSceneModel({ url, ext, autoSmooth, smoothAngle }, progress => onLoadProgress?.(url, progress), abort.signal).catch(error => {
+          if (error.name === "AbortError") throw error
+          console.warn("Falling back to main-thread model loader:", error.message)
+          return null
+        })
+        if (cancelled) return
         let obj
         if (ext === "stl") {
-          const geom = await new STLLoader().loadAsync(url)
+          const geom = prepared?.geometry || await new STLLoader().loadAsync(url)
           if (!geom.attributes.normal) geom.computeVertexNormals()
-          const base = autoSmooth ? autoSmoothGeometry(geom, smoothAngle) : (geom.computeVertexNormals(), geom)
+          const base = prepared ? prepared.base || geom : autoSmooth ? autoSmoothGeometry(geom, smoothAngle) : (geom.computeVertexNormals(), geom)
           const mat = makeMat()
           obj = new THREE.Mesh(base, mat)
           obj.userData._baseGeom = geom
           obj.userData._derivedGeom = base
           obj.userData._hasVisualTexture = false
         } else if (ext === "ply") {
-          const geom = await new PLYLoader().loadAsync(url)
+          const geom = prepared?.geometry || await new PLYLoader().loadAsync(url)
           const hasVC = !!geom.getAttribute("color")
           let base = geom
-          if (autoSmooth) base = autoSmoothGeometry(geom, smoothAngle)
+          if (prepared) base = prepared.base || geom
+          else if (autoSmooth) base = autoSmoothGeometry(geom, smoothAngle)
           else if (!geom.attributes.normal) geom.computeVertexNormals()
           const mat = hasVC && useVertexColors ? makeMat({ vertexColors: true, color: new THREE.Color("#ffffff") }) : makeMat()
           obj = new THREE.Mesh(base, mat)
@@ -5905,7 +5868,7 @@ function AnyModel({
           obj.userData._derivedGeom = base
           obj.userData._hasVisualTexture = hasVC
         } else {
-          const loaded = await new OBJLoader().loadAsync(url)
+          const loaded = prepared?.object || await new OBJLoader().loadAsync(url)
           let objHasVisualTexture = false
           loaded.traverse((ch) => {
             if (!ch.isMesh) return
@@ -5952,10 +5915,10 @@ function AnyModel({
           if (foundMesh && onMeshReady) onMeshReady(foundMesh, url);
         }
       } catch (e) {
-        console.error("Model load error:", e)
+        if (!cancelled && e.name !== "AbortError") console.error("Model load error:", e)
       }
     })()
-    return () => { cancelled = true }
+    return () => { cancelled = true; abort.abort() }
   }, [url, ext])
 
   useEffect(() => {
@@ -11958,6 +11921,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [wireframes, setWireframes] = useState([])
   const [ghostModes, setGhostModes] = useState([])
   const [fatal, setFatal] = useState(null)
+  const [sceneManifestLoading, setSceneManifestLoading] = useState(true)
 
   const [dicomSource, setDicomSource] = useState(null)
   const [dicomSettings, setDicomSettings] = useState(DEFAULT_DICOM_SETTINGS)
@@ -13059,6 +13023,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [initialCameraState, setInitialCameraState] = useState(null)
   
   const [loadedUrls, setLoadedUrls] = useState(new Set())
+  const [modelLoadProgress, setModelLoadProgress] = useState({})
+  const handleModelLoadProgress = useCallback((url, progress) => {
+    const value = Math.floor(Math.max(0, Math.min(.95, progress)) * 100) / 100
+    setModelLoadProgress(previous => previous[url] === value ? previous : { ...previous, [url]: value })
+  }, [])
   const handleModelLoaded = (url) => setLoadedUrls((prev) => { const n = new Set(prev); n.add(url); return n; })
 
   useEffect(() => {
@@ -17053,6 +17022,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       } catch (e) {
         console.error(e)
         setFatal("Tento náhled není dostupný (chyba při načtení dat).")
+      } finally {
+        setSceneManifestLoading(false)
       }
     })()
   }, [applyDicomSource])
@@ -17168,7 +17139,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [applyDicomSource, startDicomLoad])
 
   const allLoaded = files.length > 0 && files.every(f => loadedUrls.has(f.url))
-  const sceneIsLoading = files.length > 0 && !allLoaded
+  const sceneIsLoading = sceneManifestLoading || (files.length > 0 && !allLoaded)
   const [sceneLoaderPhase, setSceneLoaderPhase] = useState("hidden")
   const sceneLoaderShown = useRef(false)
   useEffect(() => {
@@ -20637,7 +20608,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       {/* OVERLAY BĚHEM NAČÍTÁNÍ MODELŮ */}
       {sceneLoaderVisible && (() => {
         const loadedCount = files.filter((file) => loadedUrls.has(file.url)).length
-        const loadPercent = sceneIsLoading ? Math.round(loadedCount / Math.max(1, files.length) * 100) : 100
+        const loadPercent = sceneIsLoading ? Math.round(files.reduce((sum, file) => sum + (loadedUrls.has(file.url) ? 1 : modelLoadProgress[file.url] || 0), 0) / Math.max(1, files.length) * 100) : 100
         return (
           <div data-scene-loader="true" style={{
             position: "absolute", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.42)",
@@ -20648,23 +20619,23 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             color: "white", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
           }}>
             <div role="status" aria-live="polite" aria-label={`Načítání 3D scény: ${loadPercent} %`} style={{
-              width: 350, maxWidth: "calc(100vw - 40px)", padding: "30px 26px 24px", borderRadius: 16,
+              width: 292, maxWidth: "calc(100vw - 40px)", padding: "28px 26px 22px", borderRadius: 16,
               background: "rgba(12,12,12,.96)", border: "1px solid rgba(255,255,255,.09)",
               boxShadow: "0 24px 70px rgba(0,0,0,.52)",
               transform: sceneLoaderExiting ? "translateY(-6px) scale(.985)" : "translateY(0) scale(1)",
               transition: "transform .42s ease-out",
             }}>
-              <img src="/arthetic-loader-scan.svg" alt="ARTHETIC" width={260} height={44} draggable={false}
-                style={{ display: "block", width: "min(260px, 100%)", height: "auto", margin: "4px auto 26px", userSelect: "none" }} />
-              <div role="progressbar" aria-label="Načítání modelů" aria-valuemin={0} aria-valuemax={100} aria-valuenow={loadPercent}
-                style={{ height: 3, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.08)" }}>
-                <div style={{
-                  width: `${loadPercent}%`, height: "100%", borderRadius: 999,
-                  background: "linear-gradient(90deg, rgba(255,255,255,.42), rgba(255,255,255,.96))",
-                  transition: "width .2s ease-out"
-                }} />
+              <div style={{ width: 220, maxWidth: "100%", margin: "0 auto" }}>
+                <div className="scene-loading-mark" role="img" aria-label="ARTHETIC">
+                  <img src="/arthetic-loader-mark.svg" alt="" width={220} height={34} draggable={false}/>
+                  <span className="scene-loading-mask" aria-hidden="true"><span className="scene-loading-sweep" /></span>
+                </div>
+                <div className="scene-loading-track" role="progressbar" aria-label="Načítání modelů" aria-valuemin={0} aria-valuemax={100} aria-valuenow={loadPercent}>
+                  <span className="scene-loading-fill" style={{ transform: `scaleX(${loadPercent / 100})` }} />
+                  <span className="scene-loading-activity" aria-hidden="true" />
+                </div>
+                <div style={{ marginTop: 10, textAlign: "right", color: "#a3a3a3", fontSize: 10, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{loadPercent} %</div>
               </div>
-              <div style={{ marginTop: 10, textAlign: "right", color: "#a3a3a3", fontSize: 10, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{loadPercent} %</div>
             </div>
           </div>
         )
@@ -21011,6 +20982,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                       ? (f.url === alignmentPair.aUrl || f.url === alignmentPair.bUrl)
                       : (visibles[i] ?? true)}
                 onLoaded={handleModelLoaded}
+                onLoadProgress={handleModelLoadProgress}
                 onMeshReady={handleMeshReady}
                 onObjectReady={handleObjectReady}
                 modelMatrix={modelTransforms[f.url]}
