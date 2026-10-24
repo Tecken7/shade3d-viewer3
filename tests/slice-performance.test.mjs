@@ -82,3 +82,20 @@ test('actual worker caches geometry for subsequent plane-only requests',async()=
   assert.deepEqual(canonical(second.groups),canonical(expected.groups))
  } finally {await worker.terminate()}
 })
+
+test('external CT surface participates in the cached slice and respects its local crop',async()=>{
+ const engine=createSliceEngine({workerFactory:()=>{throw Error('fallback')}})
+ const root=new THREE.Group(),ct=new THREE.Mesh(new THREE.BoxGeometry(4,4,4))
+ ct.matrixAutoUpdate=false;ct.matrix.makeTranslation(5,0,0);ct.matrixWorld.copy(ct.matrix)
+ ct.userData._viewerColor='#A29C90';ct.userData.sliceCrop=[0,1]
+ const frame=new THREE.Matrix4().makeRotationX(Math.PI/2).toArray()
+ const result=await engine.compute(root,frame,'vertical',[ct])
+ assert(result.segments.length>0)
+ assert(result.segments.every(s=>s.color==='#A29C90'))
+ for(const segment of result.segments)for(const p of [segment.a,segment.b]){
+  assert(p.x>=3-1e-6&&p.x<=7+1e-6)
+  assert(p.y>=-1e-6&&p.y<=1+1e-6)
+ }
+ const absent=await engine.compute(root,frame);assert.equal(absent.segments.length,0)
+ engine.dispose()
+})

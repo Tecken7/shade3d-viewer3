@@ -36,15 +36,29 @@ export function intersectSlice(meshes, planeMatrix, geometries, { bruteForce = f
       testedTriangles++
       const da = localPlane.distanceToPoint(vA), db = localPlane.distanceToPoint(vB), dc = localPlane.distanceToPoint(vC)
       if ((da > 0 && db > 0 && dc > 0) || (da < 0 && db < 0 && dc < 0)) return
-      let count = 0, x = 0, y = 0
+      let count = 0, x = 0, y = 0, z = 0
       const checkEdge = (v1, v2, d1, d2) => {
         if (d1 * d2 < 0) edge.copy(v1).lerp(v2, d1 / (d1 - d2))
         else if (d1 === 0) edge.copy(v1)
         else return
         point.copy(edge).applyMatrix4(toPlane)
         if (count && Math.abs(x - point.x) <= 1e-5 && Math.abs(y - point.y) <= 1e-5) return
-        if (!count) { x = point.x; y = point.y; count = 1 }
+        if (!count) { x = point.x; y = point.y; z = edge.z; count = 1 }
         else if (count === 1) {
+          if (mesh.crop) {
+            const dz = edge.z - z
+            let lo = 0, hi = 1
+            if (Math.abs(dz) < 1e-12) {
+              if (z < mesh.crop[0] || z > mesh.crop[1]) { count = 2; return }
+            } else {
+              const t0 = (mesh.crop[0] - z) / dz, t1 = (mesh.crop[1] - z) / dz
+              lo = Math.max(0, Math.min(t0, t1)); hi = Math.min(1, Math.max(t0, t1))
+              if (lo > hi) { count = 2; return }
+            }
+            const dx = point.x - x, dy = point.y - y
+            point.x = x + hi * dx; point.y = y + hi * dy
+            x += lo * dx; y += lo * dy
+          }
           points.push(x, y, point.x, point.y)
           minX = Math.min(minX, x, point.x); maxX = Math.max(maxX, x, point.x)
           minY = Math.min(minY, y, point.y); maxY = Math.max(maxY, y, point.y)

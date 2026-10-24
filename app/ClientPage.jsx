@@ -3357,7 +3357,7 @@ function expandBoxByDicomVolume(box, volume, settings, sceneMatrix = null) {
 }
 
 
-function DicomVolume({ volume, settings, interactive = false, sceneRootRef = null, cameraInteractingRef = null, onSurfaceStatus }) {
+function DicomVolume({ volume, settings, interactive = false, sceneRootRef = null, cameraInteractingRef = null, onSurfaceStatus, surfaceMeshRef }) {
   const { camera } = useThree()
   const meshRef = useRef(null)
   const engineRef = useRef(null)
@@ -3404,9 +3404,22 @@ function DicomVolume({ volume, settings, interactive = false, sceneRootRef = nul
     return { preview: make(currentSurface?.preview), fine: make(currentSurface?.fine) }
   }, [currentSurface])
   useEffect(() => () => { surfaceGeometries.preview?.dispose(); surfaceGeometries.fine?.dispose() }, [surfaceGeometries])
+  // Keep slicing on the stable fine surface, independently of the display LOD.
+  const sliceSurface = useMemo(() => {
+    const geometry = surfaceGeometries.fine || surfaceGeometries.preview
+    if (!geometry || !solid || settings.visible === false) return null
+    const mesh = new THREE.Mesh(geometry)
+    mesh.matrixAutoUpdate = false
+    mesh.userData._viewerColor = "#A29C90"
+    return mesh
+  }, [surfaceGeometries, solid, settings.visible])
+  useEffect(() => {
+    if (surfaceMeshRef) surfaceMeshRef.current = sliceSurface
+    return () => { if (surfaceMeshRef?.current === sliceSurface) surfaceMeshRef.current = null }
+  }, [surfaceMeshRef, sliceSurface])
   const cropUniforms = useMemo(() => ({ min: { value: 0 }, max: { value: 1 }, size: { value: volume?.size[2] || 1 } }), [volume])
   const shellMaterial = useMemo(() => {
-    const value = new THREE.MeshStandardMaterial({ color: "#91816A", roughness: .38, metalness: .22, side: THREE.DoubleSide })
+    const value = new THREE.MeshStandardMaterial({ color: "#A29C90", roughness: .42, metalness: .52, side: THREE.DoubleSide })
     value.onBeforeCompile = shader => {
       shader.uniforms.uCtCropMin = cropUniforms.min; shader.uniforms.uCtCropMax = cropUniforms.max; shader.uniforms.uCtSizeZ = cropUniforms.size
       shader.vertexShader = "uniform float uCtSizeZ; varying float vCtZ;\n" + shader.vertexShader.replace("#include <begin_vertex>", "#include <begin_vertex>\nvCtZ = position.z / uCtSizeZ + 0.5;")
@@ -3510,7 +3523,15 @@ function DicomVolume({ volume, settings, interactive = false, sceneRootRef = nul
     }
     mesh.matrix.copy(worldMatrixRef.current)
     mesh.matrixWorldNeedsUpdate = true
-  }, [localMatrix, sceneRootRef])
+    if (sliceSurface) {
+      sliceSurface.matrix.copy(worldMatrixRef.current)
+      sliceSurface.matrixWorld.copy(worldMatrixRef.current)
+      sliceSurface.userData.sliceCrop = [
+        (Math.min(settings.cropMin, settings.cropMax - .01) - .5) * volume.size[2],
+        (Math.max(settings.cropMax, settings.cropMin + .01) - .5) * volume.size[2],
+      ]
+    }
+  }, [localMatrix, sceneRootRef, sliceSurface, settings.cropMin, settings.cropMax, volume])
 
   useEffect(() => { syncWorldMatrix() }, [syncWorldMatrix])
   useFrame(() => {
@@ -11880,6 +11901,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [dicomSettings, setDicomSettings] = useState(DEFAULT_DICOM_SETTINGS)
   const [dicomVolume, setDicomVolume] = useState(null)
   const [dicomSurfaceStatus, setDicomSurfaceStatus] = useState("idle")
+  const dicomSurfaceMeshRef = useRef(null)
   const [dicomStatus, setDicomStatus] = useState("idle")
   const [dicomProgress, setDicomProgress] = useState(0)
   const dicomLoading = dicomStatus === "downloading" || dicomStatus === "processing"
@@ -16283,7 +16305,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     targetPlaneGroup.updateMatrixWorld(true)
     const planeMatrix = targetPlaneGroup.matrixWorld.clone()
     if (!sliceEngineRef.current) sliceEngineRef.current = createSliceEngine()
-    const result = await sliceEngineRef.current.compute(rootGroupRef.current, planeMatrix.elements, lane)
+    const result = await sliceEngineRef.current.compute(rootGroupRef.current, planeMatrix.elements, lane, dicomSurfaceMeshRef.current ? [dicomSurfaceMeshRef.current] : [])
     if (!result) return null
     const segments2D = result.segments
     let combinedBounds = result.boundingBox
@@ -16306,7 +16328,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       }
     }
     return { segments: segments2D, boundingBox: combinedBounds, dicomSlice }
-  }, [visibles, dicomVolume, dicomSettings])
+  }, [visibles, dicomVolume, dicomSettings, dicomSurfaceStatus])
 
   const updateClippingLogic = useCallback(async (dicomResolution = DICOM_SLICE_DETAIL_RESOLUTION) => {
     const result = await calculateSliceData(planeGroup, dicomResolution).catch(error => { console.warn("Slice calculation failed", error); return null })
@@ -20968,6 +20990,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             sceneRootRef={rootGroupRef}
             cameraInteractingRef={cameraInteractingRef}
             onSurfaceStatus={setDicomSurfaceStatus}
+            surfaceMeshRef={dicomSurfaceMeshRef}
           />
         )}
 

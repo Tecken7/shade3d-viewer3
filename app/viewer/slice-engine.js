@@ -3,10 +3,10 @@ import { prepareSliceGeometry, intersectSlice, unpackSliceResult } from './slice
 export function createSliceEngine({ workerFactory = () => new Worker(new URL('../workers/slice.worker.js', import.meta.url), { type: 'module' }) } = {}) {
   let worker = null, unavailable = false, disposed = false, active = null, serial = 0, generation = 0, epoch = 0
   const versions = new WeakMap(), pending = new Map(), sent = new Set(), fallback = new Map()
-  function snapshot(root) {
+  function snapshot(root, extraRoots = []) {
     root.updateMatrixWorld(true)
     const meshes = []
-    root.traverseVisible(child => {
+    for (const source of [root, ...extraRoots]) source.traverseVisible(child => {
       if (!child.isMesh || !child.geometry?.attributes.position) return
       const geometry = child.geometry, position = geometry.attributes.position, index = geometry.index
       let record = versions.get(geometry)
@@ -18,6 +18,7 @@ export function createSliceEngine({ workerFactory = () => new Worker(new URL('..
       let modelRoot = child
       while (modelRoot.parent && modelRoot.parent !== root) modelRoot = modelRoot.parent
       meshes.push({ key: record.key, geometry, matrix: child.matrixWorld.toArray(),
+        crop: child.userData.sliceCrop || null,
         color: child.userData._viewerColor || modelRoot.userData._viewerColor || '#ffffff',
         modelIndex: Number.isInteger(child.renderOrder) ? child.renderOrder : -1 })
     })
@@ -79,12 +80,12 @@ export function createSliceEngine({ workerFactory = () => new Worker(new URL('..
     } catch { disableWorker() }
   }
   return {
-    compute(root, planeMatrix, lane = 'vertical') {
+    compute(root, planeMatrix, lane = 'vertical', extraRoots = []) {
       if (disposed) return Promise.resolve(null)
       return new Promise((resolve, reject) => {
         const id = ++serial
         pending.get(lane)?.resolve(null)
-        pending.set(lane, { id, lane, epoch, meshes: snapshot(root), planeMatrix: Array.from(planeMatrix), resolve, reject })
+        pending.set(lane, { id, lane, epoch, meshes: snapshot(root, extraRoots), planeMatrix: Array.from(planeMatrix), resolve, reject })
         pump()
       })
     },

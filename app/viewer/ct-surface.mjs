@@ -33,7 +33,7 @@ export function prepareCtField(volume,maxDimension=256) {
   return {data:input,dims,size:[...volume.size],voxelSize:volume.size.map((v,i)=>v/dims[i])}
 }
 
-export function removeTinyCtIslands(prepared,iso,minVolume=.1) {
+export function removeTinyCtIslands(prepared,iso,minVolume=2) {
   const [nx,ny,nz]=prepared.dims,data=prepared.data.slice(),n=data.length,plane=nx*ny
   const minimum=Math.max(2,Math.ceil(minVolume/prepared.voxelSize.reduce((a,b)=>a*b,1)))
   const visited=new Uint8Array(n),queue=new Uint32Array(n)
