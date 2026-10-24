@@ -5,6 +5,8 @@ import { cameraChanged } from "./viewer/camera-sync.mjs"
 import { createViewerReceiver } from "../public/integrations/viewer-bridge-v1.mjs"
 import ViewerToolsPanel from "./ViewerToolsPanel"
 import ViewerToolIcon from "./ViewerToolIcon"
+import SliceDrawController from "./SliceDrawController"
+import SliceEmptyState from "./SliceEmptyState"
 import React, { Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react"
 import { Canvas, useThree, useFrame } from "@react-three/fiber"
 import * as THREE from "three"
@@ -6651,7 +6653,9 @@ function Switch({ checked, onChange, label }) {
 }
 
 /* ---------- 2D OVERLAY ---------- */
-function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasureState, dicomSlice, onInteractionChange, embedded = false, mobile = false, title = "", active = false, onActivate, accent = "#f59e9e" }) {
+function Overlay2D({ awaitingDraw = false, onRedraw, segments, modelColors, boundingBox: measuredBounds, measureState, setMeasureState, dicomSlice, onInteractionChange, embedded = false, mobile = false, title = "", active = false, onActivate, accent = "#f59e9e" }) {
+  const boundingBox = measuredBounds || { minX: -50, minY: -50, width: 100, height: 100 }
+  useEffect(() => { if (awaitingDraw) { setPan({ x: 0, y: 0 }); setZoom(1) } }, [awaitingDraw])
   const svgRef = useRef(null)
   const containerRef = useRef(null)
 
@@ -6884,7 +6888,6 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
       window.addEventListener('blur', onUp)
   }
 
-  if (!boundingBox) return null
 
   const padX = boundingBox.width * 0.1 || 10
   const padY = boundingBox.height * 0.1 || 10
@@ -6911,6 +6914,7 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
       onPointerDownCapture={() => onActivate?.()}
       onWheel={(e) => {
          e.stopPropagation()
+         if (awaitingDraw) return
          const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85
          setZoom(z => Math.max(0.1, Math.min(20, z * zoomFactor)))
       }}
@@ -6923,9 +6927,9 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
         minWidth: 0,
         minHeight: 0,
         boxSizing: 'border-box',
-        background: '#1a1a1a', border: active ? `2px solid ${accent}` : '1px solid #444', borderRadius: 8,
+        fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif', background: 'rgba(15,17,16,.94)', backdropFilter: 'blur(18px)', border: active ? `2px solid ${accent}` : '1px solid rgba(255,255,255,.12)', borderRadius: 14,
         zIndex: 100, overflow: embedded ? 'hidden' : 'visible', boxShadow: active ? `inset 0 0 0 1px ${accent}55, 0 0 18px ${accent}33` : embedded ? 'none' : '0 8px 32px rgba(0,0,0,0.5)',
-        cursor: measureState.active ? 'crosshair' : 'grab',
+        cursor: awaitingDraw ? 'default' : measureState.active ? 'crosshair' : 'grab',
         touchAction: mobile ? 'none' : 'auto',
         overscrollBehavior: mobile ? 'contain' : 'auto',
         WebkitUserSelect: mobile ? 'none' : 'auto',
@@ -6934,11 +6938,13 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
     >
       <div style={{ position: 'absolute', top: 8, left: 16, fontSize: 11, color: '#aaa', pointerEvents: 'none', zIndex: 11 }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-          <b style={{ color: active ? accent : '#fff' }}>{title || (dicomSlice ? "DICOM řez + obrysy modelů" : "Obrysy modelů")}</b>
+          <b style={{ color: active ? accent : '#fff' }}>{title || (dicomSlice ? "DICOM řez + obrysy modelů" : "Průřez · 2D")}</b>
           {active && <span style={{ padding: '2px 5px', borderRadius: 4, background: `${accent}30`, border: `1px solid ${accent}88`, color: accent, fontSize: 9, fontWeight: 800 }}>AKTIVNÍ</span>}
-        </span><br/>{mobile ? "Tažení = posun · dvojklep = měření" : "Levé tl. = posun, Kolečko = zoom, Dvojklik = měření"}
+        </span>{!awaitingDraw && <><br/>{mobile ? "Tažení = posun · dvojklep = měření" : "Tažení = posun · kolečko = zoom · dvojklik = měření"}</>}
       </div>
 
+      {onRedraw && !awaitingDraw && <button type="button" onClick={onRedraw} style={{ position: "absolute", top: 8, right: 10, zIndex: 12, border: "1px solid #ffffff20", borderRadius: 7, padding: "5px 8px", background: "#ffffff08", color: "#c6d5ca", font: "inherit", fontSize: 10, cursor: "pointer" }}>Nový řez</button>}
+      {(awaitingDraw || !measuredBounds) && <SliceEmptyState awaiting={awaitingDraw} />}
       {!embedded && (
         <div 
           onPointerDown={(e) => startResize(e, 'top-left')}
@@ -6951,7 +6957,7 @@ function Overlay2D({ segments, modelColors, boundingBox, measureState, setMeasur
         ref={svgRef} 
         width="100%" height="100%" 
         viewBox={vBox}
-        style={{ display: 'block', transform: 'scale(1, -1)', borderRadius: 8, overflow: 'hidden', touchAction: mobile ? 'none' : 'auto', overscrollBehavior: mobile ? 'contain' : 'auto' }}
+        style={{ display: 'block', pointerEvents: awaitingDraw ? 'none' : 'auto', opacity: awaitingDraw ? 0 : 1, transform: 'scale(1, -1)', borderRadius: 8, overflow: 'hidden', touchAction: mobile ? 'none' : 'auto', overscrollBehavior: mobile ? 'contain' : 'auto' }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -7049,7 +7055,7 @@ function ThickRotationGizmo({ controlRef }) {
       const points = []
       for (let i = 0; i < position.count; i++) points.push(new THREE.Vector3().fromBufferAttribute(position, i))
       const curve = new THREE.CatmullRomCurve3(points, false, "centripetal")
-      const geometry = new THREE.TubeGeometry(curve, Math.max(32, position.count * 2), 0.022, 6, false)
+      const geometry = new THREE.TubeGeometry(curve, Math.max(32, position.count * 2), 0.034, 8, false)
       const material = new THREE.MeshBasicMaterial({
         color: child.material?.color || "#ffffff",
         transparent: true,
@@ -7086,11 +7092,49 @@ function ThickRotationGizmo({ controlRef }) {
   useFrame(() => {
     hiddenAxisLinesRef.current.forEach(({ line }) => { line.visible = false })
     helpersRef.current.forEach(({ source, helper }) => {
-      if (source.material?.color) helper.material.color.copy(source.material.color)
+      const palette = { X: "#c58d82", Y: "#a6b991", Z: "#8fadd0", E: "#a7afb8", XYZE: "#a7afb8" }
+      helper.material.color.set(palette[source.name] || "#a7afb8")
+      if (controlRef.current?.axis === source.name) helper.material.color.lerp(new THREE.Color("#f1eee8"), .45)
       helper.material.opacity = source.material?.opacity ?? 1
     })
   })
 
+  return null
+}
+
+function SliceTranslationStyle({ controlRef }) {
+  const helpers = useRef([])
+  useEffect(() => {
+    const control = controlRef.current
+    const root = control?.getHelper ? control.getHelper() : control
+    const changed = [], bars = []
+    root?.traverse(child => {
+      if (child.name !== "Z" || !child.material?.color) return
+      const material = child.material
+      changed.push({ material, color: material.color.clone(), cached: material._color?.clone(), temporary: material.tempColor?.clone(), visible: material.visible })
+      material.color.set("#92abc8")
+      if (material._color) material._color.set("#92abc8")
+      if (material.tempColor) material.tempColor.set("#92abc8")
+      const positions = child.isLine && child.geometry?.attributes?.position
+      if (positions?.count >= 2) {
+        const from = new THREE.Vector3().fromBufferAttribute(positions, 0)
+        const to = new THREE.Vector3().fromBufferAttribute(positions, positions.count - 1)
+        if (from.distanceToSquared(to) > 1e-8) {
+          const geometry = new THREE.TubeGeometry(new THREE.LineCurve3(from, to), 1, .014, 8, false)
+          const tube = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: "#92abc8", depthTest: false, depthWrite: false, transparent: true, toneMapped: false }))
+          tube.name = "_sliceTranslationBar"; tube.raycast = () => {}
+          material.visible = false; child.add(tube); bars.push({ child, tube })
+        }
+      }
+    })
+    helpers.current = bars
+    return () => {
+      bars.forEach(({ child, tube }) => { child.remove(tube); tube.geometry.dispose(); tube.material.dispose() })
+      changed.forEach(({ material, color, cached, temporary, visible }) => { material.color.copy(color); material.visible = visible; if (cached && material._color) material._color.copy(cached); if (temporary && material.tempColor) material.tempColor.copy(temporary) })
+      helpers.current = []
+    }
+  }, [controlRef])
+  useFrame(() => helpers.current.forEach(({ child, tube }) => { tube.material.opacity = child.material.opacity; tube.material.color.set(controlRef.current?.axis === "Z" ? "#c4d4e7" : "#92abc8") }))
   return null
 }
 
@@ -11960,6 +12004,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
   // -- STAVY PRO ŘEZÁNÍ A ANIMACI --
   const [clippingEnabled, setClippingEnabled] = useState(false)
+  const [sliceDefined, setSliceDefined] = useState(false)
+  const [sliceDrawing, setSliceDrawing] = useState(false)
+  const sliceAwaiting = clippingEnabled && !dicomSource && !sliceDefined
+  useEffect(() => { if (!clippingEnabled) setSliceDefined(false) }, [clippingEnabled])
   const [sliceRigGroup, setSliceRigGroup] = useState(null)
   const [planeGroup, setPlaneGroup] = useState(null) 
   const [horizontalPlaneGroup, setHorizontalPlaneGroup] = useState(null)
@@ -16147,7 +16195,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         pos: Array.isArray(note.pos) ? note.pos.slice(0, 3) : note.pos,
       })),
       clipping: {
-        enabled: clippingEnabled,
+        enabled: clippingEnabled && !sliceAwaiting,
         rigVersion: 1,
         controlVersion: 2,
         activeSlice,
@@ -16176,7 +16224,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [
     activeAnalysisMode, files, heatmapSelection, showHeatmap, hasComputedHeatmap,
     comparisonSelection, comparisonTolerance, comparisonDirection, showComparison, hasComputedComparison, comparisonSnapshot, modelTransforms, alignmentSelection, ghostModes,
-    pinnedNotes, clippingEnabled, activeSlice, sliceRigGroup, planeGroup, horizontalPlaneGroup, measureState, horizontalMeasureState,
+    pinnedNotes, clippingEnabled, sliceAwaiting, activeSlice, sliceRigGroup, planeGroup, horizontalPlaneGroup, measureState, horizontalMeasureState,
     dicomSource, dicomSettings,
   ])
 
@@ -16507,6 +16555,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
     if (pendingViewerState.clipping?.enabled || pendingViewerState.dicom || dicomSource) {
       if (pendingViewerState.clipping) pendingClipStateRef.current = pendingViewerState.clipping
+      setSliceDefined(!!pendingViewerState.clipping?.enabled)
       setClippingEnabled(true)
     } else {
       setClippingEnabled(false)
@@ -16646,7 +16695,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const moveSliceBy = useCallback((step) => {
     const kind = activeSlice === "horizontal" ? "horizontal" : "vertical"
     const group = kind === "horizontal" ? horizontalPlaneGroup : planeGroup
-    if (!clippingEnabled || !group) return
+    if (!clippingEnabled || sliceAwaiting || !group) return
     group.translateZ(step)
     group.updateMatrixWorld(true)
 
@@ -16662,12 +16711,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       clipPlaneRef.current.setFromNormalAndCoplanarPoint(normal, pos)
       requestClipUpdate()
     }
-  }, [activeSlice, clippingEnabled, planeGroup, horizontalPlaneGroup, requestClipUpdate, requestHorizontalClipUpdate])
+  }, [activeSlice, clippingEnabled, sliceAwaiting, planeGroup, horizontalPlaneGroup, requestClipUpdate, requestHorizontalClipUpdate])
 
   const syncActiveSliceFromGizmo = useCallback(() => {
     const kind = activeSlice === "horizontal" ? "horizontal" : "vertical"
     const group = kind === "horizontal" ? horizontalPlaneGroup : planeGroup
-    if (!clippingEnabled || !group) return
+    if (!clippingEnabled || sliceAwaiting || !group) return
     group.updateMatrixWorld(true)
 
     if (kind === "horizontal") {
@@ -16682,12 +16731,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setMeasureState(prev => (prev.active || prev.p1) ? { active: false, p1: null, p2: null, snappedP2: null } : prev)
       requestClipUpdate()
     }
-  }, [activeSlice, clippingEnabled, planeGroup, horizontalPlaneGroup, requestClipUpdate, requestHorizontalClipUpdate])
+  }, [activeSlice, clippingEnabled, sliceAwaiting, planeGroup, horizontalPlaneGroup, requestClipUpdate, requestHorizontalClipUpdate])
 
   useEffect(() => {
     const handleKeyDown = (e) => {
       const activeGroup = activeSlice === "horizontal" ? horizontalPlaneGroup : planeGroup
-      if (!clippingEnabled || !activeGroup) return
+      if (!clippingEnabled || sliceAwaiting || !activeGroup) return
       const step = 0.5 
       if (e.key === "ArrowUp" || e.key === "ArrowRight") {
          moveSliceBy(step)
@@ -16697,9 +16746,39 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     }
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [clippingEnabled, activeSlice, moveSliceBy, planeGroup, horizontalPlaneGroup])
+  }, [clippingEnabled, sliceAwaiting, activeSlice, moveSliceBy, planeGroup, horizontalPlaneGroup])
+
+  const getSliceDrawingAnchor = useCallback(() => {
+    const bounds = getSliceSceneBounds()
+    return bounds.isEmpty() ? null : bounds.getCenter(new THREE.Vector3())
+  }, [getSliceSceneBounds])
+  const applyDrawnSlice = useCallback(({ matrix }) => {
+    if (!sliceRigGroup || !planeGroup) return
+    const bounds = getSliceSceneBounds()
+    if (bounds.isEmpty()) return
+    sliceRigGroup.position.copy(bounds.getCenter(new THREE.Vector3()))
+    sliceRigGroup.quaternion.identity(); sliceRigGroup.scale.set(1, 1, 1)
+    sliceRigGroup.updateMatrixWorld(true)
+    const local = sliceRigGroup.matrixWorld.clone().invert().multiply(matrix)
+    local.decompose(planeGroup.position, planeGroup.quaternion, planeGroup.scale)
+    planeGroup.updateMatrixWorld(true)
+    sliceRigMatrixRef.current.copy(sliceRigGroup.matrix)
+    planeMatrixRef.current.copy(planeGroup.matrix)
+    isSliceRigInitialized.current = true; isPlaneInitialized.current = true
+    setPlaneRadius(Math.max(...bounds.getSize(new THREE.Vector3()).toArray()) * .6)
+    setActiveSlice("vertical")
+    setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
+    updateClippingLogic()
+    setSliceDefined(true)
+  }, [sliceRigGroup, planeGroup, getSliceSceneBounds, updateClippingLogic])
 
   const handleResetPlane = useCallback(() => {
+    if (!dicomSource) {
+      setSliceDefined(false)
+      setSliceSegments([]); setSliceBBox(null); setDicomSlice2D(null)
+      setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
+      return
+    }
     if (!rootGroupRef.current || !sliceRigGroup || !planeGroup) {
        isPlaneInitialized.current = false;
        isHorizontalPlaneInitialized.current = false;
@@ -16738,10 +16817,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
        setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
        setHorizontalMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
     }
-  }, [sliceRigGroup, planeGroup, horizontalPlaneGroup, getSliceSceneBounds, updateClippingLogic, updateHorizontalClippingLogic])
+  }, [dicomSource, sliceRigGroup, planeGroup, horizontalPlaneGroup, getSliceSceneBounds, updateClippingLogic, updateHorizontalClippingLogic])
 
   useEffect(() => {
-    const ready = clippingEnabled && rootGroupRef.current && sliceRigGroup && planeGroup && (!dicomSource || isMobile || horizontalPlaneGroup)
+    const ready = clippingEnabled && !sliceAwaiting && rootGroupRef.current && sliceRigGroup && planeGroup && (!dicomSource || isMobile || horizontalPlaneGroup)
     if (ready) {
       const box = getSliceSceneBounds()
       if (box.isEmpty()) return
@@ -16803,7 +16882,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setHorizontalDicomSlice2D(null)
       setHorizontalMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
     }
-  }, [clippingEnabled, dicomSource, isMobile, sliceRigGroup, planeGroup, horizontalPlaneGroup, getSliceSceneBounds, updateClippingLogic, updateHorizontalClippingLogic])
+  }, [clippingEnabled, sliceAwaiting, dicomSource, isMobile, sliceRigGroup, planeGroup, horizontalPlaneGroup, getSliceSceneBounds, updateClippingLogic, updateHorizontalClippingLogic])
 
   useEffect(() => {
     ;(async () => {
@@ -20230,7 +20309,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             { id: "okluze", label: "Okluze", description: "Změřit kontakty a mezery mezi skeny.", disabled: analysisEligibleFiles.length < 2, active: heatmapMenuOpen || showHeatmap, toggle: true, onClick: () => { setHeatmapMenuOpen(previous => !previous); setComparisonMenuOpen(false) } },
             { id: "porovnani", label: "Porovnání", description: "Porovnat povrchové odchylky dvou modelů.", disabled: analysisEligibleFiles.length < 2, active: comparisonMenuOpen || showComparison, toggle: true, onClick: () => { setComparisonMenuOpen(previous => !previous); setHeatmapMenuOpen(false) } },
             { id: "360-spin", label: "360° Spin", description: "Spustit nebo zastavit otáčení modelu.", active: isAutoRotating, toggle: true, onClick: () => setIsAutoRotating(previous => !previous), controls: <><input aria-label="Rychlost rotace" type="range" min={0.05} max={1} step={0.05} value={spinSpeed} onChange={event => setSpinSpeed(Number(event.target.value))} /><span style={{ flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{Math.round(spinSpeed * 100)} %</span></> },
-            { id: "prurez", label: "Průřez", description: "Zobrazit řez modelem a nastavit rovinu.", active: clippingEnabled, toggle: true, controls: <button type="button" onClick={handleResetPlane}>Reset</button>, onClick: () => {
+            { id: "prurez", label: "Průřez", description: "Nakreslit průřez v aktuálním směru pohledu.", active: clippingEnabled, toggle: true, controls: <button type="button" onClick={handleResetPlane}>{dicomSource ? "Reset" : "Nový řez"}</button>, onClick: () => {
               if (clippingEnabled && dicomSettings.viewMode === "only2d") setDicomSettings(previous => ({ ...previous, viewMode: "solid" }))
               setClippingEnabled(previous => !previous)
             } },
@@ -20771,7 +20850,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       )}
 
       {!alignmentMode && !dicomLayoutActive && clippingEnabled && !isMobile && (
-        <Overlay2D segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />
+        <Overlay2D awaitingDraw={sliceAwaiting} onRedraw={!dicomSource ? handleResetPlane : undefined} segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />
       )}
 
       {mobileSliceSplitActive && (
@@ -20808,7 +20887,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           touchAction: "none", overscrollBehavior: "contain",
         }}>
           <Overlay2D
-            embedded mobile title="Průřez · 2D"
+            embedded mobile awaitingDraw={sliceAwaiting} onRedraw={!dicomSource ? handleResetPlane : undefined} title="Průřez · 2D"
             segments={sliceSegments}
             modelColors={colors}
             boundingBox={sliceBBox}
@@ -20835,6 +20914,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         }}
         style={{ position: "absolute", top: 0, bottom: alignmentSceneInsetActive ? alignmentBottomHeight : (mobileSliceSplitActive ? `calc(${mobileSlicePaneHeight} + 18px)` : 0), left: 0, right: dicomLayoutActive ? dicomPanelWidth : 0, zIndex: 1, background: "transparent", transition: "bottom .44s cubic-bezier(.2,.8,.2,1), right .34s ease", willChange: "bottom" }}
       >
+        <SliceDrawController enabled={sliceAwaiting && !alignmentMode && !trimMode && !repairMode} getAnchor={getSliceDrawingAnchor} onComplete={applyDrawnSlice} onDrawingChange={setSliceDrawing} />
         <ambientLight intensity={0.35 * sceneIntensity} />
         <directionalLight position={[0, 5, 5]} intensity={1.2 * sceneIntensity} />
         <directionalLight position={[-10, 0, 0]} intensity={0.9 * sceneIntensity} />
@@ -20844,7 +20924,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
         <AlignmentFastRaycast enabled={(cadStandalone && cadStage === "orient") || (alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy) || (trimMode && !!trimSelection) || (repairMode && !!repairSelection)} />
 
-        <AutoRotateScene enabled={!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && isAutoRotating} target={cameraTarget} speedFactor={spinSpeed} />
+        <AutoRotateScene enabled={!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && !sliceAwaiting && !sliceDrawing && isAutoRotating} target={cameraTarget} speedFactor={spinSpeed} />
 
         <group ref={rootGroupRef}>
           <Suspense fallback={null}>
@@ -21009,10 +21089,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
         {!alignmentMode && !trimMode && !repairMode && clippingEnabled && (!isMobile || dicomSettings.viewMode === "only2d") && (
           <group ref={setSliceRigGroup}>
-            <group ref={setPlaneGroup} visible={!dicomLayoutActive || activeSlice === "vertical"}>
+            <group ref={setPlaneGroup} visible={!sliceAwaiting && (!dicomLayoutActive || activeSlice === "vertical")}>
               <mesh>
                 <circleGeometry args={[planeRadius, 64]} />
-                <meshBasicMaterial color="#b88f8f" transparent opacity={0.25} side={THREE.DoubleSide} depthWrite={false} />
+                <meshBasicMaterial color="#ad9690" transparent opacity={0.12} side={THREE.DoubleSide} depthWrite={false} />
               </mesh>
               {mobileSliceSplitActive && (
                 <MobileSlicePlaneTouchController
@@ -21041,14 +21121,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           </group>
         )}
 
-        {!alignmentMode && !trimMode && !repairMode && clippingEnabled && !isMobile && activePlaneGroup && (
+        {!alignmentMode && !trimMode && !repairMode && clippingEnabled && !sliceAwaiting && !isMobile && activePlaneGroup && (
           <>
             <TransformControls
               ref={transformRotateRef}
               object={activePlaneGroup}
               mode="rotate"
               space="local"
-              size={0.72}
+              size={0.86}
               showX={true}
               showY={true}
               showZ={false}
@@ -21066,6 +21146,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               onObjectChange={syncActiveSliceFromGizmo}
             />
             <ThickRotationGizmo controlRef={transformRotateRef} />
+            <SliceTranslationStyle controlRef={transformTranslateRef} />
             <GizmoManager
               rotateRef={transformRotateRef}
               translateRef={transformTranslateRef}
@@ -21102,7 +21183,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           />
         )}
 
-        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} ref={trackballRef} target={cameraTarget} enabled={!builderDragging && !builderPlacing && !sliceOverlayInteracting && !alignmentBusy && !cadBusy && trimDraggingPoint == null && !trimBusy} onInteractionChange={handleCameraInteraction} />
+        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} ref={trackballRef} target={cameraTarget} enabled={!sliceDrawing && !builderDragging && !builderPlacing && !sliceOverlayInteracting && !alignmentBusy && !cadBusy && trimDraggingPoint == null && !trimBusy} onInteractionChange={handleCameraInteraction} />
         <RightButtonPan setTarget={setCameraTarget} trackballRef={trackballRef} onInteractionChange={handleCameraInteraction} />
       </Canvas>
 
