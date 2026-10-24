@@ -17167,14 +17167,39 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     return () => window.removeEventListener("message", onDicomCommand)
   }, [applyDicomSource, startDicomLoad])
 
+  const allLoaded = files.length > 0 && files.every(f => loadedUrls.has(f.url))
+  const sceneIsLoading = files.length > 0 && !allLoaded
+  const [sceneLoaderPhase, setSceneLoaderPhase] = useState("hidden")
+  const sceneLoaderShown = useRef(false)
+  useEffect(() => {
+    if (sceneIsLoading) {
+      sceneLoaderShown.current = true
+      setSceneLoaderPhase("loading")
+      return
+    }
+    if (!sceneLoaderShown.current) return
+    // Briefly finish the real progress bar before fading the whole loader out.
+    setSceneLoaderPhase("complete")
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    const fade = setTimeout(() => setSceneLoaderPhase("exiting"), reduced ? 0 : 200)
+    const finish = setTimeout(() => {
+      sceneLoaderShown.current = false
+      setSceneLoaderPhase("hidden")
+    }, reduced ? 0 : 620)
+    return () => { clearTimeout(fade); clearTimeout(finish) }
+  }, [sceneIsLoading])
+  const sceneLoaderVisible = sceneIsLoading || sceneLoaderPhase !== "hidden"
+  const sceneLoaderExiting = !sceneIsLoading && sceneLoaderPhase === "exiting"
+
   const logoEl = logoCfg.url && (
     <img src={logoCfg.url} alt="" style={{
       position: "absolute",
       bottom: logoCfg.pos === "bc" || logoCfg.pos === "bl" || logoCfg.pos === "br" ? 12 : "auto",
       left: logoCfg.pos === "bl" ? 12 : logoCfg.pos === "bc" ? "50%" : "auto",
       right: logoCfg.pos === "br" ? 12 : "auto",
-      transform: logoCfg.pos === "bc" ? "translateX(-50%)" : "none",
-      width: logoCfg.width, opacity: logoCfg.opacity, zIndex: 0,
+      transform: `${logoCfg.pos === "bc" ? "translateX(-50%) " : ""}translateY(${sceneLoaderVisible ? 5 : 0}px)`,
+      transition: sceneLoaderVisible ? "none" : "opacity .48s ease-in, transform .48s ease-in",
+      width: logoCfg.width, opacity: sceneLoaderVisible ? 0 : logoCfg.opacity, zIndex: 0,
       pointerEvents: "none", userSelect: "none", filter: "drop-shadow(0 0 1px rgba(0,0,0,.25))",
     }}/>
   )
@@ -18130,7 +18155,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     </div>
   )
 
-  const allLoaded = files.length > 0 && files.every(f => loadedUrls.has(f.url))
   const frameKey = allLoaded && !didInitialFrame ? `frame-${files.length}` : ""
   const sceneReadyForDicom = (files.length === 0 || (allLoaded && didInitialFrame)) &&
     !isCalculatingHeatmap && !isCalculatingComparison && !restoringAnalysisMode
@@ -20611,45 +20635,36 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       )}
 
       {/* OVERLAY BĚHEM NAČÍTÁNÍ MODELŮ */}
-      {!allLoaded && files.length > 0 && (() => {
+      {sceneLoaderVisible && (() => {
         const loadedCount = files.filter((file) => loadedUrls.has(file.url)).length
-        const totalCount = files.length
-        const loadPercent = Math.max(4, Math.min(100, Math.round((loadedCount / Math.max(1, totalCount)) * 100)))
+        const loadPercent = sceneIsLoading ? Math.round(loadedCount / Math.max(1, files.length) * 100) : 100
         return (
-          <div style={{
+          <div data-scene-loader="true" style={{
             position: "absolute", inset: 0, zIndex: 9999, background: "rgba(0,0,0,.42)",
             backdropFilter: "blur(2px)", WebkitBackdropFilter: "blur(2px)",
             display: "flex", alignItems: "center", justifyContent: "center",
+            opacity: sceneLoaderExiting ? 0 : 1, transition: "opacity .42s ease-out",
+            pointerEvents: sceneLoaderExiting ? "none" : "auto",
             color: "white", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
           }}>
-            <div role="status" aria-live="polite" style={{
-              width: 350, maxWidth: "calc(100vw - 40px)", padding: "28px 22px 20px", borderRadius: 16,
+            <div role="status" aria-live="polite" aria-label={`Načítání 3D scény: ${loadPercent} %`} style={{
+              width: 350, maxWidth: "calc(100vw - 40px)", padding: "30px 26px 24px", borderRadius: 16,
               background: "rgba(12,12,12,.96)", border: "1px solid rgba(255,255,255,.09)",
-              boxShadow: "0 24px 70px rgba(0,0,0,.52)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)"
+              boxShadow: "0 24px 70px rgba(0,0,0,.52)",
+              transform: sceneLoaderExiting ? "translateY(-6px) scale(.985)" : "translateY(0) scale(1)",
+              transition: "transform .42s ease-out",
             }}>
               <img src="/arthetic-loader-scan.svg" alt="ARTHETIC" width={260} height={44} draggable={false}
-                style={{ display: "block", width: "min(260px, 100%)", height: "auto", margin: "4px auto 28px", userSelect: "none" }} />
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={{ fontSize: 13, fontWeight: 790, letterSpacing: "-.01em" }}>Načítám 3D scénu</div>
-                  <div style={{ marginTop: 3, color: "#777", fontSize: 9.5, fontWeight: 610 }}>
-                    Připravuji modely a jejich geometrii · {loadedCount} / {totalCount}
-                  </div>
-                </div>
-                <div style={{ color: "#a3a3a3", fontSize: 10, fontWeight: 760, fontVariantNumeric: "tabular-nums" }}>
-                  {Math.round((loadedCount / Math.max(1, totalCount)) * 100)} %
-                </div>
-              </div>
-              <div style={{ marginTop: 17, height: 4, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.06)" }}>
+                style={{ display: "block", width: "min(260px, 100%)", height: "auto", margin: "4px auto 26px", userSelect: "none" }} />
+              <div role="progressbar" aria-label="Načítání modelů" aria-valuemin={0} aria-valuemax={100} aria-valuenow={loadPercent}
+                style={{ height: 3, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.08)" }}>
                 <div style={{
                   width: `${loadPercent}%`, height: "100%", borderRadius: 999,
                   background: "linear-gradient(90deg, rgba(255,255,255,.42), rgba(255,255,255,.96))",
-                  boxShadow: "0 0 14px rgba(255,255,255,.12)", transition: "width .28s cubic-bezier(.22,.8,.22,1)"
+                  transition: "width .2s ease-out"
                 }} />
               </div>
-              <div style={{ marginTop: 10, color: "#595959", fontSize: 8.5, fontWeight: 620 }}>
-                Viewer se otevře automaticky, jakmile budou všechny modely připravené.
-              </div>
+              <div style={{ marginTop: 10, textAlign: "right", color: "#a3a3a3", fontSize: 10, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{loadPercent} %</div>
             </div>
           </div>
         )
