@@ -30,3 +30,41 @@ test("reversing a gesture preserves the geometric plane",()=>{
  assert(Math.abs(Math.abs(forward.normal.dot(backward.normal))-1)<1e-8);assert(Math.abs(forward.plane.distanceToPoint(backward.center))<1e-8)
 })
 test("clicks and near-zero drags never create a cut",()=>{assert.equal(stroke({x:100,y:100},{x:105,y:102}),null)})
+
+test("vertical screen stroke produces an upright 2D section", () => {
+ const camera=ortho(), result=stroke({x:400,y:50},{x:400,y:550},camera)
+ const sectionUp=new THREE.Vector3().setFromMatrixColumn(result.matrix,1)
+ assert(sectionUp.dot(new THREE.Vector3(0,1,0))>.999)
+ assert(Math.abs(result.normal.x)>.999)
+})
+
+test("placing the drawn plane preserves the on-screen line through initialization", async () => {
+ const {placeDrawnSlice}=await import("../app/viewer/slice-drawing.mjs")
+ const camera=ortho(); camera.position.set(80,40,100); camera.up.set(.1,1,.2).normalize();camera.lookAt(anchor)
+ const a={x:310,y:80}, b={x:330,y:520}, result=stroke(a,b,camera)
+ const parent=new THREE.Group();parent.position.set(3,-7,9);parent.rotation.set(.3,.2,-.1)
+ const rig=new THREE.Group(),plane=new THREE.Group();parent.add(rig);rig.add(plane)
+ const saved=placeDrawnSlice({rig,plane,worldMatrix:result.matrix,center:anchor})
+ // This is the same snapshot restore used when controls are mounted.
+ saved.rigMatrix.decompose(rig.position,rig.quaternion,rig.scale)
+ saved.planeMatrix.decompose(plane.position,plane.quaternion,plane.scale)
+ parent.updateMatrixWorld(true)
+ const n=new THREE.Vector3(0,0,1).transformDirection(plane.matrixWorld)
+ const actual=new THREE.Plane().setFromNormalAndCoplanarPoint(n,new THREE.Vector3().setFromMatrixPosition(plane.matrixWorld))
+ assert(Math.abs(Math.abs(actual.normal.dot(result.normal))-1)<1e-8)
+ for(const point of [a,b]){
+  const ray=new THREE.Raycaster();ray.setFromCamera(new THREE.Vector2(point.x/800*2-1,1-point.y/600*2),camera)
+  assert(Math.abs(actual.normal.dot(ray.ray.direction))<1e-8)
+  assert(Math.abs(actual.distanceToPoint(ray.ray.origin))<1e-8)
+ }
+})
+
+test("repeated missing DICOM payloads never reset scan section matrices", async () => {
+ const {sliceSourceChanged}=await import("../app/viewer/slice-drawing.mjs")
+ assert.equal(sliceSourceChanged(null,null),false)
+ assert.equal(sliceSourceChanged(undefined,null),false)
+ assert.equal(sliceSourceChanged({u:"ct.zip"},{u:"ct.zip"}),false)
+ assert.equal(sliceSourceChanged({u:"ct.zip"},null),true)
+ assert.equal(sliceSourceChanged(null,{u:"ct.zip"}),true)
+ assert.equal(sliceSourceChanged({u:"a.zip"},{u:"b.zip"}),true)
+})

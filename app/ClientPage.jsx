@@ -6,6 +6,7 @@ import { createViewerReceiver } from "../public/integrations/viewer-bridge-v1.mj
 import ViewerToolsPanel from "./ViewerToolsPanel"
 import ViewerToolIcon from "./ViewerToolIcon"
 import SliceDrawController from "./SliceDrawController"
+import { placeDrawnSlice, sliceSourceChanged } from "./viewer/slice-drawing.mjs"
 import SliceEmptyState from "./SliceEmptyState"
 import React, { Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react"
 import { Canvas, useThree, useFrame } from "@react-three/fiber"
@@ -6654,7 +6655,12 @@ function Switch({ checked, onChange, label }) {
 
 /* ---------- 2D OVERLAY ---------- */
 function Overlay2D({ awaitingDraw = false, onRedraw, segments, modelColors, boundingBox: measuredBounds, measureState, setMeasureState, dicomSlice, onInteractionChange, embedded = false, mobile = false, title = "", active = false, onActivate, accent = "#f59e9e" }) {
-  const boundingBox = measuredBounds || { minX: -50, minY: -50, width: 100, height: 100 }
+  const [framingBounds, setFramingBounds] = useState(null)
+  useEffect(() => {
+    if (awaitingDraw) setFramingBounds(null)
+    else if (measuredBounds) setFramingBounds(previous => previous || measuredBounds)
+  }, [awaitingDraw, measuredBounds])
+  const boundingBox = framingBounds || measuredBounds || { minX: -50, minY: -50, width: 100, height: 100 }
   useEffect(() => { if (awaitingDraw) { setPan({ x: 0, y: 0 }); setZoom(1) } }, [awaitingDraw])
   const svgRef = useRef(null)
   const containerRef = useRef(null)
@@ -11920,8 +11926,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [dicomProgress, setDicomProgress] = useState(0)
   const [dicomError, setDicomError] = useState("")
   const dicomAbortRef = useRef(null)
+  const appliedDicomSourceRef = useRef(null)
 
   const applyDicomSource = useCallback((source) => {
+    const changed = sliceSourceChanged(appliedDicomSourceRef.current, source)
+    appliedDicomSourceRef.current = source?.u ? source : null
+    if (!source?.u && !changed) return
     if (!source?.u) {
       dicomAbortRef.current?.abort()
       dicomAbortRef.current = null
@@ -16756,14 +16766,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     if (!sliceRigGroup || !planeGroup) return
     const bounds = getSliceSceneBounds()
     if (bounds.isEmpty()) return
-    sliceRigGroup.position.copy(bounds.getCenter(new THREE.Vector3()))
-    sliceRigGroup.quaternion.identity(); sliceRigGroup.scale.set(1, 1, 1)
-    sliceRigGroup.updateMatrixWorld(true)
-    const local = sliceRigGroup.matrixWorld.clone().invert().multiply(matrix)
-    local.decompose(planeGroup.position, planeGroup.quaternion, planeGroup.scale)
-    planeGroup.updateMatrixWorld(true)
-    sliceRigMatrixRef.current.copy(sliceRigGroup.matrix)
-    planeMatrixRef.current.copy(planeGroup.matrix)
+    const placed = placeDrawnSlice({ rig: sliceRigGroup, plane: planeGroup, worldMatrix: matrix, center: bounds.getCenter(new THREE.Vector3()) })
+    sliceRigMatrixRef.current.copy(placed.rigMatrix)
+    planeMatrixRef.current.copy(placed.planeMatrix)
     isSliceRigInitialized.current = true; isPlaneInitialized.current = true
     setPlaneRadius(Math.max(...bounds.getSize(new THREE.Vector3()).toArray()) * .6)
     setActiveSlice("vertical")
@@ -16822,6 +16827,13 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   useEffect(() => {
     const ready = clippingEnabled && !sliceAwaiting && rootGroupRef.current && sliceRigGroup && planeGroup && (!dicomSource || isMobile || horizontalPlaneGroup)
     if (ready) {
+      // Drawn scans already have their exact world plane. Initialization is for
+      // DICOM/default/restored planes; it must not overwrite a drawing or gizmo.
+      if (!dicomSource && sliceDefined) {
+        sliceRigGroup.updateWorldMatrix(true, true)
+        updateClippingLogic()
+        return
+      }
       const box = getSliceSceneBounds()
       if (box.isEmpty()) return
 
@@ -16882,7 +16894,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setHorizontalDicomSlice2D(null)
       setHorizontalMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
     }
-  }, [clippingEnabled, sliceAwaiting, dicomSource, isMobile, sliceRigGroup, planeGroup, horizontalPlaneGroup, getSliceSceneBounds, updateClippingLogic, updateHorizontalClippingLogic])
+  }, [clippingEnabled, sliceAwaiting, sliceDefined, dicomSource, isMobile, sliceRigGroup, planeGroup, horizontalPlaneGroup, getSliceSceneBounds, updateClippingLogic, updateHorizontalClippingLogic])
 
   useEffect(() => {
     ;(async () => {
