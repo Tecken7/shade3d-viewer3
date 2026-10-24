@@ -11,6 +11,10 @@ import "./SceneLoader.css"
 import SliceDrawController from "./SliceDrawController"
 import { placeDrawnSlice, sliceSourceChanged, sliceSurfaceFit } from "./viewer/slice-drawing.mjs"
 import SliceEmptyState from "./SliceEmptyState"
+import { DICOM_VERTEX_SHADER, DICOM_FRAGMENT_SHADER } from "./viewer/dicom-shaders.mjs"
+import AnimatedSceneLoader, { useLoaderPresence } from "./AnimatedSceneLoader"
+import { sampleDicomTrilinear } from "./viewer/dicom-sampling.mjs"
+import { makeDicomPreview } from "./viewer/dicom-preview.mjs"
 import { createSliceEngine } from "./viewer/slice-engine.js"
 import React, { Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react"
 import { Canvas, useThree, useFrame } from "@react-three/fiber"
@@ -3350,134 +3354,9 @@ function expandBoxByDicomVolume(box, volume, settings, sceneMatrix = null) {
   return box
 }
 
-const DICOM_VERTEX_SHADER = `
-  out vec3 vOrigin;
-  out vec3 vDirection;
-  uniform vec3 uSize;
-  void main() {
-    vec3 cameraLocal = (inverse(modelMatrix) * vec4(cameraPosition, 1.0)).xyz;
-    vOrigin = cameraLocal / uSize + 0.5;
-    vec3 texturePosition = position / uSize + 0.5;
-    vDirection = texturePosition - vOrigin;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`
-
-const DICOM_FRAGMENT_SHADER = `
-  precision highp float;
-  precision highp sampler3D;
-  in vec3 vOrigin;
-  in vec3 vDirection;
-  out vec4 outColor;
-  uniform sampler3D uVolume;
-  uniform float uDensityLow;
-  uniform float uDensityHigh;
-  uniform float uOpacity;
-  uniform float uCropMin;
-  uniform float uCropMax;
-  uniform float uStep;
-  uniform float uInteractive;
-  uniform float uViewMode;
-  uniform vec3 uVoxel;
-
-  vec2 hitBox(vec3 origin, vec3 direction) {
-    vec3 invDirection = 1.0 / direction;
-    vec3 tMin = (vec3(0.0) - origin) * invDirection;
-    vec3 tMax = (vec3(1.0) - origin) * invDirection;
-    vec3 t1 = min(tMin, tMax);
-    vec3 t2 = max(tMin, tMax);
-    return vec2(max(max(t1.x, t1.y), t1.z), min(min(t2.x, t2.y), t2.z));
-  }
-
-  vec3 densityGradient(vec3 point) {
-    return vec3(
-      texture(uVolume, point + vec3(uVoxel.x, 0.0, 0.0)).r - texture(uVolume, point - vec3(uVoxel.x, 0.0, 0.0)).r,
-      texture(uVolume, point + vec3(0.0, uVoxel.y, 0.0)).r - texture(uVolume, point - vec3(0.0, uVoxel.y, 0.0)).r,
-      texture(uVolume, point + vec3(0.0, 0.0, uVoxel.z)).r - texture(uVolume, point - vec3(0.0, 0.0, uVoxel.z)).r
-    );
-  }
-
-  void main() {
-    vec3 direction = normalize(vDirection);
-    vec2 bounds = hitBox(vOrigin, direction);
-    if (bounds.x > bounds.y) discard;
-    bounds.x = max(bounds.x, 0.0);
-    vec3 point = vOrigin + bounds.x * direction;
-    float distanceTravelled = bounds.x;
-    vec4 accumulated = vec4(0.0);
-    float low = clamp((uDensityLow - ${DICOM_HU_MIN.toFixed(1)}) / ${(DICOM_HU_MAX - DICOM_HU_MIN).toFixed(1)}, 0.0, 0.998);
-    float high = clamp((uDensityHigh - ${DICOM_HU_MIN.toFixed(1)}) / ${(DICOM_HU_MAX - DICOM_HU_MIN).toFixed(1)}, low + 0.002, 1.0);
-    float isoLevel = mix(low, high, 0.16);
-    float previousDensity = 0.0;
-    vec3 previousPoint = point;
-
-    for (int i = 0; i < 1024; i++) {
-      if (distanceTravelled > bounds.y || (uInteractive > 0.5 && accumulated.a > 0.985)) break;
-      if (point.z >= uCropMin && point.z <= uCropMax) {
-        float density = texture(uVolume, point).r;
-        if (uInteractive < 0.5 && uViewMode > 0.5) {
-          if (density >= isoLevel && previousDensity < isoLevel) {
-            vec3 lowerPoint = previousPoint;
-            vec3 upperPoint = point;
-            for (int refinement = 0; refinement < 5; refinement++) {
-              vec3 middlePoint = mix(lowerPoint, upperPoint, 0.5);
-              if (texture(uVolume, middlePoint).r >= isoLevel) upperPoint = middlePoint;
-              else lowerPoint = middlePoint;
-            }
-            vec3 surfacePoint = mix(lowerPoint, upperPoint, 0.5);
-            float surfaceDensity = texture(uVolume, surfacePoint).r;
-            vec3 normal = normalize(-densityGradient(surfacePoint) + vec3(0.00001));
-            vec3 viewDirection = normalize(-direction);
-            if (dot(normal, viewDirection) < 0.0) normal = -normal;
-            vec3 keyDirection = normalize(viewDirection + vec3(0.42, 0.58, 0.72));
-            vec3 halfDirection = normalize(keyDirection + viewDirection);
-            float diffuse = max(dot(normal, keyDirection), 0.0);
-            float fill = max(dot(normal, viewDirection), 0.0);
-            float rim = pow(1.0 - fill, 2.0);
-            float specular = pow(max(dot(normal, halfDirection), 0.0), 30.0);
-            float surfaceTone = smoothstep(isoLevel, max(isoLevel + 0.02, high), surfaceDensity);
-            vec3 boneColor = mix(vec3(0.62, 0.45, 0.27), vec3(0.98, 0.90, 0.70), surfaceTone);
-            vec3 color = boneColor * (0.34 + diffuse * 0.72 + fill * 0.16 + rim * 0.08);
-            color += vec3(1.0, 0.95, 0.82) * specular * 0.34;
-            outColor = vec4(color, clamp(uOpacity * 1.2, 0.08, 1.0));
-            return;
-          }
-        } else {
-          float transfer = smoothstep(low, high, density);
-          float alpha = pow(transfer, 1.35) * uOpacity * (uInteractive > 0.5 ? 0.06 : 0.09);
-          if (alpha > 0.002) {
-            vec3 boneColor = mix(vec3(0.72, 0.61, 0.43), vec3(1.0, 0.97, 0.86), transfer);
-            float shade = 0.78;
-            if (uInteractive < 0.5) {
-              vec3 gradient = densityGradient(point);
-              vec3 normal = normalize(gradient + vec3(0.0001));
-              float diffuse = abs(dot(normal, normalize(vec3(0.45, 0.65, 1.0))));
-              float facing = abs(dot(normal, -direction));
-              float specular = pow(max(facing, 0.0), 22.0);
-              float edgeStrength = clamp(length(gradient) * 16.0, 0.0, 1.0);
-              shade = 0.34 + diffuse * 0.56 + specular * 0.34;
-              alpha *= 0.62 + edgeStrength * 0.9;
-            }
-            accumulated.rgb += (1.0 - accumulated.a) * alpha * boneColor * shade;
-            accumulated.a += (1.0 - accumulated.a) * alpha;
-          }
-        }
-        previousDensity = density;
-        previousPoint = point;
-      } else {
-        previousDensity = 0.0;
-        previousPoint = point;
-      }
-      point += direction * uStep;
-      distanceTravelled += uStep;
-    }
-    if (uInteractive < 0.5 && uViewMode > 0.5) discard;
-    if (accumulated.a < 0.01) discard;
-    outColor = accumulated;
-  }
-`
 
 function DicomVolume({ volume, settings, interactive = false, sceneRootRef = null }) {
+  const { camera } = useThree()
   const meshRef = useRef(null)
   const texture = useMemo(() => {
     if (!volume) return null
@@ -3499,11 +3378,12 @@ function DicomVolume({ volume, settings, interactive = false, sceneRootRef = nul
       fragmentShader: DICOM_FRAGMENT_SHADER,
       side: THREE.BackSide,
       transparent: true,
-      depthTest: false,
-      depthWrite: false,
+      depthTest: true,
+      depthWrite: settings.viewMode === "solid" && settings.opacity >= .8,
       toneMapped: false,
       uniforms: {
         uVolume: { value: texture },
+        uOrthographic: { value: !!camera.isOrthographicCamera },
         uSize: { value: new THREE.Vector3(...volume.size) },
         uDensityLow: { value: settings.densityMin },
         uDensityHigh: { value: settings.densityMax },
@@ -3525,6 +3405,7 @@ function DicomVolume({ volume, settings, interactive = false, sceneRootRef = nul
 
   useEffect(() => {
     if (!material) return
+    material.depthWrite = settings.viewMode === "solid" && settings.opacity >= .8
     material.uniforms.uDensityLow.value = settings.densityMin
     material.uniforms.uDensityHigh.value = Math.max(settings.densityMin + 10, settings.densityMax)
     material.uniforms.uOpacity.value = settings.opacity
@@ -3571,27 +3452,6 @@ function DicomVolume({ volume, settings, interactive = false, sceneRootRef = nul
   )
 }
 
-function sampleDicomTrilinear(volume, tx, ty, tz) {
-  const x = Math.max(0, Math.min(volume.width - 1, tx * (volume.width - 1)))
-  const y = Math.max(0, Math.min(volume.height - 1, ty * (volume.height - 1)))
-  const z = Math.max(0, Math.min(volume.depth - 1, tz * (volume.depth - 1)))
-  const x0 = Math.floor(x), y0 = Math.floor(y), z0 = Math.floor(z)
-  const x1 = Math.min(volume.width - 1, x0 + 1)
-  const y1 = Math.min(volume.height - 1, y0 + 1)
-  const z1 = Math.min(volume.depth - 1, z0 + 1)
-  const fx = x - x0, fy = y - y0, fz = z - z0
-  const row = volume.width
-  const layer = volume.width * volume.height
-  const data = volume.data
-  const value = (ix, iy, iz) => data[iz * layer + iy * row + ix]
-  const c00 = value(x0, y0, z0) * (1 - fx) + value(x1, y0, z0) * fx
-  const c10 = value(x0, y1, z0) * (1 - fx) + value(x1, y1, z0) * fx
-  const c01 = value(x0, y0, z1) * (1 - fx) + value(x1, y0, z1) * fx
-  const c11 = value(x0, y1, z1) * (1 - fx) + value(x1, y1, z1) * fx
-  const c0 = c00 * (1 - fy) + c10 * fy
-  const c1 = c01 * (1 - fy) + c11 * fy
-  return c0 * (1 - fz) + c1 * fz
-}
 
 function buildDicomSliceImage(volume, settings, planeMatrixWorld, maxResolution = 224, sceneMatrix = null) {
   if (!volume || !planeMatrixWorld || settings.visible === false || typeof document === "undefined") return null
@@ -11935,6 +11795,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [dicomVolume, setDicomVolume] = useState(null)
   const [dicomStatus, setDicomStatus] = useState("idle")
   const [dicomProgress, setDicomProgress] = useState(0)
+  const dicomLoading = dicomStatus === "downloading" || dicomStatus === "processing"
+  const { visible: dicomLoaderVisible, exiting: dicomLoaderExiting } = useLoaderPresence(dicomLoading)
+
   const [dicomError, setDicomError] = useState("")
   const dicomAbortRef = useRef(null)
   const appliedDicomSourceRef = useRef(null)
@@ -12010,8 +11873,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       if (controller.signal.aborted) return
       setDicomVolume(volume)
       setDicomStatus("ready")
+      const preview = makeDicomPreview(volume)
+      if (preview && window.parent !== window) window.parent.postMessage({ type: "ARTHETIC_DICOM_PREVIEW", payload: { source: source.u, preview } }, "*")
     } catch (error) {
       if (error?.name === "AbortError") {
+        if (dicomAbortRef.current !== controller) return
         setDicomStatus("idle")
         return
       }
@@ -17075,9 +16941,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       bottom: logoCfg.pos === "bc" || logoCfg.pos === "bl" || logoCfg.pos === "br" ? 12 : "auto",
       left: logoCfg.pos === "bl" ? 12 : logoCfg.pos === "bc" ? "50%" : "auto",
       right: logoCfg.pos === "br" ? 12 : "auto",
-      transform: `${logoCfg.pos === "bc" ? "translateX(-50%) " : ""}translateY(${sceneLoaderVisible ? 5 : 0}px)`,
-      transition: sceneLoaderVisible ? "none" : "opacity .48s ease-in, transform .48s ease-in",
-      width: logoCfg.width, opacity: sceneLoaderVisible ? 0 : logoCfg.opacity, zIndex: 0,
+      transform: `${logoCfg.pos === "bc" ? "translateX(-50%) " : ""}translateY(${(sceneLoaderVisible || dicomLoaderVisible) ? 5 : 0}px)`,
+      transition: (sceneLoaderVisible || dicomLoaderVisible) ? "none" : "opacity .48s ease-in, transform .48s ease-in",
+      width: logoCfg.width, opacity: (sceneLoaderVisible || dicomLoaderVisible) ? 0 : logoCfg.opacity, zIndex: 0,
       pointerEvents: "none", userSelect: "none", filter: "drop-shadow(0 0 1px rgba(0,0,0,.25))",
     }}/>
   )
@@ -20513,7 +20379,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       )}
 
       {/* OVERLAY BĚHEM NAČÍTÁNÍ MODELŮ */}
-      {sceneLoaderVisible && (() => {
+      {sceneLoaderVisible && !dicomLoaderVisible && (() => {
         const pendingStages = files.filter(file => !loadedUrls.has(file.url)).map(file => modelLoadStages[file.url])
         const loadStatus = !sceneIsLoading ? "Připraveno" : sceneManifestLoading ? "Načítám scénu…"
           : pendingStages.includes("optimizing") ? "Připravuji geometrii…"
@@ -20752,31 +20618,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         </div>
       )}
 
-      {(dicomStatus === "downloading" || dicomStatus === "processing") && (
-        <div style={{
-          position: "absolute", inset: 0, zIndex: 10000, background: "rgba(0,0,0,.76)",
-          display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontFamily: "sans-serif"
-        }}>
-          <div style={{ width: "min(430px, calc(100vw - 32px))", textAlign: "center" }}>
-            <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "shade3dSpin360 1s linear infinite", transformOrigin: "50% 50%", marginBottom: 14 }}>
-              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-            </svg>
-            <div style={{ fontSize: 18, fontWeight: 800 }}>
-              {dicomStatus === "downloading"
-                ? `Stahuji DICOM data - ${Math.round(dicomProgress)}%`
-                : "Zpracovávám DICOM data..."}
-            </div>
-            <div style={{ height: 6, marginTop: 14, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.15)" }}>
-              <div style={{ width: `${Math.max(2, dicomProgress)}%`, height: "100%", background: "#60a5fa", transition: "width .2s" }} />
-            </div>
-            {dicomStatus === "processing" && (
-              <div style={{ marginTop: 9, fontSize: 11, color: "#cbd5e1" }}>
-                Sestavuji 3D objem z jednotlivých řezů.
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+      <AnimatedSceneLoader visible={dicomLoaderVisible} exiting={dicomLoaderExiting}
+        status={dicomStatus === "downloading" ? "Načítám CBCT…" : dicomStatus === "processing" ? "Sestavuji CT objem…" : dicomStatus === "error" ? "Načtení se nezdařilo" : "CBCT připraveno"}
+        progress={dicomLoading ? (dicomStatus === "processing" ? 95 : Math.min(90, dicomProgress * .9)) : dicomStatus === "ready" ? 100 : 0}/>
 
       {!isMobile && showComparison && hasComputedComparison && (
         <div style={{
