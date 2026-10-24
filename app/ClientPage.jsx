@@ -2,6 +2,7 @@
 
 import { inferSceneOrientation, fitOrientedBounds } from "./viewer/scan-orientation.mjs"
 import { cameraChanged } from "./viewer/camera-sync.mjs"
+import { stableSceneValue } from "./viewer/stable-scene-value.mjs"
 import { createViewerReceiver } from "../public/integrations/viewer-bridge-v1.mjs"
 import ViewerToolsPanel from "./ViewerToolsPanel"
 import LightingControls from "./LightingControls"
@@ -11901,9 +11902,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         isHorizontalPlaneInitialized.current = false
         isSliceRigInitialized.current = false
       }
-      return source
+      return stableSceneValue(previous, source)
     })
-    setDicomSettings((previous) => ({
+    setDicomSettings((previous) => stableSceneValue(previous, {
       ...DEFAULT_DICOM_SETTINGS,
       ...previous,
       ...(source.settings || {}),
@@ -16868,7 +16869,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       if (p.onlyLights && p.lights) {
         if (typeof p.lights.intensity === "number") setSceneIntensity(clamp01(p.lights.intensity))
         if (p.lights.headlight) {
-          setHeadlightCfg((old) => ({
+          setHeadlightCfg((old) => stableSceneValue(old, {
             enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
             intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
           }))
@@ -16904,22 +16905,22 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
         const urlsChanged = filesChanged(files, newFiles)
 
-        setFiles(newFiles)
+        setFiles(previous => stableSceneValue(previous, newFiles))
         const palette = ["#AFA28A"]
-        setColors(newFiles.map((f, i) => f.c || palette[i % palette.length]))
-        setOpacities(newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1)))
-        setVisibles(newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true)))
-        setRoughnesses(newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.42)))
-        setMetalnesses(newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.51)))
+        setColors(previous => stableSceneValue(previous, newFiles.map((f, i) => f.c || palette[i % palette.length])))
+        setOpacities(previous => stableSceneValue(previous, newFiles.map((f) => (typeof f.o === "number" ? clamp01(f.o) : 1))))
+        setVisibles(previous => stableSceneValue(previous, newFiles.map((f) => (typeof f.v === "boolean" ? f.v : true))))
+        setRoughnesses(previous => stableSceneValue(previous, newFiles.map((f) => (typeof f.r === "number" ? clamp01(f.r) : 0.42))))
+        setMetalnesses(previous => stableSceneValue(previous, newFiles.map((f) => (typeof f.m === "number" ? clamp01(f.m) : 0.51))))
         
         // ÚPRAVA 6: Správné načítání textur a wireframe místo fixní hodnoty
-        setVertexColors(newFiles.map((f) => !!hasTexMap[f.url] && f.vc !== false))
-        setWireframes(newFiles.map((f) => !!f.wf))
-        setGhostModes((previous) => newFiles.map((f) => {
+        setVertexColors(previous => stableSceneValue(previous, newFiles.map((f) => !!hasTexMap[f.url] && f.vc !== false)))
+        setWireframes(previous => stableSceneValue(previous, newFiles.map((f) => !!f.wf)))
+        setGhostModes((previous) => stableSceneValue(previous, newFiles.map((f) => {
           if (typeof f.gh === "boolean") return f.gh
           const oldIndex = files.findIndex((oldFile) => oldFile.url === f.url)
           return oldIndex >= 0 ? !!previous[oldIndex] : false
-        }))
+        })))
 
         // ÚPRAVA 7: Zachování kamery, pokud posíláme keepCamera: true
         if (urlsChanged && !p.keepCamera) { 
@@ -16934,7 +16935,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       if (p.lights) {
         if (typeof p.lights.intensity === "number") setSceneIntensity(clamp01(p.lights.intensity))
         if (p.lights.headlight) {
-          setHeadlightCfg((old) => ({
+          setHeadlightCfg((old) => stableSceneValue(old, {
             enabled: typeof p.lights.headlight.enabled === "boolean" ? p.lights.headlight.enabled : old.enabled,
             intensity: typeof p.lights.headlight.intensity === "number" ? p.lights.headlight.intensity : old.intensity,
           }))
