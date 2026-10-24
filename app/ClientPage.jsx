@@ -2981,7 +2981,7 @@ const DICOM_SLICE_INTERACTIVE_RESOLUTION = 256
 const DICOM_SLICE_DETAIL_RESOLUTION = 640
 const DEFAULT_DICOM_SETTINGS = {
   preset: "teeth",
-  viewMode: "only2d",
+  viewMode: "solid",
   quality: DICOM_DETAIL_QUALITY,
   opacity: 0.82,
   densityMin: 350,
@@ -2994,7 +2994,7 @@ const DEFAULT_DICOM_SETTINGS = {
   scale: 1,
 }
 const normalizeDicomViewMode = (value) => (
-  value === "light" || value === "solid" || value === "only2d" ? value : "only2d"
+  "solid"
 )
 
 const parseDicomNumbers = (value, fallback = []) => {
@@ -3438,9 +3438,12 @@ function DicomVolume({ volume, settings, interactive = false, sceneRootRef = nul
     cropUniforms.min.value = Math.min(settings.cropMin, settings.cropMax - .01)
     cropUniforms.max.value = Math.max(settings.cropMax, settings.cropMin + .01)
     const opacity = Math.max(.08, Math.min(1, settings.opacity * 1.2))
+    shellMaterial.color.set(settings.color || "#A29C90")
+    shellMaterial.roughness = Number.isFinite(settings.roughness) ? settings.roughness : .42
+    shellMaterial.metalness = Number.isFinite(settings.metalness) ? settings.metalness : .52
     configureMaterialTransparency(shellMaterial, opacity)
     shellMaterial.depthWrite = opacity >= .98
-  }, [shellMaterial, cropUniforms, settings.cropMin, settings.cropMax, settings.opacity])
+  }, [shellMaterial, cropUniforms, settings.cropMin, settings.cropMax, settings.opacity, settings.color, settings.roughness, settings.metalness])
   const texture = useMemo(() => {
     if (!volume) return null
     const value = new THREE.Data3DTexture(volume.data, volume.width, volume.height, volume.depth)
@@ -12006,7 +12009,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       ...previous,
       ...(source.settings || {}),
       viewMode: normalizeDicomViewMode(source.settings?.viewMode),
-      quality: DICOM_DETAIL_QUALITY,
+      quality: DICOM_DETAIL_QUALITY, cropMin: 0, cropMax: 1,
       position: Array.isArray(source.settings?.position) ? source.settings.position : previous.position,
       rotation: Array.isArray(source.settings?.rotation) ? source.settings.rotation : previous.rotation,
     }))
@@ -17187,45 +17190,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         <>
           <button onClick={() => setDicomConversionDraft({ densityMin: dicomSettings.densityMin, densityMax: dicomSettings.densityMax, preset: dicomSettings.preset })}
             style={{ width: "100%", marginBottom: 12, border: "1px solid #3e4941", borderRadius: 9, padding: "10px 12px", background: "rgba(162,192,167,.08)", color: "#d6e7d8", font: "inherit", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
-            Upravit 3D povrch
+            Konvertovat do 3D
           </button>
-
-          <div style={{ marginBottom: 10 }}>
-            <div style={{ marginBottom: 5, color: "#9ca3af", fontSize: 9, fontWeight: 800, letterSpacing: ".08em" }}>VIEWING MODE</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 6 }}>
-              {[
-                ["light", "Light"],
-                ["solid", "Solid"],
-                ["only2d", "Only 2D"],
-              ].map(([mode, label]) => (
-                <button
-                  key={mode}
-                  onClick={() => {
-                    setDicomSettings((previous) => ({ ...previous, viewMode: mode }))
-                    if (mode === "only2d") setClippingEnabled(true)
-                  }}
-                  style={{
-                    minHeight: 32,
-                    padding: "6px 8px",
-                    borderRadius: 6,
-                    border: dicomSettings.viewMode === mode ? "1px solid #60a5fa" : "1px solid #444",
-                    background: dicomSettings.viewMode === mode ? "rgba(37,99,235,.4)" : "#151515",
-                    color: "white",
-                    fontSize: 10,
-                    fontWeight: 700,
-                    cursor: "pointer",
-                  }}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
 
           {[
             ["Krytí", "opacity", 0.05, 1, 0.01, `${Math.round(dicomSettings.opacity * 100)} %`],
-            ["Ořez od", "cropMin", 0, 1, 0.01, `${Math.round(dicomSettings.cropMin * 100)} %`],
-            ["Ořez do", "cropMax", 0, 1, 0.01, `${Math.round(dicomSettings.cropMax * 100)} %`],
           ].map(([label, key, min, max, step, value]) => (
             <label key={key} style={{ display: "block", marginTop: 7, fontSize: 10, color: "#bbb" }}>
               <span style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}><span>{label}</span><b style={{ color: "white" }}>{value}</b></span>
