@@ -11,7 +11,8 @@ import "./SceneLoader.css"
 import SliceDrawController from "./SliceDrawController"
 import { placeDrawnSlice, sliceSourceChanged, sliceSurfaceFit } from "./viewer/slice-drawing.mjs"
 import SliceEmptyState from "./SliceEmptyState"
-import React, { Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react"
+import { createSliceEngine } from "./viewer/slice-engine.js"
+import React, { Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react"
 import { Canvas, useThree, useFrame } from "@react-three/fiber"
 import * as THREE from "three"
 import { Html, TransformControls, useCursor } from "@react-three/drei"
@@ -5650,18 +5651,24 @@ const segmentStart = (segment) => segment.a || segment[0]
 const segmentEnd = (segment) => segment.b || segment[1]
 
 function SliceLineGroup({ points, color }) {
-  const geometry = useMemo(() => {
-    const result = new THREE.BufferGeometry()
-    result.setAttribute("position", new THREE.Float32BufferAttribute(points, 3))
-    result.computeBoundingBox()
-    result.computeBoundingSphere()
-    return result
-  }, [points])
-
+  const geometry = useMemo(() => new THREE.BufferGeometry(), [])
+  useLayoutEffect(() => {
+    let attribute = geometry.getAttribute("position")
+    if (!attribute || attribute.array.length < points.length) {
+      const capacity = Math.max(192, 3 * 2 ** Math.ceil(Math.log2(Math.max(1, Math.ceil(points.length / 3)))))
+      if (attribute) geometry.dispose()
+      attribute = new THREE.BufferAttribute(new Float32Array(capacity), 3).setUsage(THREE.DynamicDrawUsage)
+      geometry.setAttribute("position", attribute)
+    }
+    attribute.array.set(points)
+    attribute.clearUpdateRanges()
+    attribute.addUpdateRange(0, points.length)
+    attribute.needsUpdate = true
+    geometry.setDrawRange(0, points.length / 3)
+  }, [geometry, points])
   useEffect(() => () => geometry.dispose(), [geometry])
-
   return (
-    <lineSegments geometry={geometry} renderOrder={998}>
+    <lineSegments geometry={geometry} renderOrder={998} frustumCulled={false}>
       <lineBasicMaterial color={color} depthTest={false} depthWrite={false} transparent opacity={0.95} />
     </lineSegments>
   )
@@ -6707,10 +6714,10 @@ function Overlay2D({ awaitingDraw = false, onRedraw, segments, modelColors, boun
           const start = segmentStart(s)
           const end = segmentEnd(s)
           const modelIndex = Number.isInteger(s.modelIndex) ? s.modelIndex : -1
-          const d = `${grouped.get(modelIndex) || ""}M${start.x.toFixed(2)},${start.y.toFixed(2)}L${end.x.toFixed(2)},${end.y.toFixed(2)}`
-          grouped.set(modelIndex, d)
+          if (!grouped.has(modelIndex)) grouped.set(modelIndex, [])
+          grouped.get(modelIndex).push(`M${start.x.toFixed(2)},${start.y.toFixed(2)}L${end.x.toFixed(2)},${end.y.toFixed(2)}`)
       }
-      return Array.from(grouped, ([modelIndex, d]) => ({ modelIndex, d }))
+      return Array.from(grouped, ([modelIndex, paths]) => ({ modelIndex, d: paths.join("") }))
   }, [segments])
 
   const distSq = (v, w) => Math.pow(v.x - w.x, 2) + Math.pow(v.y - w.y, 2)
@@ -16312,112 +16319,26 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     return bounds
   }, [dicomVolume, dicomSettings.position, dicomSettings.rotation, dicomSettings.scale])
 
-  const calculateSliceData = useCallback((targetPlaneGroup, dicomResolution = DICOM_SLICE_DETAIL_RESOLUTION) => {
+  const sliceEngineRef = useRef(null)
+  useEffect(() => () => { sliceEngineRef.current?.dispose(); sliceEngineRef.current = null }, [])
+  useEffect(() => {
+    if (!clippingEnabled || sliceAwaiting) sliceEngineRef.current?.cancel()
+  }, [clippingEnabled, sliceAwaiting])
+
+  const calculateSliceData = useCallback(async (targetPlaneGroup, dicomResolution = DICOM_SLICE_DETAIL_RESOLUTION, lane = "vertical") => {
     if (!targetPlaneGroup || !rootGroupRef.current) return null
-
     targetPlaneGroup.updateMatrixWorld(true)
-    const normal = new THREE.Vector3(0, 0, 1).transformDirection(targetPlaneGroup.matrixWorld).normalize()
-    const planePosition = new THREE.Vector3().setFromMatrixPosition(targetPlaneGroup.matrixWorld)
-    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, planePosition)
-    const segments2D = []
-    const invMat = targetPlaneGroup.matrixWorld.clone().invert()
-
-    const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3()
-    const edgePt = new THREE.Vector3(), locPt = new THREE.Vector3()
-
-    rootGroupRef.current.children.forEach(modelRoot => {
-      if (!modelRoot.visible) return
-      modelRoot.traverse(child => {
-       if (!child.isMesh || !child.visible) return
-       child.updateMatrixWorld(true)
-       const matrix = child.matrixWorld
-       const geom = child.geometry
-       const posAttr = geom.attributes.position
-       const index = geom.index
-       const outlineColor = child.userData._viewerColor || modelRoot.userData._viewerColor || "#ffffff"
-       const modelIndex = Number.isInteger(child.renderOrder) ? child.renderOrder : -1
-
-       const checkEdge = (v1, v2, d1, d2) => {
-           if (d1 * d2 < 0) {
-               const t = d1 / (d1 - d2)
-               edgePt.copy(v1).lerp(v2, t)
-               return true
-           }
-           if (d1 === 0) {
-               edgePt.copy(v1)
-               return true
-           }
-           return false
-       }
-
-       const processTri = (iA, iB, iC) => {
-           vA.fromBufferAttribute(posAttr, iA).applyMatrix4(matrix)
-           vB.fromBufferAttribute(posAttr, iB).applyMatrix4(matrix)
-           vC.fromBufferAttribute(posAttr, iC).applyMatrix4(matrix)
-
-           const dA = plane.distanceToPoint(vA)
-           const dB = plane.distanceToPoint(vB)
-           const dC = plane.distanceToPoint(vC)
-
-           if ((dA > 0 && dB > 0 && dC > 0) || (dA < 0 && dB < 0 && dC < 0)) return
-
-           const pts = []
-
-           if (checkEdge(vA, vB, dA, dB)) {
-               locPt.copy(edgePt).applyMatrix4(invMat)
-               pts.push(locPt.x, locPt.y)
-           }
-           if (checkEdge(vB, vC, dB, dC)) {
-               locPt.copy(edgePt).applyMatrix4(invMat)
-               if (pts.length < 2 || Math.abs(pts[0] - locPt.x) > 1e-5 || Math.abs(pts[1] - locPt.y) > 1e-5) {
-                   pts.push(locPt.x, locPt.y)
-               }
-           }
-           if (pts.length < 4 && checkEdge(vC, vA, dC, dA)) {
-               locPt.copy(edgePt).applyMatrix4(invMat)
-               if (pts.length < 2 || Math.abs(pts[0] - locPt.x) > 1e-5 || Math.abs(pts[1] - locPt.y) > 1e-5) {
-                   if (pts.length < 4 || Math.abs(pts[2] - locPt.x) > 1e-5 || Math.abs(pts[3] - locPt.y) > 1e-5) {
-                      pts.push(locPt.x, locPt.y)
-                   }
-               }
-           }
-
-           if (pts.length >= 4) {
-               segments2D.push({
-                 a: { x: pts[0], y: pts[1] },
-                 b: { x: pts[2], y: pts[3] },
-                 color: outlineColor,
-                 modelIndex,
-               })
-           }
-       }
-
-       if (index) {
-           for(let i=0; i<index.count; i+=3) processTri(index.getX(i), index.getX(i+1), index.getX(i+2))
-       } else {
-           for(let i=0; i<posAttr.count; i+=3) processTri(i, i+1, i+2)
-       }
-      })
-    })
-
-    let combinedBounds = null
-    if (segments2D.length > 0) {
-       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-       for(let i=0; i<segments2D.length; i++){
-           const s = segments2D[i]
-           const start = segmentStart(s), end = segmentEnd(s)
-           if(start.x < minX) minX = start.x; if(start.x > maxX) maxX = start.x;
-           if(start.y < minY) minY = start.y; if(start.y > maxY) maxY = start.y;
-           if(end.x < minX) minX = end.x; if(end.x > maxX) maxX = end.x;
-           if(end.y < minY) minY = end.y; if(end.y > maxY) maxY = end.y;
-       }
-       combinedBounds = { minX, minY, width: maxX - minX, height: maxY - minY }
-    }
+    const planeMatrix = targetPlaneGroup.matrixWorld.clone()
+    if (!sliceEngineRef.current) sliceEngineRef.current = createSliceEngine()
+    const result = await sliceEngineRef.current.compute(rootGroupRef.current, planeMatrix.elements, lane)
+    if (!result) return null
+    const segments2D = result.segments
+    let combinedBounds = result.boundingBox
 
     rootGroupRef.current.updateMatrixWorld(true)
     const dicomSceneMatrix = rootGroupRef.current.matrixWorld
     const dicomSlice = dicomVolume && dicomSettings.visible !== false
-      ? buildDicomSliceImage(dicomVolume, dicomSettings, targetPlaneGroup.matrixWorld, dicomResolution, dicomSceneMatrix)
+      ? buildDicomSliceImage(dicomVolume, dicomSettings, planeMatrix, dicomResolution, dicomSceneMatrix)
       : null
 
     if (dicomSlice?.bounds) {
@@ -16434,71 +16355,55 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     return { segments: segments2D, boundingBox: combinedBounds, dicomSlice }
   }, [visibles, dicomVolume, dicomSettings])
 
-  const updateClippingLogic = useCallback((dicomResolution = DICOM_SLICE_DETAIL_RESOLUTION) => {
-    const result = calculateSliceData(planeGroup, dicomResolution)
+  const updateClippingLogic = useCallback(async (dicomResolution = DICOM_SLICE_DETAIL_RESOLUTION) => {
+    const result = await calculateSliceData(planeGroup, dicomResolution).catch(error => { console.warn("Slice calculation failed", error); return null })
     if (!result) return
     setSliceSegments(result.segments)
     setSliceBBox(result.boundingBox)
     setDicomSlice2D(result.dicomSlice)
   }, [planeGroup, calculateSliceData])
 
-  const updateHorizontalClippingLogic = useCallback((dicomResolution = DICOM_SLICE_DETAIL_RESOLUTION) => {
-    const result = calculateSliceData(horizontalPlaneGroup, dicomResolution)
+  const updateHorizontalClippingLogic = useCallback(async (dicomResolution = DICOM_SLICE_DETAIL_RESOLUTION) => {
+    const result = await calculateSliceData(horizontalPlaneGroup, dicomResolution, "horizontal").catch(error => { console.warn("Slice calculation failed", error); return null })
     if (!result) return
     setHorizontalSliceSegments(result.segments)
     setHorizontalSliceBBox(result.boundingBox)
     setHorizontalDicomSlice2D(result.dicomSlice)
   }, [horizontalPlaneGroup, calculateSliceData])
 
-  const lastClipTime = useRef(0)
-  const clipTimeout = useRef(null)
+  const clipFrame = useRef(null)
   const clipDetailTimeout = useRef(null)
-  const lastHorizontalClipTime = useRef(0)
-  const horizontalClipTimeout = useRef(null)
+  const horizontalClipFrame = useRef(null)
   const horizontalClipDetailTimeout = useRef(null)
 
   const requestClipUpdate = useCallback(() => {
-    const now = performance.now()
-    if (now - lastClipTime.current > 60) {
+    if (clipFrame.current === null) clipFrame.current = requestAnimationFrame(() => {
+      clipFrame.current = null
       updateClippingLogic(DICOM_SLICE_INTERACTIVE_RESOLUTION)
-      lastClipTime.current = now
-    } else {
-      clearTimeout(clipTimeout.current)
-      clipTimeout.current = setTimeout(() => {
-        updateClippingLogic(DICOM_SLICE_INTERACTIVE_RESOLUTION)
-        lastClipTime.current = performance.now()
-      }, 60)
-    }
+    })
     clearTimeout(clipDetailTimeout.current)
-    clipDetailTimeout.current = setTimeout(() => {
-      updateClippingLogic(DICOM_SLICE_DETAIL_RESOLUTION)
-      lastClipTime.current = performance.now()
-    }, 180)
+    clipDetailTimeout.current = setTimeout(() => updateClippingLogic(DICOM_SLICE_DETAIL_RESOLUTION), 180)
   }, [updateClippingLogic])
 
   const requestHorizontalClipUpdate = useCallback(() => {
-    const now = performance.now()
-    if (now - lastHorizontalClipTime.current > 60) {
+    if (horizontalClipFrame.current === null) horizontalClipFrame.current = requestAnimationFrame(() => {
+      horizontalClipFrame.current = null
       updateHorizontalClippingLogic(DICOM_SLICE_INTERACTIVE_RESOLUTION)
-      lastHorizontalClipTime.current = now
-    } else {
-      clearTimeout(horizontalClipTimeout.current)
-      horizontalClipTimeout.current = setTimeout(() => {
-        updateHorizontalClippingLogic(DICOM_SLICE_INTERACTIVE_RESOLUTION)
-        lastHorizontalClipTime.current = performance.now()
-      }, 60)
-    }
+    })
     clearTimeout(horizontalClipDetailTimeout.current)
-    horizontalClipDetailTimeout.current = setTimeout(() => {
-      updateHorizontalClippingLogic(DICOM_SLICE_DETAIL_RESOLUTION)
-      lastHorizontalClipTime.current = performance.now()
-    }, 180)
+    horizontalClipDetailTimeout.current = setTimeout(() => updateHorizontalClippingLogic(DICOM_SLICE_DETAIL_RESOLUTION), 180)
   }, [updateHorizontalClippingLogic])
 
+  useEffect(() => {
+    if (clippingEnabled && !sliceAwaiting) return
+    cancelAnimationFrame(clipFrame.current); clipFrame.current = null
+    cancelAnimationFrame(horizontalClipFrame.current); horizontalClipFrame.current = null
+    clearTimeout(clipDetailTimeout.current); clearTimeout(horizontalClipDetailTimeout.current)
+  }, [clippingEnabled, sliceAwaiting])
   useEffect(() => () => {
-    clearTimeout(clipTimeout.current)
+    cancelAnimationFrame(clipFrame.current)
+    cancelAnimationFrame(horizontalClipFrame.current)
     clearTimeout(clipDetailTimeout.current)
-    clearTimeout(horizontalClipTimeout.current)
     clearTimeout(horizontalClipDetailTimeout.current)
   }, [])
 
