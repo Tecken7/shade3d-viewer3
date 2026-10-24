@@ -17,9 +17,9 @@ import { DICOM_VERTEX_SHADER, DICOM_FRAGMENT_SHADER } from "./viewer/dicom-shade
 import AnimatedSceneLoader, { useLoaderPresence } from "./AnimatedSceneLoader"
 import { ctIsoLevel } from "./viewer/ct-surface-options.mjs"
 import { createCtSurfaceEngine } from "./viewer/ct-surface-engine.js"
-import { sampleDicomTrilinear } from "./viewer/dicom-sampling.mjs"
 import { makeDicomPreview } from "./viewer/dicom-preview.mjs"
 import { createSliceEngine } from "./viewer/slice-engine.js"
+import { createDicomResliceEngine, dicomResliceImage } from "./viewer/dicom-reslice-engine.js"
 import React, { Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react"
 import { Canvas, useThree, useFrame } from "@react-three/fiber"
 import * as THREE from "three"
@@ -3617,113 +3617,6 @@ function DicomConversionDialog({ volume, draft, onChange, onClose, onApply }) {
   </div>
 }
 
-function buildDicomSliceImage(volume, settings, planeMatrixWorld, maxResolution = 224, sceneMatrix = null) {
-  if (!volume || !planeMatrixWorld || settings.visible === false || typeof document === "undefined") return null
-
-  const dicomMatrix = getDicomWorldMatrix(volume, settings, sceneMatrix)
-  const inversePlane = planeMatrixWorld.clone().invert()
-  const planeToDicom = dicomMatrix.clone().invert().multiply(planeMatrixWorld)
-  const half = new THREE.Vector3(volume.size[0] / 2, volume.size[1] / 2, volume.size[2] / 2)
-
-  const corners = []
-  for (let z = -1; z <= 1; z += 2) {
-    for (let y = -1; y <= 1; y += 2) {
-      for (let x = -1; x <= 1; x += 2) {
-        corners.push(
-          new THREE.Vector3(x * half.x, y * half.y, z * half.z)
-            .applyMatrix4(dicomMatrix)
-            .applyMatrix4(inversePlane)
-        )
-      }
-    }
-  }
-  const edges = [
-    [0, 1], [0, 2], [0, 4], [1, 3], [1, 5], [2, 3],
-    [2, 6], [3, 7], [4, 5], [4, 6], [5, 7], [6, 7],
-  ]
-  const intersections = []
-  edges.forEach(([aIndex, bIndex]) => {
-    const a = corners[aIndex], b = corners[bIndex]
-    if (Math.abs(a.z) < 1e-5) intersections.push(a.clone())
-    if (a.z * b.z < 0) {
-      const t = a.z / (a.z - b.z)
-      intersections.push(a.clone().lerp(b, t))
-    }
-  })
-  if (intersections.length < 3) return null
-
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
-  intersections.forEach((point) => {
-    minX = Math.min(minX, point.x); maxX = Math.max(maxX, point.x)
-    minY = Math.min(minY, point.y); maxY = Math.max(maxY, point.y)
-  })
-  const physicalWidth = maxX - minX
-  const physicalHeight = maxY - minY
-  if (!(physicalWidth > 0.01 && physicalHeight > 0.01)) return null
-
-  const largestSide = Math.max(physicalWidth, physicalHeight)
-  const width = Math.max(48, Math.round(maxResolution * physicalWidth / largestSide))
-  const height = Math.max(48, Math.round(maxResolution * physicalHeight / largestSide))
-  const canvas = document.createElement("canvas")
-  canvas.width = width
-  canvas.height = height
-  const context = canvas.getContext("2d")
-  if (!context) return null
-  const image = context.createImageData(width, height)
-  const elements = planeToDicom.elements
-  const huSpan = DICOM_HU_MAX - DICOM_HU_MIN
-  const densitySpan = Math.max(10, settings.densityMax - settings.densityMin)
-
-  for (let py = 0; py < height; py++) {
-    const planeY = maxY - ((py + 0.5) / height) * physicalHeight
-    for (let px = 0; px < width; px++) {
-      const planeX = minX + ((px + 0.5) / width) * physicalWidth
-      const localX = elements[0] * planeX + elements[4] * planeY + elements[12]
-      const localY = elements[1] * planeX + elements[5] * planeY + elements[13]
-      const localZ = elements[2] * planeX + elements[6] * planeY + elements[14]
-      const tx = localX / volume.size[0] + 0.5
-      const ty = localY / volume.size[1] + 0.5
-      const tz = localZ / volume.size[2] + 0.5
-      const outputIndex = (py * width + px) * 4
-      if (tx < 0 || tx > 1 || ty < 0 || ty > 1 || tz < 0 || tz > 1 || tz < settings.cropMin || tz > settings.cropMax) {
-        image.data[outputIndex + 3] = 0
-        continue
-      }
-      const encoded = sampleDicomTrilinear(volume, tx, ty, tz)
-      const hu = DICOM_HU_MIN + (encoded / 255) * huSpan
-      const normalized = clamp01((hu - settings.densityMin) / densitySpan)
-      const gray = Math.round(Math.pow(normalized, 0.72) * 255)
-      image.data[outputIndex] = gray
-      image.data[outputIndex + 1] = gray
-      image.data[outputIndex + 2] = gray
-      image.data[outputIndex + 3] = 255
-    }
-  }
-  context.putImageData(image, 0, 0)
-
-  // Pravá 2D okna používají původní neprůhledný snímek. Samostatná kopie
-  // pro roviny ve 3D scéně zprůhlední pouze pixely s přesnou hodnotou #000000.
-  const sceneCanvas = document.createElement("canvas")
-  sceneCanvas.width = width
-  sceneCanvas.height = height
-  const sceneContext = sceneCanvas.getContext("2d")
-  if (sceneContext) {
-    const sceneImage = sceneContext.createImageData(width, height)
-    sceneImage.data.set(image.data)
-    for (let i = 0; i < sceneImage.data.length; i += 4) {
-      if (sceneImage.data[i] === 0 && sceneImage.data[i + 1] === 0 && sceneImage.data[i + 2] === 0 && sceneImage.data[i + 3] > 0) {
-        sceneImage.data[i + 3] = 0
-      }
-    }
-    sceneContext.putImageData(sceneImage, 0, 0)
-  }
-  return {
-    canvas,
-    sceneCanvas: sceneContext ? sceneCanvas : canvas,
-    url: canvas.toDataURL("image/png"),
-    bounds: { minX, minY, width: physicalWidth, height: physicalHeight },
-  }
-}
 
 function DicomSlicePlane3D({ slice }) {
   const texture = useMemo(() => {
@@ -6676,7 +6569,7 @@ function Switch({ checked, onChange, label }) {
 }
 
 /* ---------- 2D OVERLAY ---------- */
-function Overlay2D({ awaitingDraw = false, onRedraw, segments, modelColors, boundingBox: measuredBounds, measureState, setMeasureState, dicomSlice, onInteractionChange, embedded = false, mobile = false, title = "", active = false, onActivate, accent = "#f59e9e" }) {
+function Overlay2D({ dicomBusy = false, dicomImageError = false, awaitingDraw = false, onRedraw, segments, modelColors, boundingBox: measuredBounds, measureState, setMeasureState, dicomSlice, onInteractionChange, embedded = false, mobile = false, title = "", active = false, onActivate, accent = "#f59e9e" }) {
   const [framingBounds, setFramingBounds] = useState(null)
   useEffect(() => {
     if (awaitingDraw) setFramingBounds(null)
@@ -6971,6 +6864,7 @@ function Overlay2D({ awaitingDraw = false, onRedraw, segments, modelColors, boun
         </span>{!awaitingDraw && <><br/>{mobile ? "Tažení = posun · dvojklep = měření" : "Tažení = posun · kolečko = zoom · dvojklik = měření"}</>}
       </div>
 
+      {!awaitingDraw && (dicomBusy || dicomImageError) && <div role="status" style={{ position: "absolute", bottom: 12, right: 14, zIndex: 12, pointerEvents: "none", color: "#98a59d", fontSize: 10 }}>{dicomImageError ? "CT snímek se nepodařilo připravit." : "Připravuji CT snímek…"}</div>}
       {onRedraw && !awaitingDraw && <button type="button" onClick={onRedraw} style={{ position: "absolute", top: 8, right: 10, zIndex: 12, border: "1px solid #ffffff20", borderRadius: 7, padding: "5px 8px", background: "#ffffff08", color: "#c6d5ca", font: "inherit", fontSize: 10, cursor: "pointer" }}>Nový řez</button>}
       {(awaitingDraw || !measuredBounds) && <SliceEmptyState awaiting={awaitingDraw} />}
       {!embedded && (
@@ -12094,6 +11988,16 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [sliceSegments, setSliceSegments] = useState([])
   const [sliceBBox, setSliceBBox] = useState(null)
   const [dicomSlice2D, setDicomSlice2D] = useState(null)
+  const [dicomSliceBusy, setDicomSliceBusy] = useState(false)
+  const [dicomSliceError, setDicomSliceError] = useState(false)
+  const dicomResliceEngineRef = useRef(null)
+  const dicomResliceRevisionRef = useRef(0)
+  useEffect(() => {
+    const engine = dicomVolume ? createDicomResliceEngine(dicomVolume) : null
+    dicomResliceEngineRef.current = engine
+    return () => { dicomResliceRevisionRef.current++; engine?.dispose(); if (dicomResliceEngineRef.current === engine) dicomResliceEngineRef.current = null }
+  }, [dicomVolume])
+  useEffect(() => () => { if (dicomSlice2D?.url?.startsWith("blob:")) URL.revokeObjectURL(dicomSlice2D.url) }, [dicomSlice2D])
   const [measureState, setMeasureState] = useState({ active: false, p1: null, p2: null, snappedP2: null })
   const [horizontalSliceSegments, setHorizontalSliceSegments] = useState([])
   const [horizontalSliceBBox, setHorizontalSliceBBox] = useState(null)
@@ -16365,46 +16269,60 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     if (!targetPlaneGroup || !rootGroupRef.current) return null
     targetPlaneGroup.updateMatrixWorld(true)
     const planeMatrix = targetPlaneGroup.matrixWorld.clone()
+    rootGroupRef.current.updateMatrixWorld(true)
+    const dicomWorldMatrix = dicomVolume ? getDicomWorldMatrix(dicomVolume, dicomSettings, rootGroupRef.current.matrixWorld).toArray() : null
     if (!sliceEngineRef.current) sliceEngineRef.current = createSliceEngine()
     const result = await sliceEngineRef.current.compute(rootGroupRef.current, planeMatrix.elements, lane, dicomSurfaceMeshRef.current ? [dicomSurfaceMeshRef.current] : [])
     if (!result) return null
     const segments2D = result.segments
     let combinedBounds = result.boundingBox
 
-    rootGroupRef.current.updateMatrixWorld(true)
-    const dicomSceneMatrix = rootGroupRef.current.matrixWorld
-    const dicomSlice = dicomVolume && dicomSettings.visible !== false
-      ? buildDicomSliceImage(dicomVolume, dicomSettings, planeMatrix, dicomResolution, dicomSceneMatrix)
-      : null
+    return { segments: segments2D, boundingBox: combinedBounds, planeMatrix: planeMatrix.toArray(), dicomMatrix: dicomWorldMatrix }
 
-    if (dicomSlice?.bounds) {
-      const bounds = dicomSlice.bounds
-      if (!combinedBounds) combinedBounds = { ...bounds }
-      else {
-        const minX = Math.min(combinedBounds.minX, bounds.minX)
-        const minY = Math.min(combinedBounds.minY, bounds.minY)
-        const maxX = Math.max(combinedBounds.minX + combinedBounds.width, bounds.minX + bounds.width)
-        const maxY = Math.max(combinedBounds.minY + combinedBounds.height, bounds.minY + bounds.height)
-        combinedBounds = { minX, minY, width: maxX - minX, height: maxY - minY }
-      }
-    }
-    return { segments: segments2D, boundingBox: combinedBounds, dicomSlice }
   }, [visibles, dicomVolume, dicomSettings, dicomSurfaceStatus])
 
+  const invalidateDicomImage = useCallback(() => {
+    dicomResliceRevisionRef.current++
+    dicomResliceEngineRef.current?.cancel()
+    setDicomSlice2D(null)
+    setDicomSliceError(false)
+    setDicomSliceBusy(!!dicomVolume && dicomSettings.visible !== false)
+  }, [dicomVolume, dicomSettings.visible])
   const updateClippingLogic = useCallback(async (dicomResolution = DICOM_SLICE_DETAIL_RESOLUTION) => {
+    invalidateDicomImage()
+    const revision = dicomResliceRevisionRef.current
     const result = await calculateSliceData(planeGroup, dicomResolution).catch(error => { console.warn("Slice calculation failed", error); return null })
-    if (!result) return
+    if (!result || revision !== dicomResliceRevisionRef.current) return
     setSliceSegments(result.segments)
     setSliceBBox(result.boundingBox)
-    setDicomSlice2D(result.dicomSlice)
-  }, [planeGroup, calculateSliceData])
+    if (!dicomVolume || dicomSettings.visible === false) { setDicomSliceBusy(false); return }
+    if (dicomResolution === DICOM_SLICE_INTERACTIVE_RESOLUTION) return
+    try {
+      const sampled = await dicomResliceEngineRef.current?.compute({ planeMatrix: result.planeMatrix, dicomMatrix: result.dicomMatrix, settings: dicomSettings, resolution: DICOM_SLICE_DETAIL_RESOLUTION })
+      if (revision !== dicomResliceRevisionRef.current) return
+      const image = sampled ? await dicomResliceImage(sampled) : null
+      if (revision !== dicomResliceRevisionRef.current) { if (image?.url) URL.revokeObjectURL(image.url); return }
+      setDicomSlice2D(image)
+      if (image?.bounds) {
+        const a = result.boundingBox, b = image.bounds
+        const minX = Math.min(a?.minX ?? b.minX, b.minX), minY = Math.min(a?.minY ?? b.minY, b.minY)
+        const maxX = Math.max(a ? a.minX+a.width : b.minX+b.width, b.minX+b.width), maxY = Math.max(a ? a.minY+a.height : b.minY+b.height, b.minY+b.height)
+        setSliceBBox({ minX, minY, width: maxX-minX, height: maxY-minY })
+      }
+      setDicomSliceBusy(false)
+    } catch (error) {
+      if (revision !== dicomResliceRevisionRef.current) return
+      console.warn("CT reslice failed:", error)
+      setDicomSliceBusy(false); setDicomSliceError(true)
+    }
+  }, [planeGroup, calculateSliceData, dicomVolume, dicomSettings, invalidateDicomImage])
 
   const updateHorizontalClippingLogic = useCallback(async (dicomResolution = DICOM_SLICE_DETAIL_RESOLUTION) => {
     const result = await calculateSliceData(horizontalPlaneGroup, dicomResolution, "horizontal").catch(error => { console.warn("Slice calculation failed", error); return null })
     if (!result) return
     setHorizontalSliceSegments(result.segments)
     setHorizontalSliceBBox(result.boundingBox)
-    setHorizontalDicomSlice2D(result.dicomSlice)
+    setHorizontalDicomSlice2D(null)
   }, [horizontalPlaneGroup, calculateSliceData])
 
   const clipFrame = useRef(null)
@@ -16413,13 +16331,18 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const horizontalClipDetailTimeout = useRef(null)
 
   const requestClipUpdate = useCallback(() => {
+    invalidateDicomImage()
     if (clipFrame.current === null) clipFrame.current = requestAnimationFrame(() => {
       clipFrame.current = null
       updateClippingLogic(DICOM_SLICE_INTERACTIVE_RESOLUTION)
     })
     clearTimeout(clipDetailTimeout.current)
-    clipDetailTimeout.current = setTimeout(() => updateClippingLogic(DICOM_SLICE_DETAIL_RESOLUTION), 180)
-  }, [updateClippingLogic])
+    clipDetailTimeout.current = setTimeout(() => {
+      // A throttled background RAF must never clear an already settled image.
+      cancelAnimationFrame(clipFrame.current); clipFrame.current = null
+      updateClippingLogic(DICOM_SLICE_DETAIL_RESOLUTION)
+    }, 180)
+  }, [updateClippingLogic, invalidateDicomImage])
 
   const requestHorizontalClipUpdate = useCallback(() => {
     if (horizontalClipFrame.current === null) horizontalClipFrame.current = requestAnimationFrame(() => {
@@ -16427,11 +16350,15 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       updateHorizontalClippingLogic(DICOM_SLICE_INTERACTIVE_RESOLUTION)
     })
     clearTimeout(horizontalClipDetailTimeout.current)
-    horizontalClipDetailTimeout.current = setTimeout(() => updateHorizontalClippingLogic(DICOM_SLICE_DETAIL_RESOLUTION), 180)
+    horizontalClipDetailTimeout.current = setTimeout(() => {
+      cancelAnimationFrame(horizontalClipFrame.current); horizontalClipFrame.current = null
+      updateHorizontalClippingLogic(DICOM_SLICE_DETAIL_RESOLUTION)
+    }, 180)
   }, [updateHorizontalClippingLogic])
 
   useEffect(() => {
     if (clippingEnabled && !sliceAwaiting) return
+    dicomResliceRevisionRef.current++; dicomResliceEngineRef.current?.cancel(); setDicomSlice2D(null); setDicomSliceBusy(false); setDicomSliceError(false)
     cancelAnimationFrame(clipFrame.current); clipFrame.current = null
     cancelAnimationFrame(horizontalClipFrame.current); horizontalClipFrame.current = null
     clearTimeout(clipDetailTimeout.current); clearTimeout(horizontalClipDetailTimeout.current)
@@ -16731,6 +16658,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [sliceRigGroup, planeGroup, getSliceSceneBounds, updateClippingLogic])
 
   const handleResetPlane = useCallback(() => {
+    dicomResliceRevisionRef.current++; dicomResliceEngineRef.current?.cancel(); setDicomSliceBusy(false)
     setSliceDefined(false)
     setSliceSegments([]); setSliceBBox(null); setDicomSlice2D(null)
     setMeasureState({ active: false, p1: null, p2: null, snappedP2: null })
@@ -20736,7 +20664,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       )}
 
       {!alignmentMode && !dicomLayoutActive && clippingEnabled && !isMobile && (
-        <Overlay2D awaitingDraw={sliceAwaiting} onRedraw={!toolsPanelExpanded ? handleResetPlane : undefined} segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />
+        <Overlay2D dicomBusy={dicomSliceBusy} dicomImageError={dicomSliceError} awaitingDraw={sliceAwaiting} onRedraw={!toolsPanelExpanded ? handleResetPlane : undefined} segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />
       )}
 
       {mobileSliceSplitActive && (
@@ -20773,7 +20701,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           touchAction: "none", overscrollBehavior: "contain",
         }}>
           <Overlay2D
-            embedded mobile awaitingDraw={sliceAwaiting} onRedraw={!toolsPanelExpanded ? handleResetPlane : undefined} title="Průřez · 2D"
+            embedded mobile dicomBusy={dicomSliceBusy} dicomImageError={dicomSliceError} awaitingDraw={sliceAwaiting} onRedraw={!toolsPanelExpanded ? handleResetPlane : undefined} title="Průřez · 2D"
             segments={sliceSegments}
             modelColors={colors}
             boundingBox={sliceBBox}
