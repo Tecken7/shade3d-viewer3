@@ -5712,7 +5712,7 @@ function SliceLineGroup({ points, color }) {
   )
 }
 
-function SliceOutline3D({ segments, modelColors, color = "#fbbf24" }) {
+function SliceOutline3D({ segments, color = "#dfb967" }) {
   const groups = useMemo(() => {
     const grouped = new Map()
     for (let i = 0; i < segments.length; i++) {
@@ -5732,7 +5732,7 @@ function SliceOutline3D({ segments, modelColors, color = "#fbbf24" }) {
   return (
     <group>
       {groups.map(({ modelIndex, points }) => (
-        <SliceLineGroup key={modelIndex} points={points} color={modelColors?.[modelIndex] || color} />
+        <SliceLineGroup key={modelIndex} points={points} color={color} />
       ))}
     </group>
   )
@@ -6907,7 +6907,7 @@ function Overlay2D({ awaitingDraw = false, onRedraw, segments, modelColors, boun
   const vBox = `${vX} ${vY} ${vW} ${vH}`
 
   const svgToScreenRatio = Math.max(vW / winSize.w, vH / winSize.h)
-  const dynamicStrokeWidth = 1.5 * svgToScreenRatio
+  const dynamicStrokeWidth = 1.8 * svgToScreenRatio
   const dynamicPointRadius = 4 * svgToScreenRatio
 
   const distVal = measureState.p1 && measureState.snappedP2 
@@ -7039,6 +7039,7 @@ function Overlay2D({ awaitingDraw = false, onRedraw, segments, modelColors, boun
 function ThickRotationGizmo({ controlRef }) {
   const helpersRef = useRef([])
   const hiddenAxisLinesRef = useRef([])
+  const hiddenAccentsRef = useRef([])
 
   useEffect(() => {
     const control = controlRef.current
@@ -7047,8 +7048,15 @@ function ThickRotationGizmo({ controlRef }) {
 
     const helpers = []
     const hiddenAxisLines = []
+    const hiddenAccents = []
     const orbitNames = new Set(["X", "Y", "Z", "E", "XYZE"])
     root.traverse((child) => {
+      // Remove the stock saturated diamond accents, keeping the torus hit areas.
+      if (child.isMesh && child.geometry?.type === "OctahedronGeometry") {
+        hiddenAccents.push({ material: child.material, visible: child.material.visible })
+        child.material.visible = false
+        return
+      }
       if (child.isLine && child.name === "AXIS") {
         hiddenAxisLines.push({ line: child, visible: child.visible })
         child.visible = false
@@ -7081,6 +7089,7 @@ function ThickRotationGizmo({ controlRef }) {
     })
     helpersRef.current = helpers
     hiddenAxisLinesRef.current = hiddenAxisLines
+    hiddenAccentsRef.current = hiddenAccents
 
     return () => {
       helpers.forEach(({ source, helper, sourceMaterialVisible }) => {
@@ -7090,6 +7099,8 @@ function ThickRotationGizmo({ controlRef }) {
         helper.material.dispose()
       })
       hiddenAxisLines.forEach(({ line, visible }) => { line.visible = visible })
+      hiddenAccents.forEach(({ material, visible }) => { material.visible = visible })
+      hiddenAccentsRef.current = []
       helpersRef.current = []
       hiddenAxisLinesRef.current = []
     }
@@ -7097,6 +7108,7 @@ function ThickRotationGizmo({ controlRef }) {
 
   useFrame(() => {
     hiddenAxisLinesRef.current.forEach(({ line }) => { line.visible = false })
+    hiddenAccentsRef.current.forEach(({ material }) => { material.visible = false })
     helpersRef.current.forEach(({ source, helper }) => {
       const palette = { X: "#c58d82", Y: "#a6b991", Z: "#8fadd0", E: "#a7afb8", XYZE: "#a7afb8" }
       helper.material.color.set(palette[source.name] || "#a7afb8")
@@ -20862,7 +20874,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       )}
 
       {!alignmentMode && !dicomLayoutActive && clippingEnabled && !isMobile && (
-        <Overlay2D awaitingDraw={sliceAwaiting} onRedraw={!dicomSource ? handleResetPlane : undefined} segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />
+        <Overlay2D awaitingDraw={sliceAwaiting} onRedraw={!dicomSource && !toolsPanelExpanded ? handleResetPlane : undefined} segments={sliceSegments} modelColors={colors} boundingBox={sliceBBox} measureState={measureState} setMeasureState={setMeasureState} dicomSlice={dicomSlice2D} onInteractionChange={handleSliceOverlayInteraction} />
       )}
 
       {mobileSliceSplitActive && (
@@ -20899,7 +20911,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           touchAction: "none", overscrollBehavior: "contain",
         }}>
           <Overlay2D
-            embedded mobile awaitingDraw={sliceAwaiting} onRedraw={!dicomSource ? handleResetPlane : undefined} title="Průřez · 2D"
+            embedded mobile awaitingDraw={sliceAwaiting} onRedraw={!dicomSource && !toolsPanelExpanded ? handleResetPlane : undefined} title="Průřez · 2D"
             segments={sliceSegments}
             modelColors={colors}
             boundingBox={sliceBBox}
@@ -21115,7 +21127,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 />
               )}
               {dicomSlice2D && <DicomSlicePlane3D slice={dicomSlice2D} />}
-              <SliceOutline3D segments={sliceSegments} modelColors={colors} color="#eab308" />
+              <SliceOutline3D segments={sliceSegments} color="#dfb967" />
               <Measurement3D measureState={measureState} boundingBox={sliceBBox} />
             </group>
 
@@ -21126,7 +21138,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                   <meshBasicMaterial color="#5b9bb8" transparent opacity={0.23} side={THREE.DoubleSide} depthWrite={false} />
                 </mesh>
                 {horizontalDicomSlice2D && <DicomSlicePlane3D slice={horizontalDicomSlice2D} />}
-                <SliceOutline3D segments={horizontalSliceSegments} modelColors={colors} color="#38bdf8" />
+                <SliceOutline3D segments={horizontalSliceSegments} color="#dfb967" />
                 <Measurement3D measureState={horizontalMeasureState} boundingBox={horizontalSliceBBox} />
               </group>
             )}
