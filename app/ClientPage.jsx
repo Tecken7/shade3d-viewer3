@@ -16367,7 +16367,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
     rootGroupRef.current.updateMatrixWorld(true)
     const dicomSceneMatrix = rootGroupRef.current.matrixWorld
-    const dicomSlice = null // Solid CT is sliced as a surface, just like the other models.
+    const dicomSlice = dicomVolume && dicomSettings.visible !== false
+      ? buildDicomSliceImage(dicomVolume, dicomSettings, planeMatrix, dicomResolution, dicomSceneMatrix)
+      : null
 
     if (dicomSlice?.bounds) {
       const bounds = dicomSlice.bounds
