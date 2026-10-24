@@ -20622,17 +20622,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             display: "flex", alignItems: "center", justifyContent: "center",
             color: "white", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif"
           }}>
-            <div style={{
-              width: 350, maxWidth: "calc(100vw - 40px)", padding: "20px 20px 18px", borderRadius: 16,
+            <div role="status" aria-live="polite" style={{
+              width: 350, maxWidth: "calc(100vw - 40px)", padding: "28px 22px 20px", borderRadius: 16,
               background: "rgba(12,12,12,.96)", border: "1px solid rgba(255,255,255,.09)",
               boxShadow: "0 24px 70px rgba(0,0,0,.52)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)"
             }}>
+              <img src="/arthetic-loader-scan.svg" alt="ARTHETIC" width={260} height={44} draggable={false}
+                style={{ display: "block", width: "min(260px, 100%)", height: "auto", margin: "4px auto 28px", userSelect: "none" }} />
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{
-                  width: 34, height: 34, borderRadius: "50%", boxSizing: "border-box",
-                  border: "2px solid rgba(255,255,255,.10)", borderTopColor: "#f3f3f3",
-                  animation: "artheticAnalysisSpin .85s linear infinite", flex: "0 0 auto"
-                }} />
                 <div style={{ minWidth: 0, flex: 1 }}>
                   <div style={{ fontSize: 13, fontWeight: 790, letterSpacing: "-.01em" }}>Načítám 3D scénu</div>
                   <div style={{ marginTop: 3, color: "#777", fontSize: 9.5, fontWeight: 610 }}>
