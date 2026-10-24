@@ -101,9 +101,10 @@ export const DICOM_FRAGMENT_SHADER = `
             float rim = pow(1.0 - fill, 2.0);
             float specular = pow(max(dot(normal, halfDirection), 0.0), 30.0);
             float surfaceTone = smoothstep(isoLevel, max(isoLevel + 0.02, high), surfaceDensity);
-            vec3 boneColor = mix(vec3(0.62, 0.45, 0.27), vec3(0.98, 0.90, 0.70), surfaceTone);
+            // Muted warm grey for the solid surface; density data and thresholds stay unchanged.
+            vec3 boneColor = mix(vec3(0.56, 0.55, 0.51), vec3(0.77, 0.76, 0.70), surfaceTone);
             vec3 color = boneColor * (0.34 + diffuse * 0.72 + fill * 0.16 + rim * 0.08);
-            color += vec3(1.0, 0.95, 0.82) * specular * 0.34;
+            color += vec3(0.92, 0.92, 0.88) * specular * 0.15;
             writeSampleDepth(surfacePoint);
             outColor = vec4(color, clamp(uOpacity * 1.2, 0.08, 1.0));
             return;
