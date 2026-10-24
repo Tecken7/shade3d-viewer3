@@ -3406,13 +3406,18 @@ function DicomVolume({ volume, settings, interactive = false, sceneRootRef = nul
   useEffect(() => () => { surfaceGeometries.preview?.dispose(); surfaceGeometries.fine?.dispose() }, [surfaceGeometries])
   const cropUniforms = useMemo(() => ({ min: { value: 0 }, max: { value: 1 }, size: { value: volume?.size[2] || 1 } }), [volume])
   const shellMaterial = useMemo(() => {
-    const value = new THREE.MeshStandardMaterial({ color: "#807E76", roughness: .9, metalness: 0, side: THREE.DoubleSide })
+    const value = new THREE.MeshStandardMaterial({ color: "#91816A", roughness: .38, metalness: .22, side: THREE.DoubleSide })
     value.onBeforeCompile = shader => {
       shader.uniforms.uCtCropMin = cropUniforms.min; shader.uniforms.uCtCropMax = cropUniforms.max; shader.uniforms.uCtSizeZ = cropUniforms.size
       shader.vertexShader = "uniform float uCtSizeZ; varying float vCtZ;\n" + shader.vertexShader.replace("#include <begin_vertex>", "#include <begin_vertex>\nvCtZ = position.z / uCtSizeZ + 0.5;")
-      shader.fragmentShader = "uniform float uCtCropMin; uniform float uCtCropMax; varying float vCtZ;\n" + shader.fragmentShader.replace("#include <clipping_planes_fragment>", "#include <clipping_planes_fragment>\nif (vCtZ < uCtCropMin || vCtZ > uCtCropMax) discard;")
+      shader.uniforms.uCtInnerColor = { value: new THREE.Color("#686C70") }
+      shader.fragmentShader = "uniform vec3 uCtInnerColor; uniform float uCtCropMin; uniform float uCtCropMax; varying float vCtZ;\n" + shader.fragmentShader.replace("#include <clipping_planes_fragment>", "#include <clipping_planes_fragment>\nif (vCtZ < uCtCropMin || vCtZ > uCtCropMax) discard;")
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <color_fragment>", "#include <color_fragment>\nif (!gl_FrontFacing) diffuseColor.rgb = uCtInnerColor;")
+        .replace("#include <roughnessmap_fragment>", "#include <roughnessmap_fragment>\nif (!gl_FrontFacing) roughnessFactor = 0.85;")
+        .replace("#include <metalnessmap_fragment>", "#include <metalnessmap_fragment>\nif (!gl_FrontFacing) metalnessFactor = 0.0;")
     }
-    value.customProgramCacheKey = () => "ct-shell-crop-v1"
+    value.customProgramCacheKey = () => "ct-shell-bronze-inner-v2"
     return value
   }, [cropUniforms])
   useEffect(() => () => shellMaterial.dispose(), [shellMaterial])
@@ -20978,7 +20983,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                   onInteractionChange={handleSliceOverlayInteraction}
                 />
               )}
-              {dicomSlice2D && <DicomSlicePlane3D slice={dicomSlice2D} />}
+              {dicomSettings.viewMode !== "solid" && dicomSlice2D && <DicomSlicePlane3D slice={dicomSlice2D} />}
               <SliceOutline3D segments={sliceSegments} color="#e4a64e" />
               <Measurement3D measureState={measureState} boundingBox={sliceBBox} />
             </group>
@@ -20986,7 +20991,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             {dicomLayoutActive && (
               <group ref={setHorizontalPlaneGroup} visible={activeSlice === "horizontal"}>
                 <AdaptiveSliceSurface bounds={horizontalSliceBBox} fallbackRadius={planeRadius} color="#5b9bb8" opacity={0.23} />
-                {horizontalDicomSlice2D && <DicomSlicePlane3D slice={horizontalDicomSlice2D} />}
+                {dicomSettings.viewMode !== "solid" && horizontalDicomSlice2D && <DicomSlicePlane3D slice={horizontalDicomSlice2D} />}
                 <SliceOutline3D segments={horizontalSliceSegments} color="#e4a64e" />
                 <Measurement3D measureState={horizontalMeasureState} boundingBox={horizontalSliceBBox} />
               </group>
