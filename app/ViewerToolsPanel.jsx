@@ -52,7 +52,7 @@ export default function ViewerToolsPanel({ tools, expanded, onExpandedChange, sl
       <div id="viewer-tools-list" className={styles.list} onScroll={() => setTooltip(null)}>
         {tools.map(tool => (
           <div key={tool.id} className={styles.item}>
-          <button type="button"
+          <button type="button" data-tool-id={tool.id}
             className={`${styles.tool} ${tool.active ? styles.active : ""}`}
             aria-label={tool.label} aria-disabled={!!tool.disabled}
             aria-pressed={tool.toggle ? !!tool.active : undefined}

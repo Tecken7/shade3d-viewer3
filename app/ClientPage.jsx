@@ -4,6 +4,8 @@ import { inferSceneOrientation, fitOrientedBounds } from "./viewer/scan-orientat
 import { cameraChanged } from "./viewer/camera-sync.mjs"
 import { createViewerReceiver } from "../public/integrations/viewer-bridge-v1.mjs"
 import ViewerToolsPanel from "./ViewerToolsPanel"
+import LightingControls from "./LightingControls"
+import { DEFAULT_LIGHTING, normalizeLighting } from "./viewer/scene-lighting.mjs"
 import ViewerToolIcon from "./ViewerToolIcon"
 import { autoSmoothGeometry } from "./viewer/model-preparation.mjs"
 import { loadPreparedSceneModel } from "./viewer/model-loading.js"
@@ -11895,6 +11897,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const alignmentDemoStandalone = forceAlignmentDemo || (clientReady && getParam("mode") === "alignment-demo")
   const standaloneToolMode = cadStandalone || alignmentDemoStandalone
   const [sceneIntensity, setSceneIntensity] = useState(1)
+  const [sceneLighting, setSceneLighting] = useState({ ...DEFAULT_LIGHTING })
+  const [lightingOpen, setLightingOpen] = useState(false)
+  const closeLighting = useCallback(() => setLightingOpen(false), [])
   const [highlightIntensity, setHighlightIntensity] = useState(1)
   const [headlightCfg, setHeadlightCfg] = useState({ enabled: true, intensity: 2.0 })
 
@@ -16218,6 +16223,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
     return {
       version: 1,
+      lighting: sceneLighting,
       activeAnalysisMode,
       occlusion: {
         files: selectionNames(heatmapSelection),
@@ -16282,7 +16288,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [
     activeAnalysisMode, files, heatmapSelection, showHeatmap, hasComputedHeatmap,
     comparisonSelection, comparisonTolerance, comparisonDirection, showComparison, hasComputedComparison, comparisonSnapshot, modelTransforms, alignmentSelection, ghostModes,
-    pinnedNotes, clippingEnabled, sliceAwaiting, activeSlice, sliceRigGroup, planeGroup, horizontalPlaneGroup, measureState, horizontalMeasureState,
+    sceneLighting, pinnedNotes, clippingEnabled, sliceAwaiting, activeSlice, sliceRigGroup, planeGroup, horizontalPlaneGroup, measureState, horizontalMeasureState,
     dicomSource, dicomSettings,
   ])
 
@@ -16454,6 +16460,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     const savedAlignmentSelection = resolveSelection([pendingViewerState.alignment?.reference, pendingViewerState.alignment?.moving].filter(Boolean))
     const savedTolerance = Math.max(0.05, Math.min(1, Number(pendingViewerState.comparison?.tolerance) || 0.25))
     const savedComparisonDirection = pendingViewerState.comparison?.direction === "B_TO_A" ? "B_TO_A" : "A_TO_B"
+    setSceneLighting(normalizeLighting(pendingViewerState.lighting || DEFAULT_LIGHTING))
     const mode = pendingViewerState.activeAnalysisMode
 
     const restoredTransforms = {}
@@ -20211,6 +20218,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             { id: "model-builder", label: "Model Builder", description: "Vytvořit model s bází pro 3D tisk.", onClick: openCadEmbedded },
             { id: "okluze", label: "Okluze", description: "Změřit kontakty a mezery mezi skeny.", disabled: analysisEligibleFiles.length < 2, active: heatmapMenuOpen || showHeatmap, toggle: true, onClick: () => { setHeatmapMenuOpen(previous => !previous); setComparisonMenuOpen(false) } },
             { id: "porovnani", label: "Porovnání", description: "Porovnat povrchové odchylky dvou modelů.", disabled: analysisEligibleFiles.length < 2, active: comparisonMenuOpen || showComparison, toggle: true, onClick: () => { setComparisonMenuOpen(previous => !previous); setHeatmapMenuOpen(false) } },
+            { id: "nasviceni", label: "Nasvícení", description: "Upravit jas a směr světla ve scéně.", active: lightingOpen, toggle: true, onClick: () => setLightingOpen(previous => !previous) },
             { id: "360-spin", label: "360° Spin", description: "Spustit nebo zastavit otáčení modelu.", active: isAutoRotating, toggle: true, onClick: () => setIsAutoRotating(previous => !previous), controls: <><input aria-label="Rychlost rotace" type="range" min={0.05} max={1} step={0.05} value={spinSpeed} onChange={event => setSpinSpeed(Number(event.target.value))} /><span style={{ flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{Math.round(spinSpeed * 100)} %</span></> },
             { id: "prurez", label: "Průřez", description: "Nakreslit průřez v aktuálním směru pohledu.", active: clippingEnabled, toggle: true, controls: <button type="button" onClick={handleResetPlane}>{dicomSource ? "Reset" : "Nový řez"}</button>, onClick: () => {
               if (clippingEnabled && dicomSettings.viewMode === "only2d") setDicomSettings(previous => ({ ...previous, viewMode: "solid" }))
@@ -20219,6 +20227,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           ]}
         />
       )}
+      {lightingOpen && <LightingControls value={sceneLighting} onChange={setSceneLighting} onClose={closeLighting} expanded={toolsPanelExpanded} />}
       {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && topBarRight}
 
       {!standaloneToolMode && isMobile && mobileFunctionsOpen && !alignmentMode && (
@@ -20318,6 +20327,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 </span>
                 {showComparison && <span style={{ color: "#86efac", fontSize: 9, fontWeight: 720 }}>Aktivní</span>}
               </button>
+
+              <button type="button" data-tool-id="nasviceni" onClick={() => { setMobileFunctionsOpen(false); setLightingOpen(true) }} style={{ width: "100%", minHeight: 58, padding: "10px 12px", display: "flex", alignItems: "center", gap: 12, borderRadius: 13, border: "1px solid rgba(255,255,255,.075)", background: "rgba(255,255,255,.026)", color: "#e8e8e8", fontFamily: "inherit", cursor: "pointer" }}><ViewerToolIcon name="nasviceni"/><span>Nasvícení</span></button>
 
               <button
                 type="button"
@@ -20790,13 +20801,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         style={{ position: "absolute", top: 0, bottom: alignmentSceneInsetActive ? alignmentBottomHeight : (mobileSliceSplitActive ? `calc(${mobileSlicePaneHeight} + 18px)` : 0), left: 0, right: dicomLayoutActive ? dicomPanelWidth : 0, zIndex: 1, background: "transparent", transition: "bottom .44s cubic-bezier(.2,.8,.2,1), right .34s ease", willChange: "bottom" }}
       >
         <SliceDrawController enabled={sliceAwaiting && !alignmentMode && !trimMode && !repairMode} getAnchor={getSliceDrawingAnchor} onComplete={applyDrawnSlice} onDrawingChange={setSliceDrawing} />
-        <ambientLight intensity={0.35 * sceneIntensity} />
-        <directionalLight position={[0, 5, 5]} intensity={1.2 * sceneIntensity} />
-        <directionalLight position={[-10, 0, 0]} intensity={0.9 * sceneIntensity} />
-        <directionalLight position={[10, 0, 0]} intensity={1.0 * sceneIntensity} />
-        <directionalLight position={[0, -5, -5]} intensity={0.7 * sceneIntensity} />
-
-        <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity} />
+        <ambientLight intensity={.35 * sceneIntensity * sceneLighting.brightness * (.65 + sceneLighting.softness)} />
+        <group rotation={[0, THREE.MathUtils.degToRad(sceneLighting.azimuth), 0]}>
+          <directionalLight position={[0, Math.sin(THREE.MathUtils.degToRad(sceneLighting.elevation))*7, Math.cos(THREE.MathUtils.degToRad(sceneLighting.elevation))*7]} intensity={1.2 * sceneIntensity * sceneLighting.brightness * (1.35-sceneLighting.softness)} />
+          <directionalLight position={[-10,0,0]} intensity={.9 * sceneIntensity * sceneLighting.brightness * (.65+sceneLighting.softness)} />
+          <directionalLight position={[10,0,0]} intensity={sceneIntensity * sceneLighting.brightness * (.65+sceneLighting.softness)} />
+          <directionalLight position={[0,-5,-5]} intensity={.7 * sceneIntensity * sceneLighting.brightness * (.65+sceneLighting.softness)} />
+        </group>
+        <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity * sceneLighting.brightness * (1.35-sceneLighting.softness)} />
         <AlignmentFastRaycast enabled={(cadStandalone && cadStage === "orient") || (alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy) || (trimMode && !!trimSelection) || (repairMode && !!repairSelection)} />
 
         <AutoRotateScene enabled={!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && !sliceAwaiting && !sliceDrawing && isAutoRotating} target={cameraTarget} speedFactor={spinSpeed} />
