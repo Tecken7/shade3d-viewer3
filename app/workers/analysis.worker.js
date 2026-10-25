@@ -1089,6 +1089,8 @@ function makeClosestSignedDistanceQuery(targetMesh) {
   const normalMatrix = new THREE.Matrix3().getNormalMatrix(targetMesh.matrixWorld)
   const localPoint = new THREE.Vector3()
   const closestWorld = new THREE.Vector3()
+  const previousClosest = new THREE.Vector3()
+  let hasPrevious = false
   const deltaWorld = new THREE.Vector3()
   const normalWorld = new THREE.Vector3()
   const triangleA = new THREE.Vector3()
@@ -1101,7 +1103,12 @@ function makeClosestSignedDistanceQuery(targetMesh) {
     localPoint.copy(worldPoint).applyMatrix4(inverseTarget)
     result.distance = Infinity
     result.faceIndex = -1
-    targetMesh.geometry.boundsTree.closestPointToPoint(localPoint, result)
+    // A point already on B gives an exact, conservative upper search bound.
+    const limit = hasPrevious ? localPoint.distanceTo(previousClosest) + 1e-7 : Infinity
+    const hit = targetMesh.geometry.boundsTree.closestPointToPoint(localPoint, result, 0, limit)
+    if (!hit) targetMesh.geometry.boundsTree.closestPointToPoint(localPoint, result)
+    previousClosest.copy(result.point)
+    hasPrevious = true
     closestWorld.copy(result.point).applyMatrix4(targetMesh.matrixWorld)
     deltaWorld.subVectors(worldPoint, closestWorld)
     faceNormalLocal(targetMesh.geometry, result.faceIndex, normalWorld, triangleA, triangleB, triangleC)
@@ -1173,12 +1180,19 @@ function computeOcclusionWorker(pair, payload, requestId) {
   const color = new THREE.Color()
   const sample = makeClosestSignedDistanceQuery(pair.meshB)
   let lastProgressAt = -Infinity
+  const repeatedVertices = new Map()
 
   emitSurfaceProgress(requestId, { percent: 8, phase: "distances", processed: 0, total: positions.count })
   for (let i = 0; i < positions.count; i++) {
-    sourceWorld.fromBufferAttribute(positions, i).applyMatrix4(pair.meshA.matrixWorld)
-    const hit = sample(sourceWorld)
-    const signedDistance = hit.signedDistance * (invertSign ? -1 : 1)
+    // STL/OBJ commonly repeat the exact same vertex for each adjacent triangle.
+    // Reuse the full signed result; keep every original vertex and output value.
+    const key = `${positions.getX(i)},${positions.getY(i)},${positions.getZ(i)}`
+    let signedDistance = repeatedVertices.get(key)
+    if (signedDistance === undefined) {
+      sourceWorld.fromBufferAttribute(positions, i).applyMatrix4(pair.meshA.matrixWorld)
+      signedDistance = sample(sourceWorld).signedDistance * (invertSign ? -1 : 1)
+      if (repeatedVertices.size < 500000) repeatedVertices.set(key, signedDistance)
+    }
     distances[i] = signedDistance
     writeColor(colors, i, occlusionColor(signedDistance, maxDist, color))
 
