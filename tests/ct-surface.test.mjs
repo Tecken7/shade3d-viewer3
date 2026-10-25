@@ -40,3 +40,12 @@ test('actual worker returns one stable mesh with conserved dimensions',async()=>
  const worker=new Worker(script,{eval:true}),surfaces=[]
  try{const result=await new Promise((resolve,reject)=>{worker.on('error',reject);worker.on('message',data=>{if(data.type==='error')reject(Error(data.error));if(data.type==='surface'){surfaces.push(data);if(data.final)resolve(data.surface)}});worker.postMessage({type:'init',volume:sphere(40)});worker.postMessage({type:'build',id:1,iso:100,detail:160})});assert(result.triangles>0);assert.equal(surfaces.length,1);assert.equal(surfaces[0].final,true);assert(result.positions.buffer.byteLength>0)}finally{await worker.terminate()}
 })
+
+
+test('interactive CT preview delivers completed surfaces while keeping only the latest pending density',()=>{
+ const worker=new FakeWorker(),engine=createCtSurfaceEngine(sphere(),{workerFactory:()=>worker}),received=[]
+ const request=iso=>engine.request({iso,detail:96,progressive:true,onSurface:()=>received.push(iso)})
+ const cancel=request(100);cancel();request(110);request(120)
+ worker.reply();assert.deepEqual(received,[100]);assert.equal(worker.messages.at(-1).iso,120)
+ worker.reply();assert.deepEqual(received,[100,120]);engine.dispose()
+})

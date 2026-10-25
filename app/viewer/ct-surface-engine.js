@@ -2,7 +2,7 @@
 export function createCtSurfaceEngine(volume,{workerFactory=()=>new Worker(new URL('../workers/ct-surface.worker.js',import.meta.url),{type:'module'})}={}){
  let worker=null,active=null,pending=null,current=null,serial=0,disposed=false,failed=false
  const cache=new Map()
- function deliver(job,surface,final){if(current?.id===job.id)job.onSurface(surface,final)}
+ function deliver(job,surface,final){if(current?.id===job.id || (job.progressive && current?.progressive))job.onSurface(surface,final)}
  function finish(){active=null;pump()}
  function fail(error){failed=true;worker?.terminate();worker=null;if(current)current.onError(error);active=null;pending=null}
  function pump(){
@@ -30,9 +30,9 @@ export function createCtSurfaceEngine(volume,{workerFactory=()=>new Worker(new U
   }catch(error){fail(error)}
  }
  return {
-  request({iso,detail=256,onSurface,onError=()=>{}}){
+  request({iso,detail=256,progressive=false,onSurface,onError=()=>{}}){
    if(disposed)return()=>{}
-   const job={id:++serial,key:`${iso.toFixed(5)}:${detail}`,iso,detail,onSurface,onError}
+   const job={id:++serial,key:`${iso.toFixed(5)}:${detail}`,iso,detail,progressive,onSurface,onError}
    current=job;pending=job
    if(failed){pending=null;onError(new Error('CT surface worker unavailable'))}else pump()
    return()=>{if(current?.id===job.id)current=null;if(pending?.id===job.id)pending=null}

@@ -3366,6 +3366,8 @@ function DicomVolume({ volume, settings, interactive = false, sceneRootRef = nul
   const engineRef = useRef(null)
   const [surface, setSurface] = useState(null)
   const iso = ctIsoLevel(settings.densityMin, settings.densityMax)
+  const latestIsoRef = useRef(iso)
+  latestIsoRef.current = iso
   const solid = settings.viewMode === "solid"
   const detail = previewDetail || (typeof window !== "undefined" && window.innerWidth < 768 ? 160 : 256)
   useEffect(() => {
@@ -3380,17 +3382,17 @@ function DicomVolume({ volume, settings, interactive = false, sceneRootRef = nul
     onSurfaceStatus?.("preparing")
     let cancel = null
     const timer = setTimeout(() => {
-      cancel = engineRef.current?.request({ iso, detail,
+      cancel = engineRef.current?.request({ iso, detail, progressive: !!previewDetail,
         onSurface: (value, final) => {
           setSurface(previous => !previewDetail && !final && previous?.volume === volume && previous.fine ? previous : ({ volume, iso, preview: final ? (previous?.volume === volume && previous.iso === iso ? previous.preview : value) : value, fine: final ? value : null }))
-          onSurfaceStatus?.(final ? "ready" : "preparing")
+          onSurfaceStatus?.(final && iso === latestIsoRef.current ? "ready" : "preparing")
         },
         onError: (error) => { console.warn("CT surface fallback:", error.message); onSurfaceStatus?.("fallback") },
       })
-    }, 140)
+    }, previewDetail ? 0 : 140)
     return () => { clearTimeout(timer); cancel?.() }
   }, [volume, iso, detail, solid, settings.visible, onSurfaceStatus, previewDetail])
-  const currentSurface = surface?.volume === volume && (surface.iso === iso || !previewDetail) ? surface : null
+  const currentSurface = surface?.volume === volume ? surface : null
   const surfaceGeometries = useMemo(() => {
     const make = value => {
       if (!value) return null
@@ -3571,6 +3573,7 @@ function DicomConversionDialog({ volume, draft, onChange, onClose, onApply }) {
   const dialogRef = useRef(null)
   const [status, setStatus] = useState("preparing")
   const previewVolume = useMemo(() => ({ ...volume, patientMatrix: null }), [volume])
+  const threshold = Math.round(ctIsoLevel(draft.densityMin, draft.densityMax) / 255 * 4095 - 1024)
   const radius = Math.max(...volume.size) * 2.2
   const previewSettings = { ...DEFAULT_DICOM_SETTINGS, ...draft, viewMode: "solid", visible: true, opacity: 1, cropMin: 0, cropMax: 1, position: [0,0,0], rotation: [0,0,0], scale: 1 }
   useEffect(() => {
@@ -3578,8 +3581,16 @@ function DicomConversionDialog({ volume, draft, onChange, onClose, onApply }) {
     dialogRef.current?.querySelector("button")?.focus()
     return () => previous?.focus?.()
   }, [])
-  const buttonStyle = { border: "1px solid #3c403d", borderRadius: 8, padding: "9px 15px", color: "#e4e7e4", background: "#1b1e1c", font: "inherit", fontSize: 12, cursor: "pointer" }
-  return <div style={{ position: "fixed", inset: 0, zIndex: 100000, background: "rgba(0,0,0,.68)", backdropFilter: "blur(12px)", display: "grid", placeItems: "center", padding: 16 }}>
+  const buttonStyle = { transition: "background .2s ease, border-color .2s ease, color .2s ease, transform .2s ease", border: "1px solid #ffffff25", borderRadius: 8, padding: "9px 15px", color: "#e7e7e7", background: "#ffffff06", font: "inherit", fontSize: 12, cursor: "pointer" }
+  return <div className="ct-conversion-overlay" style={{ position: "fixed", inset: 0, zIndex: 100000, background: "rgba(0,0,0,.68)", backdropFilter: "blur(12px)", display: "grid", placeItems: "center", padding: 16 }}>
+    <style>{`
+      .ct-conversion-overlay button:not(:disabled):hover {background:#ffffff18!important;border-color:#ffffff45!important}
+      .ct-conversion-overlay button:not(:disabled):active {transform:scale(.97)}
+      .ct-conversion-overlay button:focus-visible {outline:2px solid #eee;outline-offset:3px}
+      .ct-conversion-overlay button[aria-label="Zavřít přípravu CT"]:hover {transform:rotate(90deg)}
+      .ct-conversion-overlay button[data-primary]:hover {background:#fff!important;color:#111!important}
+      @media(prefers-reduced-motion:reduce){.ct-conversion-overlay button {transition:none!important}}
+    `}</style>
     <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="ct-convert-title" onKeyDown={event => {
       if (event.key === "Escape") onClose()
       if (event.key === "Tab") {
@@ -3588,32 +3599,34 @@ function DicomConversionDialog({ volume, draft, onChange, onClose, onApply }) {
         if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
         else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
       }
-    }} style={{ width: "min(800px,100%)", maxHeight: "calc(100dvh - 32px)", overflow: "auto", border: "1px solid #343a35", borderRadius: 18, background: "#101311", color: "#e5e7e5", boxShadow: "0 24px 100px #0009", fontFamily: "inherit" }}>
+    }} style={{ width: "min(800px,100%)", maxHeight: "calc(100dvh - 32px)", overflow: "auto", border: "1px solid #ffffff20", borderRadius: 18, background: "#101010", color: "#e7e7e7", boxShadow: "0 24px 100px #0009", fontFamily: "inherit" }}>
       <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid #ffffff12" }}>
         <h2 id="ct-convert-title" style={{ margin: 0, fontSize: 15 }}>Příprava 3D povrchu CT</h2>
         <button aria-label="Zavřít přípravu CT" onClick={onClose} style={buttonStyle}>×</button>
       </header>
-      <div style={{ height: "min(48vh,420px)", minHeight: 180, position: "relative", background: "#202320" }}>
+      <div style={{ height: "min(48vh,420px)", minHeight: 180, position: "relative", background: "#202020" }}>
         <Canvas camera={{ position: [0,-radius,radius*.25], up: [0,0,1], fov: 35, near: .1, far: radius*10 }} dpr={[1,1.5]}>
           <ambientLight intensity={.4} /><directionalLight position={[0,-80,100]} intensity={2} /><directionalLight position={[80,50,0]} intensity={1} />
-          <DicomVolume volume={previewVolume} settings={previewSettings} previewDetail={128} onSurfaceStatus={setStatus} />
+          <DicomVolume volume={previewVolume} settings={previewSettings} previewDetail={96} onSurfaceStatus={setStatus} />
           <TouchTrackballControls />
         </Canvas>
-        <div role="status" style={{ position: "absolute", bottom: 12, left: 16, fontSize: 11, color: "#b2bcb3", pointerEvents: "none" }}>{status === "preparing" ? "Připravuji náhled…" : status === "fallback" ? "Náhled povrchu není dostupný. Zkuste přípravu otevřít znovu." : "Tažením otočíte náhled"}</div>
+        <div role="status" style={{ position: "absolute", bottom: 12, left: 16, fontSize: 11, color: "#b7b7b7", pointerEvents: "none" }}>{status === "preparing" ? "Připravuji náhled…" : status === "fallback" ? "Náhled povrchu není dostupný. Zkuste přípravu otevřít znovu." : "Tažením otočíte náhled"}</div>
       </div>
       <div style={{ padding: "16px 20px" }}>
         <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-          {[["teeth","Zuby",350,2200],["bone","Kost",180,1700],["soft","Měkké tkáně",-150,450]].map(([preset,label,densityMin,densityMax]) => <button key={preset} onClick={() => onChange({ preset,densityMin,densityMax })} style={{ ...buttonStyle, background: draft.preset === preset ? "#34473a" : "#1b1e1c" }}>{label}</button>)}
+          {[["teeth","Zuby",350,2200],["bone","Kost",180,1700],["soft","Měkké tkáně",-150,450]].map(([preset,label,densityMin,densityMax]) => <button key={preset} aria-pressed={draft.preset === preset} onClick={() => onChange({ preset,densityMin,densityMax })} style={{ ...buttonStyle, background: draft.preset === preset ? "#ffffff20" : "#ffffff06" }}>{label}</button>)}
         </div>
-        {[["Hustota od","densityMin",-1000,2500],["Hustota do","densityMax",0,3500]].map(([label,key,min,max]) => <label key={key} style={{ display: "block", fontSize: 12, marginTop: 12 }}>
-          <span style={{ display: "flex", justifyContent: "space-between", marginBottom: 7 }}><span>{label}</span><b>{draft[key]} HU</b></span>
-          <input aria-label={label} type="range" min={min} max={max} step={10} value={draft[key]} onChange={event => onChange({ ...draft, preset: "custom", [key]: Number(event.target.value) })} style={{ width: "100%", accentColor: "#b4d8ba" }} />
-        </label>)}
-        <p style={{ fontSize: 11, color: "#919b93", marginBottom: 0 }}>Změny se do scény použijí až po potvrzení převodu.</p>
+        <label style={{ display: "block", fontSize: 12, marginTop: 12 }}>
+          <span style={{ display: "flex", justifyContent: "space-between", marginBottom: 7 }}><span>Hustota povrchu</span><b>{threshold} HU</b></span>
+          <input aria-label="Hustota povrchu" type="range" min={-1000} max={3000} step={1} value={threshold}
+            onChange={event => { const density = Number(event.target.value); onChange({ ...draft, preset: "custom", densityMin: density - 1.6, densityMax: density + 8.4 }) }}
+            style={{ width: "100%", accentColor: "#ededed", cursor: "pointer" }} />
+        </label>
+        <p style={{ fontSize: 11, color: "#979797", marginBottom: 0 }}>Změny se do scény použijí až po potvrzení převodu.</p>
       </div>
       <footer style={{ display: "flex", justifyContent: "flex-end", gap: 10, padding: "14px 20px", borderTop: "1px solid #ffffff12" }}>
         <button onClick={onClose} style={buttonStyle}>Zrušit</button>
-        <button disabled={status !== "ready"} onClick={onApply} style={{ ...buttonStyle, background: "#bddcc2", color: "#152219", fontWeight: 750, opacity: status !== "ready" ? .45 : 1 }}>Převést do 3D</button>
+        <button data-primary disabled={status !== "ready"} onClick={onApply} style={{ ...buttonStyle, background: "#ededed", color: "#151515", fontWeight: 750, opacity: status !== "ready" ? .45 : 1 }}>Převést do 3D</button>
       </footer>
     </section>
   </div>
@@ -17237,9 +17250,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               title={isTexAvailable ? "Přepnout texturu / barevná data" : "Sken neobsahuje barevná data"}
               style={{
                   width: 30, height: 24, fontSize: 8.5, fontWeight: 720,
-                  background: vertexColors[i] && isTexAvailable ? "rgba(34,197,94,.10)" : "rgba(255,255,255,.025)",
-                  border: vertexColors[i] && isTexAvailable ? "1px solid rgba(74,222,128,.22)" : "1px solid rgba(255,255,255,.09)", borderRadius: 7, 
-                  color: isTexAvailable ? (vertexColors[i] ? "#b7f7ca" : "#bdbdbd") : "rgba(255,255,255,0.22)", 
+                  background: vertexColors[i] && isTexAvailable ? "rgba(255,255,255,.10)" : "rgba(255,255,255,.025)",
+                  border: vertexColors[i] && isTexAvailable ? "1px solid rgba(255,255,255,.25)" : "1px solid rgba(255,255,255,.09)", borderRadius: 7,
+                  color: isTexAvailable ? (vertexColors[i] ? "#f1f1f1" : "#bdbdbd") : "rgba(255,255,255,0.22)",
                   cursor: isTexAvailable ? "pointer" : "not-allowed", padding: 0,
                   textDecoration: isTexAvailable ? "none" : "line-through"
               }}
@@ -17254,9 +17267,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               title="Přepnout drátěný model (Wireframe)"
               style={{
                   width: 30, height: 24, fontSize: 8.5, fontWeight: 720,
-                  background: wireframes[i] ? "rgba(34,197,94,.10)" : "rgba(255,255,255,.025)",
-                  border: wireframes[i] ? "1px solid rgba(74,222,128,.22)" : "1px solid rgba(255,255,255,.09)", borderRadius: 7, 
-                  color: wireframes[i] ? "#b7f7ca" : "#bdbdbd", cursor: "pointer", padding: 0
+                  background: wireframes[i] ? "rgba(255,255,255,.10)" : "rgba(255,255,255,.025)",
+                  border: wireframes[i] ? "1px solid rgba(255,255,255,.25)" : "1px solid rgba(255,255,255,.09)", borderRadius: 7,
+                  color: wireframes[i] ? "#f1f1f1" : "#bdbdbd", cursor: "pointer", padding: 0
               }}
             >WF</button>
 
@@ -17270,9 +17283,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               aria-pressed={!!ghostModes[i]}
               style={{
                 width: 30, height: 24, fontSize: 8.2, fontWeight: 760, letterSpacing: "-.02em",
-                background: ghostModes[i] ? "rgba(34,197,94,.10)" : "rgba(255,255,255,.025)",
-                border: ghostModes[i] ? "1px solid rgba(74,222,128,.22)" : "1px solid rgba(255,255,255,.09)",
-                borderRadius: 7, color: ghostModes[i] ? "#b7f7ca" : "#bdbdbd", cursor: "pointer", padding: 0,
+                background: ghostModes[i] ? "rgba(255,255,255,.10)" : "rgba(255,255,255,.025)",
+                border: ghostModes[i] ? "1px solid rgba(255,255,255,.25)" : "1px solid rgba(255,255,255,.09)",
+                borderRadius: 7, color: ghostModes[i] ? "#f1f1f1" : "#bdbdbd", cursor: "pointer", padding: 0,
                 transition: "background .16s ease, border-color .16s ease, color .16s ease, transform .16s ease",
               }}
             >GH</button>
@@ -17288,7 +17301,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 background: "rgba(34,197,94,.045)", border: "1px solid rgba(74,222,128,.12)",
               }}>
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ color: "#b7f7ca", fontSize: 8.6, fontWeight: 760, letterSpacing: ".02em" }}>BEST FIT · ZAROVNÁNO</div>
+                  <div style={{ color: "#f1f1f1", fontSize: 8.6, fontWeight: 760, letterSpacing: ".02em" }}>BEST FIT · ZAROVNÁNO</div>
                   <div style={{ marginTop: 2, color: "#707070", fontSize: 8.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     vůči {stripExt(alignedReferenceFile?.rawName || alignedReferenceFile?.name || "Reference A")}
                   </div>
@@ -17307,7 +17320,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                       type="button"
                       onClick={() => saveAlignedModelToCase(f.url)}
                       disabled={alignedExportBusyUrl === f.url || !!alignedInfo.saveRequested}
-                      style={{ height: 25, padding: "0 8px", borderRadius: 7, border: "1px solid rgba(74,222,128,.16)", background: "rgba(34,197,94,.065)", color: alignedInfo.saveRequested ? "#7b9c84" : "#b7f7ca", fontSize: 8.3, fontWeight: 700, cursor: alignedInfo.saveRequested ? "default" : "pointer" }}
+                      style={{ height: 25, padding: "0 8px", borderRadius: 7, border: "1px solid rgba(74,222,128,.16)", background: "rgba(34,197,94,.065)", color: alignedInfo.saveRequested ? "#7b9c84" : "#f1f1f1", fontSize: 8.3, fontWeight: 700, cursor: alignedInfo.saveRequested ? "default" : "pointer" }}
                     >
                       {alignedInfo.saveRequested ? "Předáno" : "Uložit do zakázky"}
                     </button>
