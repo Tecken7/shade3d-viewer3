@@ -1121,13 +1121,20 @@ function makeClosestDistanceQuery(targetMesh) {
   const inverseTarget = new THREE.Matrix4().copy(targetMesh.matrixWorld).invert()
   const localPoint = new THREE.Vector3()
   const closestWorld = new THREE.Vector3()
+  const previousClosest = new THREE.Vector3()
+  let hasPrevious = false
   const result = { point: new THREE.Vector3(), distance: Infinity, faceIndex: -1 }
 
   return (worldPoint) => {
     localPoint.copy(worldPoint).applyMatrix4(inverseTarget)
     result.distance = Infinity
     result.faceIndex = -1
-    targetMesh.geometry.boundsTree.closestPointToPoint(localPoint, result)
+    // A previous point on the target is a conservative search radius, never an approximation.
+    const limit = hasPrevious ? localPoint.distanceTo(previousClosest) + 1e-7 : Infinity
+    const hit = targetMesh.geometry.boundsTree.closestPointToPoint(localPoint, result, 0, limit)
+    if (!hit) targetMesh.geometry.boundsTree.closestPointToPoint(localPoint, result)
+    previousClosest.copy(result.point)
+    hasPrevious = true
     closestWorld.copy(result.point).applyMatrix4(targetMesh.matrixWorld)
     return worldPoint.distanceTo(closestWorld)
   }
@@ -1201,10 +1208,16 @@ function computeComparisonPassWorker(sourceMesh, targetMesh, tolerance, requestI
   const stride = Math.max(1, Math.ceil(positions.count / 100000))
   let sum = 0, sumSq = 0, max = 0, within = 0
   let lastProgressAt = -Infinity
+  const repeatedVertices = new Map()
 
   for (let i = 0; i < positions.count; i++) {
-    sourceWorld.fromBufferAttribute(positions, i).applyMatrix4(sourceMesh.matrixWorld)
-    const distance = sample(sourceWorld)
+    const key = `${positions.getX(i)},${positions.getY(i)},${positions.getZ(i)}`
+    let distance = repeatedVertices.get(key)
+    if (distance === undefined) {
+      sourceWorld.fromBufferAttribute(positions, i).applyMatrix4(sourceMesh.matrixWorld)
+      distance = sample(sourceWorld)
+      if (repeatedVertices.size < 500000) repeatedVertices.set(key, distance)
+    }
     distances[i] = distance
     sum += distance
     sumSq += distance * distance
@@ -1380,8 +1393,8 @@ self.onmessage = async (event) => {
       const reconstructedAt = performance.now()
 
       // Okluze potřebuje BVH pouze pro B. Porovnání používá oba směry.
-      if (!pair.geometryB.boundsTree) pair.geometryB.computeBoundsTree()
-      if (message.type === "COMPARISON" && !pair.geometryA.boundsTree) pair.geometryA.computeBoundsTree()
+      if (!pair.geometryB.boundsTree) pair.geometryB.computeBoundsTree(message.type === "COMPARISON" ? ALIGNMENT_BVH_OPTIONS : undefined)
+      if (message.type === "COMPARISON" && !pair.geometryA.boundsTree) pair.geometryA.computeBoundsTree(ALIGNMENT_BVH_OPTIONS)
       const bvhReadyAt = performance.now()
 
       const result = message.type === "OCCLUSION"

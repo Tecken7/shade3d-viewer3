@@ -15,13 +15,19 @@
 .result {margin-top:16px;padding-top:14px;border-top:1px solid #ffffff12}
 .resultHeader {display:flex;justify-content:space-between;font-size:11px;font-weight:650;margin-bottom:14px}
 .visibility {display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;cursor:pointer}
-.visibility input {appearance:none;position:relative;flex-shrink:0;width:30px;height:18px;border:1px solid #ffffff25;border-radius:20px;background:#ffffff0a;cursor:pointer;transition:background .18s,border-color .18s}
-.visibility input::after {content:"";position:absolute;width:12px;height:12px;top:2px;left:2px;border-radius:50%;background:#888;transition:transform .18s,background .18s}
-.visibility input:checked {background:#ffffff20;border-color:#ffffff50}
-.visibility input:checked::after {transform:translateX(12px);background:#eee}
-.visibility input:focus-visible {outline:2px solid #eee;outline-offset:3px}
 .result dl {display:grid;grid-template-columns:1fr auto;gap:8px;margin:16px 0 0;font-size:10px;color:#929292}
 .result dt,.result dd {margin:0}
 .result dd {color:#dedede;font-variant-numeric:tabular-nums}
 @media(max-width:600px){.card.mobile {right:10px!important;left:10px;top:auto;bottom:10px;width:auto;max-width:none;max-height:calc(100dvh - 20px);z-index:460}}
 @media(prefers-reduced-motion:reduce){.card button,.visibility input,.visibility input::after {transition:none}}
+.models {position:relative;padding-right:36px}
+.card button.swap {position:absolute;right:0;top:50%;margin-top:-15px;width:30px;height:30px;padding:0;display:grid;place-items:center}
+.swap svg {transition:transform .36s cubic-bezier(.2,.75,.25,1)}
+.models[data-swapping] .swap svg {transform:rotate(180deg)}
+.models[data-swapping] .field:first-child {animation:swapUp .36s cubic-bezier(.2,.75,.25,1)}
+.models[data-swapping] .field:nth-child(2) {animation:swapDown .36s cubic-bezier(.2,.75,.25,1)}
+.card button.eye {width:32px;height:24px;padding:0;display:grid;place-items:center;border-radius:7px}
+.eye img {display:block;pointer-events:none}
+@keyframes swapUp {from {transform:translateY(70px);opacity:.25} to {transform:translateY(0);opacity:1}}
+@keyframes swapDown {from {transform:translateY(-70px);opacity:.25} to {transform:translateY(0);opacity:1}}
+@media(prefers-reduced-motion:reduce){.models[data-swapping] .field {animation:none}.swap svg {transition:none}}

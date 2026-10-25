@@ -2,22 +2,16 @@
 import React, { useEffect, useRef } from "react"
 import { DEFAULT_LIGHTING, LIGHTING_PRESETS } from "./viewer/scene-lighting.mjs"
 import styles from "./LightingControls.module.css"
-export default function LightingControls({ value, onChange, onClose, expanded }) {
+export default function LightingControls({ value, onChange, onClose, expanded, offset = 0 }) {
  const root = useRef(null), close = useRef(null)
- useEffect(() => {
-  close.current?.focus()
-  const key = event => { if (event.key === "Escape") onClose() }
-  const outside = event => { if (!root.current?.contains(event.target) && !event.target.closest?.('[data-tool-id="nasviceni"]')) onClose() }
-  document.addEventListener('keydown', key); document.addEventListener('pointerdown', outside)
-  return () => { document.removeEventListener('keydown', key); document.removeEventListener('pointerdown', outside) }
- }, [onClose])
+ useEffect(() => { close.current?.focus() }, [])
  const update = (key, next) => onChange({ ...value, [key]: next, preset: "custom" })
  const direction = event => {
   const box = event.currentTarget.getBoundingClientRect()
   update('azimuth', Math.round(Math.atan2(event.clientX-box.left-box.width/2, -(event.clientY-box.top-box.height/2))*180/Math.PI))
  }
  const rad = value.azimuth*Math.PI/180
- return <section ref={root} className={styles.card} style={{ right: expanded ? 320 : 78 }} role="dialog" aria-label="Nasvícení scény">
+ return <section ref={root} className={styles.card} style={{ right: (expanded ? 320 : 78) + offset, maxWidth: `calc(100vw - ${(expanded ? 320 : 78) + offset + 20}px)` }} role="dialog" aria-label="Nasvícení scény">
   <header><strong>Nasvícení</strong><button ref={close} onClick={onClose} aria-label="Zavřít nasvícení">×</button></header>
   <div className={styles.presets}>{[['default','Výchozí'],['even','Rovnoměrné'],['detail','Detail povrchu']].map(([id,label]) => <button key={id} aria-pressed={value.preset===id} onClick={() => onChange({ ...LIGHTING_PRESETS[id] })}>{label}</button>)}</div>
   <label className={styles.row}><span>Jas <b>{Math.round(value.brightness*100)} %</b></span><input aria-label="Jas scény" type="range" min=".2" max="2" step=".01" value={value.brightness} onChange={event=>update('brightness',Number(event.target.value))}/></label>

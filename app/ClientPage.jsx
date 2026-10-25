@@ -12111,6 +12111,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const closeComparisonMenu = useCallback(() => setComparisonMenuOpen(false), [])
   const [comparisonSelection, setComparisonSelection] = useState([])
   const [isCalculatingComparison, setIsCalculatingComparison] = useState(false)
+  const { visible: comparisonLoaderVisible, exiting: comparisonLoaderExiting } = useLoaderPresence(isCalculatingComparison)
   const [surfaceAnalysisProgress, setSurfaceAnalysisProgress] = useState(null)
   const [hasComputedComparison, setHasComputedComparison] = useState(false)
   const [showComparison, setShowComparison] = useState(false)
@@ -12947,7 +12948,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setSurfaceAnalysisCompletion({ kind, phase: "show", elapsed: completedElapsed })
     // Hlavní scéna: closing sekvence Porovnání/Okluze je záměrně svižnější
     // než BestFit / Odchylka uvnitř režimu Zarovnání.
-    await new Promise((resolve) => window.setTimeout(resolve, 1350))
+    await new Promise((resolve) => window.setTimeout(resolve, kind === "comparison" ? 150 : 1350))
     setSurfaceAnalysisCompletion((current) => current ? { ...current, phase: "fade" } : current)
     await new Promise((resolve) => window.setTimeout(resolve, 280))
   }, [])
@@ -17022,9 +17023,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       bottom: logoCfg.pos === "bc" || logoCfg.pos === "bl" || logoCfg.pos === "br" ? 12 : "auto",
       left: logoCfg.pos === "bl" ? 12 : logoCfg.pos === "bc" ? "50%" : "auto",
       right: logoCfg.pos === "br" ? 12 : "auto",
-      transform: `${logoCfg.pos === "bc" ? "translateX(-50%) " : ""}translateY(${(sceneLoaderVisible || dicomLoaderVisible) ? 5 : 0}px)`,
-      transition: (sceneLoaderVisible || dicomLoaderVisible) ? "none" : "opacity .48s ease-in, transform .48s ease-in",
-      width: logoCfg.width, opacity: (sceneLoaderVisible || dicomLoaderVisible) ? 0 : logoCfg.opacity, zIndex: 0,
+      transform: `${logoCfg.pos === "bc" ? "translateX(-50%) " : ""}translateY(${(sceneLoaderVisible || dicomLoaderVisible || comparisonLoaderVisible) ? 5 : 0}px)`,
+      transition: (sceneLoaderVisible || dicomLoaderVisible || comparisonLoaderVisible) ? "none" : "opacity .48s ease-in, transform .48s ease-in",
+      width: logoCfg.width, opacity: (sceneLoaderVisible || dicomLoaderVisible || comparisonLoaderVisible) ? 0 : logoCfg.opacity, zIndex: 0,
       pointerEvents: "none", userSelect: "none", filter: "drop-shadow(0 0 1px rgba(0,0,0,.25))",
     }}/>
   )
@@ -20019,8 +20020,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             { id: "oprava-site", label: "Oprava sítě", description: "Vyhledat a uzavřít otvory ve skenu.", disabled: analysisEligibleFiles.length < 1, onClick: openRepairMode },
             { id: "model-builder", label: "Model Builder", description: "Vytvořit model s bází pro 3D tisk.", onClick: openCadEmbedded },
             { id: "okluze", label: "Okluze", description: "Změřit kontakty a mezery mezi skeny.", disabled: analysisEligibleFiles.length < 2, active: heatmapMenuOpen || showHeatmap, toggle: true, onClick: () => { setHeatmapMenuOpen(previous => !previous); setComparisonMenuOpen(false) } },
-            { id: "porovnani", label: "Porovnání", description: "Porovnat povrchové odchylky dvou modelů.", disabled: analysisEligibleFiles.length < 2, active: comparisonMenuOpen || showComparison, toggle: true, onClick: () => { setComparisonMenuOpen(previous => !previous); setHeatmapMenuOpen(false); setLightingOpen(false) } },
-            { id: "nasviceni", label: "Nasvícení", description: "Upravit jas a směr světla ve scéně.", active: lightingOpen, toggle: true, onClick: () => { setLightingOpen(previous => !previous); setComparisonMenuOpen(false); setHeatmapMenuOpen(false) } },
+            { id: "porovnani", label: "Porovnání", description: "Porovnat povrchové odchylky dvou modelů.", disabled: analysisEligibleFiles.length < 2, active: comparisonMenuOpen || showComparison, toggle: true, onClick: () => { setComparisonMenuOpen(true); setHeatmapMenuOpen(false) } },
+            { id: "nasviceni", label: "Nasvícení", description: "Upravit jas a směr světla ve scéně.", active: lightingOpen, toggle: true, onClick: () => { setLightingOpen(true); setHeatmapMenuOpen(false) } },
             { id: "360-spin", label: "360° Spin", description: "Spustit nebo zastavit otáčení modelu.", active: isAutoRotating, toggle: true, onClick: () => setIsAutoRotating(previous => !previous), controls: <><input aria-label="Rychlost rotace" type="range" min={0.05} max={1} step={0.05} value={spinSpeed} onChange={event => setSpinSpeed(Number(event.target.value))} /><span style={{ flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{Math.round(spinSpeed * 100)} %</span></> },
             { id: "prurez", label: "Průřez", description: "Nakreslit průřez v aktuálním směru pohledu.", active: clippingEnabled, toggle: true, controls: <button type="button" onClick={handleResetPlane}>{dicomSource ? "Reset" : "Nový řez"}</button>, onClick: () => {
               if (clippingEnabled && dicomSettings.viewMode === "only2d") setDicomSettings(previous => ({ ...previous, viewMode: "solid" }))
@@ -20029,11 +20030,17 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           ]}
         />
       )}
-      {lightingOpen && <LightingControls value={sceneLighting} onChange={setSceneLighting} onClose={closeLighting} expanded={toolsPanelExpanded} />}
+      {lightingOpen && <LightingControls value={sceneLighting} onChange={setSceneLighting} onClose={closeLighting} expanded={toolsPanelExpanded} offset={comparisonMenuOpen ? 276 : 0} />}
       {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && comparisonMenuOpen && <ComparisonControls
         expanded={toolsPanelExpanded} mobile={isMobile} onClose={closeComparisonMenu}
         modelA={<AlignmentModelDropdown badge="A" value={comparisonSelection[0] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[1] || ""} disabled={isCalculatingComparison} onChange={url => setComparisonSelectionSlot(0, url)} />}
         modelB={<AlignmentModelDropdown badge="B" value={comparisonSelection[1] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0] || isCalculatingComparison} onChange={url => setComparisonSelectionSlot(1, url)} />}
+        eyeIcon={showComparison ? ICONS.eye : ICONS.eyeOff} onSwap={() => {
+          if (comparisonSelection.length !== 2 || isCalculatingComparison) return
+          setComparisonSelection(([a, b]) => [b, a])
+          setHasComputedComparison(false); setShowComparison(false); setComparisonStats(null); setComparisonSnapshot(null); setPinnedNotes([])
+          if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
+        }}
         tolerance={comparisonTolerance} onToleranceChange={value => { setComparisonTolerance(value); setHasComputedComparison(false); setShowComparison(false); setComparisonStats(null); setComparisonSnapshot(null) }}
         ready={comparisonModelsReady} calculating={isCalculatingComparison} computed={hasComputedComparison} onCalculate={handleApplyComparison}
         stats={comparisonStats} visible={showComparison} onVisibleChange={checked => { setShowComparison(checked); if (checked) setShowHeatmap(false) }}
@@ -20324,8 +20331,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         )
       })()}
 
+      <AnimatedSceneLoader visible={comparisonLoaderVisible} exiting={comparisonLoaderExiting} progressLabel="Průběh porovnání"
+        status={surfaceAnalysisCompletion?.kind === "comparison" || !isCalculatingComparison ? "Porovnání dokončeno" : ({ prepare: "Připravuji modely…", A_TO_B: "Porovnávám povrchy…", B_TO_A: "Ověřuji vzdálenosti…", metrics: "Počítám výsledky…", snapshot: "Připravuji mapu…", "snapshot-decode": "Načítám uloženou mapu…", "snapshot-colors-A": "Obnovuji mapu…", "snapshot-colors-B": "Dokončuji mapu…", done: "Porovnání dokončeno" }[surfaceAnalysisProgress?.phase] || "Připravuji porovnání…")}
+        progress={surfaceAnalysisCompletion?.kind === "comparison" || !isCalculatingComparison ? 100 : surfaceAnalysisProgress?.percent || 1} />
+
       {/* SJEDNOCENÝ TERMINÁL PRO POROVNÁNÍ / OKLUZI NA HLAVNÍ SCÉNĚ */}
-      {(isCalculatingHeatmap || isCalculatingComparison || surfaceAnalysisCompletion) && surfaceAnalysisProgressUi && (
+      {(isCalculatingHeatmap || surfaceAnalysisCompletion?.kind === "occlusion") && surfaceAnalysisProgressUi && (
         <>
           <style>{`
             @keyframes artheticSurfaceSpin { to { transform:rotate(360deg); } }
