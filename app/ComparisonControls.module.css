@@ -37,3 +37,5 @@
 .card button.calculate:focus-visible {outline:2px solid #ededed;outline-offset:3px}
 .card button.calculate:disabled {background:rgba(255,255,255,.05);border:1px solid #3f3f46;color:#9ca3af;opacity:1}
 @media(prefers-reduced-motion:reduce){.card button.calculate,.card button.calculate::after {transition:none}.card button.calculate:hover:not(:disabled),.card button.calculate:active:not(:disabled){transform:none}}
+
+.hint {font-size:10px;color:#818181;line-height:1.5;margin:12px 0 0}
