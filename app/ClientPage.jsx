@@ -3552,6 +3552,7 @@ function DicomVolume({ volume, settings, interactive = false, sceneRootRef = nul
   })
 
   if (!volume || !material || settings.visible === false || settings.viewMode === "only2d") return null
+  if (solid && !surfaceGeometries.preview) return null
   if (solid && surfaceGeometries.preview) return <mesh ref={meshRef} matrixAutoUpdate={false} geometry={surfaceGeometries.fine || surfaceGeometries.preview} material={shellMaterial} renderOrder={-1000} />
   return (
     <mesh
@@ -11857,18 +11858,25 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [dicomVolume, setDicomVolume] = useState(null)
   const [dicomSurfaceStatus, setDicomSurfaceStatus] = useState("idle")
   const [dicomConversionDraft, setDicomConversionDraft] = useState(null)
+  const canConvertDicom = clientReady && getParam("mode") === "live"
+  const [dicomSurfaceReadyVolume, setDicomSurfaceReadyVolume] = useState(null)
+  const handleDicomSurfaceStatus = useCallback((status) => {
+    setDicomSurfaceStatus(status)
+    if (status === "ready") setDicomSurfaceReadyVolume(dicomVolume)
+  }, [dicomVolume])
   const pendingDicomPreparationRef = useRef(null)
   useEffect(() => {
     setDicomConversionDraft(null)
-    if (dicomVolume && pendingDicomPreparationRef.current === dicomSource?.u) {
+    if (canConvertDicom && dicomVolume && pendingDicomPreparationRef.current === dicomSource?.u) {
       pendingDicomPreparationRef.current = null
       setDicomConversionDraft({ densityMin: dicomSettings.densityMin, densityMax: dicomSettings.densityMax, preset: dicomSettings.preset })
     }
-  }, [dicomSource?.u, dicomVolume])
+  }, [dicomSource?.u, dicomVolume, canConvertDicom])
   const dicomSurfaceMeshRef = useRef(null)
   const [dicomStatus, setDicomStatus] = useState("idle")
   const [dicomProgress, setDicomProgress] = useState(0)
-  const dicomLoading = dicomStatus === "downloading" || dicomStatus === "processing"
+  const dicomPreparingSurface = !!dicomVolume && dicomStatus === "ready" && dicomSettings.visible !== false && dicomSurfaceReadyVolume !== dicomVolume && dicomSurfaceStatus !== "fallback"
+  const dicomLoading = dicomStatus === "downloading" || dicomStatus === "processing" || dicomPreparingSurface
   const { visible: dicomLoaderVisible, exiting: dicomLoaderExiting } = useLoaderPresence(dicomLoading)
 
   const [dicomError, setDicomError] = useState("")
@@ -16972,12 +16980,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
   useEffect(() => {
     const openConversion = event => {
-      if (event.source !== window.parent || event.data?.type !== "SHADE3D_DICOM_CONVERT" || !dicomVolume) return
+      if (!canConvertDicom || event.source !== window.parent || event.data?.type !== "SHADE3D_DICOM_CONVERT" || !dicomVolume) return
       setDicomConversionDraft({ densityMin: dicomSettings.densityMin, densityMax: dicomSettings.densityMax, preset: dicomSettings.preset })
     }
     window.addEventListener("message", openConversion)
     return () => window.removeEventListener("message", openConversion)
-  }, [dicomVolume, dicomSettings.densityMin, dicomSettings.densityMax, dicomSettings.preset])
+  }, [canConvertDicom, dicomVolume, dicomSettings.densityMin, dicomSettings.densityMax, dicomSettings.preset])
 
   const allLoaded = files.length > 0 && files.every(f => loadedUrls.has(f.url))
   const sceneIsLoading = sceneManifestLoading || (files.length > 0 && !allLoaded)
@@ -17029,66 +17037,115 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     }))
   }
 
+  const dicomExpanded = openColorPickerUrl === "__dicom__"
+  const toggleDicomMaterial = () => setOpenColorPickerUrl(previous => previous === "__dicom__" ? null : "__dicom__")
   const dicomControls = dicomSource && (
-    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid rgba(255,255,255,.16)" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 9 }}>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontWeight: 800, fontSize: 12 }}>DICOM / CT</div>
-          <div title={dicomSource.n} style={{ fontSize: 10, color: "#9ca3af", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {dicomSource.n || "DICOM série"}
-          </div>
-        </div>
-        {dicomStatus === "ready" && (
-          <Switch
-            checked={dicomSettings.visible !== false}
-            onChange={(visible) => setDicomSettings((previous) => ({ ...previous, visible }))}
-          />
-        )}
-      </div>
-
-      {dicomStatus === "ready" && dicomSettings.viewMode === "solid" && dicomSurfaceStatus === "preparing" && <div role="status" style={{ fontSize: 10, color: "#a1a1aa", marginBottom: 8 }}>Připravuji hladký povrch…</div>}
-
-      {dicomStatus !== "ready" ? (
-        <div>
-          <div style={{ padding: "8px 9px", borderRadius: 7, background: "rgba(96,165,250,.1)", color: "#dbeafe", fontSize: 11, lineHeight: 1.4 }}>
-            {dicomStatus === "downloading"
-              ? `Stahuji DICOM data - ${Math.round(dicomProgress)}%`
-              : dicomStatus === "processing"
-                ? "Zpracovávám DICOM data..."
-                : dicomStatus === "error"
-                  ? "DICOM data se nepodařilo načíst."
-                  : "DICOM data se automaticky připraví po načtení scény."}
-          </div>
-          {(dicomStatus === "downloading" || dicomStatus === "processing") && (
-            <div style={{ height: 4, marginTop: 7, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.12)" }}>
-              <div style={{ width: `${Math.max(2, dicomProgress)}%`, height: "100%", background: "#60a5fa", transition: "width .2s" }} />
+          <div className="control-row" style={{
+            display: "grid", gridTemplateColumns: "32px minmax(0,1fr) 32px", alignItems: "center", columnGap: 7, rowGap: 8,
+            margin: "7px 0", padding: "9px 10px", borderRadius: dicomExpanded ? 14 : 11, boxSizing: "border-box",
+            background: dicomExpanded ? "rgba(12,12,12,.96)" : "rgba(255,255,255,.025)",
+            border: dicomExpanded ? "1px solid rgba(255,255,255,.10)" : "1px solid rgba(255,255,255,.065)",
+            boxShadow: dicomExpanded ? "0 18px 46px rgba(0,0,0,.30)" : "none", position: "relative",
+            transition: "border-radius .32s ease, background .28s ease, border-color .28s ease, box-shadow .32s ease",
+          }}>
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={toggleDicomMaterial}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault()
+                  toggleDicomMaterial()
+                }
+              }}
+              aria-label={`${(dicomSource.n || "CT")} advanced material settings`}
+              aria-expanded={dicomExpanded}
+              title="Kliknutím otevřít barvu, Roughness a Metalness"
+              style={{
+                gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 7, minWidth: 0,
+                margin: "-4px -4px 0", padding: "4px 4px 3px", borderRadius: 8, cursor: "pointer",
+                outline: "none", transition: "background .16s ease",
+              }}
+              onMouseEnter={(event) => { event.currentTarget.style.background = "rgba(255,255,255,.025)" }}
+              onMouseLeave={(event) => { event.currentTarget.style.background = "transparent" }}
+            >
+              <div className="row-label" style={{
+                flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                color: "#d7d7d7", fontSize: 10.5, fontWeight: 680, letterSpacing: "-.01em",
+              }} title={dicomSource.n || "CT"}>{stripExt((dicomSource.n || "CT"))}</div>
+              <span
+                aria-hidden
+                style={{
+                  width: 24, height: 24, flex: "0 0 24px", padding: 0, display: "grid", placeItems: "center",
+                  borderRadius: 7, border: dicomExpanded ? "1px solid rgba(255,255,255,.18)" : "1px solid rgba(255,255,255,.075)",
+                  background: dicomExpanded ? "rgba(255,255,255,.06)" : "rgba(255,255,255,.02)",
+                  color: dicomExpanded ? "#ededed" : "#858585",
+                  transition: "background .16s ease, border-color .16s ease, color .16s ease",
+                }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden style={{ transform: dicomExpanded ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .22s cubic-bezier(.2,.75,.25,1)" }}>
+                  <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </span>
             </div>
-          )}
-          {dicomError && <div style={{ marginTop: 7, color: "#fca5a5", fontSize: 11, lineHeight: 1.35 }}>{dicomError}</div>}
-          {dicomStatus === "error" && (
-            <button onClick={() => startDicomLoad(null, true)} style={{ width: "100%", marginTop: 8, border: 0, borderRadius: 7, padding: "8px 10px", background: "#2563eb", color: "white", fontWeight: 800, cursor: "pointer" }}>
-              Zkusit znovu
+
+            <button
+              type="button"
+              onClick={toggleDicomMaterial}
+              aria-label={`${(dicomSource.n || "CT")} color`}
+              aria-expanded={dicomExpanded}
+              title="Barva a materiál modelu"
+              style={{
+                width: 32, height: 24, border: dicomExpanded ? "1px solid rgba(255,255,255,.24)" : "1px solid rgba(255,255,255,.12)",
+                borderRadius: 7, padding: 3, cursor: "pointer", background: "rgba(255,255,255,.025)", boxSizing: "border-box",
+                display: "grid", placeItems: "stretch", transition: "border-color .16s ease, background .16s ease, transform .16s ease",
+              }}
+            >
+              <span style={{ width: "100%", height: "100%", borderRadius: 4, background: dicomSettings.color || "#A29C90", border: "1px solid rgba(255,255,255,.14)", boxShadow: "inset 0 0 0 1px rgba(0,0,0,.12)" }} />
             </button>
-          )}
-        </div>
-      ) : (
-        <>
-          <button onClick={() => setDicomConversionDraft({ densityMin: dicomSettings.densityMin, densityMax: dicomSettings.densityMax, preset: dicomSettings.preset })}
-            style={{ width: "100%", marginBottom: 12, border: "1px solid #3e4941", borderRadius: 9, padding: "10px 12px", background: "rgba(162,192,167,.08)", color: "#d6e7d8", font: "inherit", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
-            Konvertovat do 3D
-          </button>
 
-          {[
-            ["Krytí", "opacity", 0.05, 1, 0.01, `${Math.round(dicomSettings.opacity * 100)} %`],
-          ].map(([label, key, min, max, step, value]) => (
-            <label key={key} style={{ display: "block", marginTop: 7, fontSize: 10, color: "#bbb" }}>
-              <span style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}><span>{label}</span><b style={{ color: "white" }}>{value}</b></span>
-              <input type="range" min={min} max={max} step={step} value={dicomSettings[key]} onChange={(e) => setDicomSettings((previous) => ({ ...previous, preset: "custom", [key]: Number(e.target.value) }))} style={{ width: "100%" }} />
-            </label>
-          ))}
+            <input className="slider" type="range" min={0} max={1} step={0.01} value={dicomSettings.opacity ?? 1} onChange={(e) => { const v = parseFloat(e.target.value); setDicomSettings(prev => ({ ...prev, opacity: v })) }} style={{ width: "100%", minWidth: 0, accentColor: "#bdbdbd" }} aria-label={`${(dicomSource.n || "CT")} opacity`} />
 
-        </>
-      )}
+            <button className={`toggle icon-btn ${(dicomSettings.visible !== false) ? "is-on" : "is-off"}`} onClick={() => setDicomSettings(prev => ({ ...prev, visible: prev.visible === false }))} aria-label={(dicomSettings.visible !== false) ? `Hide ${(dicomSource.n || "CT")}` : `Show ${(dicomSource.n || "CT")}`} title={(dicomSettings.visible !== false) ? "Skrýt" : "Zobrazit"} style={{ width: 32, height: 24, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0, margin: 0, background: (dicomSettings.visible !== false) ? "rgba(255,255,255,.025)" : "rgba(255,255,255,.012)", border: "1px solid rgba(255,255,255,.09)", borderRadius: 7, cursor: "pointer", opacity: (dicomSettings.visible !== false) ? 1 : .56 }}>
+              <img src={(dicomSettings.visible !== false) ? ICONS.eye : ICONS.eyeOff} alt="" width={14} height={14} style={{ display: "block", pointerEvents: "none", userSelect: "none" }}/>
+            </button>
+
+            <div style={{
+              gridColumn: "1 / -1", display: "grid",
+              gridTemplateRows: dicomExpanded ? "1fr" : "0fr",
+              opacity: dicomExpanded ? 1 : 0,
+              transform: dicomExpanded ? "translateY(0) scale(1)" : "translateY(-7px) scale(.988)",
+              filter: dicomExpanded ? "blur(0)" : "blur(2.5px)",
+              pointerEvents: dicomExpanded ? "auto" : "none",
+              overflow: "hidden",
+              transition: "grid-template-rows .40s cubic-bezier(.2,.75,.25,1), opacity .22s .06s ease, transform .36s cubic-bezier(.2,.75,.25,1), filter .25s ease",
+            }}>
+              <div style={{ minHeight: 0, overflow: "hidden" }}>
+                <ArtheticInlineColorPicker
+                  value={dicomSettings.color || "#A29C90"}
+                  onChange={(nextColor) => setDicomSettings(prev => ({ ...prev, color: nextColor }))}
+                />
+                <div style={{
+                  display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12,
+                  marginTop: 10, padding: "11px 3px 2px", borderTop: "1px solid rgba(255,255,255,.07)",
+                }}>
+                  <label style={{ display: "block", minWidth: 0 }}>
+                    <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 7, marginBottom: 5, color: "#969696", fontSize: 9.5, fontWeight: 650 }}>
+                      <span>Roughness</span><span style={{ color: "#d7d7d7", fontVariantNumeric: "tabular-nums" }}>{Math.round((dicomSettings.roughness ?? 0.42) * 100)}%</span>
+                    </span>
+                    <input type="range" min={0} max={1} step={0.01} value={dicomSettings.roughness ?? 0.42} onChange={(e) => { const v = parseFloat(e.target.value); setDicomSettings(prev => ({ ...prev, roughness: v })) }} style={{ width: "100%", accentColor: "#a3a3a3" }} aria-label={`${(dicomSource.n || "CT")} roughness`} />
+                  </label>
+                  <label style={{ display: "block", minWidth: 0 }}>
+                    <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 7, marginBottom: 5, color: "#969696", fontSize: 9.5, fontWeight: 650 }}>
+                      <span>Metalness</span><span style={{ color: "#d7d7d7", fontVariantNumeric: "tabular-nums" }}>{Math.round((dicomSettings.metalness ?? 0.52) * 100)}%</span>
+                    </span>
+                    <input type="range" min={0} max={1} step={0.01} value={dicomSettings.metalness ?? 0.52} onChange={(e) => { const v = parseFloat(e.target.value); setDicomSettings(prev => ({ ...prev, metalness: v })) }} style={{ width: "100%", accentColor: "#a3a3a3" }} aria-label={`${(dicomSource.n || "CT")} metalness`} />
+                  </label>
+                </div>
+              </div>
+            </div>
+      {canConvertDicom && dicomStatus === "ready" && <button type="button" onClick={() => setDicomConversionDraft({ densityMin: dicomSettings.densityMin, densityMax: dicomSettings.densityMax, preset: dicomSettings.preset })} style={{ gridColumn: "1 / -1", padding: "8px 10px", borderRadius: 7, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.025)", color: "#d7d7d7", font: "inherit", cursor: "pointer" }}>Konvertovat do 3D</button>}
+      {(dicomStatus === "error" || dicomSurfaceStatus === "fallback") && <div role="alert" style={{ gridColumn: "1 / -1", color: "#fca5a5", fontSize: 11 }}>{dicomError || "CT povrch se nepodařilo připravit."}<button onClick={() => startDicomLoad(null, true)}>Zkusit znovu</button></div>}
     </div>
   )
 
@@ -17096,6 +17153,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     <div style={{ color: "#ff8b8b" }}>{fatal}</div>
   ) : (
     <>
+      {dicomControls}
       {files.map((f, i) => {
         const isTexAvailable = !!hasTexMap[f.url]
         const alignedInfo = alignedExportsByUrl[f.url] || null
@@ -17336,7 +17394,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           </div>
         )
       })}
-      {dicomControls}
     </>
   )
 
@@ -20124,7 +20181,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   return (
     <div className="stage" style={{ position: "relative", width: "100vw", height: "100vh", background: "black", overflow: "hidden" }}>
       <PreloadIcons />
-      {dicomConversionDraft && dicomVolume && <DicomConversionDialog volume={dicomVolume} draft={dicomConversionDraft}
+      {canConvertDicom && dicomConversionDraft && dicomVolume && <DicomConversionDialog volume={dicomVolume} draft={dicomConversionDraft}
         onChange={setDicomConversionDraft} onClose={() => setDicomConversionDraft(null)}
         onApply={() => {
           setDicomSettings(previous => ({ ...previous, ...dicomConversionDraft, viewMode: "solid", visible: true }))
@@ -20642,8 +20699,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       )}
 
       <AnimatedSceneLoader visible={dicomLoaderVisible} exiting={dicomLoaderExiting}
-        status={dicomStatus === "downloading" ? "Načítám CBCT…" : dicomStatus === "processing" ? "Sestavuji CT objem…" : dicomStatus === "error" ? "Načtení se nezdařilo" : "CBCT připraveno"}
-        progress={dicomLoading ? (dicomStatus === "processing" ? 95 : Math.min(90, dicomProgress * .9)) : dicomStatus === "ready" ? 100 : 0}/>
+        status={dicomPreparingSurface ? "Optimalizuji 3D povrch…" : dicomStatus === "downloading" ? "Načítám CBCT…" : dicomStatus === "processing" ? "Sestavuji CT objem…" : dicomStatus === "error" ? "Načtení se nezdařilo" : "CBCT připraveno"}
+        progress={dicomLoading ? (dicomPreparingSurface ? 98 : dicomStatus === "processing" ? 95 : Math.min(90, dicomProgress * .9)) : dicomStatus === "ready" ? 100 : 0}/>
 
       {!isMobile && showComparison && hasComputedComparison && (
         <div style={{
@@ -20902,7 +20959,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             interactive={false}
             sceneRootRef={rootGroupRef}
             cameraInteractingRef={cameraInteractingRef}
-            onSurfaceStatus={setDicomSurfaceStatus}
+            onSurfaceStatus={handleDicomSurfaceStatus}
             surfaceMeshRef={dicomSurfaceMeshRef}
           />
         )}
