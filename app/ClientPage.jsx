@@ -6,6 +6,7 @@ import { stableSceneValue } from "./viewer/stable-scene-value.mjs"
 import { createViewerReceiver } from "../public/integrations/viewer-bridge-v1.mjs"
 import ViewerToolsPanel from "./ViewerToolsPanel"
 import LightingControls from "./LightingControls"
+import ComparisonControls from "./ComparisonControls"
 import { DEFAULT_LIGHTING, normalizeLighting } from "./viewer/scene-lighting.mjs"
 import ViewerToolIcon from "./ViewerToolIcon"
 import { autoSmoothGeometry } from "./viewer/model-preparation.mjs"
@@ -12107,6 +12108,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [showHeatmap, setShowHeatmap] = useState(false)
 
   const [comparisonMenuOpen, setComparisonMenuOpen] = useState(false)
+  const closeComparisonMenu = useCallback(() => setComparisonMenuOpen(false), [])
   const [comparisonSelection, setComparisonSelection] = useState([])
   const [isCalculatingComparison, setIsCalculatingComparison] = useState(false)
   const [surfaceAnalysisProgress, setSurfaceAnalysisProgress] = useState(null)
@@ -17787,196 +17789,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         </div>
       </div>
 
-      <div style={{
-        width: isMobile ? "100%" : (dicomLayoutActive ? 120 : 270),
-        display: comparisonMenuOpen ? "flex" : "none",
-        flexDirection: "column",
-        alignItems: "flex-end",
-        position: "relative",
-        zIndex: comparisonMenuOpen ? 420 : 2,
-        overflow: "visible",
-      }}>
-        <div style={{
-          width: isMobile ? "100%" : (comparisonMenuOpen ? (dicomLayoutActive ? 330 : 320) : "100%"),
-          maxWidth: "calc(100vw - 20px)",
-          maxHeight: isMobile ? "calc(100vh - 24px)" : "none",
-          boxSizing: "border-box",
-          borderRadius: comparisonMenuOpen ? 15 : 11,
-          border: comparisonMenuOpen ? "1px solid rgba(255,255,255,.095)" : "1px solid rgba(255,255,255,.10)",
-          background: comparisonMenuOpen ? "rgba(12,12,12,.96)" : "rgba(12,12,12,.72)",
-          backdropFilter: comparisonMenuOpen ? "blur(20px)" : "blur(14px)",
-          WebkitBackdropFilter: comparisonMenuOpen ? "blur(20px)" : "blur(14px)",
-          boxShadow: comparisonMenuOpen ? "0 24px 64px rgba(0,0,0,.42)" : "none",
-          color: "#f2f2f2",
-          fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
-          overflow: "visible",
-          transition: "width .36s cubic-bezier(.2,.75,.25,1), border-radius .32s ease, background .28s ease, border-color .28s ease, box-shadow .32s ease, backdrop-filter .32s ease",
-          position: "relative",
-        }}>
-          {comparisonMenuOpen && (
-            <button
-              onClick={(event) => { event.stopPropagation(); setComparisonMenuOpen(false) }}
-              style={analysisCloseButtonStyle}
-              title="Sbalit Porovnání"
-              aria-label="Sbalit Porovnání"
-              onMouseEnter={(event) => { event.currentTarget.style.background = "rgba(255,255,255,.075)"; event.currentTarget.style.color = "#fff"; event.currentTarget.style.borderColor = "rgba(255,255,255,.15)" }}
-              onMouseLeave={(event) => { event.currentTarget.style.background = "rgba(255,255,255,.035)"; event.currentTarget.style.color = "#bdbdbd"; event.currentTarget.style.borderColor = "rgba(255,255,255,.09)" }}
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M15 18l-6-6 6-6" />
-              </svg>
-            </button>
-          )}
-          <button
-            onClick={() => { setComparisonMenuOpen((prev) => !prev); setHeatmapMenuOpen(false) }}
-            disabled={analysisEligibleFiles.length < 2}
-            title="Oboustranně porovnat podobnost povrchů dvou modelů"
-            style={{
-              position: "relative", width: "100%", height: comparisonMenuOpen ? 54 : 38, padding: 0,
-              border: 0, borderRadius: "inherit", background: "transparent", color: analysisEligibleFiles.length < 2 ? "#666" : "#ededed",
-              cursor: analysisEligibleFiles.length < 2 ? "not-allowed" : "pointer", fontFamily: "inherit", overflow: "hidden",
-              transition: "height .32s cubic-bezier(.2,.75,.25,1), color .18s ease",
-            }}
-          >
-            <span style={{
-              position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-              opacity: comparisonMenuOpen ? 0 : 1, transform: comparisonMenuOpen ? "translateY(-7px) scale(.98)" : "translateY(0) scale(1)",
-              transition: "opacity .16s ease, transform .28s cubic-bezier(.2,.75,.25,1)", pointerEvents: "none",
-              fontWeight: 680, fontSize: 12, letterSpacing: "-.01em",
-            }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M5 7h9"/><path d="M10.5 3.5L14 7l-3.5 3.5"/><path d="M19 17h-9"/><path d="M13.5 13.5L10 17l3.5 3.5"/>
-              </svg>
-              <span>Porovnání</span>
-            </span>
 
-            <span style={{
-              position: "absolute", inset: 0, display: "flex", alignItems: "center", padding: "0 50px 0 14px", boxSizing: "border-box",
-              opacity: comparisonMenuOpen ? 1 : 0, transform: comparisonMenuOpen ? "translateY(0) scale(1)" : "translateY(7px) scale(.985)",
-              transition: "opacity .2s .08s ease, transform .32s cubic-bezier(.2,.75,.25,1)", pointerEvents: "none", textAlign: "left",
-            }}>
-              <span>
-                <span style={{ display: "block", lineHeight: 1.05 }}><span style={{ fontSize: 14, fontWeight: 850 }}>ART</span><span style={{ fontSize: 14, fontWeight: 300 }}>HETIC</span><span style={{ marginLeft: 6, fontSize: 14, fontWeight: 300, color: "#d7d7d7" }}>Porovnání</span></span>
-                <span style={{ display: "block", marginTop: 4, color: "#666", fontSize: 9.5, fontWeight: 590 }}>Oboustranná povrchová odchylka · mm</span>
-              </span>
-            </span>
-          </button>
-
-          <div style={{
-            display: "grid",
-            gridTemplateRows: comparisonMenuOpen ? "1fr" : "0fr",
-            opacity: comparisonMenuOpen ? 1 : 0,
-            transform: comparisonMenuOpen ? "translateY(0)" : "translateY(-8px)",
-            pointerEvents: comparisonMenuOpen ? "auto" : "none",
-            overflow: comparisonMenuOpen ? "visible" : "hidden",
-            transition: "grid-template-rows .38s cubic-bezier(.2,.75,.25,1), opacity .2s .08s ease, transform .34s cubic-bezier(.2,.75,.25,1)",
-          }}>
-            <div style={{ minHeight: 0, overflow: comparisonMenuOpen ? "visible" : "hidden" }}>
-              <div style={{ padding: "0 14px 14px", boxSizing: "border-box" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <div style={analysisStepChipStyle(!comparisonModelsReady, comparisonModelsReady)}>
-                    {comparisonModelsReady && <span style={{ color: "#86efac" }}>✓</span>}<span>Vybrat modely</span>
-                  </div>
-                  <div style={{ width: 13, height: 1, background: "rgba(255,255,255,.07)" }} />
-                  <div style={analysisStepChipStyle(comparisonModelsReady && !hasComputedComparison, hasComputedComparison)}>
-                    {hasComputedComparison && <span style={{ color: "#86efac" }}>✓</span>}<span>Vypočítat</span>
-                  </div>
-                </div>
-
-                <div style={{ height: 1, background: "rgba(255,255,255,.07)", margin: "13px 0" }} />
-
-                <div style={{ display: "grid", gap: 11 }}>
-                  <div>
-                    <div style={{ marginBottom: 6, color: "#bdbdbd", fontSize: 9.5, fontWeight: 700 }}>
-                      A · {comparisonDirection === "A_TO_B" ? "Analyzovaný model" : "Referenční model"}
-                    </div>
-                    <AlignmentModelDropdown badge="A" value={comparisonSelection[0] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[1] || ""} onChange={(url) => setComparisonSelectionSlot(0, url)} />
-                  </div>
-                  <div>
-                    <div style={{ marginBottom: 6, color: "#bdbdbd", fontSize: 9.5, fontWeight: 700 }}>
-                      B · {comparisonDirection === "A_TO_B" ? "Referenční model" : "Analyzovaný model"}
-                    </div>
-                    <AlignmentModelDropdown badge="B" value={comparisonSelection[1] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0]} onChange={(url) => setComparisonSelectionSlot(1, url)} />
-                  </div>
-                </div>
-
-                <div style={{ marginTop: 13, padding: "9px 10px", borderRadius: 11, background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.065)" }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
-                    <span style={{ color: "#8a8a8a", fontSize: 9.3, fontWeight: 650 }}>Mapa odchylek</span>
-                    <span style={{ color: "#707070", fontSize: 8.7 }}>Reference zůstává v původní opacitě</span>
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, padding: 3, borderRadius: 9, background: "rgba(0,0,0,.28)", border: "1px solid rgba(255,255,255,.055)" }}>
-                    {[
-                      ["A_TO_B", "A → B"],
-                      ["B_TO_A", "B → A"],
-                    ].map(([direction, label]) => {
-                      const active = comparisonDirection === direction
-                      return (
-                        <button
-                          key={direction}
-                          type="button"
-                          onClick={() => handleComparisonDirectionChange(direction)}
-                          disabled={!comparisonModelsReady}
-                          style={{
-                            height: 28, borderRadius: 7, border: active ? "1px solid rgba(74,222,128,.20)" : "1px solid transparent",
-                            background: active ? "rgba(22,54,34,.78)" : "transparent",
-                            color: !comparisonModelsReady ? "#555" : active ? "#c8f8d5" : "#858585",
-                            cursor: comparisonModelsReady ? "pointer" : "not-allowed", fontFamily: "inherit", fontSize: 9.5, fontWeight: 720,
-                            transition: "background .18s ease, border-color .18s ease, color .18s ease, transform .18s ease",
-                          }}
-                        >{label}</button>
-                      )
-                    })}
-                  </div>
-                </div>
-
-                <div style={{ marginTop: 13, padding: "10px 11px", borderRadius: 11, background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.065)" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
-                    <span style={{ color: "#8a8a8a", fontSize: 9.3, fontWeight: 650 }}>Tolerance shody</span>
-                    <span style={{ color: "#d7d7d7", fontSize: 9.5, fontWeight: 730, fontVariantNumeric: "tabular-nums" }}>{comparisonTolerance.toFixed(2)} mm</span>
-                  </div>
-                  <input className="artheticAnalysisRange" type="range" min={0.05} max={1} step={0.05} value={comparisonTolerance} onChange={(e) => { setComparisonTolerance(Number(e.target.value)); setHasComputedComparison(false); setShowComparison(false); setComparisonStats(null); setComparisonSnapshot(null) }} style={{ width: "100%", margin: 0 }} />
-                </div>
-
-                <button
-                  onClick={handleApplyComparison}
-                  disabled={!comparisonModelsReady || isCalculatingComparison}
-                  className={comparisonModelsReady && !hasComputedComparison && !isCalculatingComparison ? "artheticAnalysisReadyAction" : undefined}
-                  style={{
-                    marginTop: 14, width: "100%", height: 36, borderRadius: 10, boxSizing: "border-box",
-                    border: "1px solid rgba(255,255,255,.09)",
-                    background: hasComputedComparison ? "rgba(255,255,255,.055)" : comparisonModelsReady ? "rgba(18,42,27,.97)" : "rgba(255,255,255,.03)",
-                    color: !comparisonModelsReady ? "#555" : hasComputedComparison ? "#c9c9c9" : "#dffbea",
-                    cursor: !comparisonModelsReady || isCalculatingComparison ? "not-allowed" : "pointer",
-                    fontFamily: "inherit", fontSize: 10, fontWeight: 720,
-                  }}
-                ><span>{hasComputedComparison ? "Přepočítat porovnání" : "Vypočítat porovnání"}</span></button>
-
-                {hasComputedComparison && comparisonStats && (
-                  <div style={{ marginTop: 13, padding: 11, borderRadius: 11, background: "rgba(255,255,255,.035)", border: "1px solid rgba(255,255,255,.065)" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 10 }}>
-                      <span style={{ width: 16, height: 16, borderRadius: "50%", display: "grid", placeItems: "center", color: "#86efac", background: "rgba(34,197,94,.1)", border: "1px solid rgba(74,222,128,.2)", fontSize: 10 }}>✓</span>
-                      <span style={{ fontSize: 10, fontWeight: 720, color: "#d8d8d8" }}>Výpočet dokončen</span>
-                    </div>
-                    <Switch checked={showComparison} onChange={(checked) => { setShowComparison(checked); if (checked) setShowHeatmap(false) }} label="Zobrazit mapu odchylek" />
-                    <div style={{ marginTop: 8, padding: "7px 8px", borderRadius: 8, background: "rgba(0,0,0,.18)", color: "#777", fontSize: 8.7, lineHeight: 1.45 }}>
-                      {comparisonDirection === "A_TO_B" ? "A" : "B"} zobrazuje heatmapu · {comparisonDirection === "A_TO_B" ? "B" : "A"} zůstává jako reference v původní opacitě.
-                    </div>
-                    <div style={{ marginTop: 11, display: "grid", gridTemplateColumns: "1fr auto", gap: "5px 12px", color: "#8b8b8b", fontSize: 9 }}>
-                      <span>Průměrná odchylka</span><b style={{ color: "#d4d4d4" }}>{comparisonStats.mean.toFixed(3)} mm</b>
-                      <span>RMS</span><b style={{ color: "#d4d4d4" }}>{comparisonStats.rms.toFixed(3)} mm</b>
-                      <span>95. percentil</span><b style={{ color: "#d4d4d4" }}>{comparisonStats.percentile95.toFixed(3)} mm</b>
-                      <span>Maximum</span><b style={{ color: "#d4d4d4" }}>{comparisonStats.max.toFixed(3)} mm</b>
-                      <span>V toleranci</span><b style={{ color: "#a7e6b8" }}>{comparisonStats.withinTolerance.toFixed(1)} %</b>
-                    </div>
-                    <div style={{ marginTop: 9, color: "#626262", fontSize: 8.7, lineHeight: 1.45 }}>Oboustranná povrchová odchylka v aktuální poloze modelů.</div>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
 
 
     </div>
@@ -20217,8 +20030,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             { id: "oprava-site", label: "Oprava sítě", description: "Vyhledat a uzavřít otvory ve skenu.", disabled: analysisEligibleFiles.length < 1, onClick: openRepairMode },
             { id: "model-builder", label: "Model Builder", description: "Vytvořit model s bází pro 3D tisk.", onClick: openCadEmbedded },
             { id: "okluze", label: "Okluze", description: "Změřit kontakty a mezery mezi skeny.", disabled: analysisEligibleFiles.length < 2, active: heatmapMenuOpen || showHeatmap, toggle: true, onClick: () => { setHeatmapMenuOpen(previous => !previous); setComparisonMenuOpen(false) } },
-            { id: "porovnani", label: "Porovnání", description: "Porovnat povrchové odchylky dvou modelů.", disabled: analysisEligibleFiles.length < 2, active: comparisonMenuOpen || showComparison, toggle: true, onClick: () => { setComparisonMenuOpen(previous => !previous); setHeatmapMenuOpen(false) } },
-            { id: "nasviceni", label: "Nasvícení", description: "Upravit jas a směr světla ve scéně.", active: lightingOpen, toggle: true, onClick: () => setLightingOpen(previous => !previous) },
+            { id: "porovnani", label: "Porovnání", description: "Porovnat povrchové odchylky dvou modelů.", disabled: analysisEligibleFiles.length < 2, active: comparisonMenuOpen || showComparison, toggle: true, onClick: () => { setComparisonMenuOpen(previous => !previous); setHeatmapMenuOpen(false); setLightingOpen(false) } },
+            { id: "nasviceni", label: "Nasvícení", description: "Upravit jas a směr světla ve scéně.", active: lightingOpen, toggle: true, onClick: () => { setLightingOpen(previous => !previous); setComparisonMenuOpen(false); setHeatmapMenuOpen(false) } },
             { id: "360-spin", label: "360° Spin", description: "Spustit nebo zastavit otáčení modelu.", active: isAutoRotating, toggle: true, onClick: () => setIsAutoRotating(previous => !previous), controls: <><input aria-label="Rychlost rotace" type="range" min={0.05} max={1} step={0.05} value={spinSpeed} onChange={event => setSpinSpeed(Number(event.target.value))} /><span style={{ flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{Math.round(spinSpeed * 100)} %</span></> },
             { id: "prurez", label: "Průřez", description: "Nakreslit průřez v aktuálním směru pohledu.", active: clippingEnabled, toggle: true, controls: <button type="button" onClick={handleResetPlane}>{dicomSource ? "Reset" : "Nový řez"}</button>, onClick: () => {
               if (clippingEnabled && dicomSettings.viewMode === "only2d") setDicomSettings(previous => ({ ...previous, viewMode: "solid" }))
@@ -20228,6 +20041,15 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         />
       )}
       {lightingOpen && <LightingControls value={sceneLighting} onChange={setSceneLighting} onClose={closeLighting} expanded={toolsPanelExpanded} />}
+      {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && comparisonMenuOpen && <ComparisonControls
+        expanded={toolsPanelExpanded} mobile={isMobile} onClose={closeComparisonMenu}
+        modelA={<AlignmentModelDropdown badge="A" value={comparisonSelection[0] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[1] || ""} disabled={isCalculatingComparison} onChange={url => setComparisonSelectionSlot(0, url)} />}
+        modelB={<AlignmentModelDropdown badge="B" value={comparisonSelection[1] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0] || isCalculatingComparison} onChange={url => setComparisonSelectionSlot(1, url)} />}
+        direction={comparisonDirection} onDirectionChange={handleComparisonDirectionChange}
+        tolerance={comparisonTolerance} onToleranceChange={value => { setComparisonTolerance(value); setHasComputedComparison(false); setShowComparison(false); setComparisonStats(null); setComparisonSnapshot(null) }}
+        ready={comparisonModelsReady} calculating={isCalculatingComparison} computed={hasComputedComparison} onCalculate={handleApplyComparison}
+        stats={comparisonStats} visible={showComparison} onVisibleChange={checked => { setShowComparison(checked); if (checked) setShowHeatmap(false) }}
+      />}
       {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && topBarRight}
 
       {!standaloneToolMode && isMobile && mobileFunctionsOpen && !alignmentMode && (

@@ -1,0 +1,31 @@
+.card {z-index:45;scrollbar-width:thin;scrollbar-color:#444 transparent}
+.card header {margin-bottom:8px}
+.intro {margin:0 0 18px;color:#818181;font-size:10px;line-height:1.5}
+.field {margin:14px 0;min-width:0}
+.field>span {display:block;margin-bottom:7px;color:#aeaeae;font-size:11px}
+.field small {display:block;margin-top:7px;color:#818181;font-size:10px;line-height:1.5}
+.direction {display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.direction button {font-size:11px;padding:8px}
+.card button {transition:background .2s ease,border-color .2s ease,color .2s ease}
+.card button:disabled {opacity:.38;cursor:not-allowed}
+.card button:disabled:hover {background:#ffffff06}
+.card button.close {width:30px;height:30px;flex-shrink:0;padding:0;display:grid;place-items:center;border-radius:9px;border:1px solid #ffffff1a;background:#ffffff0a;color:#a1a1aa;font-size:20px;box-shadow:none;transition:background 180ms,color 180ms}
+.card button.close:hover {background:#ffffff1f;color:white}
+.card button.calculate {width:100%;margin-top:2px;padding:10px 8px;font-weight:650;background:#ededed;color:#171717;border-color:#ededed}
+.card button.calculate:hover:not(:disabled) {background:white;border-color:white}
+.card button.calculate:disabled {background:#ffffff06;border-color:#ffffff1a;color:#aaa}
+.tolerance {margin:18px 0}
+.card [role=option][aria-selected=true] span:first-child {background:#ededed!important}
+.result {margin-top:16px;padding-top:14px;border-top:1px solid #ffffff12}
+.resultHeader {display:flex;justify-content:space-between;font-size:11px;font-weight:650;margin-bottom:14px}
+.visibility {display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;cursor:pointer}
+.visibility input {appearance:none;position:relative;flex-shrink:0;width:30px;height:18px;border:1px solid #ffffff25;border-radius:20px;background:#ffffff0a;cursor:pointer;transition:background .18s,border-color .18s}
+.visibility input::after {content:"";position:absolute;width:12px;height:12px;top:2px;left:2px;border-radius:50%;background:#888;transition:transform .18s,background .18s}
+.visibility input:checked {background:#ffffff20;border-color:#ffffff50}
+.visibility input:checked::after {transform:translateX(12px);background:#eee}
+.visibility input:focus-visible {outline:2px solid #eee;outline-offset:3px}
+.result dl {display:grid;grid-template-columns:1fr auto;gap:8px;margin:16px 0 0;font-size:10px;color:#929292}
+.result dt,.result dd {margin:0}
+.result dd {color:#dedede;font-variant-numeric:tabular-nums}
+@media(max-width:600px){.card.mobile {right:10px!important;left:10px;top:auto;bottom:10px;width:auto;max-width:none;max-height:calc(100dvh - 20px);z-index:460}}
+@media(prefers-reduced-motion:reduce){.card button,.visibility input,.visibility input::after {transition:none}}
