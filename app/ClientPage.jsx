@@ -12114,9 +12114,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [surfaceAnalysisProgress, setSurfaceAnalysisProgress] = useState(null)
   const [hasComputedComparison, setHasComputedComparison] = useState(false)
   const [showComparison, setShowComparison] = useState(false)
-  const [comparisonTolerance, setComparisonTolerance] = useState(0.25)
+  const [comparisonTolerance, setComparisonTolerance] = useState(20)
   const [comparisonStats, setComparisonStats] = useState(null)
-  const [comparisonDirection, setComparisonDirection] = useState("A_TO_B") // A_TO_B | B_TO_A
+  const comparisonDirection = "A_TO_B"
   // Persistovaný výsledek deviation mapy. Obsahuje komprimované vzdálenosti pro
   // oba směry + fingerprint modelů a jejich přesných transformací.
   const [comparisonSnapshot, setComparisonSnapshot] = useState(null)
@@ -16039,16 +16039,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
   }
 
-  const handleComparisonDirectionChange = (direction) => {
-    if (direction !== "A_TO_B" && direction !== "B_TO_A") return
-    setComparisonDirection(direction)
-
-    // Směr porovnání mění pouze analyzovaný povrch. Opacity modelů necháváme beze změny.
-
-    setPinnedNotes([])
-    if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
-  }
-
   const handleApplyHeatmap = async () => {
     if (heatmapSelection.length !== 2) return
     const analysisStartedAt = performance.now()
@@ -16410,8 +16400,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     const occlusionSelection = resolveSelection(pendingViewerState.occlusion?.files)
     const savedComparisonSelection = resolveSelection(pendingViewerState.comparison?.files)
     const savedAlignmentSelection = resolveSelection([pendingViewerState.alignment?.reference, pendingViewerState.alignment?.moving].filter(Boolean))
-    const savedTolerance = Math.max(0.05, Math.min(1, Number(pendingViewerState.comparison?.tolerance) || 0.25))
-    const savedComparisonDirection = pendingViewerState.comparison?.direction === "B_TO_A" ? "B_TO_A" : "A_TO_B"
+    const savedTolerance = Math.max(0.05, Math.min(50, Number(pendingViewerState.comparison?.tolerance) || 20))
+    const savedComparisonDirection = "A_TO_B"
     setSceneLighting(normalizeLighting(pendingViewerState.lighting || DEFAULT_LIGHTING))
     const mode = pendingViewerState.activeAnalysisMode
 
@@ -16451,7 +16441,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setComparisonSelection(savedComparisonSelection)
     if (savedAlignmentSelection.length === 2) setAlignmentSelection(savedAlignmentSelection)
     setComparisonTolerance(savedTolerance)
-    setComparisonDirection(savedComparisonDirection)
     setShowHeatmap(false)
     setShowComparison(false)
     setHasComputedHeatmap(false)
@@ -17550,7 +17539,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       {isMobile && !heatmapMenuOpen && !comparisonMenuOpen && showComparison && hasComputedComparison && (
         <div style={{ marginTop: 8, padding: "8px 10px 7px", borderRadius: 10, background: "rgba(255,255,255,.022)", border: "1px solid rgba(255,255,255,.065)" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
-            <span style={{ color: "#cfcfcf", fontSize: 9.2, fontWeight: 720 }}>Porovnání · {comparisonDirection === "A_TO_B" ? "A → B" : "B → A"}</span>
+            <span style={{ color: "#cfcfcf", fontSize: 9.2, fontWeight: 720 }}>Porovnání</span>
             <span style={{ color: "#626262", fontSize: 7.8, fontWeight: 620 }}>odchylka · mm</span>
           </div>
           <div style={{ height: 5, borderRadius: 999, background: "linear-gradient(to right, #2563eb 0%, #22c55e 25%, #facc15 50%, #ef4444 75%, #a21caf 100%)" }} />
@@ -20045,7 +20034,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         expanded={toolsPanelExpanded} mobile={isMobile} onClose={closeComparisonMenu}
         modelA={<AlignmentModelDropdown badge="A" value={comparisonSelection[0] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[1] || ""} disabled={isCalculatingComparison} onChange={url => setComparisonSelectionSlot(0, url)} />}
         modelB={<AlignmentModelDropdown badge="B" value={comparisonSelection[1] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0] || isCalculatingComparison} onChange={url => setComparisonSelectionSlot(1, url)} />}
-        direction={comparisonDirection} onDirectionChange={handleComparisonDirectionChange}
         tolerance={comparisonTolerance} onToleranceChange={value => { setComparisonTolerance(value); setHasComputedComparison(false); setShowComparison(false); setComparisonStats(null); setComparisonSnapshot(null) }}
         ready={comparisonModelsReady} calculating={isCalculatingComparison} computed={hasComputedComparison} onCalculate={handleApplyComparison}
         stats={comparisonStats} visible={showComparison} onVisibleChange={checked => { setShowComparison(checked); if (checked) setShowHeatmap(false) }}
@@ -20547,7 +20535,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)", boxShadow: "0 16px 42px rgba(0,0,0,.3)"
         }}>
           <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16, marginBottom: 8 }}>
-            <span style={{ fontWeight: 720, fontSize: 10.5 }}>Porovnání povrchů · {comparisonDirection === "A_TO_B" ? "A → B" : "B → A"}</span>
+            <span style={{ fontWeight: 720, fontSize: 10.5 }}>Porovnání povrchů</span>
             <span style={{ color: "#696969", fontWeight: 600, fontSize: 8.5 }}>absolutní odchylka · mm</span>
           </div>
           <div style={{ height: 7, borderRadius: 999, background: "linear-gradient(to right, #2563eb 0%, #22c55e 25%, #facc15 50%, #ef4444 75%, #a21caf 100%)" }} />

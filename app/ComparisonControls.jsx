@@ -3,7 +3,7 @@ import React, { useEffect, useRef } from "react"
 import lighting from "./LightingControls.module.css"
 import styles from "./ComparisonControls.module.css"
 
-export default function ComparisonControls({ expanded, mobile, onClose, modelA, modelB, direction, onDirectionChange, tolerance, onToleranceChange, ready, calculating, computed, onCalculate, stats, visible, onVisibleChange }) {
+export default function ComparisonControls({ expanded, mobile, onClose, modelA, modelB, tolerance, onToleranceChange, ready, calculating, computed, onCalculate, stats, visible, onVisibleChange }) {
   const root = useRef(null)
   const close = useRef(null)
   useEffect(() => {
@@ -18,13 +18,9 @@ export default function ComparisonControls({ expanded, mobile, onClose, modelA, 
   }, [onClose])
   return <section ref={root} className={`${lighting.card} ${styles.card} ${mobile ? styles.mobile : ""}`} style={{ right: mobile ? 10 : expanded ? 320 : 78 }} role="dialog" aria-label="Porovnání modelů">
     <header><strong>Porovnání</strong><button ref={close} type="button" className={styles.close} onClick={onClose} aria-label="Zavřít porovnání">×</button></header>
-    <p className={styles.intro}>Povrchová odchylka dvou modelů · mm</p>
-    <div className={styles.field}><span>A · {direction === "A_TO_B" ? "Analyzovaný model" : "Referenční model"}</span>{modelA}</div>
-    <div className={styles.field}><span>B · {direction === "A_TO_B" ? "Referenční model" : "Analyzovaný model"}</span>{modelB}</div>
-    <div className={styles.field}><span>Směr porovnání</span><div className={styles.direction}>
-      {[["A_TO_B", "A → B"], ["B_TO_A", "B → A"]].map(([value, label]) => <button key={value} type="button" disabled={!ready || calculating} aria-pressed={direction === value} onClick={() => onDirectionChange(value)}>{label}</button>)}
-    </div><small>Referenční model si zachová svůj vzhled.</small></div>
-    <label className={`${lighting.row} ${styles.tolerance}`}><span>Tolerance shody <b>{tolerance.toFixed(2)} mm</b></span><input aria-label="Tolerance shody" type="range" min={.05} max={1} step={.05} value={tolerance} disabled={calculating} onChange={event => onToleranceChange(Number(event.target.value))} /></label>
+    <div className={styles.field}><span>Analyzovaný model</span>{modelA}</div>
+    <div className={styles.field}><span>Referenční model</span>{modelB}</div>
+    <label className={`${lighting.row} ${styles.tolerance}`}><span>Tolerance shody <b>{tolerance.toFixed(2)} mm</b></span><input aria-label="Tolerance shody" type="range" min={.05} max={50} step={.05} value={tolerance} disabled={calculating} onChange={event => onToleranceChange(Number(event.target.value))} /></label>
     <button className={styles.calculate} type="button" disabled={!ready || calculating} onClick={onCalculate}>{calculating ? "Počítám…" : computed ? "Přepočítat porovnání" : "Vypočítat porovnání"}</button>
     {computed && stats && <div className={styles.result}>
       <div className={styles.resultHeader}><span>Výpočet dokončen</span><span aria-hidden="true">✓</span></div>

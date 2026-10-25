@@ -1,11 +1,7 @@
 .card {z-index:45;scrollbar-width:thin;scrollbar-color:#444 transparent}
 .card header {margin-bottom:8px}
-.intro {margin:0 0 18px;color:#818181;font-size:10px;line-height:1.5}
 .field {margin:14px 0;min-width:0}
 .field>span {display:block;margin-bottom:7px;color:#aeaeae;font-size:11px}
-.field small {display:block;margin-top:7px;color:#818181;font-size:10px;line-height:1.5}
-.direction {display:grid;grid-template-columns:1fr 1fr;gap:5px}
-.direction button {font-size:11px;padding:8px}
 .card button {transition:background .2s ease,border-color .2s ease,color .2s ease}
 .card button:disabled {opacity:.38;cursor:not-allowed}
 .card button:disabled:hover {background:#ffffff06}
