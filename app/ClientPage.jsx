@@ -3587,7 +3587,8 @@ function DicomConversionDialog({ volume, draft, onChange, onClose, onApply }) {
       .ct-conversion-overlay button:not(:disabled):hover {background:#ffffff18!important;border-color:#ffffff45!important}
       .ct-conversion-overlay button:not(:disabled):active {transform:scale(.97)}
       .ct-conversion-overlay button:focus-visible {outline:2px solid #eee;outline-offset:3px}
-      .ct-conversion-overlay button[aria-label="Zavřít přípravu CT"]:hover {transform:rotate(90deg)}
+      .ct-conversion-overlay button.ct-conversion-close {width:30px!important;height:30px!important;flex-shrink:0;padding:0!important;display:grid;place-items:center;border-radius:9px!important;border:1px solid rgba(255,255,255,.1)!important;background:rgba(255,255,255,.04)!important;color:#a1a1aa!important;font-size:20px!important;box-shadow:none!important;cursor:pointer;transition:background 180ms,color 180ms}
+      .ct-conversion-overlay button.ct-conversion-close:hover {background:rgba(255,255,255,.12)!important;color:#fff!important;transform:none!important}
       .ct-conversion-overlay button[data-primary]:hover {background:#fff!important;color:#111!important}
       @media(prefers-reduced-motion:reduce){.ct-conversion-overlay button {transition:none!important}}
     `}</style>
@@ -3602,7 +3603,7 @@ function DicomConversionDialog({ volume, draft, onChange, onClose, onApply }) {
     }} style={{ width: "min(800px,100%)", maxHeight: "calc(100dvh - 32px)", overflow: "auto", border: "1px solid #ffffff20", borderRadius: 18, background: "#101010", color: "#e7e7e7", boxShadow: "0 24px 100px #0009", fontFamily: "inherit" }}>
       <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 20px", borderBottom: "1px solid #ffffff12" }}>
         <h2 id="ct-convert-title" style={{ margin: 0, fontSize: 15 }}>Příprava 3D povrchu CT</h2>
-        <button aria-label="Zavřít přípravu CT" onClick={onClose} style={buttonStyle}>×</button>
+        <button type="button" className="ct-conversion-close" aria-label="Zavřít přípravu CT" onClick={onClose}>×</button>
       </header>
       <div style={{ height: "min(48vh,420px)", minHeight: 180, position: "relative", background: "#202020" }}>
         <Canvas camera={{ position: [0,-radius,radius*.25], up: [0,0,1], fov: 35, near: .1, far: radius*10 }} dpr={[1,1.5]}>
