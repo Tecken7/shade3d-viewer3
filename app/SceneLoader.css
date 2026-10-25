@@ -7,3 +7,13 @@
 .scene-loading-activity{position:absolute;inset:0 auto 0 0;width:35%;background:linear-gradient(90deg,transparent,#ffffff45,transparent);will-change:transform;animation:artheticSceneSweep 2.8s ease-in-out infinite}
 @keyframes artheticSceneSweep{from{transform:translateX(-110%)}to{transform:translateX(400%)}}
 @media(prefers-reduced-motion:reduce){.scene-loading-sweep,.scene-loading-activity{animation:none;display:none}.scene-loading-fill{transition:none}}
+
+@keyframes artheticComparisonLegendIn {from{opacity:0;transform:translate(-50%,-6px)}to{opacity:1;transform:translate(-50%,0)}}
+@keyframes artheticComparisonLegendOut {from{opacity:1;transform:translate(-50%,0)}to{opacity:0;transform:translate(-50%,-6px)}}
+@media(prefers-reduced-motion:reduce){[data-comparison-legend]{animation:none!important}}
+
+@keyframes artheticComparisonMobileIn {from{opacity:0;transform:translateY(-5px)}to{opacity:1;transform:translateY(0)}}
+@keyframes artheticComparisonMobileOut {from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(-5px)}}
+
+@keyframes artheticToolPopoverIn {from{opacity:0;transform:translateX(8px)}to{opacity:1;transform:translateX(0)}}
+@keyframes artheticToolPopoverOut {from{opacity:1;transform:translateX(0)}to{opacity:0;transform:translateX(8px)}}

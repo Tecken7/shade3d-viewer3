@@ -7,6 +7,8 @@ import { createViewerReceiver } from "../public/integrations/viewer-bridge-v1.mj
 import ViewerToolsPanel from "./ViewerToolsPanel"
 import LightingControls from "./LightingControls"
 import ComparisonControls from "./ComparisonControls"
+import useAnimatedPresence from "./useAnimatedPresence"
+import { advanceComparisonBlend, setComparisonBlendMaterial } from "./viewer/comparison-transition.mjs"
 import { DEFAULT_LIGHTING, normalizeLighting } from "./viewer/scene-lighting.mjs"
 import ViewerToolIcon from "./ViewerToolIcon"
 import { autoSmoothGeometry } from "./viewer/model-preparation.mjs"
@@ -5767,6 +5769,7 @@ function AnyModel({
   wireframe = false,
   ghost = false,
   analysisMode = null,
+  comparisonVisible = false,
   renderOrder = 0,
   modelMatrix = null,
   onHoverDist,
@@ -5786,6 +5789,16 @@ function AnyModel({
   onCadSurfaceClick,
 }) {
   const [object3D, setObject3D] = useState(null)
+  const comparisonUniform = useRef({ value: 0 })
+  const comparisonBlendPosition = useRef(0)
+  const reducedMotion = useRef(false)
+  useEffect(() => { reducedMotion.current = window.matchMedia("(prefers-reduced-motion: reduce)").matches }, [])
+  useFrame((_, delta) => {
+    const active = analysisMode === "comparison" && comparisonVisible
+    const blend = advanceComparisonBlend(comparisonBlendPosition.current, active, reducedMotion.current ? 1 : delta)
+    comparisonBlendPosition.current = blend.position
+    comparisonUniform.current.value = blend.value
+  })
   const ext = useMemo(() => inferExt(name || url), [name, url])
 
   const makeMat = (opts = {}) => {
@@ -5922,7 +5935,10 @@ function AnyModel({
         : analysisMode === "comparison"
           ? child.userData._comparisonDistances
           : null
-      const isHeatmapActive = !!analysisColors
+      const isComparisonActive = analysisMode === "comparison" && !!analysisColors
+      const isHeatmapActive = !!analysisColors && !isComparisonActive
+      if (isComparisonActive) child.geometry.setAttribute("artheticComparisonColor", analysisColors)
+      else child.geometry.deleteAttribute("artheticComparisonColor")
       
       if (isHeatmapActive) {
           child.geometry.setAttribute('color', analysisColors);
@@ -5933,7 +5949,8 @@ function AnyModel({
           } else {
               child.geometry.deleteAttribute('color');
           }
-          child.geometry.deleteAttribute('_analysisDist');
+          if (isComparisonActive) child.geometry.setAttribute('_analysisDist', analysisDistances)
+          else child.geometry.deleteAttribute('_analysisDist');
       }
       
       if (child.geometry.attributes.color) {
@@ -5983,6 +6000,7 @@ function AnyModel({
         }
 
         ghostMaterialList(child.material).forEach((material) => {
+          setComparisonBlendMaterial(material, comparisonUniform.current, isComparisonActive)
           material.needsUpdate = true
         })
         return
@@ -6011,6 +6029,7 @@ function AnyModel({
             else oldMaterial.dispose?.()
           }
       }
+      ghostMaterialList(child.material).forEach(material => setComparisonBlendMaterial(material, comparisonUniform.current, isComparisonActive))
     })
   }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, ghost, analysisMode, renderOrder])
 
@@ -12128,6 +12147,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     }
   }, [mobileFunctionsOpen, isMobile, getMobileFunctionsSheetBounds])
   const [heatmapMenuOpen, setHeatmapMenuOpen] = useState(false)
+  const heatmapPanelPresence = useAnimatedPresence(heatmapMenuOpen)
   const [heatmapSelection, setHeatmapSelection] = useState([])
   const [isCalculatingHeatmap, setIsCalculatingHeatmap] = useState(false)
   
@@ -12142,9 +12162,15 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [surfaceAnalysisProgress, setSurfaceAnalysisProgress] = useState(null)
   const [hasComputedComparison, setHasComputedComparison] = useState(false)
   const [showComparison, setShowComparison] = useState(false)
+  const comparisonPanelPresence = useAnimatedPresence(comparisonMenuOpen)
+  const lightingPanelPresence = useAnimatedPresence(lightingOpen)
+
   const [comparisonTolerance, setComparisonTolerance] = useState(0.20)
   const [comparisonStats, setComparisonStats] = useState(null)
   const comparisonDirection = "A_TO_B"
+  const comparisonRevealed = showComparison && hasComputedComparison && (!comparisonLoaderVisible || comparisonLoaderExiting)
+  const comparisonVisualPresence = useAnimatedPresence(comparisonRevealed, 420)
+
   // Persistovaný výsledek deviation mapy. Obsahuje komprimované vzdálenosti pro
   // oba směry + fingerprint modelů a jejich přesných transformací.
   const [comparisonSnapshot, setComparisonSnapshot] = useState(null)
@@ -17565,8 +17591,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         </div>
       )}
 
-      {isMobile && !heatmapMenuOpen && !comparisonMenuOpen && showComparison && hasComputedComparison && (
-        <div style={{ marginTop: 8, padding: "8px 10px 7px", borderRadius: 10, background: "rgba(255,255,255,.022)", border: "1px solid rgba(255,255,255,.065)" }}>
+      {isMobile && !heatmapMenuOpen && !comparisonMenuOpen && comparisonVisualPresence.present && hasComputedComparison && (
+        <div data-comparison-legend style={{ animation: comparisonVisualPresence.exiting ? "artheticComparisonMobileOut .38s ease-in both" : "artheticComparisonMobileIn .38s ease-out both", marginTop: 8, padding: "8px 10px 7px", borderRadius: 10, background: "rgba(255,255,255,.022)", border: "1px solid rgba(255,255,255,.065)" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
             <span style={{ color: "#cfcfcf", fontSize: 9.2, fontWeight: 720 }}>Porovnání</span>
             <span style={{ color: "#626262", fontSize: 7.8, fontWeight: 620 }}>odchylka · mm</span>
@@ -17620,16 +17646,16 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: 9, fontWeight: 680, whiteSpace: "nowrap",
   })
 
-  const topBarRight = (!isMobile || heatmapMenuOpen || comparisonMenuOpen) && (
+  const topBarRight = (!isMobile || heatmapPanelPresence.present || comparisonMenuOpen) && (
     <div style={{
       position: "absolute",
       top: isMobile ? "auto" : 10,
       bottom: isMobile ? 10 : "auto",
-      right: isMobile ? 10 : 80,
+      right: isMobile ? 10 : toolsPanelExpanded ? 320 : 78,
       left: isMobile ? 10 : "auto",
       transform: "none",
       zIndex: isMobile ? 460 : 10,
-      display: !isMobile && toolsPanelExpanded ? "none" : "flex",
+      display: "flex",
       flexDirection: "column",
       alignItems: isMobile ? "stretch" : "flex-end",
       maxHeight: "calc(100dvh - 20px)", overflowY: "auto", overscrollBehavior: "contain",
@@ -17663,32 +17689,34 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       `}} />
 
       <div style={{
-        width: isMobile ? "100%" : (dicomLayoutActive ? 120 : 270),
-        display: heatmapMenuOpen ? "flex" : "none",
+        width: isMobile ? "100%" : (dicomLayoutActive ? 320 : 310),
+        animation: heatmapPanelPresence.exiting ? "artheticToolPopoverOut .22s ease-in both" : "artheticToolPopoverIn .22s ease-out both",
+        pointerEvents: heatmapPanelPresence.exiting ? "none" : "auto",
+        display: heatmapPanelPresence.present ? "flex" : "none",
         flexDirection: "column",
         alignItems: "flex-end",
         position: "relative",
-        zIndex: heatmapMenuOpen ? 420 : 2,
+        zIndex: heatmapPanelPresence.present ? 420 : 2,
         overflow: "visible",
       }}>
         <div style={{
-          width: isMobile ? "100%" : (heatmapMenuOpen ? (dicomLayoutActive ? 320 : 310) : "100%"),
+          width: isMobile ? "100%" : (heatmapPanelPresence.present ? (dicomLayoutActive ? 320 : 310) : "100%"),
           maxWidth: "calc(100vw - 20px)",
           maxHeight: isMobile ? "calc(100vh - 24px)" : "none",
           boxSizing: "border-box",
-          borderRadius: heatmapMenuOpen ? 15 : 11,
-          border: heatmapMenuOpen ? "1px solid rgba(255,255,255,.095)" : "1px solid rgba(255,255,255,.10)",
-          background: heatmapMenuOpen ? "rgba(12,12,12,.96)" : "rgba(12,12,12,.72)",
-          backdropFilter: heatmapMenuOpen ? "blur(20px)" : "blur(14px)",
-          WebkitBackdropFilter: heatmapMenuOpen ? "blur(20px)" : "blur(14px)",
-          boxShadow: heatmapMenuOpen ? "0 24px 64px rgba(0,0,0,.42)" : "none",
+          borderRadius: heatmapPanelPresence.present ? 15 : 11,
+          border: heatmapPanelPresence.present ? "1px solid rgba(255,255,255,.095)" : "1px solid rgba(255,255,255,.10)",
+          background: heatmapPanelPresence.present ? "rgba(12,12,12,.96)" : "rgba(12,12,12,.72)",
+          backdropFilter: heatmapPanelPresence.present ? "blur(20px)" : "blur(14px)",
+          WebkitBackdropFilter: heatmapPanelPresence.present ? "blur(20px)" : "blur(14px)",
+          boxShadow: heatmapPanelPresence.present ? "0 24px 64px rgba(0,0,0,.42)" : "none",
           color: "#f2f2f2",
           fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
           overflow: "visible",
           transition: "width .36s cubic-bezier(.2,.75,.25,1), border-radius .32s ease, background .28s ease, border-color .28s ease, box-shadow .32s ease, backdrop-filter .32s ease",
           position: "relative",
         }}>
-          {heatmapMenuOpen && (
+          {heatmapPanelPresence.present && (
             <button
               onClick={(event) => { event.stopPropagation(); setHeatmapMenuOpen(false) }}
               style={analysisCloseButtonStyle}
@@ -17707,7 +17735,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             disabled={analysisEligibleFiles.length < 2}
             title="Změřit mezeru a průnik mezi dvěma modely"
             style={{
-              position: "relative", width: "100%", height: heatmapMenuOpen ? 54 : 38, padding: 0,
+              position: "relative", width: "100%", height: heatmapPanelPresence.present ? 54 : 38, padding: 0,
               border: 0, borderRadius: "inherit", background: "transparent", color: analysisEligibleFiles.length < 2 ? "#666" : "#ededed",
               cursor: analysisEligibleFiles.length < 2 ? "not-allowed" : "pointer", fontFamily: "inherit", overflow: "hidden",
               transition: "height .32s cubic-bezier(.2,.75,.25,1), color .18s ease",
@@ -17715,7 +17743,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           >
             <span style={{
               position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-              opacity: heatmapMenuOpen ? 0 : 1, transform: heatmapMenuOpen ? "translateY(-7px) scale(.98)" : "translateY(0) scale(1)",
+              opacity: heatmapPanelPresence.present ? 0 : 1, transform: heatmapPanelPresence.present ? "translateY(-7px) scale(.98)" : "translateY(0) scale(1)",
               transition: "opacity .16s ease, transform .28s cubic-bezier(.2,.75,.25,1)", pointerEvents: "none",
               fontWeight: 680, fontSize: 12, letterSpacing: "-.01em",
             }}>
@@ -17727,7 +17755,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
             <span style={{
               position: "absolute", inset: 0, display: "flex", alignItems: "center", padding: "0 50px 0 14px", boxSizing: "border-box",
-              opacity: heatmapMenuOpen ? 1 : 0, transform: heatmapMenuOpen ? "translateY(0) scale(1)" : "translateY(7px) scale(.985)",
+              opacity: heatmapPanelPresence.present ? 1 : 0, transform: heatmapPanelPresence.present ? "translateY(0) scale(1)" : "translateY(7px) scale(.985)",
               transition: "opacity .2s .08s ease, transform .32s cubic-bezier(.2,.75,.25,1)", pointerEvents: "none", textAlign: "left",
             }}>
               <span>
@@ -17739,14 +17767,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
           <div style={{
             display: "grid",
-            gridTemplateRows: heatmapMenuOpen ? "1fr" : "0fr",
-            opacity: heatmapMenuOpen ? 1 : 0,
-            transform: heatmapMenuOpen ? "translateY(0)" : "translateY(-8px)",
-            pointerEvents: heatmapMenuOpen ? "auto" : "none",
-            overflow: heatmapMenuOpen ? "visible" : "hidden",
+            gridTemplateRows: heatmapPanelPresence.present ? "1fr" : "0fr",
+            opacity: heatmapPanelPresence.present ? 1 : 0,
+            transform: heatmapPanelPresence.present ? "translateY(0)" : "translateY(-8px)",
+            pointerEvents: heatmapPanelPresence.present ? "auto" : "none",
+            overflow: heatmapPanelPresence.present ? "visible" : "hidden",
             transition: "grid-template-rows .38s cubic-bezier(.2,.75,.25,1), opacity .2s .08s ease, transform .34s cubic-bezier(.2,.75,.25,1)",
           }}>
-            <div style={{ minHeight: 0, overflow: heatmapMenuOpen ? "visible" : "hidden" }}>
+            <div style={{ minHeight: 0, overflow: heatmapPanelPresence.present ? "visible" : "hidden" }}>
               <div style={{ padding: "0 14px 14px", boxSizing: "border-box" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <div style={analysisStepChipStyle(!occlusionModelsReady, occlusionModelsReady)}>
@@ -20063,8 +20091,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           ]}
         />
       )}
-      {lightingOpen && <LightingControls value={sceneLighting} onChange={setSceneLighting} onClose={closeLighting} expanded={toolsPanelExpanded} />}
-      {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && comparisonMenuOpen && <ComparisonControls
+      {lightingPanelPresence.present && <LightingControls exiting={lightingPanelPresence.exiting} value={sceneLighting} onChange={setSceneLighting} onClose={closeLighting} expanded={toolsPanelExpanded} />}
+      {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && comparisonPanelPresence.present && <ComparisonControls exiting={comparisonPanelPresence.exiting}
         expanded={toolsPanelExpanded} mobile={isMobile} onClose={closeComparisonMenu}
         modelA={<AlignmentModelDropdown floating badge="A" value={comparisonSelection[0] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[1] || ""} disabled={isCalculatingComparison} onChange={url => setComparisonSelectionSlot(0, url)} />}
         modelB={<AlignmentModelDropdown floating badge="B" value={comparisonSelection[1] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0] || isCalculatingComparison} onChange={url => setComparisonSelectionSlot(1, url)} />}
@@ -20570,10 +20598,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         status={dicomPreparingSurface ? "Optimalizuji 3D povrch…" : dicomStatus === "downloading" ? "Načítám CBCT…" : dicomStatus === "processing" ? "Sestavuji CT objem…" : dicomStatus === "error" ? "Načtení se nezdařilo" : "CBCT připraveno"}
         progress={dicomLoading ? (dicomPreparingSurface ? 98 : dicomStatus === "processing" ? 95 : Math.min(90, dicomProgress * .9)) : dicomStatus === "ready" ? 100 : 0}/>
 
-      {!isMobile && showComparison && hasComputedComparison && (
-        <div style={{
+      {!isMobile && comparisonVisualPresence.present && hasComputedComparison && (
+        <div data-comparison-legend style={{
           position: "absolute", top: alignmentMode ? 106 : 20, left: "50%", transform: "translateX(-50%)", zIndex: 100,
           minWidth: 330, padding: "11px 14px 10px", borderRadius: 13,
+          animation: comparisonVisualPresence.exiting ? "artheticComparisonLegendOut .38s ease-in both" : "artheticComparisonLegendIn .38s ease-out both",
+          pointerEvents: comparisonVisualPresence.exiting ? "none" : "auto",
           background: "rgba(12,12,12,.88)", border: "1px solid rgba(255,255,255,.09)",
           color: "#ededed", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
           backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)", boxShadow: "0 16px 42px rgba(0,0,0,.3)"
@@ -20704,10 +20734,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 analysisMode={
                   showHeatmap && heatmapSelection[0] === f.url
                     ? "occlusion"
-                    : showComparison && hasComputedComparison && f.url === comparisonAnalyzedUrl
+                    : comparisonVisualPresence.present && hasComputedComparison && f.url === comparisonAnalyzedUrl
                       ? "comparison"
                       : null
                 }
+                comparisonVisible={comparisonRevealed && f.url === comparisonAnalyzedUrl}
                 onHoverDist={handleHeatmapHover} 
                 onPinNote={handlePinNote}
                 onAlignmentSelect={alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy && (!alignmentHasA || f.url !== alignmentPair.aUrl)

@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from "react"
 import lighting from "./LightingControls.module.css"
 import styles from "./ComparisonControls.module.css"
 
-export default function ComparisonControls({ expanded, mobile, onClose, modelA, modelB, onSwap, eyeIcon, tolerance, onToleranceChange, ready, calculating, computed, onCalculate, stats, visible, onVisibleChange }) {
+export default function ComparisonControls({ exiting = false, expanded, mobile, onClose, modelA, modelB, onSwap, eyeIcon, tolerance, onToleranceChange, ready, calculating, computed, onCalculate, stats, visible, onVisibleChange }) {
   const root = useRef(null)
   const close = useRef(null)
   const [swapping, setSwapping] = useState(false)
@@ -15,7 +15,7 @@ export default function ComparisonControls({ expanded, mobile, onClose, modelA, 
     onSwap()
     swapTimer.current = setTimeout(() => setSwapping(false), 360)
   }
-  return <section ref={root} className={`${lighting.card} ${styles.card} ${mobile ? styles.mobile : ""}`} style={{ right: mobile ? 10 : expanded ? 320 : 78 }} role="dialog" aria-label="Porovnání modelů">
+  return <section ref={root} data-exiting={exiting || undefined} aria-hidden={exiting || undefined} inert={exiting ? "" : undefined} className={`${lighting.card} ${styles.card} ${mobile ? styles.mobile : ""}`} style={{ right: mobile ? 10 : expanded ? 320 : 78 }} role="dialog" aria-label="Porovnání modelů">
     <header><strong>Porovnání</strong><button ref={close} type="button" className={styles.close} onClick={onClose} aria-label="Zavřít porovnání">×</button></header>
     <div className={styles.models} data-swapping={swapping || undefined}>
       <div className={styles.field}><span>Analyzovaný model</span>{modelA}</div>
