@@ -7,9 +7,6 @@
 .card button:disabled:hover {background:#ffffff06}
 .card button.close {width:30px;height:30px;flex-shrink:0;padding:0;display:grid;place-items:center;border-radius:9px;border:1px solid #ffffff1a;background:#ffffff0a;color:#a1a1aa;font-size:20px;box-shadow:none;transition:background 180ms,color 180ms}
 .card button.close:hover {background:#ffffff1f;color:white}
-.card button.calculate {width:100%;margin-top:2px;padding:10px 8px;font-weight:650;background:#ededed;color:#171717;border-color:#ededed}
-.card button.calculate:hover:not(:disabled) {background:white;border-color:white}
-.card button.calculate:disabled {background:#ffffff06;border-color:#ffffff1a;color:#aaa}
 .tolerance {margin:18px 0}
 .card [role=option][aria-selected=true] span:first-child {background:#ededed!important}
 .result {margin-top:16px;padding-top:14px;border-top:1px solid #ffffff12}
@@ -31,3 +28,12 @@
 @keyframes swapUp {from {transform:translateY(70px);opacity:.25} to {transform:translateY(0);opacity:1}}
 @keyframes swapDown {from {transform:translateY(-70px);opacity:.25} to {transform:translateY(0);opacity:1}}
 @media(prefers-reduced-motion:reduce){.models[data-swapping] .field {animation:none}.swap svg {transition:none}}
+.card button.calculate {position:relative;overflow:hidden;width:100%;margin-top:2px;padding:12px 26px;border:0;border-radius:12px;font-size:12px;font-weight:650;background:linear-gradient(135deg,#3b82f6 0%,#2563eb 100%);color:white;transition:transform 160ms cubic-bezier(.2,.8,.2,1),filter 160ms ease,background 160ms ease,border-color 160ms ease,box-shadow 180ms ease,color 160ms ease}
+.card button.calculate:not(:disabled) {box-shadow:0 8px 22px rgba(37,99,235,.25),inset 0 1px 0 rgba(255,255,255,.16)}
+.card button.calculate:hover:not(:disabled) {background:linear-gradient(135deg,#3b82f6 0%,#2563eb 100%);filter:brightness(1.10);transform:translateY(-1px)}
+.card button.calculate:active:not(:disabled) {transform:translateY(0) scale(.975)}
+.card button.calculate::after {content:"";position:absolute;top:-70%;left:-70%;width:42%;height:240%;background:linear-gradient(90deg,transparent,rgba(255,255,255,.18),transparent);transform:rotate(18deg);transition:left 480ms ease;pointer-events:none}
+.card button.calculate:hover:not(:disabled)::after {left:135%}
+.card button.calculate:focus-visible {outline:2px solid #ededed;outline-offset:3px}
+.card button.calculate:disabled {background:rgba(255,255,255,.05);border:1px solid #3f3f46;color:#9ca3af;opacity:1}
+@media(prefers-reduced-motion:reduce){.card button.calculate,.card button.calculate::after {transition:none}.card button.calculate:hover:not(:disabled),.card button.calculate:active:not(:disabled){transform:none}}

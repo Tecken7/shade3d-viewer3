@@ -22,6 +22,7 @@ import { createCtSurfaceEngine } from "./viewer/ct-surface-engine.js"
 import { makeDicomPreview } from "./viewer/dicom-preview.mjs"
 import { createSliceEngine } from "./viewer/slice-engine.js"
 import { createDicomResliceEngine, dicomResliceImage } from "./viewer/dicom-reslice-engine.js"
+import { createPortal } from "react-dom"
 import React, { Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react"
 import { Canvas, useThree, useFrame } from "@react-three/fiber"
 import * as THREE from "three"
@@ -5149,16 +5150,39 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, active, mute
   )
 }
 
-function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", disabled = false, docked = false, onChange, style = {} }) {
+function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", disabled = false, docked = false, floating = false, onChange, style = {} }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef(null)
+  const menuRef = useRef(null)
+  const [menuPosition, setMenuPosition] = useState(null)
+  useLayoutEffect(() => {
+    if (!open || !floating) return
+    const place = event => {
+      if (event?.target && menuRef.current?.contains(event.target)) return
+      const box = rootRef.current?.getBoundingClientRect()
+      if (!box) return
+      const below = window.innerHeight - box.bottom - 14
+      const above = box.top - 14
+      const upward = below < 150 && above > below
+      const maxHeight = Math.max(40, Math.min(208, upward ? above : below))
+      const width = Math.min(box.width, window.innerWidth - 16)
+      setMenuPosition({ left: Math.max(8, Math.min(box.left, window.innerWidth - width - 8)), width, maxHeight,
+        ...(upward ? { bottom: window.innerHeight - box.top + 6, top: "auto" } : { top: box.bottom + 6, bottom: "auto" }) })
+    }
+    place()
+    window.addEventListener("resize", place)
+    window.addEventListener("scroll", place, true)
+
+
+  return () => { window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true) }
+  }, [open, floating])
   const selected = files.find((item) => item.url === value)
   const selectedLabel = selected ? stripExt(selected.name || selected.rawName || "Model") : "Vyberte model…"
 
   useEffect(() => {
     if (!open) return
     const onPointerDown = (event) => {
-      if (!rootRef.current?.contains(event.target)) setOpen(false)
+      if (!rootRef.current?.contains(event.target) && !menuRef.current?.contains(event.target)) setOpen(false)
     }
     const onKeyDown = (event) => {
       if (event.key === "Escape") setOpen(false)
@@ -5180,41 +5204,15 @@ function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", dis
     requestAnimationFrame(() => onChange?.(url))
   }
 
-  return (
-    <div ref={rootRef} style={{ position: "relative", zIndex: open ? 500 : 1, width: docked ? 205 : "100%", minWidth: docked ? 180 : 0, maxWidth: docked ? 280 : "none", ...style }}>
-      <button
-        type="button"
-        disabled={disabled}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-label={`Vybrat model ${badge}`}
-        onClick={() => !disabled && setOpen((value) => !value)}
-        style={{
-          width: "100%", height: docked ? 31 : 36, boxSizing: "border-box",
-          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
-          padding: "0 9px 0 10px", borderRadius: docked ? 9 : 10,
-          border: open ? "1px solid rgba(255,255,255,.20)" : "1px solid rgba(255,255,255,.10)",
-          background: open ? "#1b1b1b" : "#151515", color: disabled ? "#616161" : "#f0f0f0",
-          boxShadow: open ? "0 0 0 3px rgba(255,255,255,.035)" : "none",
-          cursor: disabled ? "not-allowed" : "pointer", outline: "none",
-          fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: docked ? 10 : 11, fontWeight: 680,
-          transition: "background .16s ease, border-color .16s ease, box-shadow .16s ease, color .16s ease",
-        }}
-      >
-        <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "left" }}>{selectedLabel}</span>
-        <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true" style={{ flex: "0 0 auto", opacity: .66, transform: open ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .18s ease" }}>
-          <path d="M5.5 7.5L10 12L14.5 7.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
-
-      {open && !disabled && (
-        <div role="listbox" style={{
+    const menu = open && !disabled && (
+        <div ref={menuRef} role="listbox" aria-label={`Model ${badge}`} style={{
           position: "absolute", left: 0, right: 0, top: "calc(100% + 6px)", zIndex: 510,
-          padding: 5, maxHeight: 238, overflowY: "auto", overscrollBehavior: "contain",
+          padding: 5, maxHeight: 208, overflowY: "auto", overscrollBehavior: "contain", scrollbarWidth: "thin", scrollbarColor: "#555 transparent",
           borderRadius: 12, border: "1px solid rgba(255,255,255,.10)",
           background: "rgba(17,17,17,.97)", boxShadow: "0 18px 46px rgba(0,0,0,.52)",
           backdropFilter: "blur(18px)", WebkitBackdropFilter: "blur(18px)",
           animation: "artheticAlignMenuIn .15s cubic-bezier(.22,.61,.36,1) both",
+          ...(floating ? { position: "fixed", left: "auto", right: "auto", top: "auto", zIndex: 1000, boxSizing: "border-box", visibility: menuPosition ? "visible" : "hidden", ...menuPosition } : {}),
         }}>
           <button type="button" role="option" aria-selected={!value} onClick={() => choose("")} style={{
             width: "100%", minHeight: 32, padding: "7px 9px", border: 0, borderRadius: 8,
@@ -5246,13 +5244,42 @@ function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", dis
                 onPointerEnter={(event) => { if (!blocked && !current) event.currentTarget.style.background = "rgba(255,255,255,.045)" }}
                 onPointerLeave={(event) => { if (!current) event.currentTarget.style.background = "transparent" }}
               >
-                <span style={{ width: 5, height: 5, borderRadius: "50%", flex: "0 0 auto", background: current ? "#4ade80" : blocked ? "#3a3a3a" : "#737373" }} />
+                <span style={{ width: 5, height: 5, borderRadius: "50%", flex: "0 0 auto", background: current ? (floating ? "#ededed" : "#4ade80") : blocked ? "#3a3a3a" : "#737373" }} />
                 <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
               </button>
             )
           })}
         </div>
-      )}
+      )
+
+  return (
+    <div ref={rootRef} style={{ position: "relative", zIndex: open ? 500 : 1, width: docked ? 205 : "100%", minWidth: docked ? 180 : 0, maxWidth: docked ? 280 : "none", ...style }}>
+      <button
+        type="button"
+        disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`Vybrat model ${badge}`}
+        onClick={() => !disabled && setOpen((value) => !value)}
+        style={{
+          width: "100%", height: docked ? 31 : 36, boxSizing: "border-box",
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+          padding: "0 9px 0 10px", borderRadius: docked ? 9 : 10,
+          border: open ? "1px solid rgba(255,255,255,.20)" : "1px solid rgba(255,255,255,.10)",
+          background: open ? "#1b1b1b" : "#151515", color: disabled ? "#616161" : "#f0f0f0",
+          boxShadow: open ? "0 0 0 3px rgba(255,255,255,.035)" : "none",
+          cursor: disabled ? "not-allowed" : "pointer", outline: "none",
+          fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: docked ? 10 : 11, fontWeight: 680,
+          transition: "background .16s ease, border-color .16s ease, box-shadow .16s ease, color .16s ease",
+        }}
+      >
+        <span style={{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "left" }}>{selectedLabel}</span>
+        <svg width="13" height="13" viewBox="0 0 20 20" fill="none" aria-hidden="true" style={{ flex: "0 0 auto", opacity: .66, transform: open ? "rotate(180deg)" : "rotate(0deg)", transition: "transform .18s ease" }}>
+          <path d="M5.5 7.5L10 12L14.5 7.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+
+      {floating && menu ? createPortal(menu, document.body) : menu}
     </div>
   )
 }
@@ -12115,7 +12142,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [surfaceAnalysisProgress, setSurfaceAnalysisProgress] = useState(null)
   const [hasComputedComparison, setHasComputedComparison] = useState(false)
   const [showComparison, setShowComparison] = useState(false)
-  const [comparisonTolerance, setComparisonTolerance] = useState(20)
+  const [comparisonTolerance, setComparisonTolerance] = useState(0.20)
   const [comparisonStats, setComparisonStats] = useState(null)
   const comparisonDirection = "A_TO_B"
   // Persistovaný výsledek deviation mapy. Obsahuje komprimované vzdálenosti pro
@@ -16401,7 +16428,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     const occlusionSelection = resolveSelection(pendingViewerState.occlusion?.files)
     const savedComparisonSelection = resolveSelection(pendingViewerState.comparison?.files)
     const savedAlignmentSelection = resolveSelection([pendingViewerState.alignment?.reference, pendingViewerState.alignment?.moving].filter(Boolean))
-    const savedTolerance = Math.max(0.05, Math.min(50, Number(pendingViewerState.comparison?.tolerance) || 20))
+    const savedToleranceValue = Number(pendingViewerState.comparison?.tolerance)
+    const savedTolerance = savedToleranceValue > 1 ? 0.20 : Math.max(0.05, savedToleranceValue || 0.20)
     const savedComparisonDirection = "A_TO_B"
     setSceneLighting(normalizeLighting(pendingViewerState.lighting || DEFAULT_LIGHTING))
     const mode = pendingViewerState.activeAnalysisMode
@@ -20013,6 +20041,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         <ViewerToolsPanel
           expanded={toolsPanelExpanded}
           onExpandedChange={setToolsPanelExpanded}
+          onToolSelect={id => {
+            if (id !== "porovnani") setComparisonMenuOpen(false)
+            if (id !== "nasviceni") setLightingOpen(false)
+            if (id !== "okluze") setHeatmapMenuOpen(false)
+          }}
           sliceActive={clippingEnabled && !dicomLayoutActive}
           tools={[
             { id: "zarovnani", label: "Zarovnání", description: "Zarovnat dva modely pomocí bodů a Best Fit.", disabled: analysisEligibleFiles.length < 2, onClick: openAlignmentMode },
@@ -20020,8 +20053,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             { id: "oprava-site", label: "Oprava sítě", description: "Vyhledat a uzavřít otvory ve skenu.", disabled: analysisEligibleFiles.length < 1, onClick: openRepairMode },
             { id: "model-builder", label: "Model Builder", description: "Vytvořit model s bází pro 3D tisk.", onClick: openCadEmbedded },
             { id: "okluze", label: "Okluze", description: "Změřit kontakty a mezery mezi skeny.", disabled: analysisEligibleFiles.length < 2, active: heatmapMenuOpen || showHeatmap, toggle: true, onClick: () => { setHeatmapMenuOpen(previous => !previous); setComparisonMenuOpen(false) } },
-            { id: "porovnani", label: "Porovnání", description: "Porovnat povrchové odchylky dvou modelů.", disabled: analysisEligibleFiles.length < 2, active: comparisonMenuOpen || showComparison, toggle: true, onClick: () => { setComparisonMenuOpen(true); setHeatmapMenuOpen(false) } },
-            { id: "nasviceni", label: "Nasvícení", description: "Upravit jas a směr světla ve scéně.", active: lightingOpen, toggle: true, onClick: () => { setLightingOpen(true); setHeatmapMenuOpen(false) } },
+            { id: "porovnani", label: "Porovnání", description: "Porovnat povrchové odchylky dvou modelů.", disabled: analysisEligibleFiles.length < 2, active: comparisonMenuOpen || showComparison, toggle: true, onClick: () => { setComparisonMenuOpen(previous => !previous); setHeatmapMenuOpen(false) } },
+            { id: "nasviceni", label: "Nasvícení", description: "Upravit jas a směr světla ve scéně.", active: lightingOpen, toggle: true, onClick: () => { setLightingOpen(previous => !previous); setHeatmapMenuOpen(false) } },
             { id: "360-spin", label: "360° Spin", description: "Spustit nebo zastavit otáčení modelu.", active: isAutoRotating, toggle: true, onClick: () => setIsAutoRotating(previous => !previous), controls: <><input aria-label="Rychlost rotace" type="range" min={0.05} max={1} step={0.05} value={spinSpeed} onChange={event => setSpinSpeed(Number(event.target.value))} /><span style={{ flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{Math.round(spinSpeed * 100)} %</span></> },
             { id: "prurez", label: "Průřez", description: "Nakreslit průřez v aktuálním směru pohledu.", active: clippingEnabled, toggle: true, controls: <button type="button" onClick={handleResetPlane}>{dicomSource ? "Reset" : "Nový řez"}</button>, onClick: () => {
               if (clippingEnabled && dicomSettings.viewMode === "only2d") setDicomSettings(previous => ({ ...previous, viewMode: "solid" }))
@@ -20030,11 +20063,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           ]}
         />
       )}
-      {lightingOpen && <LightingControls value={sceneLighting} onChange={setSceneLighting} onClose={closeLighting} expanded={toolsPanelExpanded} offset={comparisonMenuOpen ? 276 : 0} />}
+      {lightingOpen && <LightingControls value={sceneLighting} onChange={setSceneLighting} onClose={closeLighting} expanded={toolsPanelExpanded} />}
       {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && comparisonMenuOpen && <ComparisonControls
         expanded={toolsPanelExpanded} mobile={isMobile} onClose={closeComparisonMenu}
-        modelA={<AlignmentModelDropdown badge="A" value={comparisonSelection[0] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[1] || ""} disabled={isCalculatingComparison} onChange={url => setComparisonSelectionSlot(0, url)} />}
-        modelB={<AlignmentModelDropdown badge="B" value={comparisonSelection[1] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0] || isCalculatingComparison} onChange={url => setComparisonSelectionSlot(1, url)} />}
+        modelA={<AlignmentModelDropdown floating badge="A" value={comparisonSelection[0] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[1] || ""} disabled={isCalculatingComparison} onChange={url => setComparisonSelectionSlot(0, url)} />}
+        modelB={<AlignmentModelDropdown floating badge="B" value={comparisonSelection[1] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0] || isCalculatingComparison} onChange={url => setComparisonSelectionSlot(1, url)} />}
         eyeIcon={showComparison ? ICONS.eye : ICONS.eyeOff} onSwap={() => {
           if (comparisonSelection.length !== 2 || isCalculatingComparison) return
           setComparisonSelection(([a, b]) => [b, a])

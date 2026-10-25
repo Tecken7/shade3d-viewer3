@@ -24,7 +24,7 @@ export default function ComparisonControls({ expanded, mobile, onClose, modelA, 
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 3v18m-4-4 4 4 4-4M16 21V3m-4 4 4-4 4 4" /></svg>
       </button>
     </div>
-    <label className={`${lighting.row} ${styles.tolerance}`}><span>Tolerance shody <b>{tolerance.toFixed(2)} mm</b></span><input aria-label="Tolerance shody" type="range" min={.05} max={50} step={.05} value={tolerance} disabled={calculating} onChange={event => onToleranceChange(Number(event.target.value))} /></label>
+    <label className={`${lighting.row} ${styles.tolerance}`}><span>Tolerance shody <b>{tolerance.toFixed(2)} mm</b></span><input aria-label="Tolerance shody" type="range" min={.05} max={1} step={.01} value={tolerance} disabled={calculating} onChange={event => onToleranceChange(Number(event.target.value))} /></label>
     <button className={styles.calculate} type="button" disabled={!ready || calculating} onClick={onCalculate}>{calculating ? "Počítám…" : computed ? "Přepočítat porovnání" : "Vypočítat porovnání"}</button>
     {computed && stats && <div className={styles.result}>
       <div className={styles.resultHeader}><span>Výpočet dokončen</span><span aria-hidden="true">✓</span></div>

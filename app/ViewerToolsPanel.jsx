@@ -5,7 +5,7 @@ import { createPortal } from "react-dom"
 import ViewerToolIcon from "./ViewerToolIcon"
 import styles from "./ViewerToolsPanel.module.css"
 
-export default function ViewerToolsPanel({ tools, expanded, onExpandedChange, sliceActive }) {
+export default function ViewerToolsPanel({ tools, expanded, onExpandedChange, onToolSelect, sliceActive }) {
   const [tooltip, setTooltip] = useState(null)
   const toggleRef = useRef(null)
 
@@ -59,6 +59,7 @@ export default function ViewerToolsPanel({ tools, expanded, onExpandedChange, sl
             onClick={() => {
               if (tool.disabled) return
               setTooltip(null)
+              onToolSelect?.(tool.id)
               tool.onClick()
             }}
             onMouseEnter={event => reveal(event, tool.label)}
