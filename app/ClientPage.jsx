@@ -6198,18 +6198,7 @@ function AnyModel({
     })
   }
 
-  useEffect(() => {
-    if (!repairHover) return
-    if (repairPreviewUrl) repairPointerHover.current = false
-    setAlignmentHoverVisual(!!onAlignmentSelect && visible && (repairPreviewUrl ? repairPreviewUrl === url : repairPointerHover.current))
-  }, [repairPreviewUrl, repairHover, object3D, onAlignmentSelect, visible, url])
-
-  useEffect(() => {
-    if (!onAlignmentSelect) setAlignmentHoverVisual(false)
-    return () => setAlignmentHoverVisual(false)
-  }, [object3D, onAlignmentSelect])
-
-  useEffect(() => () => {
+  const resetRepairHoverVisual = () => {
     repairPointerHover.current = false
     repairHoverTarget.current = false
     repairHoverPosition.current = 0
@@ -6222,7 +6211,31 @@ function AnyModel({
     }
     repairFoilUniforms.current.amount.value = 0
     repairHoverMaterials.current = []
-  }, [object3D])
+  }
+
+  // A new repair session must not inherit a pointer hit from the previous one.
+  // Pointer-out may never fire when selection removes the model's event handlers.
+  useEffect(() => {
+    resetRepairHoverVisual()
+    return resetRepairHoverVisual
+  }, [object3D, repairHover])
+
+  useEffect(() => {
+    if (!repairHover) return
+    if (repairPreviewUrl) repairPointerHover.current = false
+    setAlignmentHoverVisual(!!onAlignmentSelect && visible && (repairPreviewUrl ? repairPreviewUrl === url : repairPointerHover.current))
+  }, [repairPreviewUrl, repairHover, object3D, onAlignmentSelect, visible, url])
+
+  useEffect(() => {
+    if (!onAlignmentSelect) {
+      repairPointerHover.current = false
+      setAlignmentHoverVisual(false)
+    }
+    return () => {
+      repairPointerHover.current = false
+      setAlignmentHoverVisual(false)
+    }
+  }, [object3D, onAlignmentSelect])
 
   if (!object3D) return null
 
