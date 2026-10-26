@@ -7,8 +7,8 @@ export function RepairCheck() {
 export function RepairStep({active, done, children}) {
   return <div className={styles.step} data-active={active || undefined} aria-current={active ? 'step' : undefined}>{done && <RepairCheck />}<span>{children}</span></div>
 }
-export default function RepairStatus({clear, verticesChecked, report}) {
-  return <div className={styles.statuses} role="status" aria-live="polite">
+export default function RepairStatus({clear, verticesChecked, report, inline = false}) {
+  return <div className={`${styles.statuses} ${inline ? styles.inline : ""}`} role="status" aria-live="polite">
     {clear && <div className={styles.status}><RepairCheck /><span>Otevřené hrany <b>0</b></span></div>}
     {verticesChecked ? <div className={styles.status} title={report}><RepairCheck /><span>Vrcholky v toleranci</span></div> : report && <div className={styles.notice}>{report}</div>}
   </div>

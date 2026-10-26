@@ -1,6 +1,7 @@
 "use client"
 
 import { captureModelFade, applyModelFade, restoreModelFade } from "./viewer/model-fade.mjs"
+import repairToolbarStyles from "./RepairToolbar.module.css"
 import ViewerBackButton from "./ViewerBackButton"
 import RepairStatus, { RepairStep } from "./RepairStatus"
 import { setRepairFoilMaterial } from "./viewer/repair-foil.mjs"
@@ -19020,14 +19021,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       )}
       </div>
 
-      {repairVariant === "auto" && repairStage !== "model" && repairStage !== "result" && (
+      {repairVariant === "auto" && repairStage !== "model" && repairStage !== "result" && repairHoles.length > 0 && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, flexWrap: "wrap" }}>
           <div style={{ minWidth: 0, flex: "1 1 100%", textAlign: "center" }}>
-            {repairHoles.length > 0 && <div style={{ color: "#858585", fontSize: 9.2, marginBottom: 7 }}>
-              {repairHoles.length
-                ? `Nalezeno ${repairHoles.length} opravovatelných ${repairHoles.length === 1 ? "otvor" : "otvorů"} · ${repairLikelyHoles.length} doporučených${repairCompletedHoleIds.length ? ` · ${repairCompletedHoleIds.length} opraveno` : ""}.`
-                : ""}
-            </div>}
+            <div style={{ color: "#a1a1a1", fontSize: 10, fontWeight: 600, marginBottom: 8 }}>Otvory:</div>
+            <div className={repairToolbarStyles.row}>
             <div style={{ display: "flex", justifyContent: "center", gap: 5, flexWrap: "wrap" }}>
               {repairHoles.map((hole, index) => {
                 const selected = repairSelectedHoleIds.includes(hole.id)
@@ -19077,23 +19075,18 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 </>
               )}
             </div>
+            {!repairProgressVisible && repairAnalysisComplete && <div className={repairToolbarStyles.checks}><RepairStatus inline clear={repairCleanResult} verticesChecked={repairVertexReport.startsWith("Kontrola vrcholů:")} report={repairVertexReport} /></div>}
+            </div>
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "center" }}>
             {repairSelectedAutoCount > 0 && (
               <button
-                className={`artheticRepairReadyAction${repairReadyActionLeaving ? " isLeaving" : ""}`}
+                className={repairToolbarStyles.primary}
+                data-leaving={repairReadyActionLeaving || undefined}
                 type="button"
                 onClick={triggerRepairSelectedAutoHoles}
                 disabled={repairBusy}
-                style={{ height: 31, padding: "0 11px", borderRadius: 8, color: "#bbf7d0", fontSize: 9, fontWeight: 720, cursor: repairBusy ? "wait" : "pointer", minWidth: 112 }}
               >
-                <span className="artheticRepairReadyParticles" aria-hidden="true">
-                  <i className="artheticRepairReadyParticle" />
-                  <i className="artheticRepairReadyParticle" />
-                  <i className="artheticRepairReadyParticle" />
-                  <i className="artheticRepairReadyParticle" />
-                  <i className="artheticRepairReadyParticle" />
-                </span>
                 <span>Opravit vybrané</span>
               </button>
             )}
@@ -19130,7 +19123,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
 
 
-      {!repairProgressVisible && repairAnalysisComplete && <RepairStatus clear={repairCleanResult} verticesChecked={repairVertexReport.startsWith("Kontrola vrcholů:")} report={repairVertexReport} />}
+      {!repairProgressVisible && repairAnalysisComplete && !(repairVariant === "auto" && repairHoles.length > 0 && repairStage !== "result") && <RepairStatus clear={repairCleanResult} verticesChecked={repairVertexReport.startsWith("Kontrola vrcholů:")} report={repairVertexReport} />}
       {!repairProgressVisible && repairMessage && /nepodař|nenaš|potřeba|není načten|selhal|chyba/i.test(repairMessage) && (
         <div style={{ marginTop: 9, padding: "7px 9px", borderRadius: 9, background: "rgba(239,68,68,.045)", border: "1px solid rgba(248,113,113,.11)", color: "#ba8585", fontSize: 8.8, lineHeight: 1.45 }}>
           {repairMessage}
