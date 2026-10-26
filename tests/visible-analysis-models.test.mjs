@@ -19,3 +19,10 @@ test('a selected model disappearing from the scene cannot remain in an analysis 
   assert.deepEqual(visibleAnalysisSelection(['/hidden.stl','/lower.ply'],available), [])
   assert.deepEqual(visibleAnalysisSelection(['/upper.obj','/upper.obj'],available), ['/upper.obj'])
 })
+
+test('a computed map retains a hidden antagonist for viewing, but never a removed file', () => {
+  const selection = ['/upper.obj','/lower.ply'], visible = [files[1]], sceneFiles = [files[1],files[3]]
+  assert.deepEqual(visibleAnalysisSelection(selection,visible,{computed:true,sceneFiles}),selection)
+  assert.deepEqual(visibleAnalysisSelection(selection,visible,{computed:false,sceneFiles}),['/upper.obj'])
+  assert.deepEqual(visibleAnalysisSelection(selection,visible,{computed:true,sceneFiles:[files[1]]}),['/upper.obj'])
+})

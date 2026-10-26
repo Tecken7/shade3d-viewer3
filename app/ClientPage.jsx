@@ -4821,7 +4821,7 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, active, mute
   )
 }
 
-function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", disabled = false, docked = false, floating = false, onChange, onPreview, style = {} }) {
+function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", disabled = false, docked = false, floating = false, onChange, onPreview, selectedFile, style = {} }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef(null)
   const menuRef = useRef(null)
@@ -4851,7 +4851,7 @@ function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", dis
     if (!open || disabled) onPreview?.("")
     return () => onPreview?.("")
   }, [open, disabled, onPreview])
-  const selected = files.find((item) => item.url === value)
+  const selected = files.find((item) => item.url === value) || (selectedFile?.url === value ? selectedFile : null)
   const selectedLabel = selected ? stripExt(selected.name || selected.rawName || "Model") : "Vyberte model…"
 
   useEffect(() => {
@@ -15929,7 +15929,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }
 
   const handleApplyHeatmap = async () => {
-    if (heatmapSelection.length !== 2 || visibleAnalysisSelection(heatmapSelection, analysisVisibleFiles).length !== 2) return
+    if (heatmapSelection.length !== 2 || visibleAnalysisSelection(heatmapSelection, analysisVisibleFiles, {computed: hasComputedHeatmap, sceneFiles: analysisEligibleFiles}).length !== 2) return
     setHasComputedHeatmap(false)
     setShowHeatmap(false)
     const analysisStartedAt = performance.now()
@@ -15968,7 +15968,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }
 
   const handleApplyComparison = async () => {
-    if (comparisonSelection.length !== 2 || visibleAnalysisSelection(comparisonSelection, analysisVisibleFiles).length !== 2) return
+    if (comparisonSelection.length !== 2 || visibleAnalysisSelection(comparisonSelection, analysisVisibleFiles, {computed: hasComputedComparison, sceneFiles: analysisEligibleFiles}).length !== 2) return
     // Explicitní kliknutí na Vypočítat znamená vždy čerstvý výpočet pro aktuální
     // polohu modelů. Starý snapshot se před startem zahodí.
     const analysisStartedAt = performance.now()
@@ -17322,21 +17322,44 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   useEffect(() => {
     const available = visibleAnalysisModels(files, visibles, opacities, inferExt)
     if (heatmapMenuOpen && !isCalculatingHeatmap) {
-      const next = visibleAnalysisSelection(heatmapSelection, available)
+      const next = visibleAnalysisSelection(heatmapSelection, available, {computed: hasComputedHeatmap, sceneFiles: files})
       if (next.length !== heatmapSelection.length || next.some((url, index) => url !== heatmapSelection[index])) {
         setHeatmapSelection(next); setHasComputedHeatmap(false); setShowHeatmap(false); setPinnedNotes([])
       }
     }
     if (comparisonMenuOpen && !isCalculatingComparison) {
-      const next = visibleAnalysisSelection(comparisonSelection, available)
+      const next = visibleAnalysisSelection(comparisonSelection, available, {computed: hasComputedComparison, sceneFiles: files})
       if (next.length !== comparisonSelection.length || next.some((url, index) => url !== comparisonSelection[index])) {
         setComparisonSelection(next); setHasComputedComparison(false); setShowComparison(false); setComparisonStats(null); setComparisonSnapshot(null); setPinnedNotes([])
       }
     }
-  }, [files, visibles, opacities, heatmapMenuOpen, comparisonMenuOpen, heatmapSelection, comparisonSelection, isCalculatingHeatmap, isCalculatingComparison])
+  }, [files, visibles, opacities, heatmapMenuOpen, comparisonMenuOpen, heatmapSelection, comparisonSelection, isCalculatingHeatmap, isCalculatingComparison, hasComputedHeatmap, hasComputedComparison])
   const analysisPreviewActive = !standaloneToolMode && !alignmentMode && !trimMode && !repairMode &&
     ((heatmapMenuOpen && !isCalculatingHeatmap) || (comparisonMenuOpen && !isCalculatingComparison))
   const analysisPreviewUrl = analysisPreviewActive && analysisVisibleFiles.some(file => file.url === analysisMenuHoveredUrl) ? analysisMenuHoveredUrl : ""
+
+  const updateReferenceDisplay = (url, change) => {
+    const index = files.findIndex(file => file.url === url)
+    if (index < 0) return
+    if (change.opacity != null) {
+      const opacity = clamp01(change.opacity)
+      setOpacities(previous => files.map((_, i) => i === index ? opacity : previous[i] ?? 1))
+      setVisibles(previous => files.map((_, i) => i === index ? opacity > 0 : previous[i] ?? true))
+    } else if (change.visible != null) {
+      setVisibles(previous => files.map((_, i) => i === index ? change.visible : previous[i] ?? true))
+      if (change.visible && (opacities[index] ?? 1) === 0) {
+        setOpacities(previous => files.map((_, i) => i === index ? 1 : previous[i] ?? 1))
+      }
+    }
+  }
+  const referenceDisplayFor = url => {
+    const index = files.findIndex(file => file.url === url)
+    if (index < 0) return null
+    const opacity = opacities[index] ?? 1, visible = visibles[index] !== false && opacity > 0
+    return {opacity, visible, eyeIcon: visible ? ICONS.eye : ICONS.eyeOff,
+      onVisibleChange: value => updateReferenceDisplay(url, {visible: value}),
+      onOpacityChange: value => updateReferenceDisplay(url, {opacity: value})}
+  }
 
   const sidebar = (
     <div className="sidebar" style={{
@@ -17469,8 +17492,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     </div>
   )
 
-  const occlusionModelsReady = heatmapSelection.length === 2 && visibleAnalysisSelection(heatmapSelection, analysisVisibleFiles).length === 2
-  const comparisonModelsReady = comparisonSelection.length === 2 && visibleAnalysisSelection(comparisonSelection, analysisVisibleFiles).length === 2
+  const occlusionModelsReady = heatmapSelection.length === 2 && visibleAnalysisSelection(heatmapSelection, analysisVisibleFiles, {computed: hasComputedHeatmap, sceneFiles: analysisEligibleFiles}).length === 2
+  const comparisonModelsReady = comparisonSelection.length === 2 && visibleAnalysisSelection(comparisonSelection, analysisVisibleFiles, {computed: hasComputedComparison, sceneFiles: analysisEligibleFiles}).length === 2
   const comparisonAnalyzedUrl = comparisonDirection === "B_TO_A" ? comparisonSelection[1] : comparisonSelection[0]
   const comparisonReferenceUrl = comparisonDirection === "B_TO_A" ? comparisonSelection[0] : comparisonSelection[1]
 
@@ -19624,20 +19647,21 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       {lightingPanelPresence.present && <LightingControls exiting={lightingPanelPresence.exiting} value={sceneLighting} onChange={setSceneLighting} onClose={closeLighting} expanded={toolsPanelExpanded} />}
       {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && heatmapPanelPresence.present && <ComparisonControls mode="occlusion" exiting={heatmapPanelPresence.exiting}
         expanded={toolsPanelExpanded} mobile={isMobile} onClose={closeOcclusionMenu}
-        modelA={<AlignmentModelDropdown floating badge="A" value={heatmapSelection[0] || ""} files={analysisVisibleFiles} otherValue={heatmapSelection[1] || ""} disabled={isCalculatingHeatmap} onPreview={setAnalysisMenuHoveredUrl} onChange={url => setHeatmapSelectionSlot(0, url)} />}
-        modelB={<AlignmentModelDropdown floating badge="B" value={heatmapSelection[1] || ""} files={analysisVisibleFiles} otherValue={heatmapSelection[0] || ""} disabled={!heatmapSelection[0] || isCalculatingHeatmap} onPreview={setAnalysisMenuHoveredUrl} onChange={url => setHeatmapSelectionSlot(1, url)} />}
+        modelA={<AlignmentModelDropdown floating badge="A" value={heatmapSelection[0] || ""} selectedFile={hasComputedHeatmap ? files.find(file => file.url === heatmapSelection[0]) : null} files={analysisVisibleFiles} otherValue={heatmapSelection[1] || ""} disabled={isCalculatingHeatmap} onPreview={setAnalysisMenuHoveredUrl} onChange={url => setHeatmapSelectionSlot(0, url)} />}
+        modelB={<AlignmentModelDropdown floating badge="B" value={heatmapSelection[1] || ""} selectedFile={hasComputedHeatmap ? files.find(file => file.url === heatmapSelection[1]) : null} files={analysisVisibleFiles} otherValue={heatmapSelection[0] || ""} disabled={!heatmapSelection[0] || isCalculatingHeatmap} onPreview={setAnalysisMenuHoveredUrl} onChange={url => setHeatmapSelectionSlot(1, url)} />}
         eyeIcon={showHeatmap ? ICONS.eye : ICONS.eyeOff} onSwap={() => {
           if (heatmapSelection.length !== 2 || isCalculatingHeatmap) return
           setHeatmapSelection(([a, b]) => [b, a]); setHasComputedHeatmap(false); setShowHeatmap(false); setPinnedNotes([])
           if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
         }}
+        referenceDisplay={referenceDisplayFor(heatmapSelection[1])}
         ready={occlusionModelsReady} calculating={isCalculatingHeatmap} computed={hasComputedHeatmap} onCalculate={handleApplyHeatmap}
         visible={showHeatmap} onVisibleChange={checked => { setShowHeatmap(checked); if (checked) setShowComparison(false) }}
       />}
       {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && comparisonPanelPresence.present && <ComparisonControls exiting={comparisonPanelPresence.exiting}
         expanded={toolsPanelExpanded} mobile={isMobile} onClose={closeComparisonMenu}
-        modelA={<AlignmentModelDropdown floating badge="A" value={comparisonSelection[0] || ""} files={analysisVisibleFiles} otherValue={comparisonSelection[1] || ""} disabled={isCalculatingComparison} onPreview={setAnalysisMenuHoveredUrl} onChange={url => setComparisonSelectionSlot(0, url)} />}
-        modelB={<AlignmentModelDropdown floating badge="B" value={comparisonSelection[1] || ""} files={analysisVisibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0] || isCalculatingComparison} onPreview={setAnalysisMenuHoveredUrl} onChange={url => setComparisonSelectionSlot(1, url)} />}
+        modelA={<AlignmentModelDropdown floating badge="A" value={comparisonSelection[0] || ""} selectedFile={hasComputedComparison ? files.find(file => file.url === comparisonSelection[0]) : null} files={analysisVisibleFiles} otherValue={comparisonSelection[1] || ""} disabled={isCalculatingComparison} onPreview={setAnalysisMenuHoveredUrl} onChange={url => setComparisonSelectionSlot(0, url)} />}
+        modelB={<AlignmentModelDropdown floating badge="B" value={comparisonSelection[1] || ""} selectedFile={hasComputedComparison ? files.find(file => file.url === comparisonSelection[1]) : null} files={analysisVisibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0] || isCalculatingComparison} onPreview={setAnalysisMenuHoveredUrl} onChange={url => setComparisonSelectionSlot(1, url)} />}
         eyeIcon={showComparison ? ICONS.eye : ICONS.eyeOff} onSwap={() => {
           if (comparisonSelection.length !== 2 || isCalculatingComparison) return
           setComparisonSelection(([a, b]) => [b, a])
@@ -19645,6 +19669,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
         }}
         tolerance={comparisonTolerance} onToleranceChange={value => { setComparisonTolerance(value); setHasComputedComparison(false); setShowComparison(false); setComparisonStats(null); setComparisonSnapshot(null) }}
+        referenceDisplay={referenceDisplayFor(comparisonSelection[1])}
         ready={comparisonModelsReady} calculating={isCalculatingComparison} computed={hasComputedComparison} onCalculate={handleApplyComparison}
         stats={comparisonStats} visible={showComparison} onVisibleChange={checked => { setShowComparison(checked); if (checked) setShowHeatmap(false) }}
       />}

@@ -39,3 +39,7 @@
 @media(prefers-reduced-motion:reduce){.card button.calculate,.card button.calculate::after {transition:none}.card button.calculate:hover:not(:disabled),.card button.calculate:active:not(:disabled){transform:none}}
 
 .hint {font-size:10px;color:#818181;line-height:1.5;margin:12px 0 0}
+.referenceDisplay {margin-top:14px;padding-top:12px;border-top:1px solid #ffffff12;animation:referenceIn .22s ease-out both}
+.referenceOpacity {margin:12px 0 0}
+@keyframes referenceIn {from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+@media(prefers-reduced-motion:reduce){.referenceDisplay{animation:none}}

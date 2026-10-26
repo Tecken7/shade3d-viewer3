@@ -3,8 +3,10 @@ export function visibleAnalysisModels(files, visibles, opacities, inferExt) {
     ['stl', 'ply', 'obj'].includes(inferExt(file.rawName || file.name || file.url)))
 }
 
-export function visibleAnalysisSelection(selection, visibleFiles) {
-  const urls = new Set(visibleFiles.map(file => file.url))
+export function visibleAnalysisSelection(selection, visibleFiles, {computed = false, sceneFiles = visibleFiles} = {}) {
+  // Once measured, visibility is a viewing preference, not a change to the pair.
+  // Removed files still invalidate the result; hidden files cannot be newly picked.
+  const urls = new Set((computed ? sceneFiles : visibleFiles).map(file => file.url))
   const [a, b] = selection
   if (!a || !urls.has(a)) return []
   return b && b !== a && urls.has(b) ? [a, b] : [a]

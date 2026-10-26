@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from "react"
 import lighting from "./LightingControls.module.css"
 import styles from "./ComparisonControls.module.css"
 
-export default function ComparisonControls({ mode = "comparison", exiting = false, expanded, mobile, onClose, modelA, modelB, onSwap, eyeIcon, tolerance, onToleranceChange, ready, calculating, computed, onCalculate, stats, visible, onVisibleChange }) {
+export default function ComparisonControls({ mode = "comparison", exiting = false, expanded, mobile, onClose, modelA, modelB, onSwap, eyeIcon, tolerance, onToleranceChange, ready, calculating, computed, onCalculate, stats, visible, onVisibleChange, referenceDisplay }) {
   const occlusion = mode === "occlusion"
   const title = occlusion ? "Okluze" : "Porovnání"
   const mapLabel = occlusion ? "mapu okluze" : "mapu odchylek"
@@ -32,6 +32,18 @@ export default function ComparisonControls({ mode = "comparison", exiting = fals
     {computed && (occlusion || stats) && <div className={styles.result}>
       <div className={styles.resultHeader}><span>Výpočet dokončen</span><span aria-hidden="true">✓</span></div>
       <div className={styles.visibility}><span>{occlusion ? "Mapa okluze" : "Mapa odchylek"}</span><button type="button" className={styles.eye} aria-label={visible ? `Skrýt ${mapLabel}` : `Zobrazit ${mapLabel}`} aria-pressed={visible} onClick={() => onVisibleChange(!visible)} title={visible ? `Skrýt ${mapLabel}` : `Zobrazit ${mapLabel}`}><img src={eyeIcon} width={14} height={14} alt="" /></button></div>
+      {referenceDisplay && <div className={styles.referenceDisplay}>
+        <div className={styles.visibility}>
+          <span>{occlusion ? "Antagonista" : "Referenční model"}</span>
+          <button type="button" className={styles.eye} aria-label={`${referenceDisplay.visible ? "Skrýt" : "Zobrazit"} ${occlusion ? "antagonistu" : "referenční model"}`} aria-pressed={referenceDisplay.visible} onClick={() => referenceDisplay.onVisibleChange(!referenceDisplay.visible)}>
+            <img src={referenceDisplay.eyeIcon} width={14} height={14} alt="" />
+          </button>
+        </div>
+        <label className={`${lighting.row} ${styles.referenceOpacity}`}>
+          <span>Průhlednost <b>{Math.round((1 - referenceDisplay.opacity) * 100)} %</b></span>
+          <input aria-label={occlusion ? "Průhlednost antagonisty" : "Průhlednost referenčního modelu"} type="range" min={0} max={1} step={.01} value={1 - referenceDisplay.opacity} onChange={event => referenceDisplay.onOpacityChange(1 - Number(event.target.value))} />
+        </label>
+      </div>}
       {!occlusion && stats && <dl>{[["Průměrná odchylka", `${stats.mean.toFixed(3)} mm`], ["RMS", `${stats.rms.toFixed(3)} mm`], ["95. percentil", `${stats.percentile95.toFixed(3)} mm`], ["Maximum", `${stats.max.toFixed(3)} mm`], ["V toleranci", `${stats.withinTolerance.toFixed(1)} %`]].map(([label, value]) => <React.Fragment key={label}><dt>{label}</dt><dd>{value}</dd></React.Fragment>)}</dl>}
       {occlusion && <p className={styles.hint}>Záporná hodnota znamená průnik. Dvojklikem připnete hodnotu do scény.</p>}
     </div>}
