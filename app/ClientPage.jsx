@@ -5,6 +5,7 @@ import repairToolbarStyles from "./RepairToolbar.module.css"
 import ViewerBackButton from "./ViewerBackButton"
 import RepairStatus, { RepairStep } from "./RepairStatus"
 import { setRepairFoilMaterial } from "./viewer/repair-foil.mjs"
+import { visibleAnalysisModels, visibleAnalysisSelection } from "./viewer/visible-analysis-models.mjs"
 
 import { inferSceneOrientation, fitOrientedBounds } from "./viewer/scan-orientation.mjs"
 import { cameraChanged } from "./viewer/camera-sync.mjs"
@@ -5789,7 +5790,7 @@ function AnyModel({
 
   const setAlignmentHoverVisual = (enabled) => {
     if (!object3D) return
-    if (enabled && !onAlignmentSelect) return
+    if (enabled && !onAlignmentSelect && !(repairHover && repairPreviewUrl === url)) return
     if (repairHover || repairHoverMaterials.current.length) {
       repairHoverTarget.current = enabled
       if (enabled && !repairHoverMaterials.current.length) {
@@ -5857,7 +5858,7 @@ function AnyModel({
   useEffect(() => {
     if (!repairHover) return
     if (repairPreviewUrl) repairPointerHover.current = false
-    setAlignmentHoverVisual(!!onAlignmentSelect && visible && (repairPreviewUrl ? repairPreviewUrl === url : repairPointerHover.current))
+    setAlignmentHoverVisual(visible && (repairPreviewUrl ? repairPreviewUrl === url : !!onAlignmentSelect && repairPointerHover.current))
   }, [repairPreviewUrl, repairHover, object3D, onAlignmentSelect, visible, url])
 
   useEffect(() => {
@@ -11949,6 +11950,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const closeComparisonMenu = useCallback(() => setComparisonMenuOpen(false), [])
   const [comparisonSelection, setComparisonSelection] = useState([])
   const [isCalculatingComparison, setIsCalculatingComparison] = useState(false)
+  const [analysisMenuHoveredUrl, setAnalysisMenuHoveredUrl] = useState("")
+  useEffect(() => { setAnalysisMenuHoveredUrl("") }, [heatmapMenuOpen, comparisonMenuOpen, isCalculatingHeatmap, isCalculatingComparison])
   const { visible: comparisonLoaderVisible, exiting: comparisonLoaderExiting } = useLoaderPresence(isCalculatingComparison)
   const [surfaceAnalysisProgress, setSurfaceAnalysisProgress] = useState(null)
   const [hasComputedComparison, setHasComputedComparison] = useState(false)
@@ -15926,7 +15929,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }
 
   const handleApplyHeatmap = async () => {
-    if (heatmapSelection.length !== 2) return
+    if (heatmapSelection.length !== 2 || visibleAnalysisSelection(heatmapSelection, analysisVisibleFiles).length !== 2) return
     setHasComputedHeatmap(false)
     setShowHeatmap(false)
     const analysisStartedAt = performance.now()
@@ -15965,7 +15968,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }
 
   const handleApplyComparison = async () => {
-    if (comparisonSelection.length !== 2) return
+    if (comparisonSelection.length !== 2 || visibleAnalysisSelection(comparisonSelection, analysisVisibleFiles).length !== 2) return
     // Explicitní kliknutí na Vypočítat znamená vždy čerstvý výpočet pro aktuální
     // polohu modelů. Starý snapshot se před startem zahodí.
     const analysisStartedAt = performance.now()
@@ -17314,10 +17317,26 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [dicomLayoutActive])
 
   const analysisEligibleFiles = files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url)))
-  const repairVisibleFiles = analysisEligibleFiles.filter(file => {
-    const index = files.indexOf(file)
-    return visibles[index] !== false && (opacities[index] ?? 1) > 0
-  })
+  const analysisVisibleFiles = visibleAnalysisModels(files, visibles, opacities, inferExt)
+  const repairVisibleFiles = analysisVisibleFiles
+  useEffect(() => {
+    const available = visibleAnalysisModels(files, visibles, opacities, inferExt)
+    if (heatmapMenuOpen && !isCalculatingHeatmap) {
+      const next = visibleAnalysisSelection(heatmapSelection, available)
+      if (next.length !== heatmapSelection.length || next.some((url, index) => url !== heatmapSelection[index])) {
+        setHeatmapSelection(next); setHasComputedHeatmap(false); setShowHeatmap(false); setPinnedNotes([])
+      }
+    }
+    if (comparisonMenuOpen && !isCalculatingComparison) {
+      const next = visibleAnalysisSelection(comparisonSelection, available)
+      if (next.length !== comparisonSelection.length || next.some((url, index) => url !== comparisonSelection[index])) {
+        setComparisonSelection(next); setHasComputedComparison(false); setShowComparison(false); setComparisonStats(null); setComparisonSnapshot(null); setPinnedNotes([])
+      }
+    }
+  }, [files, visibles, opacities, heatmapMenuOpen, comparisonMenuOpen, heatmapSelection, comparisonSelection, isCalculatingHeatmap, isCalculatingComparison])
+  const analysisPreviewActive = !standaloneToolMode && !alignmentMode && !trimMode && !repairMode &&
+    ((heatmapMenuOpen && !isCalculatingHeatmap) || (comparisonMenuOpen && !isCalculatingComparison))
+  const analysisPreviewUrl = analysisPreviewActive && analysisVisibleFiles.some(file => file.url === analysisMenuHoveredUrl) ? analysisMenuHoveredUrl : ""
 
   const sidebar = (
     <div className="sidebar" style={{
@@ -17450,8 +17469,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     </div>
   )
 
-  const occlusionModelsReady = heatmapSelection.length === 2
-  const comparisonModelsReady = comparisonSelection.length === 2
+  const occlusionModelsReady = heatmapSelection.length === 2 && visibleAnalysisSelection(heatmapSelection, analysisVisibleFiles).length === 2
+  const comparisonModelsReady = comparisonSelection.length === 2 && visibleAnalysisSelection(comparisonSelection, analysisVisibleFiles).length === 2
   const comparisonAnalyzedUrl = comparisonDirection === "B_TO_A" ? comparisonSelection[1] : comparisonSelection[0]
   const comparisonReferenceUrl = comparisonDirection === "B_TO_A" ? comparisonSelection[0] : comparisonSelection[1]
 
@@ -19605,8 +19624,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       {lightingPanelPresence.present && <LightingControls exiting={lightingPanelPresence.exiting} value={sceneLighting} onChange={setSceneLighting} onClose={closeLighting} expanded={toolsPanelExpanded} />}
       {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && heatmapPanelPresence.present && <ComparisonControls mode="occlusion" exiting={heatmapPanelPresence.exiting}
         expanded={toolsPanelExpanded} mobile={isMobile} onClose={closeOcclusionMenu}
-        modelA={<AlignmentModelDropdown floating badge="A" value={heatmapSelection[0] || ""} files={analysisEligibleFiles} otherValue={heatmapSelection[1] || ""} disabled={isCalculatingHeatmap} onChange={url => setHeatmapSelectionSlot(0, url)} />}
-        modelB={<AlignmentModelDropdown floating badge="B" value={heatmapSelection[1] || ""} files={analysisEligibleFiles} otherValue={heatmapSelection[0] || ""} disabled={!heatmapSelection[0] || isCalculatingHeatmap} onChange={url => setHeatmapSelectionSlot(1, url)} />}
+        modelA={<AlignmentModelDropdown floating badge="A" value={heatmapSelection[0] || ""} files={analysisVisibleFiles} otherValue={heatmapSelection[1] || ""} disabled={isCalculatingHeatmap} onPreview={setAnalysisMenuHoveredUrl} onChange={url => setHeatmapSelectionSlot(0, url)} />}
+        modelB={<AlignmentModelDropdown floating badge="B" value={heatmapSelection[1] || ""} files={analysisVisibleFiles} otherValue={heatmapSelection[0] || ""} disabled={!heatmapSelection[0] || isCalculatingHeatmap} onPreview={setAnalysisMenuHoveredUrl} onChange={url => setHeatmapSelectionSlot(1, url)} />}
         eyeIcon={showHeatmap ? ICONS.eye : ICONS.eyeOff} onSwap={() => {
           if (heatmapSelection.length !== 2 || isCalculatingHeatmap) return
           setHeatmapSelection(([a, b]) => [b, a]); setHasComputedHeatmap(false); setShowHeatmap(false); setPinnedNotes([])
@@ -19617,8 +19636,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       />}
       {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && comparisonPanelPresence.present && <ComparisonControls exiting={comparisonPanelPresence.exiting}
         expanded={toolsPanelExpanded} mobile={isMobile} onClose={closeComparisonMenu}
-        modelA={<AlignmentModelDropdown floating badge="A" value={comparisonSelection[0] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[1] || ""} disabled={isCalculatingComparison} onChange={url => setComparisonSelectionSlot(0, url)} />}
-        modelB={<AlignmentModelDropdown floating badge="B" value={comparisonSelection[1] || ""} files={analysisEligibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0] || isCalculatingComparison} onChange={url => setComparisonSelectionSlot(1, url)} />}
+        modelA={<AlignmentModelDropdown floating badge="A" value={comparisonSelection[0] || ""} files={analysisVisibleFiles} otherValue={comparisonSelection[1] || ""} disabled={isCalculatingComparison} onPreview={setAnalysisMenuHoveredUrl} onChange={url => setComparisonSelectionSlot(0, url)} />}
+        modelB={<AlignmentModelDropdown floating badge="B" value={comparisonSelection[1] || ""} files={analysisVisibleFiles} otherValue={comparisonSelection[0] || ""} disabled={!comparisonSelection[0] || isCalculatingComparison} onPreview={setAnalysisMenuHoveredUrl} onChange={url => setComparisonSelectionSlot(1, url)} />}
         eyeIcon={showComparison ? ICONS.eye : ICONS.eyeOff} onSwap={() => {
           if (comparisonSelection.length !== 2 || isCalculatingComparison) return
           setComparisonSelection(([a, b]) => [b, a])
@@ -20113,8 +20132,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                       ? selectRepairModel
                       : null}
                 repairHidden={repairMode && !!repairFocusUrl && f.url !== repairFocusUrl}
-                repairHover={repairMode}
-                repairPreviewUrl={repairMode && repairStage === "model" && !repairBusy ? repairMenuHoveredUrl : ""}
+                repairHover={repairMode || analysisPreviewActive}
+                repairPreviewUrl={repairMode && repairStage === "model" && !repairBusy ? repairMenuHoveredUrl : analysisPreviewUrl}
                 onAlignmentHover={alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy
                   ? handleAlignmentSceneHover
                   : null}
