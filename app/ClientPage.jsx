@@ -12604,6 +12604,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [repairBusy, setRepairBusy] = useState(false)
   const [repairMessage, setRepairMessage] = useState("")
   const [repairVertexReport, setRepairVertexReport] = useState("")
+  const [repairProgressKind, setRepairProgressKind] = useState("analysis")
+  const [repairProcessingHoleIds, setRepairProcessingHoleIds] = useState([])
   const [repairProgressVisible, setRepairProgressVisible] = useState(false)
   const [repairProgressLeaving, setRepairProgressLeaving] = useState(false)
   const repairModelPickerPresence = useAnimatedPresence(repairMode && repairStage === "model" && !repairProgressVisible, 200)
@@ -14523,6 +14525,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
 
   const clearRepairWorkingState = useCallback(() => {
+    setRepairProcessingHoleIds([])
+    setRepairProgressKind("analysis")
     setRepairMenuHoveredUrl("")
     setRepairAnalysisComplete(false)
     setRepairStage("model")
@@ -14615,6 +14619,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       return
     }
 
+    setRepairProgressKind("analysis")
+    setRepairProcessingHoleIds([])
     setRepairFocusUrl(url)
     setRepairBusy(true)
     setRepairMessage("")
@@ -15063,6 +15069,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     )
     if (!selected.length) return
 
+    setRepairProgressKind("repair")
+    setRepairProcessingHoleIds(selected.map(hole => hole.id))
     setRepairStage("preview")
     setRepairBusy(true)
     setRepairMessage("")
@@ -15147,6 +15155,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       resetRepairProgress()
       setRepairMessage(error?.message || "CGAL Oprava sítě se nepodařila.")
     } finally {
+      setRepairProcessingHoleIds([])
       setRepairBusy(false)
       // Ready CTA zůstává po fade-outu skryté po celou dobu CGAL opravy.
       // Po úspěchu už je výběr prázdný; při chybě se CTA znovu zpřístupní pro retry.
@@ -18780,6 +18789,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const repairLikelyHoles = repairHoles.filter((hole) => hole.likely)
   const repairSelectedAutoCount = repairSelectedHoleIds.filter((id) => !repairCompletedHoleSet.has(id)).length
   const repairAllVisibleSelected = repairPendingHoles.length > 0 && repairSelectedAutoCount === repairPendingHoles.length
+  const repairShowAnalysisProgress = repairProgressVisible && repairProgressKind === "analysis"
   const repairCleanResult = repairAnalysisComplete && !repairBusy && repairPendingHoles.length === 0
   const repairWorkspace = repairMode && !(cadStandalone && cadStage === "repair") && (
     <div className="artheticRepairWorkspace" style={{
@@ -18981,7 +18991,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               ["model", "Model"], ["work", "Analýza"], ["preview", "Výběr"], ["result", "Výsledek"],
             ].map(([key, label], index) => {
               const active = key === "model" ? repairStage === "model" && !repairBusy : key === "work" ? (repairBusy && repairStage === "model") || (["detect","paint"].includes(repairStage) && !repairCleanResult) : key === "preview" ? repairStage === "preview" && !repairCleanResult : repairStage === "result" || repairCleanResult
-              const done = key === "model" ? !!repairSelection || repairBusy : key === "work" ? repairAnalysisComplete : key === "preview" ? (repairSelectedAutoCount > 0 || repairStage === "result") : repairStage === "result" || repairCleanResult
+              const done = key === "model" ? !!repairSelection || repairBusy : key === "work" ? repairAnalysisComplete : key === "preview" ? (repairHoles.length > 0 && repairPendingHoles.length === 0 && !repairBusy) : repairStage === "result" || repairCleanResult
               return <React.Fragment key={key}>
                 <RepairStep active={active} done={done}>{label}</RepairStep>
                 {index < 3 && <div style={{ width: 12, height: 1, background: "rgba(255,255,255,.07)" }} />}
@@ -18994,13 +19004,13 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
       <div style={{ height: 1, margin: "10px 0", background: "rgba(255,255,255,.065)" }} />
 
-      <div className="artheticRepairTaskSlot" data-busy={repairProgressVisible || undefined}>
+      <div className="artheticRepairTaskSlot" data-busy={repairShowAnalysisProgress || undefined}>
       {repairModelPickerPresence.present && (
         <div className="artheticRepairModelPicker" data-exiting={repairModelPickerPresence.exiting || undefined} inert={repairModelPickerPresence.exiting ? "" : undefined} aria-hidden={repairModelPickerPresence.exiting || undefined} style={{ width: "min(540px, 100%)", margin: "0 auto" }}>
           <AlignmentModelDropdown badge="R" value={repairSelection || ""} files={repairVisibleFiles} otherValue="" onChange={selectRepairModel} onPreview={setRepairMenuHoveredUrl} />
         </div>
       )}
-      {repairProgressVisible && (
+      {repairShowAnalysisProgress && (
         <div
           className={`artheticRepairProgressPanel${repairProgressLeaving ? " isLeaving" : ""}`}
           style={{ marginTop: 0, padding: "8px 9px 9px", borderRadius: 10, background: "rgba(255,255,255,.026)", border: "1px solid rgba(255,255,255,.065)" }}
@@ -19030,15 +19040,17 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               {repairHoles.map((hole, index) => {
                 const selected = repairSelectedHoleIds.includes(hole.id)
                 const completed = repairCompletedHoleSet.has(hole.id)
+                const processing = repairProcessingHoleIds.includes(hole.id)
                 return (
                   <button
                     key={hole.id}
                     type="button"
                     onClick={() => selectRepairHole(hole.id)}
                     aria-pressed={selected}
+                    aria-busy={processing || undefined}
                     disabled={repairBusy || completed}
                     style={{
-                      height: 29, padding: "0 9px", borderRadius: 8,
+                      height: 29, padding: "0 9px", borderRadius: 8, display: "inline-flex", alignItems: "center", gap: 5,
                       border: selected
                         ? "1px solid rgba(255,255,255,.40)"
                         : completed
@@ -19057,7 +19069,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                       cursor: repairBusy ? "wait" : completed ? "default" : "pointer",
                     }}
                   >
-                    {completed ? "✓ " : selected ? "● " : ""}
+                    {processing ? <span className={repairToolbarStyles.spinner} role="progressbar" aria-label={`Opravuji otvor ${index + 1}`} /> : completed ? "✓ " : selected ? "● " : ""}
                     {index + 1}. Ø {(hole.equivalentRadius * 2).toFixed(1)}
                     {completed ? " · opraveno" : hole.likely ? "" : " · velká"}
                   </button>
@@ -19077,11 +19089,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 </>
               )}
             </div>
-            {!repairProgressVisible && repairAnalysisComplete && <div className={repairToolbarStyles.checks}><RepairStatus inline clear={repairCleanResult} verticesChecked={repairVertexReport.startsWith("Kontrola vrcholů:")} report={repairVertexReport} /></div>}
+            {!repairShowAnalysisProgress && repairAnalysisComplete && <div className={repairToolbarStyles.checks}><RepairStatus inline clear={repairCleanResult} verticesChecked={repairVertexReport.startsWith("Kontrola vrcholů:")} report={repairVertexReport} /></div>}
             </div>
           </div>
           <div className={repairToolbarStyles.actions}>
-            {repairSelectedAutoCount > 0 && (
+            {repairSelectedAutoCount > 0 && !repairBusy && (
               <button
                 className={repairToolbarStyles.primary}
                 data-leaving={repairReadyActionLeaving || undefined}
@@ -19125,8 +19137,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
 
 
-      {!repairProgressVisible && repairAnalysisComplete && !(repairVariant === "auto" && repairHoles.length > 0 && repairStage !== "result") && <RepairStatus clear={repairCleanResult} verticesChecked={repairVertexReport.startsWith("Kontrola vrcholů:")} report={repairVertexReport} />}
-      {!repairProgressVisible && repairMessage && /nepodař|nenaš|potřeba|není načten|selhal|chyba/i.test(repairMessage) && (
+      {!repairShowAnalysisProgress && repairAnalysisComplete && !(repairVariant === "auto" && repairHoles.length > 0 && repairStage !== "result") && <RepairStatus clear={repairCleanResult} verticesChecked={repairVertexReport.startsWith("Kontrola vrcholů:")} report={repairVertexReport} />}
+      {!repairShowAnalysisProgress && repairMessage && /nepodař|nenaš|potřeba|není načten|selhal|chyba/i.test(repairMessage) && (
         <div style={{ marginTop: 9, padding: "7px 9px", borderRadius: 9, background: "rgba(239,68,68,.045)", border: "1px solid rgba(248,113,113,.11)", color: "#ba8585", fontSize: 8.8, lineHeight: 1.45 }}>
           {repairMessage}
         </div>

@@ -11,3 +11,7 @@
 @media(prefers-reduced-motion:reduce){.primary,.primary::after{transition:none}.primary:hover:not(:disabled),.primary:active:not(:disabled),.primary[data-leaving]{transform:none}}
 
 .actions{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap;width:100%;margin-top:2px}
+
+.spinner{display:inline-block;flex:0 0 11px;width:11px;height:11px;box-sizing:border-box;border:1.5px solid #ffffff30;border-top-color:#f5f5f5;border-radius:50%;animation:repairHoleSpin .65s linear infinite}
+@keyframes repairHoleSpin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.spinner{animation:none}}
