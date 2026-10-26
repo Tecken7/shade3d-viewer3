@@ -1,10 +1,10 @@
-.step,.status{display:inline-flex;align-items:center;gap:7px;box-sizing:border-box;border:1px solid #ffffff20;border-radius:8px;background:#ffffff07;color:#929292;font:600 10px Inter,ui-sans-serif,system-ui,sans-serif;transition:background .2s ease,border-color .2s ease,color .2s ease}
+.step,.status{display:inline-flex;align-items:center;gap:7px;box-sizing:border-box;border:1px solid #ffffff20;border-radius:8px;background:#ffffff07;color:#929292;font:600 10px Inter,ui-sans-serif,system-ui,sans-serif;transition:background .2s ease,border-color .2s ease,color .2s ease,box-shadow .2s ease}
 .step{height:29px;padding:0 9px;white-space:nowrap}
-.step[data-active]{background:#ffffff18;border-color:#ffffff66;color:#f5f5f5}
+.step[data-active]{background:#ffffff18;border-color:#ffffff66;color:#f5f5f5;box-shadow:0 0 0 1px #ffffff09,0 0 14px #ffffff16,inset 0 1px 0 #ffffff0d}
 .step:has(.check){color:#dedede}
 .check{width:17px;height:17px;flex:0 0 17px;display:inline-grid;place-items:center;border:1px solid #4ade8040;border-radius:5px;color:#86efac;background:#22c55e18;animation:checkIn .2s ease-out both}
 .check svg{width:13px;height:13px}
-.statuses{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:9px}
+.statuses{display:flex;justify-content:center;flex-wrap:wrap;align-items:center;gap:8px;margin-top:9px}
 .status{min-height:33px;padding:6px 10px;color:#dedede;animation:checkIn .22s ease-out both}
 .status b{margin-left:3px;font-weight:650}
 .notice{color:#aaa;font-size:10px;line-height:1.5}

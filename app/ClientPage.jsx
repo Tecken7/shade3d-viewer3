@@ -1,5 +1,6 @@
 "use client"
 
+import ViewerBackButton from "./ViewerBackButton"
 import RepairStatus, { RepairStep } from "./RepairStatus"
 import { setRepairFoilMaterial } from "./viewer/repair-foil.mjs"
 
@@ -18715,14 +18716,18 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const repairAllVisibleSelected = repairPendingHoles.length > 0 && repairSelectedAutoCount === repairPendingHoles.length
   const repairCleanResult = repairAnalysisComplete && !repairBusy && repairPendingHoles.length === 0
   const repairWorkspace = repairMode && !(cadStandalone && cadStage === "repair") && (
-    <div style={{
+    <div className="artheticRepairWorkspace" style={{
       position: "absolute", top: cadStandalone && cadStage === "repair" ? 146 : 10, left: "50%", transform: "translateX(-50%)", zIndex: cadStandalone && cadStage === "repair" ? 85 : 73,
-      width: cadStandalone && cadStage === "repair" ? "min(850px, calc(100vw - 34px))" : "min(820px, calc(100vw - 32px))", boxSizing: "border-box", padding: "11px 12px",
+      width: cadStandalone && cadStage === "repair" ? "min(850px, calc(100vw - 34px))" : "min(820px, calc(100vw - 288px))", boxSizing: "border-box", padding: "11px 12px",
       borderRadius: 15, background: "rgba(11,11,11,.955)", border: "1px solid rgba(255,255,255,.10)",
       boxShadow: "0 22px 70px rgba(0,0,0,.46)", backdropFilter: "blur(22px)", WebkitBackdropFilter: "blur(22px)",
-      color: "#f3f3f3", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", animation: "artheticAlignMenuIn .24s ease-out both",
+      color: "#f3f3f3", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", animation: "artheticRepairWorkspaceIn .24s ease-out",
     }}>
       <style>{`
+        @keyframes artheticRepairWorkspaceIn { from { opacity:0; transform:translate(-50%,-4px) scale(.985); } to { opacity:1; transform:translate(-50%,0) scale(1); } }
+        @media(max-width:680px) { .artheticRepairWorkspace { top:72px!important;width:calc(100vw - 20px)!important; } }
+        @media(prefers-reduced-motion:reduce) { .artheticRepairWorkspace { animation:none!important; } }
+
         @keyframes artheticRepairSpinnerSpin {
           from { transform: translateZ(0) rotate(0deg); }
           to { transform: translateZ(0) rotate(360deg); }
@@ -18895,13 +18900,17 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         @media (max-width: 1160px) {
           .artheticRepairSideActions { top:178px; left:auto; right:10px; }
         }
+        @media (max-width: 680px) {
+          .artheticRepairSideActions { top:10px; left:auto; right:10px; width:auto; }
+          .artheticRepairSideActions > div { display:flex!important; }
+        }
       `}</style>
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
         <div style={{ minWidth: 0, flex: "1 1 auto" }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 6, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", justifyContent: "center", alignItems: "baseline", gap: 6, flexWrap: "wrap" }}>
             <span style={{ color: "#ededed", fontSize: 13, fontWeight: 650 }}>Oprava sítě</span>
           </div>
-          <div style={{ marginTop: 7, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+          <div style={{ marginTop: 7, display: "flex", justifyContent: "center", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
             {[
               ["model", "Model"], ["work", "Analýza"], ["preview", "Výběr"], ["result", "Výsledek"],
             ].map(([key, label], index) => {
@@ -18921,9 +18930,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
       <div className="artheticRepairTaskSlot" data-busy={repairProgressVisible || undefined}>
       {repairModelPickerPresence.present && (
-        <div className="artheticRepairModelPicker" data-exiting={repairModelPickerPresence.exiting || undefined} inert={repairModelPickerPresence.exiting ? "" : undefined} aria-hidden={repairModelPickerPresence.exiting || undefined} style={{ display: "grid", gridTemplateColumns: "minmax(220px,1fr) auto", gap: 10, alignItems: "center" }}>
+        <div className="artheticRepairModelPicker" data-exiting={repairModelPickerPresence.exiting || undefined} inert={repairModelPickerPresence.exiting ? "" : undefined} aria-hidden={repairModelPickerPresence.exiting || undefined} style={{ width: "min(540px, 100%)", margin: "0 auto" }}>
           <AlignmentModelDropdown badge="R" value={repairSelection || ""} files={analysisEligibleFiles} otherValue="" onChange={selectRepairModel} />
-          <span style={{ color: "#777", fontSize: 9.2 }}>Vyberte v menu nebo klikněte přímo na model ve scéně.</span>
         </div>
       )}
       {repairProgressVisible && (
@@ -18948,14 +18956,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       </div>
 
       {repairVariant === "auto" && repairStage !== "model" && repairStage !== "result" && (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-          <div style={{ minWidth: 0, flex: "1 1 360px" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ minWidth: 0, flex: "1 1 100%", textAlign: "center" }}>
             {repairHoles.length > 0 && <div style={{ color: "#858585", fontSize: 9.2, marginBottom: 7 }}>
               {repairHoles.length
                 ? `Nalezeno ${repairHoles.length} opravovatelných ${repairHoles.length === 1 ? "otvor" : "otvorů"} · ${repairLikelyHoles.length} doporučených${repairCompletedHoleIds.length ? ` · ${repairCompletedHoleIds.length} opraveno` : ""}.`
                 : ""}
             </div>}
-            <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", justifyContent: "center", gap: 5, flexWrap: "wrap" }}>
               {repairHoles.map((hole, index) => {
                 const selected = repairSelectedHoleIds.includes(hole.id)
                 const completed = repairCompletedHoleSet.has(hole.id)
@@ -19005,7 +19013,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               )}
             </div>
           </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "center" }}>
             {repairSelectedAutoCount > 0 && (
               <button
                 className={`artheticRepairReadyAction${repairReadyActionLeaving ? " isLeaving" : ""}`}
@@ -19200,7 +19208,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     </div>
   )
 
-  const repairActionsPanel = repairMode && !(cadStandalone && cadStage === "repair") && (
+  const repairActionsPanel = repairMode && !(cadStandalone && cadStage === "repair") && repairSelection && repairedExportsByUrl[repairSelection] && (
     <div className="artheticRepairSideActions">
       <div style={{ display: "grid", gap: 6 }}>
         {repairSelection && repairedExportsByUrl[repairSelection] && (
@@ -19227,18 +19235,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               {repairExportBusyUrl === repairSelection ? "Připravuji…" : "Stáhnout"}
             </button>
 
-            <div aria-hidden="true" style={{ height: 1, margin: "1px 2px", background: "rgba(255,255,255,.075)" }} />
           </>
         )}
 
-        <button
-          type="button"
-          onClick={closeRepairMode}
-          disabled={repairBusy}
-          style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: repairBusy ? "#555" : "#c8c8c8", cursor: repairBusy ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
-        >
-          Zavřít
-        </button>
+
       </div>
     </div>
   )
@@ -20074,6 +20074,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       {trimWorkspace}
       {trimActionsPanel}
       {repairWorkspace}
+      {repairMode && !(cadStandalone && cadStage === "repair") && <ViewerBackButton onClick={closeRepairMode} disabled={repairBusy} />}
       {cadRepairWorkspace}
       {repairActionsPanel}
       {alignmentWorkspace}
