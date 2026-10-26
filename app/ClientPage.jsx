@@ -5833,7 +5833,7 @@ function AnyModel({
   onCadSurfaceClick,
 }) {
   const [object3D, setObject3D] = useState(null)
-  const repairVisibility = useAnimatedPresence(!repairHidden, 280)
+  const repairVisibility = useAnimatedPresence(!repairHidden, 760)
   const repairFadePosition = useRef(1)
   const repairFadeMaterials = useRef([])
   const comparisonUniform = useRef({ value: 0 })
@@ -5848,7 +5848,7 @@ function AnyModel({
   useEffect(() => { reducedMotion.current = window.matchMedia("(prefers-reduced-motion: reduce)").matches }, [])
   useFrame((_, delta) => {
     if (repairFadeMaterials.current.length) {
-      const fade = advanceComparisonBlend(repairFadePosition.current, !repairHidden, reducedMotion.current ? 1 : delta, .24)
+      const fade = advanceComparisonBlend(repairFadePosition.current, !repairHidden, reducedMotion.current ? 1 : delta, .7)
       repairFadePosition.current = fade.position
       applyModelFade(repairFadeMaterials.current, fade.value)
       if (!repairHidden && fade.position === 1) {
