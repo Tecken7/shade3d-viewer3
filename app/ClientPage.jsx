@@ -5185,7 +5185,7 @@ function AlignmentPreviewModel({ file, sourceObject, color, points, active, mute
   )
 }
 
-function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", disabled = false, docked = false, floating = false, onChange, style = {} }) {
+function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", disabled = false, docked = false, floating = false, onChange, onPreview, style = {} }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef(null)
   const menuRef = useRef(null)
@@ -5211,6 +5211,10 @@ function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", dis
 
   return () => { window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true) }
   }, [open, floating])
+  useEffect(() => {
+    if (!open || disabled) onPreview?.("")
+    return () => onPreview?.("")
+  }, [open, disabled, onPreview])
   const selected = files.find((item) => item.url === value)
   const selectedLabel = selected ? stripExt(selected.name || selected.rawName || "Model") : "Vyberte model…"
 
@@ -5235,12 +5239,13 @@ function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", dis
   }, [disabled])
 
   const choose = (url) => {
+    onPreview?.("")
     setOpen(false)
     requestAnimationFrame(() => onChange?.(url))
   }
 
     const menu = open && !disabled && (
-        <div ref={menuRef} role="listbox" aria-label={`Model ${badge}`} style={{
+        <div ref={menuRef} role="listbox" aria-label={`Model ${badge}`} onPointerLeave={() => onPreview?.("")} style={{
           position: "absolute", left: 0, right: 0, top: "calc(100% + 6px)", zIndex: 510,
           padding: 5, maxHeight: 208, overflowY: "auto", overscrollBehavior: "contain", scrollbarWidth: "thin", scrollbarColor: "#555 transparent",
           borderRadius: 12, border: "1px solid rgba(255,255,255,.10)",
@@ -5249,7 +5254,7 @@ function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", dis
           animation: "artheticAlignMenuIn .15s cubic-bezier(.22,.61,.36,1) both",
           ...(floating ? { position: "fixed", left: "auto", right: "auto", top: "auto", zIndex: 1000, boxSizing: "border-box", visibility: menuPosition ? "visible" : "hidden", ...menuPosition } : {}),
         }}>
-          <button type="button" role="option" aria-selected={!value} onClick={() => choose("")} style={{
+          <button type="button" role="option" aria-selected={!value} onPointerEnter={() => onPreview?.("")} onFocus={() => onPreview?.("")} onClick={() => choose("")} style={{
             width: "100%", minHeight: 32, padding: "7px 9px", border: 0, borderRadius: 8,
             background: !value ? "rgba(255,255,255,.075)" : "transparent", color: !value ? "#f2f2f2" : "#929292",
             display: "flex", alignItems: "center", textAlign: "left", cursor: "pointer",
@@ -5276,8 +5281,10 @@ function AlignmentModelDropdown({ badge, value, files = [], otherValue = "", dis
                   fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif", fontSize: 10, fontWeight: current ? 720 : 620,
                   transition: "background .13s ease, color .13s ease",
                 }}
-                onPointerEnter={(event) => { if (!blocked && !current) event.currentTarget.style.background = "rgba(255,255,255,.045)" }}
-                onPointerLeave={(event) => { if (!current) event.currentTarget.style.background = "transparent" }}
+                onFocus={() => !blocked && onPreview?.(candidate.url)}
+                onBlur={() => onPreview?.("")}
+                onPointerEnter={(event) => { if (!blocked) onPreview?.(candidate.url); if (!blocked && !current) event.currentTarget.style.background = "rgba(255,255,255,.045)" }}
+                onPointerLeave={(event) => { onPreview?.(""); if (!current) event.currentTarget.style.background = "transparent" }}
               >
                 <span style={{ width: 5, height: 5, borderRadius: "50%", flex: "0 0 auto", background: current ? (floating ? "#ededed" : "#4ade80") : blocked ? "#3a3a3a" : "#737373" }} />
                 <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
@@ -5810,6 +5817,7 @@ function AnyModel({
   onAlignmentSelect,
   onAlignmentHover,
   repairHover = false,
+  repairPreviewUrl = "",
   onTrimSurfaceClick,
   onTrimSurfaceDoubleClick,
   onTrimSurfaceMove,
@@ -5827,6 +5835,7 @@ function AnyModel({
   const comparisonBlendPosition = useRef(0)
   const reducedMotion = useRef(false)
   const repairFoilUniforms = useRef({ amount: { value: 0 }, time: { value: 0 } })
+  const repairPointerHover = useRef(false)
   const repairHoverTarget = useRef(false)
   const repairHoverPosition = useRef(0)
   const repairHoverMaterials = useRef([])
@@ -6167,11 +6176,18 @@ function AnyModel({
   }
 
   useEffect(() => {
+    if (!repairHover) return
+    if (repairPreviewUrl) repairPointerHover.current = false
+    setAlignmentHoverVisual(!!onAlignmentSelect && visible && (repairPreviewUrl ? repairPreviewUrl === url : repairPointerHover.current))
+  }, [repairPreviewUrl, repairHover, object3D, onAlignmentSelect, visible, url])
+
+  useEffect(() => {
     if (!onAlignmentSelect) setAlignmentHoverVisual(false)
     return () => setAlignmentHoverVisual(false)
   }, [object3D, onAlignmentSelect])
 
   useEffect(() => () => {
+    repairPointerHover.current = false
     repairHoverTarget.current = false
     repairHoverPosition.current = 0
     for (const { material, color, emissive, intensity, roughness, metalness } of repairHoverMaterials.current) {
@@ -6208,6 +6224,7 @@ function AnyModel({
       } : undefined}
       onPointerOver={onAlignmentSelect ? (e) => {
         e.stopPropagation()
+        if (repairHover) repairPointerHover.current = true
         setAlignmentHoverVisual(true)
         onAlignmentHover?.(url, true)
       } : undefined}
@@ -6232,7 +6249,8 @@ function AnyModel({
       } : undefined}
       onPointerOut={(analysisMode && onHoverDist) || onAlignmentSelect || onTrimSurfaceMove || onTrimSurfaceOut || onRepairSurfaceMove || onRepairSurfaceOut || onRepairHoleMove || onRepairHoleOut ? () => {
         if (onAlignmentSelect) {
-          setAlignmentHoverVisual(false)
+          repairPointerHover.current = false
+          setAlignmentHoverVisual(repairHover && repairPreviewUrl === url)
           onAlignmentHover?.(url, false)
         }
         if (analysisMode && onHoverDist) onHoverDist(null)
@@ -12531,6 +12549,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [repairVariant, setRepairVariant] = useState("auto") // auto | manual
   const [repairStage, setRepairStage] = useState("model") // model | detect | paint | preview | result
   const [repairSelection, setRepairSelection] = useState("")
+  const [repairMenuHoveredUrl, setRepairMenuHoveredUrl] = useState("")
   const [repairContext, setRepairContext] = useState(null)
   const [repairAnalysisComplete, setRepairAnalysisComplete] = useState(false)
   const [repairHoles, setRepairHoles] = useState([])
@@ -14465,6 +14484,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
 
   const clearRepairWorkingState = useCallback(() => {
+    setRepairMenuHoveredUrl("")
     setRepairAnalysisComplete(false)
     setRepairStage("model")
     setRepairSelection("")
@@ -17590,6 +17610,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [dicomLayoutActive])
 
   const analysisEligibleFiles = files.filter((file) => ["stl", "ply", "obj"].includes(inferExt(file.rawName || file.name || file.url)))
+  const repairVisibleFiles = analysisEligibleFiles.filter(file => {
+    const index = files.indexOf(file)
+    return visibles[index] !== false && (opacities[index] ?? 1) > 0
+  })
 
   const sidebar = (
     <div className="sidebar" style={{
@@ -18931,7 +18955,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       <div className="artheticRepairTaskSlot" data-busy={repairProgressVisible || undefined}>
       {repairModelPickerPresence.present && (
         <div className="artheticRepairModelPicker" data-exiting={repairModelPickerPresence.exiting || undefined} inert={repairModelPickerPresence.exiting ? "" : undefined} aria-hidden={repairModelPickerPresence.exiting || undefined} style={{ width: "min(540px, 100%)", margin: "0 auto" }}>
-          <AlignmentModelDropdown badge="R" value={repairSelection || ""} files={analysisEligibleFiles} otherValue="" onChange={selectRepairModel} />
+          <AlignmentModelDropdown badge="R" value={repairSelection || ""} files={repairVisibleFiles} otherValue="" onChange={selectRepairModel} onPreview={setRepairMenuHoveredUrl} />
         </div>
       )}
       {repairProgressVisible && (
@@ -19854,7 +19878,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           tools={[
             { id: "zarovnani", label: "Zarovnání", description: "Zarovnat dva modely pomocí bodů a Best Fit.", disabled: analysisEligibleFiles.length < 2, onClick: openAlignmentMode },
             { id: "orez", label: "Ořez", description: "Odstranit část skenu křivkou po povrchu.", disabled: analysisEligibleFiles.length < 1, onClick: openTrimMode },
-            { id: "oprava-site", label: "Oprava sítě", description: "Vyhledat a uzavřít otvory ve skenu.", disabled: analysisEligibleFiles.length < 1, onClick: openRepairMode },
+            { id: "oprava-site", label: "Oprava sítě", description: "Vyhledat a uzavřít otvory ve skenu.", disabled: repairVisibleFiles.length < 1, onClick: openRepairMode },
             { id: "model-builder", label: "Model Builder", description: "Vytvořit model s bází pro 3D tisk.", onClick: openCadEmbedded },
             { id: "okluze", label: "Okluze", description: "Změřit kontakty a mezery mezi skeny.", disabled: analysisEligibleFiles.length < 2, active: heatmapMenuOpen || showHeatmap, toggle: true, onClick: () => { setHeatmapMenuOpen(previous => !previous); setComparisonMenuOpen(false) } },
             { id: "porovnani", label: "Porovnání", description: "Porovnat povrchové odchylky dvou modelů.", disabled: analysisEligibleFiles.length < 2, active: comparisonMenuOpen || showComparison, toggle: true, onClick: () => { setComparisonMenuOpen(previous => !previous); setHeatmapMenuOpen(false) } },
@@ -20376,10 +20400,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                   ? selectAlignmentModelFromScene
                   : trimMode && trimStage === "model" && !trimBusy
                     ? selectTrimModel
-                    : repairMode && repairStage === "model" && !repairBusy
+                    : repairMode && repairStage === "model" && !repairBusy && visibles[i] !== false && (opacities[i] ?? 1) > 0
                       ? selectRepairModel
                       : null}
                 repairHover={repairMode}
+                repairPreviewUrl={repairMode && repairStage === "model" && !repairBusy ? repairMenuHoveredUrl : ""}
                 onAlignmentHover={alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy
                   ? handleAlignmentSceneHover
                   : null}
