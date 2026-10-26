@@ -47,7 +47,8 @@ import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, SAH } from "t
 import { Unzip, UnzipInflate } from "fflate"
 import * as dicomParser from "dicom-parser"
 import { DEFAULTS as BUILDER_DEFAULTS } from "./model-builder/defaults.mjs"
-import { prepareRepairVertices } from "./model-builder/mesh-preflight.mjs"
+import { runStepsAsync } from "./model-builder/cooperative-work.mjs"
+import { prepareRepairVertices, prepareRepairVerticesAsync } from "./model-builder/mesh-preflight.mjs"
 import { orientRepairPatch } from "./model-builder/repair-orientation.mjs"
 import { predictEdgePatch, smoothScanBorder, paintedEdgeSelection } from "./model-builder/edge-edit.mjs"
 import { fairArtifact, applySurfacePositions } from "./model-builder/surface-edit.mjs"
@@ -298,6 +299,12 @@ const repairWaitForBusyPaint = () => new Promise((resolve) => {
 })
 
 function buildTrimMeshContext(sourceObject) {
+  const steps = buildTrimMeshContextSteps(sourceObject)
+  let result = steps.next()
+  while (!result.done) result = steps.next()
+  return result.value
+}
+function* buildTrimMeshContextSteps(sourceObject) {
   if (!sourceObject) throw new Error("Model není připravený pro Ořez.")
   sourceObject.updateMatrixWorld(true)
   const sourceInverse = sourceObject.matrixWorld.clone().invert()
@@ -328,8 +335,9 @@ function buildTrimMeshContext(sourceObject) {
     else edgeTriangles.set(key, [triIndex])
   }
 
-  sourceObject.traverse((child) => {
-    if (!child?.isMesh || !child.geometry?.getAttribute?.("position")) return
+  const children = []
+  sourceObject.traverse(child => { if (child?.isMesh && child.geometry?.getAttribute?.("position")) children.push(child) })
+  for (const child of children) {
     child.updateMatrixWorld(true)
     const geometry = child.geometry
     const position = geometry.getAttribute("position")
@@ -378,6 +386,7 @@ function buildTrimMeshContext(sourceObject) {
     }
 
     for (let faceIndex = 0; faceIndex < faceCount; faceIndex++) {
+      if (faceIndex % 128 === 0) yield
       const offset = faceIndex * 3
       const ia = index ? index.getX(offset) : offset
       const ib = index ? index.getX(offset + 1) : offset + 1
@@ -404,13 +413,16 @@ function buildTrimMeshContext(sourceObject) {
       registerEdge(nodeIds[1], nodeIds[2], triIndex)
       registerEdge(nodeIds[2], nodeIds[0], triIndex)
     }
-  })
+  }
 
   if (!triangles.length || !nodes.length) throw new Error("Model neobsahuje použitelnou triangulaci pro Ořez.")
 
-  const triangleNeighbors = Array.from({ length: triangles.length }, () => [])
+  const triangleNeighbors = []
+  for (let i = 0; i < triangles.length; i++) { if (i % 512 === 0) yield; triangleNeighbors.push([]) }
   const sharedEdgeByPair = new Map()
+  let edgeCounter = 0
   for (const [edgeKey, list] of edgeTriangles) {
+    if (edgeCounter++ % 256 === 0) yield
     if (!Array.isArray(list) || list.length < 2) continue
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
@@ -1700,6 +1712,12 @@ function repairMakeBiharmonicDisk(boundary, guideStrength = 0.62) {
 }
 
 function findRepairBoundaryLoops(context) {
+  const steps = findRepairBoundaryLoopSteps(context)
+  let result = steps.next()
+  while (!result.done) result = steps.next()
+  return result.value
+}
+function* findRepairBoundaryLoopSteps(context) {
   if (!context) return []
   const boundaryEdges = []
   const adjacency = new Map()
@@ -1709,11 +1727,27 @@ function findRepairBoundaryLoops(context) {
     list.push({ node: b, edge })
     adjacency.set(a, list)
   }
+  let edgeCounter = 0
+  for (const [edgeKey, list] of context.edgeTriangles) {
+    if (edgeCounter++ % 512 === 0) yield
+    if (!Array.isArray(list) || list.length !== 1) continue
+    const parts = edgeKey.split(":").map(Number)
+    if (parts.length !== 2) continue
+    const edge = { key: edgeKey, a: parts[0], b: parts[1], triangleIndex: list[0] }
+    boundaryEdges.push(edge)
+    addAdj(edge.a, edge.b, edge)
+    addAdj(edge.b, edge.a, edge)
+  }
+  if (!boundaryEdges.length) return []
+  const boundaryNodes = new Set(adjacency.keys())
   for (let triIndex = 0; triIndex < context.triangles.length; triIndex++) {
+    if (triIndex % 256 === 0) yield
     const triangle = context.triangles[triIndex]
+    if (!triangle.nodeIds.some(id => boundaryNodes.has(id))) continue
     const pa = trimVec(triangle.corners[0].sourcePos), pb = trimVec(triangle.corners[1].sourcePos), pc = trimVec(triangle.corners[2].sourcePos)
     const faceNormal = pb.clone().sub(pa).cross(pc.clone().sub(pa)).normalize()
     triangle.corners.forEach((corner) => {
+      if (!boundaryNodes.has(corner.nodeId)) return
       const list = nodeSamples.get(corner.nodeId) || []
       list.push({
         normal: corner.sourceNormal ? trimVec(corner.sourceNormal) : faceNormal.clone(),
@@ -1723,15 +1757,6 @@ function findRepairBoundaryLoops(context) {
       })
       nodeSamples.set(corner.nodeId, list)
     })
-  }
-  for (const [edgeKey, list] of context.edgeTriangles) {
-    if (!Array.isArray(list) || list.length !== 1) continue
-    const parts = edgeKey.split(":").map(Number)
-    if (parts.length !== 2) continue
-    const edge = { key: edgeKey, a: parts[0], b: parts[1], triangleIndex: list[0] }
-    boundaryEdges.push(edge)
-    addAdj(edge.a, edge.b, edge)
-    addAdj(edge.b, edge.a, edge)
   }
   const visited = new Set()
   const loops = []
@@ -1758,12 +1783,15 @@ function findRepairBoundaryLoops(context) {
     }
   }
 
+  let workCounter = 0
   for (const seed of boundaryEdges) {
+    if (workCounter++ % 128 === 0) yield
     if (visited.has(seed.key)) continue
     const componentEdges = []
     const stack = [seed]
     visited.add(seed.key)
     while (stack.length) {
+      if (workCounter++ % 256 === 0) yield
       const edge = stack.pop()
       componentEdges.push(edge)
       for (const nodeId of [edge.a, edge.b]) {
@@ -1791,6 +1819,7 @@ function findRepairBoundaryLoops(context) {
     let current = start
     let guard = 0
     while (guard++ < componentEdges.length + 4) {
+      if (guard % 256 === 0) yield
       const candidates = (adjacency.get(current) || []).filter((entry) => edgeMap.has(entry.edge.key) && entry.node !== previous)
       if (!candidates.length) break
       let next = candidates[0]
@@ -12519,6 +12548,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [repairVertexReport, setRepairVertexReport] = useState("")
   const [repairProgressVisible, setRepairProgressVisible] = useState(false)
   const [repairProgressLeaving, setRepairProgressLeaving] = useState(false)
+  const repairModelPickerPresence = useAnimatedPresence(repairMode && repairStage === "model" && !repairProgressVisible, 200)
   const [repairProgressPercent, setRepairProgressPercent] = useState(0)
   const [repairProgressLabel, setRepairProgressLabel] = useState("")
   const [repairReadyActionLeaving, setRepairReadyActionLeaving] = useState(false)
@@ -14534,7 +14564,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     try {
       await repairWaitForBusyPaint()
       updateRepairProgress("Kontroluji a slučuji blízké vrcholy · 0,005 mm", 14)
-      const preflight = skipWeld ? { stats: {}, backup: [] } : prepareRepairVertices(object)
+      const preflight = skipWeld ? { stats: {}, backup: [] } : await prepareRepairVerticesAsync(object)
       if (preflight.backup.length) {
         const stack = repairHistoryByUrlRef.current[url] || []
         repairHistoryByUrlRef.current[url] = [...stack, { backup: preflight.backup, kind: "vertices", holeIds: [], patchCount: 0, createdAt: Date.now() }]
@@ -14547,11 +14577,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         : "Kontrola vrcholů: bez rozpojených švů v toleranci 0,005 mm.")
       await repairWaitForBusyPaint()
       updateRepairProgress("Analyzuji model · připravuji topologii", 28)
-      const context = buildTrimMeshContext(object)
+      const context = await runStepsAsync(buildTrimMeshContextSteps(object))
 
       updateRepairProgress("Analyzuji model · hledám otevřené boundary", 58)
       await repairWaitForBusyPaint()
-      const rawHoles = findRepairBoundaryLoops(context)
+      const rawHoles = await runStepsAsync(findRepairBoundaryLoopSteps(context))
 
       updateRepairProgress("Analyzuji model · klasifikuji nalezené otvory", 86)
       // Ořez v Model Builderu ponechává hlavní otevřený obvod pro napojení
@@ -18847,6 +18877,13 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         .artheticRepairReadyParticle:nth-child(5) {
           width:2px; height:2px; animation-delay:-1.82s; animation-duration:3.25s; opacity:.42;
         }
+        .artheticRepairTaskSlot { display:grid; grid-template-columns:minmax(0,1fr); align-items:center; }
+        .artheticRepairTaskSlot > * { grid-area:1 / 1; min-width:0; }
+        .artheticRepairModelPicker { animation:artheticRepairPickerIn .20s ease-out both; }
+        .artheticRepairModelPicker[data-exiting] { animation:artheticRepairPickerOut .20s ease-in both; pointer-events:none; }
+        @keyframes artheticRepairPickerIn { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:none; } }
+        @keyframes artheticRepairPickerOut { from { opacity:1; transform:none; } to { opacity:0; transform:translateY(-3px); } }
+        @media(prefers-reduced-motion:reduce) { .artheticRepairModelPicker,.artheticRepairModelPicker[data-exiting] { animation:none; } }
         .artheticRepairSideActions {
           position:absolute; top:10px; left:calc(50% + 420px); z-index:74; width:158px;
           box-sizing:border-box; padding:8px; border-radius:13px;
@@ -18868,8 +18905,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             {[
               ["model", "Model"], ["work", "Analýza"], ["preview", "Výběr"], ["result", "Výsledek"],
             ].map(([key, label], index) => {
-              const active = key === "model" ? repairStage === "model" : key === "work" ? ["detect","paint"].includes(repairStage) && !repairCleanResult : key === "preview" ? repairStage === "preview" && !repairCleanResult : repairStage === "result" || repairCleanResult
-              const done = key === "model" ? !!repairSelection : key === "work" ? repairAnalysisComplete : key === "preview" ? (repairStage === "preview" || repairStage === "result") : repairStage === "result" || repairCleanResult
+              const active = key === "model" ? repairStage === "model" && !repairBusy : key === "work" ? (repairBusy && repairStage === "model") || (["detect","paint"].includes(repairStage) && !repairCleanResult) : key === "preview" ? repairStage === "preview" && !repairCleanResult : repairStage === "result" || repairCleanResult
+              const done = key === "model" ? !!repairSelection || repairBusy : key === "work" ? repairAnalysisComplete : key === "preview" ? (repairStage === "preview" || repairStage === "result") : repairStage === "result" || repairCleanResult
               return <React.Fragment key={key}>
                 <RepairStep active={active} done={done}>{label}</RepairStep>
                 {index < 3 && <div style={{ width: 12, height: 1, background: "rgba(255,255,255,.07)" }} />}
@@ -18882,12 +18919,33 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
       <div style={{ height: 1, margin: "10px 0", background: "rgba(255,255,255,.065)" }} />
 
-      {repairStage === "model" && (
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(220px,1fr) auto", gap: 10, alignItems: "center" }}>
+      <div className="artheticRepairTaskSlot" data-busy={repairProgressVisible || undefined}>
+      {repairModelPickerPresence.present && (
+        <div className="artheticRepairModelPicker" data-exiting={repairModelPickerPresence.exiting || undefined} inert={repairModelPickerPresence.exiting ? "" : undefined} aria-hidden={repairModelPickerPresence.exiting || undefined} style={{ display: "grid", gridTemplateColumns: "minmax(220px,1fr) auto", gap: 10, alignItems: "center" }}>
           <AlignmentModelDropdown badge="R" value={repairSelection || ""} files={analysisEligibleFiles} otherValue="" onChange={selectRepairModel} />
           <span style={{ color: "#777", fontSize: 9.2 }}>Vyberte v menu nebo klikněte přímo na model ve scéně.</span>
         </div>
       )}
+      {repairProgressVisible && (
+        <div
+          className={`artheticRepairProgressPanel${repairProgressLeaving ? " isLeaving" : ""}`}
+          style={{ marginTop: 0, padding: "8px 9px 9px", borderRadius: 10, background: "rgba(255,255,255,.026)", border: "1px solid rgba(255,255,255,.065)" }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span className="artheticRepairSpinner" aria-hidden="true" />
+            <span style={{ minWidth: 0, flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#d1d1d1", fontSize: 8.9, fontWeight: 560 }}>
+              {repairProgressLabel || "Pracuji…"}
+            </span>
+            <span style={{ flex: "0 0 auto", minWidth: 31, textAlign: "right", color: "#f4f4f5", fontSize: 8.9, fontVariantNumeric: "tabular-nums", fontWeight: 760 }}>
+              {Math.round(repairProgressPercent)} %
+            </span>
+          </div>
+          <div style={{ marginTop: 7, height: 2, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.055)" }}>
+            <div className="artheticRepairProgressFill" style={{ width: `${Math.max(1.5, repairProgressPercent)}%` }} />
+          </div>
+        </div>
+      )}
+      </div>
 
       {repairVariant === "auto" && repairStage !== "model" && repairStage !== "result" && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
@@ -18997,25 +19055,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         </div>
       )}
 
-      {repairProgressVisible && (
-        <div
-          className={`artheticRepairProgressPanel${repairProgressLeaving ? " isLeaving" : ""}`}
-          style={{ marginTop: 9, padding: "8px 9px 9px", borderRadius: 10, background: "rgba(255,255,255,.026)", border: "1px solid rgba(255,255,255,.065)" }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span className="artheticRepairSpinner" aria-hidden="true" />
-            <span style={{ minWidth: 0, flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#d1d1d1", fontSize: 8.9, fontWeight: 560 }}>
-              {repairProgressLabel || "Pracuji…"}
-            </span>
-            <span style={{ flex: "0 0 auto", minWidth: 31, textAlign: "right", color: "#f4f4f5", fontSize: 8.9, fontVariantNumeric: "tabular-nums", fontWeight: 760 }}>
-              {Math.round(repairProgressPercent)} %
-            </span>
-          </div>
-          <div style={{ marginTop: 7, height: 2, borderRadius: 999, overflow: "hidden", background: "rgba(255,255,255,.055)" }}>
-            <div className="artheticRepairProgressFill" style={{ width: `${Math.max(1.5, repairProgressPercent)}%` }} />
-          </div>
-        </div>
-      )}
+
 
       {!repairProgressVisible && repairAnalysisComplete && <RepairStatus clear={repairCleanResult} verticesChecked={repairVertexReport.startsWith("Kontrola vrcholů:")} report={repairVertexReport} />}
       {!repairProgressVisible && repairMessage && /nepodař|nenaš|potřeba|není načten|selhal|chyba/i.test(repairMessage) && (
