@@ -23,6 +23,7 @@ import { autoSmoothGeometry } from "./viewer/model-preparation.mjs"
 import { loadPreparedSceneModel } from "./viewer/model-loading.js"
 import "./SceneLoader.css"
 import SliceDrawController from "./SliceDrawController"
+import { createDicomPreparationTracker } from "./viewer/dicom-preparation.mjs"
 import { placeDrawnSlice, sliceSourceChanged, sliceSurfaceFit } from "./viewer/slice-drawing.mjs"
 import SliceEmptyState from "./SliceEmptyState"
 import { DICOM_VERTEX_SHADER, DICOM_FRAGMENT_SHADER } from "./viewer/dicom-shaders.mjs"
@@ -11713,6 +11714,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setDicomSurfaceStatus(status)
     if (status === "ready") setDicomSurfaceReadyVolume(dicomVolume)
   }, [dicomVolume])
+  const dicomPreparationTracker = useRef(null)
+  if (!dicomPreparationTracker.current) dicomPreparationTracker.current = createDicomPreparationTracker({ restoreInitial: !!getParam("m") })
   const pendingDicomPreparationRef = useRef(null)
   useEffect(() => {
     setDicomConversionDraft(null)
@@ -11732,10 +11735,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const dicomAbortRef = useRef(null)
   const appliedDicomSourceRef = useRef(null)
 
-  const applyDicomSource = useCallback((source) => {
+  const applyDicomSource = useCallback((source, { restored = false } = {}) => {
     const changed = sliceSourceChanged(appliedDicomSourceRef.current, source)
     appliedDicomSourceRef.current = source?.u ? source : null
-    if (changed) pendingDicomPreparationRef.current = source?.u && source.prepareSurface !== false ? source.u : null
+    const prepare = dicomPreparationTracker.current.receive(source, { restored })
+    if (changed || restored || source?.prepareSurface === false || source?.settings?.surfacePrepared === true) pendingDicomPreparationRef.current = prepare ? source.u : null
     if (!source?.u && !changed) return
     if (!source?.u) {
       dicomAbortRef.current?.abort()
@@ -16708,7 +16712,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf, gh: x.gh !== undefined ? !!x.gh : undefined
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, m?.lights?.headlight, m?.camera, m?.viewer_state)
-          applyDicomSource(m?.dicom ? { ...m.dicom, prepareSurface: false } : null)
+          applyDicomSource(m?.dicom ? { ...m.dicom, prepareSurface: false } : null, { restored: true })
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -16725,7 +16729,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             vc: x.vc !== undefined ? !!x.vc : undefined, km: !!x.km, wf: !!x.wf, gh: x.gh !== undefined ? !!x.gh : undefined
           }))
           applyFiles(Fs, m?.title, m?.logo?.url, null, m?.camera, m?.viewer_state)
-          applyDicomSource(m?.dicom ? { ...m.dicom, prepareSurface: false } : null)
+          applyDicomSource(m?.dicom ? { ...m.dicom, prepareSurface: false } : null, { restored: true })
           if (typeof m?.lights?.intensity === "number") setSceneIntensity(clamp01(m.lights.intensity))
           if (Array.isArray(m?.photos)) setPhotos(m.photos.map((p) => ({ u: p.u, n: p.n })))
           return
@@ -16784,7 +16788,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       }
 
       if (typeof p.title === "string" || p.title === null) setTitle(p.title ?? null)
-      if (Object.prototype.hasOwnProperty.call(p, "dicom")) applyDicomSource(p.dicom)
+      if (Object.prototype.hasOwnProperty.call(p, "dicom")) applyDicomSource(p.dicom, { restored: !!p.viewer_state })
       if (p.viewer_state) {
         restoredViewerStateRef.current = null
         setPendingViewerState(p.viewer_state)
@@ -19590,7 +19594,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       {canConvertDicom && dicomConversionDraft && dicomVolume && <DicomConversionDialog volume={dicomVolume} draft={dicomConversionDraft}
         onChange={setDicomConversionDraft} onClose={() => setDicomConversionDraft(null)}
         onApply={() => {
-          setDicomSettings(previous => ({ ...previous, ...dicomConversionDraft, viewMode: "solid", visible: true }))
+          dicomPreparationTracker.current.confirm(dicomSource)
+          setDicomSettings(previous => ({ ...previous, ...dicomConversionDraft, surfacePrepared: true, viewMode: "solid", visible: true }))
           window.parent.postMessage({ type: "ARTHETIC_DICOM_CONVERTED", settings: dicomConversionDraft }, "*")
           setDicomConversionDraft(null)
         }} />}
