@@ -4,8 +4,9 @@ import { captureModelFade, applyModelFade, restoreModelFade } from "./viewer/mod
 import repairToolbarStyles from "./RepairToolbar.module.css"
 import ViewerBackButton from "./ViewerBackButton"
 import RepairStatus, { RepairStep } from "./RepairStatus"
+import { ensureAnalysisPickingTree } from "./viewer/analysis-picking.mjs"
 import { setRepairFoilMaterial } from "./viewer/repair-foil.mjs"
-import { visibleAnalysisModels, visibleAnalysisSelection } from "./viewer/visible-analysis-models.mjs"
+import { visibleAnalysisModels, visibleAnalysisSelection, analysisCalculationAvailability } from "./viewer/visible-analysis-models.mjs"
 
 import { inferSceneOrientation, fitOrientedBounds } from "./viewer/scan-orientation.mjs"
 import { cameraChanged } from "./viewer/camera-sync.mjs"
@@ -5752,7 +5753,7 @@ function AnyModel({
   }, [object3D, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, ghost, analysisMode, renderOrder])
 
   useEffect(() => {
-    if (!object3D || !onAlignmentSelect) return
+    if (!object3D || !(onAlignmentSelect || analysisMode)) return
     let cancelled = false
     const meshes = []
     object3D.traverse((child) => {
@@ -5763,11 +5764,11 @@ function AnyModel({
         if (cancelled) return
         await alignmentYield()
         if (cancelled) return
-        try { if (!meshes[i].geometry.boundsTree) meshes[i].geometry.computeBoundsTree() } catch {}
+        try { await ensureAnalysisPickingTree(meshes[i].geometry) } catch (error) { console.warn("Analysis picking preparation:", error.message) }
       }
     })()
     return () => { cancelled = true }
-  }, [object3D, !!onAlignmentSelect])
+  }, [object3D, !!onAlignmentSelect, analysisMode])
 
   useEffect(() => {
     if (!object3D || !repairHover) return
@@ -15929,7 +15930,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }
 
   const handleApplyHeatmap = async () => {
-    if (heatmapSelection.length !== 2 || visibleAnalysisSelection(heatmapSelection, analysisVisibleFiles, {computed: hasComputedHeatmap, sceneFiles: analysisEligibleFiles}).length !== 2) return
+    if (heatmapSelection.length !== 2 || visibleAnalysisSelection(heatmapSelection, analysisVisibleFiles).length !== 2) return
     setHasComputedHeatmap(false)
     setShowHeatmap(false)
     const analysisStartedAt = performance.now()
@@ -15968,7 +15969,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }
 
   const handleApplyComparison = async () => {
-    if (comparisonSelection.length !== 2 || visibleAnalysisSelection(comparisonSelection, analysisVisibleFiles, {computed: hasComputedComparison, sceneFiles: analysisEligibleFiles}).length !== 2) return
+    if (comparisonSelection.length !== 2 || visibleAnalysisSelection(comparisonSelection, analysisVisibleFiles).length !== 2) return
     // Explicitní kliknutí na Vypočítat znamená vždy čerstvý výpočet pro aktuální
     // polohu modelů. Starý snapshot se před startem zahodí.
     const analysisStartedAt = performance.now()
@@ -17469,8 +17470,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     </div>
   )
 
-  const occlusionModelsReady = heatmapSelection.length === 2 && visibleAnalysisSelection(heatmapSelection, analysisVisibleFiles, {computed: hasComputedHeatmap, sceneFiles: analysisEligibleFiles}).length === 2
-  const comparisonModelsReady = comparisonSelection.length === 2 && visibleAnalysisSelection(comparisonSelection, analysisVisibleFiles, {computed: hasComputedComparison, sceneFiles: analysisEligibleFiles}).length === 2
+  const occlusionCalculation = analysisCalculationAvailability(heatmapSelection, analysisVisibleFiles)
+  const comparisonCalculation = analysisCalculationAvailability(comparisonSelection, analysisVisibleFiles)
+  const occlusionModelsReady = occlusionCalculation.ready
+  const comparisonModelsReady = comparisonCalculation.ready
   const comparisonAnalyzedUrl = comparisonDirection === "B_TO_A" ? comparisonSelection[1] : comparisonSelection[0]
   const comparisonReferenceUrl = comparisonDirection === "B_TO_A" ? comparisonSelection[0] : comparisonSelection[1]
 
@@ -19631,7 +19634,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           setHeatmapSelection(([a, b]) => [b, a]); setHasComputedHeatmap(false); setShowHeatmap(false); setPinnedNotes([])
           if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
         }}
-        ready={occlusionModelsReady} calculating={isCalculatingHeatmap} computed={hasComputedHeatmap} onCalculate={handleApplyHeatmap}
+        ready={occlusionModelsReady} disabledReason={occlusionCalculation.reason} calculating={isCalculatingHeatmap} computed={hasComputedHeatmap} onCalculate={handleApplyHeatmap}
         visible={showHeatmap} onVisibleChange={checked => { setShowHeatmap(checked); if (checked) setShowComparison(false) }}
       />}
       {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && comparisonPanelPresence.present && <ComparisonControls exiting={comparisonPanelPresence.exiting}
@@ -19645,7 +19648,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
         }}
         tolerance={comparisonTolerance} onToleranceChange={value => { setComparisonTolerance(value); setHasComputedComparison(false); setShowComparison(false); setComparisonStats(null); setComparisonSnapshot(null) }}
-        ready={comparisonModelsReady} calculating={isCalculatingComparison} computed={hasComputedComparison} onCalculate={handleApplyComparison}
+        ready={comparisonModelsReady} disabledReason={comparisonCalculation.reason} calculating={isCalculatingComparison} computed={hasComputedComparison} onCalculate={handleApplyComparison}
         stats={comparisonStats} visible={showComparison} onVisibleChange={checked => { setShowComparison(checked); if (checked) setShowHeatmap(false) }}
       />}
       {!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && analysisUiStyles}
@@ -20078,7 +20081,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           <directionalLight position={[0,-5,-5]} intensity={.7 * sceneIntensity * sceneLighting.brightness * (.65+sceneLighting.softness)} />
         </group>
         <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity * sceneLighting.brightness * (1.35-sceneLighting.softness)} />
-        <AlignmentFastRaycast enabled={(cadStandalone && cadStage === "orient") || (alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy) || (trimMode && !!trimSelection) || (repairMode && !!repairSelection)} />
+        <AlignmentFastRaycast enabled={(cadStandalone && cadStage === "orient") || (alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy) || (trimMode && !!trimSelection) || (repairMode && !!repairSelection) || occlusionVisualPresence.present || comparisonVisualPresence.present} />
 
         <AutoRotateScene enabled={!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && !sliceAwaiting && !sliceDrawing && isAutoRotating} target={cameraTarget} speedFactor={spinSpeed} />
 

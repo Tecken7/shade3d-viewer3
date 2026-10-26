@@ -1,9 +1,9 @@
 "use client"
-import React, { useEffect, useRef, useState } from "react"
+import React, { useEffect, useId, useRef, useState } from "react"
 import lighting from "./LightingControls.module.css"
 import styles from "./ComparisonControls.module.css"
 
-export default function ComparisonControls({ mode = "comparison", exiting = false, expanded, mobile, onClose, modelA, modelB, onSwap, eyeIcon, tolerance, onToleranceChange, ready, calculating, computed, onCalculate, stats, visible, onVisibleChange }) {
+export default function ComparisonControls({ mode = "comparison", exiting = false, expanded, mobile, onClose, modelA, modelB, onSwap, eyeIcon, tolerance, onToleranceChange, ready, disabledReason, calculating, computed, onCalculate, stats, visible, onVisibleChange }) {
   const occlusion = mode === "occlusion"
   const title = occlusion ? "Okluze" : "Porovnání"
   const mapLabel = occlusion ? "mapu okluze" : "mapu odchylek"
@@ -11,6 +11,8 @@ export default function ComparisonControls({ mode = "comparison", exiting = fals
   const close = useRef(null)
   const [swapping, setSwapping] = useState(false)
   const swapTimer = useRef(null)
+  const disabledHintId = useId()
+  const unavailable = !ready && !calculating
   useEffect(() => { close.current?.focus(); return () => clearTimeout(swapTimer.current) }, [])
   const swap = () => {
     if (!ready || calculating || swapping) return
@@ -28,7 +30,10 @@ export default function ComparisonControls({ mode = "comparison", exiting = fals
       </button>
     </div>
     {!occlusion && <label className={`${lighting.row} ${styles.tolerance}`}><span>Tolerance shody <b>{tolerance.toFixed(2)} mm</b></span><input aria-label="Tolerance shody" type="range" min={.05} max={1} step={.01} value={tolerance} disabled={calculating} onChange={event => onToleranceChange(Number(event.target.value))} /></label>}
-    <button className={styles.calculate} type="button" disabled={!ready || calculating} onClick={onCalculate}>{calculating ? "Počítám…" : occlusion ? (computed ? "Přepočítat okluzi" : "Vypočítat okluzi") : (computed ? "Přepočítat porovnání" : "Vypočítat porovnání")}</button>
+    <div className={styles.calculation} data-unavailable={unavailable || undefined} tabIndex={unavailable ? 0 : undefined} aria-describedby={unavailable ? disabledHintId : undefined}>
+      <button className={styles.calculate} type="button" disabled={!ready || calculating} aria-describedby={unavailable ? disabledHintId : undefined} onClick={onCalculate}>{calculating ? "Počítám…" : occlusion ? (computed ? "Přepočítat okluzi" : "Vypočítat okluzi") : (computed ? "Přepočítat porovnání" : "Vypočítat porovnání")}</button>
+      {unavailable && <span className={styles.disabledHint} role="tooltip" id={disabledHintId}>{disabledReason || 'Vyberte dva viditelné modely.'}</span>}
+    </div>
     {computed && (occlusion || stats) && <div className={styles.result}>
       <div className={styles.resultHeader}><span>Výpočet dokončen</span><span aria-hidden="true">✓</span></div>
       <div className={styles.visibility}><span>{occlusion ? "Mapa okluze" : "Mapa odchylek"}</span><button type="button" className={styles.eye} aria-label={visible ? `Skrýt ${mapLabel}` : `Zobrazit ${mapLabel}`} aria-pressed={visible} onClick={() => onVisibleChange(!visible)} title={visible ? `Skrýt ${mapLabel}` : `Zobrazit ${mapLabel}`}><img src={eyeIcon} width={14} height={14} alt="" /></button></div>

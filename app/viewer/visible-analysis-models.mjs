@@ -11,3 +11,10 @@ export function visibleAnalysisSelection(selection, visibleFiles, {computed = fa
   if (!a || !urls.has(a)) return []
   return b && b !== a && urls.has(b) ? [a, b] : [a]
 }
+
+export function analysisCalculationAvailability(selection, visibleFiles) {
+  const ready = selection.length === 2 && visibleAnalysisSelection(selection, visibleFiles).length === 2
+  return {ready, reason: ready ? '' : visibleFiles.length < 2
+    ? 'Na scéně musí být alespoň dva viditelné modely.'
+    : selection.length === 2 ? 'Oba vybrané modely musí být na scéně viditelné.' : 'Vyberte dva viditelné modely.'}
+}

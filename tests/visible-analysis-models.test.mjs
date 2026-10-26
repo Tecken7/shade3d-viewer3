@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {visibleAnalysisModels, visibleAnalysisSelection} from '../app/viewer/visible-analysis-models.mjs'
+import {visibleAnalysisModels, visibleAnalysisSelection, analysisCalculationAvailability} from '../app/viewer/visible-analysis-models.mjs'
 
 const ext = name => name.split('.').pop().toLowerCase()
 const files = ['ct.zip','upper.obj','hidden.stl','lower.ply','transparent.obj'].map(name => ({name, url: '/'+name}))
@@ -25,4 +25,12 @@ test('a computed map retains a hidden antagonist for viewing, but never a remove
   assert.deepEqual(visibleAnalysisSelection(selection,visible,{computed:true,sceneFiles}),selection)
   assert.deepEqual(visibleAnalysisSelection(selection,visible,{computed:false,sceneFiles}),['/upper.obj'])
   assert.deepEqual(visibleAnalysisSelection(selection,visible,{computed:true,sceneFiles:[files[1]]}),['/upper.obj'])
+  assert.equal(analysisCalculationAvailability(selection,visible).ready,false)
+  assert.match(analysisCalculationAvailability(selection,visible).reason,/alespoň dva viditelné/)
+  assert.equal(analysisCalculationAvailability(selection,sceneFiles).ready,true)
+})
+
+test('a hidden selected reference blocks recalculation even when other visible scans exist',()=>{
+  const state = analysisCalculationAvailability(['/upper.obj','/hidden.stl'],[files[1],files[3]])
+  assert.equal(state.ready,false);assert.match(state.reason,/Oba vybrané modely/)
 })
