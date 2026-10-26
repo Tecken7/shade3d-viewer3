@@ -5776,6 +5776,7 @@ function AnyModel({
   onPinNote,
   onAlignmentSelect,
   onAlignmentHover,
+  repairHover = false,
   onTrimSurfaceClick,
   onTrimSurfaceDoubleClick,
   onTrimSurfaceMove,
@@ -5792,12 +5793,33 @@ function AnyModel({
   const comparisonUniform = useRef({ value: 0 })
   const comparisonBlendPosition = useRef(0)
   const reducedMotion = useRef(false)
+  const repairHoverTarget = useRef(false)
+  const repairHoverPosition = useRef(0)
+  const repairHoverMaterials = useRef([])
+  const repairHoverBlue = useMemo(() => new THREE.Color("#3b82f6"), [])
   useEffect(() => { reducedMotion.current = window.matchMedia("(prefers-reduced-motion: reduce)").matches }, [])
   useFrame((_, delta) => {
     const active = !!analysisMode && analysisVisible
     const blend = advanceComparisonBlend(comparisonBlendPosition.current, active, reducedMotion.current ? 1 : delta)
     comparisonBlendPosition.current = blend.position
     comparisonUniform.current.value = blend.value
+    if (repairHoverMaterials.current.length) {
+      const hover = advanceComparisonBlend(repairHoverPosition.current, repairHoverTarget.current, reducedMotion.current ? 1 : delta, .24)
+      repairHoverPosition.current = hover.position
+      for (const entry of repairHoverMaterials.current) {
+        const { material, color, emissive, intensity } = entry
+        if (color) material.color.copy(color).lerp(repairHoverBlue, hover.value * .22)
+        if (emissive) {
+          material.emissive.copy(emissive).multiplyScalar(intensity).lerp(repairHoverBlue, hover.value * .16)
+          material.emissiveIntensity = 1
+        }
+        if (!repairHoverTarget.current && hover.position === 0) {
+          if (emissive) material.emissive.copy(emissive)
+          material.emissiveIntensity = intensity
+        }
+      }
+      if (!repairHoverTarget.current && hover.position === 0) repairHoverMaterials.current = []
+    }
   })
   const ext = useMemo(() => inferExt(name || url), [name, url])
 
@@ -6054,6 +6076,20 @@ function AnyModel({
   const setAlignmentHoverVisual = (enabled) => {
     if (!object3D) return
     if (enabled && !onAlignmentSelect) return
+    if (repairHover || repairHoverMaterials.current.length) {
+      repairHoverTarget.current = enabled
+      if (enabled && !repairHoverMaterials.current.length) {
+        object3D.traverse(child => {
+          if (!child.isMesh) return
+          const materials = Array.isArray(child.material) ? child.material : [child.material]
+          materials.filter(Boolean).forEach(material => {
+            if (repairHoverMaterials.current.some(entry => entry.material === material)) return
+            repairHoverMaterials.current.push({ material, color: material.color?.clone?.(), emissive: material.emissive?.clone?.(), intensity: material.emissiveIntensity ?? 0 })
+          })
+        })
+      }
+      return
+    }
     object3D.traverse((child) => {
       if (!child.isMesh || !child.material) return
       const materials = Array.isArray(child.material) ? child.material : [child.material]
@@ -6086,6 +6122,17 @@ function AnyModel({
     if (!onAlignmentSelect) setAlignmentHoverVisual(false)
     return () => setAlignmentHoverVisual(false)
   }, [object3D, onAlignmentSelect])
+
+  useEffect(() => () => {
+    repairHoverTarget.current = false
+    repairHoverPosition.current = 0
+    for (const { material, color, emissive, intensity } of repairHoverMaterials.current) {
+      if (color) material.color.copy(color)
+      if (emissive) material.emissive.copy(emissive)
+      material.emissiveIntensity = intensity
+    }
+    repairHoverMaterials.current = []
+  }, [object3D])
 
   if (!object3D) return null
 
@@ -20274,6 +20321,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                     : repairMode && repairStage === "model" && !repairBusy
                       ? selectRepairModel
                       : null}
+                repairHover={repairMode}
                 onAlignmentHover={alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy
                   ? handleAlignmentSceneHover
                   : null}
