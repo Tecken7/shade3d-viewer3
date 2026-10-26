@@ -1,0 +1,32 @@
+.workspace{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:73;width:min(820px,calc(100vw - 288px));box-sizing:border-box;padding:11px 12px;border-radius:15px;background:rgba(11,11,11,.955);border:1px solid #ffffff1a;box-shadow:0 22px 70px #0007;backdrop-filter:blur(22px);color:#f3f3f3;font-family:Inter,ui-sans-serif,system-ui,sans-serif;animation:workspaceIn 240ms ease-out}
+.workspace h2{margin:0;font-size:13px;font-weight:700}
+.steps{display:flex;align-items:center;justify-content:center;gap:5px;margin-top:7px;flex-wrap:wrap}
+.connector{width:12px;height:1px;background:#ffffff12}
+.content{border-top:1px solid #ffffff11;margin-top:9px;padding-top:10px}
+.task{display:grid;align-items:center;min-height:36px}
+.picker,.preparation{grid-area:1/1;transition:opacity 200ms ease,transform 240ms ease}
+.picker{width:min(540px,100%);margin:auto}
+.task[data-busy] .picker{opacity:0;transform:translateY(-5px);pointer-events:none}
+.preparation{display:grid;grid-template-columns:11px 1fr;align-items:center;gap:8px;padding:8px 9px;border:1px solid #ffffff12;border-radius:10px;background:#ffffff06;font-size:10px;opacity:0;transform:translateY(5px);pointer-events:none}
+.task[data-busy] .preparation{opacity:1;transform:translateY(0)}
+.progress{grid-column:1/-1;height:2px;background:#ffffff12;border-radius:10px;overflow:hidden}
+.progress i{display:block;width:35%;height:100%;background:#f2f2f2;animation:progress 1.2s ease-in-out infinite}
+.stage{animation:stageIn 240ms ease-out;text-align:center}
+.stage p,.notice{margin:0;color:#a1a1a1;font-size:10px;line-height:1.6}
+.editActions{display:flex;justify-content:center;gap:6px;flex-wrap:wrap;margin-top:10px}
+.editActions button,.side>button{height:31px;padding:0 10px;border-radius:8px;border:1px solid #ffffff17;background:#ffffff09;color:#c8c8c8;font:650 10px Inter,ui-sans-serif,system-ui,sans-serif;cursor:pointer;transition:background 180ms,border-color 180ms,color 180ms,transform 160ms}
+.editActions button:hover:not(:disabled),.side>button:hover:not(:disabled){background:#ffffff18;border-color:#ffffff35;color:#fff;transform:translateY(-1px)}
+.editActions button:active:not(:disabled),.side>button:active:not(:disabled){transform:scale(.975)}
+.workspace button:focus-visible,.side button:focus-visible{outline:2px solid #eee;outline-offset:3px}
+.editActions button:disabled,.side>button:disabled{opacity:.45;cursor:wait}
+.success{display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border-radius:8px;border:1px solid #ffffff17;background:#ffffff06;font-size:10px;font-weight:650}
+.notice{padding:7px 9px;border:1px solid #ffffff12;border-radius:9px;margin-top:9px;text-align:center}
+.side{position:absolute;top:10px;left:calc(50% + 420px);z-index:74;display:grid;gap:6px;width:158px;box-sizing:border-box;padding:8px;border-radius:13px;border:1px solid #ffffff1a;background:rgba(11,11,11,.955);backdrop-filter:blur(22px);animation:stageIn 240ms ease-out}
+.side>button{height:34px}
+.side :global(button){width:100%;min-width:0}
+@keyframes workspaceIn{from{opacity:0;transform:translate(-50%,-4px) scale(.985)}to{opacity:1;transform:translate(-50%,0) scale(1)}}
+@keyframes stageIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+@keyframes progress{from{transform:translateX(-100%)}to{transform:translateX(390%)}}
+@media(max-width:1150px){.side{top:auto;bottom:10px;left:auto;right:10px}}
+@media(max-width:680px){.workspace{top:72px;width:calc(100vw - 20px)}.steps{gap:3px}.connector{width:5px}}
+@media(prefers-reduced-motion:reduce){.workspace,.stage,.side,.progress i{animation:none}.picker,.preparation,.editActions button,.side>button{transition:none}}

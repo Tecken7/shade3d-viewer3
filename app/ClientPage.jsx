@@ -3,6 +3,7 @@
 import { captureModelFade, applyModelFade, restoreModelFade } from "./viewer/model-fade.mjs"
 import repairToolbarStyles from "./RepairToolbar.module.css"
 import ViewerBackButton from "./ViewerBackButton"
+import TrimControls from "./TrimControls"
 import RepairStatus, { RepairStep } from "./RepairStatus"
 import { ensureAnalysisPickingTree } from "./viewer/analysis-picking.mjs"
 import { setRepairFoilMaterial } from "./viewer/repair-foil.mjs"
@@ -12037,6 +12038,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [trimMode, setTrimMode] = useState(false)
   const [trimStage, setTrimStage] = useState("model") // model | boundary | region | result
   const [trimSelection, setTrimSelection] = useState("")
+  const [trimFocusUrl, setTrimFocusUrl] = useState("")
+  const [trimMenuHoveredUrl, setTrimMenuHoveredUrl] = useState("")
+  const trimFinishPendingRef = useRef(false)
   const [trimContext, setTrimContext] = useState(null)
   // Control point je přesný bod uvnitř face, ne snapnutý vertex. Díky tomu může
   // křivka v10 skutečně protínat jednotlivé trojúhelníky.
@@ -12915,6 +12919,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setTrimMode(false)
     setTrimStage("model")
     setTrimSelection("")
+    setTrimFocusUrl("")
+    setTrimMenuHoveredUrl("")
     setTrimContext(null)
     setTrimControlNodes([])
     setTrimSegments([])
@@ -13216,6 +13222,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const clearTrimWorkingState = useCallback(() => {
     setTrimStage("model")
     setTrimSelection("")
+    setTrimFocusUrl("")
+    setTrimMenuHoveredUrl("")
     setTrimContext(null)
     setTrimControlNodes([])
     setTrimSegments([])
@@ -13257,6 +13265,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setTrimMessage("Model ještě není načtený. Zkuste to za okamžik.")
       return
     }
+    setTrimFocusUrl(url)
+    setTrimMenuHoveredUrl("")
     setTrimBusy(true)
     setTrimMessage("Připravuji povrchovou síť pro Ořez…")
     window.setTimeout(() => {
@@ -13273,6 +13283,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         setTrimStage("boundary")
         setTrimMessage("Klikáním umístěte body hranice. Kuličku můžete kdykoliv přetáhnout po povrchu; první žlutou kuličku dvojklikem uzavřete.")
       } catch (error) {
+        setTrimFocusUrl("")
         console.error("Trim context error:", error)
         setTrimMessage(error?.message || "Povrch modelu se nepodařilo připravit pro Ořez.")
       } finally {
@@ -13581,6 +13592,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setTrimReadyActionLeaving(false)
     setTrimStage("model")
     setTrimSelection("")
+    setTrimFocusUrl("")
+    setTrimMenuHoveredUrl("")
     setTrimMessage("Poslední Ořez byl vrácen. Vyberte model pro další úpravu.")
   }, [trimSelection])
 
@@ -13652,6 +13665,25 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       throw error
     }
   }, [createTrimmedExport, editorCapabilities.canSaveTrimmedToCase])
+
+  const finishTrim = useCallback(async () => {
+    const url = trimSelection
+    if (!url || trimBusy || trimExportBusyUrl || trimFinishPendingRef.current) return
+    trimFinishPendingRef.current = true
+    setTrimMode(false)
+    setTrimFocusUrl("")
+    try {
+      await repairWaitForBusyPaint()
+      if (editorCapabilities.canSaveTrimmedToCase && !trimmedExportsByUrl[url]?.saveRequested) {
+        await saveTrimmedModelToCase(url, { silent: true })
+      }
+      clearTrimWorkingState()
+    } catch (error) {
+      setTrimMode(true)
+      setTrimFocusUrl(url)
+      setTrimMessage(error?.message || "Ořezaný model se nepodařilo připravit k uložení.")
+    } finally { trimFinishPendingRef.current = false }
+  }, [trimSelection, trimBusy, trimExportBusyUrl, editorCapabilities.canSaveTrimmedToCase, trimmedExportsByUrl, saveTrimmedModelToCase, clearTrimWorkingState])
 
   const resetCadBuilder = useCallback(() => {
     if(cadEmbedded&&cadSessionRef.current){restoreTrimBackup(cadSessionRef.current.backup);setModelTransforms(cadSessionRef.current.transforms)}
@@ -18196,271 +18228,17 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   )
 
 
-  const trimSelectedFile = trimSelection ? files.find((file) => file.url === trimSelection) : null
-  const trimStepDone = {
-    model: !!trimSelection,
-    boundary: !!trimClosed,
-    region: trimKeepComponent != null || trimStage === "result",
-    result: trimStage === "result",
-  }
-  const trimShowStatusMessage =
-    trimBusy ||
-    (!!trimMessage &&
-      /nepodař|potřeba|není|nerozdělila|jednoznačně|alespoň|zkuste/i.test(trimMessage))
-
-  const trimWorkspace = trimMode && !cadStandalone && (
-    <div style={{
-      position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)", zIndex: 72,
-      width: "min(760px, calc(100vw - 32px))", boxSizing: "border-box", padding: "11px 12px",
-      borderRadius: 15, background: "rgba(11,11,11,.955)", border: "1px solid rgba(255,255,255,.10)",
-      boxShadow: "0 22px 70px rgba(0,0,0,.46)", backdropFilter: "blur(22px)", WebkitBackdropFilter: "blur(22px)",
-      color: "#f3f3f3", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
-      animation: "artheticAlignMenuIn .24s ease-out both",
-    }}>
-      <style>{`
-        @property --artheticTrimBeamAngle {
-          syntax:"<angle>";
-          inherits:false;
-          initial-value:0deg;
-        }
-        @keyframes artheticTrimReadyBeam {
-          to { --artheticTrimBeamAngle:360deg; }
-        }
-        @keyframes artheticTrimReadyParticle {
-          0%   { offset-distance:0%; opacity:0; transform:scale(.45) translateY(0); }
-          7%   { opacity:.92; transform:scale(1) translateY(-1px); }
-          44%  { opacity:.58; transform:scale(.78) translateY(-2px); }
-          72%  { opacity:.16; transform:scale(.55) translateY(-4px); }
-          100% { offset-distance:100%; opacity:0; transform:scale(.35) translateY(-6px); }
-        }
-        .artheticTrimReadyAction {
-          position:relative;
-          isolation:isolate;
-          overflow:visible;
-          border:1px solid transparent !important;
-          background:transparent !important;
-          box-shadow:none !important;
-          transition:opacity .13s ease-out, transform .16s cubic-bezier(.22,.75,.35,1), filter .14s ease-out;
-        }
-        .artheticTrimReadyAction::before {
-          content:"";
-          position:absolute;
-          inset:-2px;
-          padding:2px;
-          border-radius:12px;
-          pointer-events:none;
-          z-index:0;
-          background:conic-gradient(
-            from var(--artheticTrimBeamAngle),
-            rgba(74,222,128,0) 0deg 286deg,
-            rgba(74,222,128,.05) 301deg,
-            rgba(74,222,128,.42) 316deg,
-            rgba(187,247,208,.96) 328deg,
-            rgba(240,253,244,1) 334deg,
-            rgba(134,239,172,.72) 342deg,
-            rgba(74,222,128,.08) 353deg,
-            rgba(74,222,128,0) 360deg
-          );
-          -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-          -webkit-mask-composite:xor;
-          mask-composite:exclude;
-          filter:drop-shadow(0 0 2px rgba(134,239,172,.75)) drop-shadow(0 0 6px rgba(34,197,94,.35));
-          animation:artheticTrimReadyBeam 1.9s linear infinite;
-        }
-        .artheticTrimReadyAction::after {
-          content:"";
-          position:absolute;
-          inset:1px;
-          border-radius:8px;
-          z-index:1;
-          pointer-events:none;
-          background:rgba(18,42,27,.96);
-          box-shadow:inset 0 0 0 1px rgba(34,197,94,.12);
-        }
-        .artheticTrimReadyAction > * {
-          position:relative;
-          z-index:3;
-        }
-        .artheticTrimReadyAction.isLeaving {
-          opacity:0;
-          transform:translateY(2px) scale(.955);
-          filter:blur(1px);
-          pointer-events:none;
-        }
-        .artheticTrimReadyParticles {
-          position:absolute !important;
-          inset:-7px;
-          z-index:2 !important;
-          pointer-events:none;
-          overflow:visible;
-        }
-        .artheticTrimReadyParticle {
-          position:absolute !important;
-          left:0;
-          top:0;
-          width:3px;
-          height:3px;
-          border-radius:50%;
-          background:rgba(187,247,208,.95);
-          box-shadow:0 0 3px rgba(134,239,172,.9), 0 0 7px rgba(34,197,94,.45);
-          offset-path:inset(7px round 10px);
-          offset-rotate:0deg;
-          opacity:0;
-          animation:artheticTrimReadyParticle 2.35s linear infinite;
-        }
-        .artheticTrimReadyParticle:nth-child(2) {
-          width:2px; height:2px; animation-delay:-.42s; animation-duration:2.7s; opacity:.72;
-        }
-        .artheticTrimReadyParticle:nth-child(3) {
-          width:2.5px; height:2.5px; animation-delay:-.96s; animation-duration:3.05s; opacity:.58;
-        }
-        .artheticTrimReadyParticle:nth-child(4) {
-          width:1.5px; height:1.5px; animation-delay:-1.48s; animation-duration:2.55s; opacity:.5;
-        }
-        .artheticTrimReadyParticle:nth-child(5) {
-          width:2px; height:2px; animation-delay:-1.82s; animation-duration:3.25s; opacity:.42;
-        }
-        .artheticTrimSideActions {
-          position:absolute; top:10px; left:calc(50% + 390px); z-index:74; width:158px;
-          box-sizing:border-box; padding:8px; border-radius:13px;
-          background:rgba(11,11,11,.955); border:1px solid rgba(255,255,255,.10);
-          box-shadow:0 18px 58px rgba(0,0,0,.42); backdrop-filter:blur(22px); -webkit-backdrop-filter:blur(22px);
-          animation:artheticAlignMenuIn .24s ease-out both;
-          font-family:Inter,ui-sans-serif,system-ui,sans-serif;
-        }
-        @media (max-width: 1100px) {
-          .artheticTrimSideActions { top:178px; left:auto; right:10px; }
-        }
-      `}</style>
-
-      <div style={{ minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-          <span style={{ display: "inline-flex", alignItems: "baseline", gap: 0, fontSize: 13 }}><span style={{ fontWeight: 850 }}>ART</span><span style={{ fontWeight: 300 }}>HETIC</span></span>
-          <span style={{ color: "#d7d7d7", fontSize: 13, fontWeight: 340 }}>Ořez</span>
-          {trimSelectedFile && <span style={{ marginLeft: 4, color: "#777", fontSize: 9.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stripExt(trimSelectedFile.rawName || trimSelectedFile.name)}</span>}
-        </div>
-
-        <div style={{ marginTop: 7, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", minWidth: 0 }}>
-            {[
-              ["model", "Model"], ["boundary", "Hranice"], ["region", "Oblast"], ["result", "Výsledek"],
-            ].map(([key, label], index) => {
-              const done = trimStepDone[key]
-              const active = (key === "model" && trimStage === "model") || (key === "boundary" && trimStage === "boundary") || (key === "region" && trimStage === "region") || (key === "result" && trimStage === "result")
-              return <React.Fragment key={key}>
-                <div style={analysisStepChipStyle(active, done)}>{done && <span style={{ color: "#86efac" }}>✓</span>}<span>{label}</span></div>
-                {index < 3 && <div style={{ width: 12, height: 1, background: "rgba(255,255,255,.07)" }} />}
-              </React.Fragment>
-            })}
-          </div>
-
-          {trimStage !== "model" && trimSelectedFile && trimStage !== "result" && (
-            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginLeft: "auto" }}>
-              {trimStage === "boundary" && !trimClosed && trimControlNodes.length > 0 && (
-                <button type="button" onClick={removeLastTrimPoint} style={{ height: 29, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 8.8, fontWeight: 680, cursor: "pointer" }}>Smazat poslední</button>
-              )}
-              {(trimStage === "boundary" || trimStage === "region") && (
-                <button type="button" onClick={resetTrimBoundary} style={{ height: 29, padding: "0 9px", borderRadius: 8, border: "1px solid rgba(255,255,255,.08)", background: "rgba(255,255,255,.03)", color: "#aaa", fontSize: 8.8, fontWeight: 680, cursor: "pointer" }}>Reset hranice</button>
-              )}
-              {trimStage === "boundary" && !trimClosed && trimControlNodes.length >= 3 && (
-                <button type="button" onClick={closeTrimLoop} style={{ height: 29, padding: "0 10px", borderRadius: 8, border: "1px solid rgba(251,191,36,.18)", background: "rgba(245,158,11,.065)", color: "#fde68a", fontSize: 8.8, fontWeight: 710, cursor: "pointer" }}>Uzavřít hranici</button>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div style={{ height: 1, margin: "9px 0", background: "rgba(255,255,255,.065)" }} />
-
-      {trimStage === "model" && (
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(220px,1fr) auto", gap: 10, alignItems: "center" }}>
-          <AlignmentModelDropdown badge="T" value={trimSelection || ""} files={analysisEligibleFiles} otherValue="" onChange={selectTrimModel} />
-          <span style={{ color: "#777", fontSize: 9.2 }}>Vyberte v menu nebo klikněte přímo na model ve scéně.</span>
-        </div>
-      )}
-
-      {trimStage !== "model" && trimSelectedFile && (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, minWidth: 0 }}>
-          <div style={{ minWidth: 0, flex: "1 1 auto", color: "#8b8b8b", fontSize: 9.3, lineHeight: 1.45 }}>
-            {trimStage === "boundary" && !trimClosed && <>LMB klik = nový bod · přetažení kuličky = oprava bodu · dvojklik na první žlutý bod = uzavřít.</>}
-            {trimStage === "boundary" && trimClosed && <>Smyčka je uzavřená. Najeďte myší na jednu stranu pro náhled a kliknutím vyberte zelenou oblast, kterou chcete zachovat.</>}
-            {trimStage === "region" && !trimBusy && <>Oblast je vybraná. Zkontrolujte zelený náhled a klikněte na Oříznout.</>}
-            {trimStage === "region" && trimBusy && <>Ořezávám vybranou oblast…</>}
-            {trimStage === "result" && <>Ořez je aplikovaný na geometrii v této session. Výsledek lze stáhnout; při uložení scény se změněný model uloží automaticky.</>}
-          </div>
-
-          {trimStage === "region" && trimKeepComponent != null && !trimBusy && (
-            <button
-              className={`artheticTrimReadyAction${trimReadyActionLeaving ? " isLeaving" : ""}`}
-              type="button"
-              onClick={applyTrimResult}
-              disabled={trimBusy}
-              style={{ height: 31, padding: "0 13px", borderRadius: 8, color: "#bbf7d0", fontSize: 9, fontWeight: 720, cursor: trimBusy ? "wait" : "pointer", minWidth: 96, flex: "0 0 auto" }}
-            >
-              <span className="artheticTrimReadyParticles" aria-hidden="true">
-                <i className="artheticTrimReadyParticle" />
-                <i className="artheticTrimReadyParticle" />
-                <i className="artheticTrimReadyParticle" />
-                <i className="artheticTrimReadyParticle" />
-                <i className="artheticTrimReadyParticle" />
-              </span>
-              <span>Oříznout</span>
-            </button>
-          )}
-        </div>
-      )}
-
-      {trimShowStatusMessage && (
-        <div style={{ marginTop: 9, padding: "7px 9px", borderRadius: 9, background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.055)", color: trimBusy ? "#cfcfcf" : "#a1a1a1", fontSize: 8.8, lineHeight: 1.45 }}>
-          {trimBusy && <span style={{ display: "inline-block", width: 9, height: 9, marginRight: 7, border: "1.5px solid rgba(255,255,255,.18)", borderTopColor: "#d7d7d7", borderRadius: "50%", animation: "artheticAnalysisSpin .8s linear infinite", verticalAlign: "-1px" }} />}
-          {trimMessage}
-        </div>
-      )}
-    </div>
-  )
-
-  const trimActionsPanel = trimMode && !cadStandalone && (
-    <div className="artheticTrimSideActions">
-      <div style={{ display: "grid", gap: 6 }}>
-        {trimSelection && trimmedExportsByUrl[trimSelection] && (
-          <>
-            <button
-              type="button"
-              onClick={() => undoLastTrim(trimSelection)}
-              disabled={trimBusy}
-              style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: trimBusy ? "#555" : "#c8c8c8", cursor: trimBusy ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7 }}
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M9 7L4.5 11.5L9 16" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                <path d="M5 11.5H14.2C17.4 11.5 19.5 13.2 19.5 16.4C19.5 17 19.43 17.55 19.28 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              <span>Undo</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => downloadTrimmedModel(trimSelection)}
-              disabled={trimBusy || trimExportBusyUrl === trimSelection}
-              style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: trimBusy || trimExportBusyUrl === trimSelection ? "#555" : "#c8c8c8", cursor: trimBusy || trimExportBusyUrl === trimSelection ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
-            >
-              {trimExportBusyUrl === trimSelection ? "Připravuji…" : "Stáhnout"}
-            </button>
-
-            <div aria-hidden="true" style={{ height: 1, margin: "1px 2px", background: "rgba(255,255,255,.075)" }} />
-          </>
-        )}
-
-        <button
-          type="button"
-          onClick={closeTrimMode}
-          disabled={trimBusy}
-          style={{ height: 34, padding: "0 11px", borderRadius: 9, border: "1px solid rgba(255,255,255,.09)", background: "rgba(255,255,255,.035)", color: trimBusy ? "#555" : "#c8c8c8", cursor: trimBusy ? "wait" : "pointer", fontFamily: "inherit", fontSize: 9.5, fontWeight: 690 }}
-        >
-          Zavřít
-        </button>
-      </div>
-    </div>
-  )
+  const trimShowStatusMessage = !!trimMessage && /nepodař|potřeba|není|nenavazuje|nerozdělila|jednoznačně|alespoň|zkuste/i.test(trimMessage)
+  const trimWorkspace = trimMode && !cadStandalone && <TrimControls
+    stage={trimStage} closed={trimClosed} pointCount={trimControlNodes.length}
+    busy={trimBusy} message={trimMessage} showMessage={trimShowStatusMessage}
+    picker={<AlignmentModelDropdown badge="T" value={trimSelection || ""} files={repairVisibleFiles} otherValue="" disabled={trimBusy} onChange={selectTrimModel} onPreview={setTrimMenuHoveredUrl} />}
+    ready={trimStage === "region" && trimKeepComponent != null && !trimBusy} leaving={trimReadyActionLeaving}
+    canUndo={!!trimSelection && !!trimmedExportsByUrl[trimSelection]} exportBusy={!!trimExportBusyUrl}
+    onRemovePoint={removeLastTrimPoint} onReset={resetTrimBoundary} onCloseLoop={closeTrimLoop}
+    onApply={applyTrimResult} onUndo={() => undoLastTrim(trimSelection)}
+    onDownload={() => downloadTrimmedModel(trimSelection)} onFinish={finishTrim}
+  />
 
   const repairSelectedFile = repairSelection ? files.find((file) => file.url === repairSelection) : null
   const repairCompletedHoleSet = new Set(repairCompletedHoleIds)
@@ -19615,7 +19393,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           sliceActive={clippingEnabled && !dicomLayoutActive}
           tools={[
             { id: "zarovnani", label: "Zarovnání", description: "Zarovnat dva modely pomocí bodů a Best Fit.", disabled: analysisEligibleFiles.length < 2, onClick: openAlignmentMode },
-            { id: "orez", label: "Ořez", description: "Odstranit část skenu křivkou po povrchu.", disabled: analysisEligibleFiles.length < 1, onClick: openTrimMode },
+            { id: "orez", label: "Ořez", description: "Odstranit část skenu křivkou po povrchu.", disabled: repairVisibleFiles.length < 1, onClick: openTrimMode },
             { id: "oprava-site", label: "Oprava sítě", description: "Vyhledat a uzavřít otvory ve skenu.", disabled: repairVisibleFiles.length < 1, onClick: openRepairMode },
             { id: "model-builder", label: "Model Builder", description: "Vytvořit model s bází pro 3D tisk.", onClick: openCadEmbedded },
             { id: "okluze", label: "Okluze", description: "Změřit kontakty a mezery mezi skeny.", disabled: analysisEligibleFiles.length < 2, active: heatmapMenuOpen || showHeatmap, toggle: true, onClick: () => { setHeatmapMenuOpen(previous => !previous); setComparisonMenuOpen(false) } },
@@ -19834,7 +19612,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       )}
 
       {trimWorkspace}
-      {trimActionsPanel}
+      {trimMode && !cadStandalone && <ViewerBackButton onClick={closeTrimMode} disabled={trimBusy || !!trimExportBusyUrl} />}
       {repairWorkspace}
       {repairMode && !(cadStandalone && cadStage === "repair") && <ViewerBackButton onClick={closeRepairMode} disabled={repairBusy} />}
       {cadRepairWorkspace}
@@ -20103,8 +19881,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                   ? false
                   : cadStandalone && cadStage !== "scan"
                       ? f.url === cadFileUrl
-                      : trimMode && trimSelection
-                        ? f.url === trimSelection
                     : alignmentMode && alignmentModelsSelected
                       ? (f.url === alignmentPair.aUrl || f.url === alignmentPair.bUrl)
                       : (visibles[i] ?? true)}
@@ -20134,14 +19910,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 onPinNote={handlePinNote}
                 onAlignmentSelect={alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy && (!alignmentHasA || f.url !== alignmentPair.aUrl)
                   ? selectAlignmentModelFromScene
-                  : trimMode && trimStage === "model" && !trimBusy
+                  : trimMode && trimStage === "model" && !trimBusy && visibles[i] !== false && (opacities[i] ?? 1) > 0
                     ? selectTrimModel
                     : repairMode && repairStage === "model" && !repairBusy && visibles[i] !== false && (opacities[i] ?? 1) > 0
                       ? selectRepairModel
                       : null}
-                repairHidden={repairMode && !!repairFocusUrl && f.url !== repairFocusUrl}
-                repairHover={repairMode || analysisPreviewActive}
-                repairPreviewUrl={repairMode && repairStage === "model" && !repairBusy ? repairMenuHoveredUrl : analysisPreviewUrl}
+                repairHidden={(repairMode && !!repairFocusUrl && f.url !== repairFocusUrl) || (trimMode && !!trimFocusUrl && f.url !== trimFocusUrl)}
+                repairHover={repairMode || trimMode || analysisPreviewActive}
+                repairPreviewUrl={repairMode && repairStage === "model" && !repairBusy ? repairMenuHoveredUrl : trimMode && trimStage === "model" && !trimBusy ? trimMenuHoveredUrl : analysisPreviewUrl}
                 onAlignmentHover={alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy
                   ? handleAlignmentSceneHover
                   : null}
