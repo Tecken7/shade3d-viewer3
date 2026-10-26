@@ -1,5 +1,6 @@
 "use client"
 
+import { captureModelFade, applyModelFade, restoreModelFade } from "./viewer/model-fade.mjs"
 import ViewerBackButton from "./ViewerBackButton"
 import RepairStatus, { RepairStep } from "./RepairStatus"
 import { setRepairFoilMaterial } from "./viewer/repair-foil.mjs"
@@ -5816,6 +5817,7 @@ function AnyModel({
   onPinNote,
   onAlignmentSelect,
   onAlignmentHover,
+  repairHidden = false,
   repairHover = false,
   repairPreviewUrl = "",
   onTrimSurfaceClick,
@@ -5831,6 +5833,9 @@ function AnyModel({
   onCadSurfaceClick,
 }) {
   const [object3D, setObject3D] = useState(null)
+  const repairVisibility = useAnimatedPresence(!repairHidden, 280)
+  const repairFadePosition = useRef(1)
+  const repairFadeMaterials = useRef([])
   const comparisonUniform = useRef({ value: 0 })
   const comparisonBlendPosition = useRef(0)
   const reducedMotion = useRef(false)
@@ -5842,6 +5847,15 @@ function AnyModel({
   const repairHoverBlue = useMemo(() => new THREE.Color("#3b82f6"), [])
   useEffect(() => { reducedMotion.current = window.matchMedia("(prefers-reduced-motion: reduce)").matches }, [])
   useFrame((_, delta) => {
+    if (repairFadeMaterials.current.length) {
+      const fade = advanceComparisonBlend(repairFadePosition.current, !repairHidden, reducedMotion.current ? 1 : delta, .24)
+      repairFadePosition.current = fade.position
+      applyModelFade(repairFadeMaterials.current, fade.value)
+      if (!repairHidden && fade.position === 1) {
+        restoreModelFade(repairFadeMaterials.current)
+        repairFadeMaterials.current = []
+      }
+    }
     const active = !!analysisMode && analysisVisible
     const blend = advanceComparisonBlend(comparisonBlendPosition.current, active, reducedMotion.current ? 1 : delta)
     comparisonBlendPosition.current = blend.position
@@ -6130,6 +6144,15 @@ function AnyModel({
     return () => materials.forEach(material => setRepairFoilMaterial(material, repairFoilUniforms.current, false))
   }, [object3D, repairHover, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, ghost, analysisMode])
 
+  useEffect(() => {
+    if (!object3D || (!repairHidden && repairFadePosition.current === 1)) return
+    repairFadeMaterials.current = captureModelFade(object3D)
+    return () => {
+      restoreModelFade(repairFadeMaterials.current)
+      repairFadeMaterials.current = []
+    }
+  }, [object3D, repairHidden, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, ghost, analysisMode])
+
   const setAlignmentHoverVisual = (enabled) => {
     if (!object3D) return
     if (enabled && !onAlignmentSelect) return
@@ -6203,7 +6226,7 @@ function AnyModel({
 
   if (!object3D) return null
 
-  return visible ? (
+  return visible && repairVisibility.present ? (
     <primitive 
       object={object3D} 
       renderOrder={renderOrder}
@@ -12549,6 +12572,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [repairVariant, setRepairVariant] = useState("auto") // auto | manual
   const [repairStage, setRepairStage] = useState("model") // model | detect | paint | preview | result
   const [repairSelection, setRepairSelection] = useState("")
+  const [repairFocusUrl, setRepairFocusUrl] = useState("")
   const [repairMenuHoveredUrl, setRepairMenuHoveredUrl] = useState("")
   const [repairContext, setRepairContext] = useState(null)
   const [repairAnalysisComplete, setRepairAnalysisComplete] = useState(false)
@@ -14016,6 +14040,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadTrimBoundaryPoints([])
     setCadPreviewGeometry((previous) => { previous?.dispose?.(); return null })
     setRepairSelection("")
+    setRepairFocusUrl("")
     setRepairContext(null)
     setRepairHoles([])
     setRepairSelectedHoleId("")
@@ -14488,6 +14513,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setRepairAnalysisComplete(false)
     setRepairStage("model")
     setRepairSelection("")
+    setRepairFocusUrl("")
     setRepairContext(null)
     setRepairHoles([])
     setRepairSelectedHoleId("")
@@ -14575,6 +14601,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       return
     }
 
+    setRepairFocusUrl(url)
     setRepairBusy(true)
     setRepairMessage("")
     setRepairVertexReport("")
@@ -14639,6 +14666,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       finishRepairProgress(holes.length ? `Analýza hotová · ${holes.length} ${holes.length === 1 ? "otvor" : "otvory"}` : "Analýza hotová")
     } catch (error) {
       console.error("Repair context error:", error)
+      setRepairFocusUrl("")
       resetRepairProgress()
       setRepairMessage(error?.message || "Síť modelu se nepodařilo analyzovat.")
     } finally {
@@ -20363,9 +20391,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 opacity={opacities[i] ?? 1}
                 visible={cadStandalone && (cadPreviewActive || cadStage === "result")
                   ? false
-                  : repairMode && repairSelection
-                    ? f.url === repairSelection
-                    : cadStandalone && cadStage !== "scan"
+                  : cadStandalone && cadStage !== "scan"
                       ? f.url === cadFileUrl
                       : trimMode && trimSelection
                         ? f.url === trimSelection
@@ -20403,6 +20429,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                     : repairMode && repairStage === "model" && !repairBusy && visibles[i] !== false && (opacities[i] ?? 1) > 0
                       ? selectRepairModel
                       : null}
+                repairHidden={repairMode && !!repairFocusUrl && f.url !== repairFocusUrl}
                 repairHover={repairMode}
                 repairPreviewUrl={repairMode && repairStage === "model" && !repairBusy ? repairMenuHoveredUrl : ""}
                 onAlignmentHover={alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy
