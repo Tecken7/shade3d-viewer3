@@ -13258,7 +13258,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setTrimMessage("Vyberte model, který chcete oříznout.")
   }, [files, clearTrimWorkingState])
 
-  const selectTrimModel = useCallback((url) => {
+  const selectTrimModel = useCallback(async (url) => {
     if (trimBusy || !url) return
     const object = modelObjectsRef.current[url]
     if (!object) {
@@ -13269,27 +13269,26 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setTrimMenuHoveredUrl("")
     setTrimBusy(true)
     setTrimMessage("Připravuji povrchovou síť pro Ořez…")
-    window.setTimeout(() => {
-      try {
-        const context = buildTrimMeshContext(object)
-        setTrimSelection(url)
-        setTrimContext(context)
-        setTrimControlNodes([])
-        setTrimSegments([])
-        setTrimClosed(false)
-        setTrimKeepComponent(null)
-        setTrimHoverComponent(null)
-        setTrimReadyActionLeaving(false)
-        setTrimStage("boundary")
-        setTrimMessage("Klikáním umístěte body hranice. Kuličku můžete kdykoliv přetáhnout po povrchu; první žlutou kuličku dvojklikem uzavřete.")
-      } catch (error) {
-        setTrimFocusUrl("")
-        console.error("Trim context error:", error)
-        setTrimMessage(error?.message || "Povrch modelu se nepodařilo připravit pro Ořez.")
-      } finally {
-        setTrimBusy(false)
-      }
-    }, 30)
+    try {
+      await repairWaitForBusyPaint()
+      const context = await runStepsAsync(buildTrimMeshContextSteps(object))
+      setTrimSelection(url)
+      setTrimContext(context)
+      setTrimControlNodes([])
+      setTrimSegments([])
+      setTrimClosed(false)
+      setTrimKeepComponent(null)
+      setTrimHoverComponent(null)
+      setTrimReadyActionLeaving(false)
+      setTrimStage("boundary")
+      setTrimMessage("Klikáním umístěte body hranice. Kuličku můžete kdykoliv přetáhnout po povrchu; první žlutou kuličku dvojklikem uzavřete.")
+    } catch (error) {
+      setTrimFocusUrl("")
+      console.error("Trim context error:", error)
+      setTrimMessage(error?.message || "Povrch modelu se nepodařilo připravit pro Ořez.")
+    } finally {
+      setTrimBusy(false)
+    }
   }, [trimBusy])
 
   const closeTrimLoop = useCallback(() => {
@@ -20123,7 +20122,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           />
         )}
 
-        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} ref={trackballRef} target={cameraTarget} enabled={!sliceDrawing && !builderDragging && !builderPlacing && !sliceOverlayInteracting && !alignmentBusy && !cadBusy && trimDraggingPoint == null && !trimBusy} onInteractionChange={handleCameraInteraction} />
+        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} ref={trackballRef} target={cameraTarget} enabled={!sliceDrawing && !builderDragging && !builderPlacing && !sliceOverlayInteracting && !alignmentBusy && !cadBusy && trimDraggingPoint == null && (!trimBusy || trimStage === "model")} onInteractionChange={handleCameraInteraction} />
         <RightButtonPan setTarget={setCameraTarget} trackballRef={trackballRef} onInteractionChange={handleCameraInteraction} />
       </Canvas>
 
