@@ -13,7 +13,7 @@ THREE.BufferGeometry.prototype.disposeBoundsTree=disposeBoundsTree
 const source=fs.readFileSync(new URL('../app/ClientPage.jsx',import.meta.url),'utf8'),section=(a,b)=>source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)))
 const options=new Function('SAH',source.match(/const ALIGNMENT_BVH_OPTIONS = [^\r\n]+/)[0]+';return ALIGNMENT_BVH_OPTIONS')(SAH)
 const helpers=new Function('THREE','ALIGNMENT_BVH_OPTIONS','buildTrimRegions','trimPlaneSurfacePath',section('const trimEdgeKey =','const repairWaitForBusyPaint')+section('function buildTrimMeshContext(','function TrimRegionPreview(')+section('function collectTrimBoundaryPoints(','function TrimBoundaryTube(')+';return {buildTrimSurfaceSplineSamples,buildTrimSurfaceSplineSegments,collectTrimBoundaryPoints,makeTrimPolylineCurve,buildTrimMeshContext,projectTrimPointToSurface,trimTriangleSurfacePath,buildTrimBoundaryPlan,resolveTrimComponentFromHit,buildTrimmedGeometryForChild,interpolateTrimCorner}')(THREE,options,buildTrimRegions,trimPlaneSurfacePath)
-const applyPatches=new Function('THREE','ALIGNMENT_BVH_OPTIONS','refreshLocalNormals',section('const trimEdgeKey =','const repairWaitForBusyPaint')+section('function applyRepairPatchesToObject(','function collectRepairBrushTriangles(')+';return applyRepairPatchesToObject')(THREE,options,refreshLocalNormals)
+import {applyRepairPatchesToObject as applyPatches} from '../app/model-builder/repair-geometry.mjs'
 export {helpers,options,applyPatches}
 
 test('creating the trim search tree preserves face IDs of repaired non-indexed geometry',()=>{

@@ -10,6 +10,7 @@ import { collectTrianglesInRoot } from '../app/model-builder/scene-input.mjs'
 import { roundShoulder } from '../app/model-builder/transition.mjs'
 import { drainPassage } from '../app/model-builder/drains.mjs'
 import { prepareRepairVertices, weldByDistance } from '../app/model-builder/mesh-preflight.mjs'
+import {buildCGALPatchVertexNormals as repairPatchNormals} from '../app/model-builder/repair-geometry.mjs'
 import { orientRepairPatch } from '../app/model-builder/repair-orientation.mjs'
 import { buildModel, meshTopology, indexed } from '../app/model-builder/engine.mjs'
 import { holeDirection } from '../app/model-builder/hole-placement.mjs'
@@ -274,8 +275,7 @@ test('repair winding follows shared scan edges for correct, inverted and mixed p
 
 test('patch shading normals follow winding even when the boundary average points backwards',()=>{
  const source=fs.readFileSync(new URL('../app/ClientPage.jsx',import.meta.url),'utf8')
- const start=source.indexOf('function buildCGALPatchVertexNormals('),end=source.indexOf('function buildCGALRepairPatchData(',start)
- const normals=new Function('THREE','repairAverageBoundaryNormal',source.slice(start,end)+';return buildCGALPatchVertexNormals')(THREE,()=>new THREE.Vector3(0,0,-1))
+ const normals=repairPatchNormals
  const anchors=new Map([[5,{normal:[0,0,-1]}]])
  const result=normals([0,0,0,1,0,0,0,1,0],[0,1,2],anchors,[0,-1,-1],[5],{boundary:[]})
  assert.ok(result.every(n=>n[2]>0.999),'both the interior and boundary normals must agree with the actual face')
