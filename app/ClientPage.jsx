@@ -17338,29 +17338,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     ((heatmapMenuOpen && !isCalculatingHeatmap) || (comparisonMenuOpen && !isCalculatingComparison))
   const analysisPreviewUrl = analysisPreviewActive && analysisVisibleFiles.some(file => file.url === analysisMenuHoveredUrl) ? analysisMenuHoveredUrl : ""
 
-  const updateReferenceDisplay = (url, change) => {
-    const index = files.findIndex(file => file.url === url)
-    if (index < 0) return
-    if (change.opacity != null) {
-      const opacity = clamp01(change.opacity)
-      setOpacities(previous => files.map((_, i) => i === index ? opacity : previous[i] ?? 1))
-      setVisibles(previous => files.map((_, i) => i === index ? opacity > 0 : previous[i] ?? true))
-    } else if (change.visible != null) {
-      setVisibles(previous => files.map((_, i) => i === index ? change.visible : previous[i] ?? true))
-      if (change.visible && (opacities[index] ?? 1) === 0) {
-        setOpacities(previous => files.map((_, i) => i === index ? 1 : previous[i] ?? 1))
-      }
-    }
-  }
-  const referenceDisplayFor = url => {
-    const index = files.findIndex(file => file.url === url)
-    if (index < 0) return null
-    const opacity = opacities[index] ?? 1, visible = visibles[index] !== false && opacity > 0
-    return {opacity, visible, eyeIcon: visible ? ICONS.eye : ICONS.eyeOff,
-      onVisibleChange: value => updateReferenceDisplay(url, {visible: value}),
-      onOpacityChange: value => updateReferenceDisplay(url, {opacity: value})}
-  }
-
   const sidebar = (
     <div className="sidebar" style={{
       position: "absolute", top: 10, left: 10, zIndex: isMobile ? 5 : 2, width: "clamp(270px, 27vw, 400px)", maxWidth: "calc(100vw - 20px)",
@@ -19654,7 +19631,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           setHeatmapSelection(([a, b]) => [b, a]); setHasComputedHeatmap(false); setShowHeatmap(false); setPinnedNotes([])
           if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
         }}
-        referenceDisplay={referenceDisplayFor(heatmapSelection[1])}
         ready={occlusionModelsReady} calculating={isCalculatingHeatmap} computed={hasComputedHeatmap} onCalculate={handleApplyHeatmap}
         visible={showHeatmap} onVisibleChange={checked => { setShowHeatmap(checked); if (checked) setShowComparison(false) }}
       />}
@@ -19669,7 +19645,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           if (tooltipRef.current) tooltipRef.current.style.opacity = "0"
         }}
         tolerance={comparisonTolerance} onToleranceChange={value => { setComparisonTolerance(value); setHasComputedComparison(false); setShowComparison(false); setComparisonStats(null); setComparisonSnapshot(null) }}
-        referenceDisplay={referenceDisplayFor(comparisonSelection[1])}
         ready={comparisonModelsReady} calculating={isCalculatingComparison} computed={hasComputedComparison} onCalculate={handleApplyComparison}
         stats={comparisonStats} visible={showComparison} onVisibleChange={checked => { setShowComparison(checked); if (checked) setShowHeatmap(false) }}
       />}
