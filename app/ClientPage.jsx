@@ -12247,6 +12247,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [repairReadyActionLeaving, setRepairReadyActionLeaving] = useState(false)
   const [repairedExportsByUrl, setRepairedExportsByUrl] = useState({})
   const [repairExportBusyUrl, setRepairExportBusyUrl] = useState("")
+  const repairActionPresence = useAnimatedPresence(repairMode && !repairBusy && repairSelectedHoleIds.some(id => !repairCompletedHoleIds.includes(id)), 240)
+  const repairFinishPendingRef = useRef(false)
   const repairHistoryByUrlRef = useRef({})
   const repairPaintLastAtRef = useRef(0)
   const repairHoleHoverLastAtRef = useRef(0)
@@ -14998,6 +15000,27 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       throw error
     }
   }, [createRepairedExport, editorCapabilities.canSaveRepairedToCase])
+
+  const finishRepair = useCallback(async () => {
+    const url = repairSelection
+    if (!url || repairBusy || repairExportBusyUrl || repairFinishPendingRef.current) return
+    repairFinishPendingRef.current = true
+    // Restore the normal scene before preparing the file and handing it to the case.
+    setRepairMode(false)
+    setRepairFocusUrl("")
+    try {
+      await repairWaitForBusyPaint()
+      if (editorCapabilities.canSaveRepairedToCase && !repairedExportsByUrl[url]?.saveRequested) {
+        await saveRepairedModelToCase(url, { silent: true })
+      }
+      clearRepairWorkingState()
+    } catch (error) {
+      // Keep the completed repair available for retry or download if export fails.
+      setRepairMode(true)
+      setRepairFocusUrl(url)
+      setRepairMessage(error?.message || "Opravený model se nepodařilo připravit k uložení.")
+    } finally { repairFinishPendingRef.current = false }
+  }, [repairSelection, repairBusy, repairExportBusyUrl, editorCapabilities.canSaveRepairedToCase, repairedExportsByUrl, saveRepairedModelToCase, clearRepairWorkingState])
 
   const flushPendingDerivedModelsForScene = useCallback(async () => {
     if (!window.parent || window.parent === window) return 0
@@ -18664,9 +18687,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       {repairVariant === "auto" && repairStage !== "model" && repairStage !== "result" && repairHoles.length > 0 && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, flexWrap: "wrap" }}>
           <div style={{ minWidth: 0, flex: "1 1 100%", textAlign: "center" }}>
-            <div style={{ color: "#a1a1a1", fontSize: 10, fontWeight: 600, marginBottom: 8 }}>Otvory:</div>
             <div className={repairToolbarStyles.row}>
-            <div style={{ display: "flex", justifyContent: "center", gap: 5, flexWrap: "wrap" }}>
+            <div className={repairToolbarStyles.holesGroup}>
+            <div className={repairToolbarStyles.label}>Otvory:</div>
+            <div className={repairToolbarStyles.holes}>
               {repairHoles.map((hole, index) => {
                 const selected = repairSelectedHoleIds.includes(hole.id)
                 const completed = repairCompletedHoleSet.has(hole.id)
@@ -18674,6 +18698,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 return (
                   <button
                     key={hole.id}
+                    className={repairToolbarStyles.hole}
                     type="button"
                     onClick={() => selectRepairHole(hole.id)}
                     aria-pressed={selected}
@@ -18694,7 +18719,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                       color: selected ? "#f5f5f5" : completed ? "#9ad9ad" : hole.likely ? "#b5b5b5" : "#777",
                       boxShadow: selected ? "0 0 0 1px rgba(255,255,255,.035), 0 0 14px rgba(255,255,255,.086), inset 0 1px 0 rgba(255,255,255,.05)" : "none",
                       opacity: completed ? 0.72 : 1,
-                      transition: "background .2s ease, border-color .2s ease, color .2s ease, box-shadow .2s ease",
                       fontSize: 8.7, fontWeight: 680,
                       cursor: repairBusy ? "wait" : completed ? "default" : "pointer",
                     }}
@@ -18719,11 +18743,13 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 </>
               )}
             </div>
+            </div>
             {!repairShowAnalysisProgress && repairAnalysisComplete && <div className={repairToolbarStyles.checks}><RepairStatus inline clear={repairCleanResult} verticesChecked={repairVertexReport.startsWith("Kontrola vrcholů:")} report={repairVertexReport} /></div>}
             </div>
           </div>
           <div className={repairToolbarStyles.actions}>
-            {repairSelectedAutoCount > 0 && !repairBusy && (
+            {repairActionPresence.present && (
+              <div className={repairToolbarStyles.actionPresence} data-exiting={repairActionPresence.exiting || undefined} aria-hidden={repairActionPresence.exiting || undefined} inert={repairActionPresence.exiting ? "" : undefined}>
               <button
                 className={repairToolbarStyles.primary}
                 data-leaving={repairReadyActionLeaving || undefined}
@@ -18733,6 +18759,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               >
                 <span>Opravit vybrané</span>
               </button>
+              </div>
             )}
           </div>
         </div>
@@ -18936,6 +18963,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             >
               {repairExportBusyUrl === repairSelection ? "Připravuji…" : "Stáhnout"}
             </button>
+
+            {repairCleanResult && <div className={repairToolbarStyles.done}>
+              <button type="button" className={repairToolbarStyles.primary} onClick={finishRepair} disabled={repairBusy || !!repairExportBusyUrl} style={{ width: "100%", height: 34, minWidth: 0 }}>
+                Hotovo
+              </button>
+            </div>}
 
           </>
         )}

@@ -1,5 +1,10 @@
-.row{display:flex;justify-content:center;align-items:center;gap:10px;flex-wrap:wrap}
+.row{display:flex;justify-content:center;align-items:flex-end;gap:10px;flex-wrap:wrap}
 .checks{display:flex;align-items:center;border-left:1px solid #ffffff24;padding-left:10px}
+.holesGroup{min-width:0;max-width:100%;text-align:center}
+.label{color:#a1a1a1;font-size:10px;font-weight:600;margin-bottom:8px}
+.holes{display:flex;justify-content:center;gap:5px;flex-wrap:wrap}
+.hole{transition:background 280ms ease,border-color 280ms ease,color 280ms ease,box-shadow 320ms ease,transform 280ms cubic-bezier(.2,.8,.2,1),opacity 280ms ease}
+.hole[aria-pressed=true]:not(:disabled){transform:translateY(-1px) scale(1.025)}
 .primary{position:relative;overflow:hidden;box-sizing:border-box;min-width:138px;padding:10px 20px;border:0;border-radius:12px;font:650 11px Inter,ui-sans-serif,system-ui,sans-serif;background:linear-gradient(135deg,#3b82f6 0%,#2563eb 100%);color:white;cursor:pointer;box-shadow:0 8px 22px rgba(37,99,235,.25),inset 0 1px 0 rgba(255,255,255,.16);transition:transform 160ms cubic-bezier(.2,.8,.2,1),filter 160ms ease,background 160ms ease,border-color 160ms ease,box-shadow 180ms ease,color 160ms ease,opacity 160ms ease}
 .primary:hover:not(:disabled){filter:brightness(1.10);transform:translateY(-1px)}
 .primary:active:not(:disabled){transform:translateY(0) scale(.975)}
@@ -11,6 +16,12 @@
 @media(prefers-reduced-motion:reduce){.primary,.primary::after{transition:none}.primary:hover:not(:disabled),.primary:active:not(:disabled),.primary[data-leaving]{transform:none}}
 
 .actions{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap;width:100%;margin-top:2px}
+.actionPresence{animation:repairActionIn 280ms cubic-bezier(.2,.8,.2,1) both;transform-origin:right center}
+.actionPresence[data-exiting]{animation:repairActionOut 220ms cubic-bezier(.2,.8,.2,1) both;pointer-events:none}
+.done{animation:repairActionIn 280ms cubic-bezier(.2,.8,.2,1) both}
+@keyframes repairActionIn{from{opacity:0;transform:translateY(6px) scale(.97);max-height:0}to{opacity:1;transform:translateY(0) scale(1);max-height:44px}}
+@keyframes repairActionOut{from{opacity:1;transform:translateY(0) scale(1);max-height:44px}to{opacity:0;transform:translateY(4px) scale(.98);max-height:0}}
+@media(prefers-reduced-motion:reduce){.hole{transition:none}.hole[aria-pressed=true]:not(:disabled){transform:none}.actionPresence,.actionPresence[data-exiting],.done{animation:none}}
 
 .spinner{display:inline-block;flex:0 0 11px;width:11px;height:11px;box-sizing:border-box;border:1.5px solid #ffffff30;border-top-color:#f5f5f5;border-radius:50%;animation:repairHoleSpin .65s linear infinite}
 @keyframes repairHoleSpin{to{transform:rotate(360deg)}}
