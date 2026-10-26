@@ -2931,7 +2931,7 @@ function RepairOverlay({ context, modelMatrix, holes, selectedHoleIds, completed
               points={points}
               radius={selected ? lineRadius * 1.45 : hovered ? lineRadius * 1.12 : completed ? lineRadius * 0.86 : lineRadius * 0.80}
               closed
-              color={selected ? "#7dd3fc" : hovered ? "#f5f5f5" : completed ? "#86efac" : "#6f7f8a"}
+              color={selected ? "#f5f5f5" : hovered ? "#f5f5f5" : completed ? "#86efac" : "#6f7f8a"}
               opacity={selected ? 0.98 : hovered ? 0.90 : completed ? 0.42 : 0.10}
               roughness={selected ? 0.20 : hovered ? 0.20 : completed ? 0.28 : 0.34}
               metalness={selected ? 0.18 : hovered ? 0.08 : completed ? 0.06 : 0.02}
@@ -2951,7 +2951,7 @@ function RepairOverlay({ context, modelMatrix, holes, selectedHoleIds, completed
                 points={points}
                 radius={lineRadius * 2.35}
                 closed
-                color="#38bdf8"
+                color="#ffffff"
                 opacity={0.12}
                 roughness={0.22}
                 metalness={0.08}
@@ -14600,7 +14600,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setRepairSelectedHoleIds(next)
     setRepairSelectedHoleId(next.includes(hole.id) ? hole.id : (next[next.length - 1] || ""))
     setRepairPreviewPatch(null)
-    setRepairStage(next.length ? "preview" : "detect")
+    setRepairStage("preview")
     setRepairMessage(next.length
       ? `Vybráno ${next.length === 1 ? "1 místo" : `${next.length} míst`} k opravě. Jasně modrý obrys označuje vybrané díry.`
       : "Vyberte jednu nebo více děr. CGAL se spustí až po kliknutí na Opravit vybrané.")
@@ -14669,11 +14669,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       if (cadStandalone && cadStage === "repair") {
         // Model Builder začíná vždy bezpečnou Auto kontrolou. Ruční režim si
         // uživatel může zapnout až následně, pokud potřebuje řešit atypické místo.
-        setRepairStage("detect")
+        setRepairStage(holes.length ? "preview" : "detect")
       } else if (repairVariant === "manual") {
         setRepairStage("paint")
       } else {
-        setRepairStage("detect")
+        setRepairStage(holes.length ? "preview" : "detect")
       }
       setRepairAnalysisComplete(true)
       setRepairMessage("")
@@ -14888,7 +14888,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setRepairStage("paint")
       setRepairMessage("LMB = malovat oblast · RMB = kamera · velikost štětce nastavíte posuvníkem. Označte okolí problému, nemusíte přesně obkreslovat hranu.")
     } else {
-      setRepairStage("detect")
+      setRepairStage(repairHoles.length ? "preview" : "detect")
       setRepairMessage(repairHoles.length
         ? "Vyberte jednu nebo více děr. Jasně modrý obrys označí výběr; CGAL se spustí až po potvrzení."
         : "Automatická analýza nenašla opravovatelný uzavřený otvor.")
@@ -15136,7 +15136,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setRepairPaintedTriangles(new Set())
       setRepairBrushCursor(null)
 
-      if (remaining.length && mode === "auto") setRepairStage("detect")
+      if (remaining.length && mode === "auto") setRepairStage("preview")
       else if (remaining.length && mode === "manual") setRepairStage("paint")
       else setRepairStage("result")
 
@@ -15191,7 +15191,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const clearRepairHoleSelection = useCallback(() => {
     setRepairSelectedHoleIds([])
     setRepairSelectedHoleId("")
-    setRepairStage("detect")
+    setRepairStage("preview")
     setRepairMessage("Výběr byl zrušen. Kliknutím na čísla děr vyberte jednu nebo více oblastí.")
   }, [])
 
@@ -15273,7 +15273,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setRepairCompletedHoleIds((previous) =>
         previous.filter((id) => !undoneSet.has(id))
       )
-      setRepairStage(repairVariant === "manual" ? "paint" : "detect")
+      setRepairStage(repairVariant === "manual" ? "paint" : "preview")
       setRepairMessage("")
     } else {
       // Legacy history bez hole IDs: model zůstává vybraný a jeho aktuální
@@ -18981,7 +18981,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               ["model", "Model"], ["work", "Analýza"], ["preview", "Výběr"], ["result", "Výsledek"],
             ].map(([key, label], index) => {
               const active = key === "model" ? repairStage === "model" && !repairBusy : key === "work" ? (repairBusy && repairStage === "model") || (["detect","paint"].includes(repairStage) && !repairCleanResult) : key === "preview" ? repairStage === "preview" && !repairCleanResult : repairStage === "result" || repairCleanResult
-              const done = key === "model" ? !!repairSelection || repairBusy : key === "work" ? repairAnalysisComplete : key === "preview" ? (repairStage === "preview" || repairStage === "result") : repairStage === "result" || repairCleanResult
+              const done = key === "model" ? !!repairSelection || repairBusy : key === "work" ? repairAnalysisComplete : key === "preview" ? (repairSelectedAutoCount > 0 || repairStage === "result") : repairStage === "result" || repairCleanResult
               return <React.Fragment key={key}>
                 <RepairStep active={active} done={done}>{label}</RepairStep>
                 {index < 3 && <div style={{ width: 12, height: 1, background: "rgba(255,255,255,.07)" }} />}
@@ -19035,22 +19035,24 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                     key={hole.id}
                     type="button"
                     onClick={() => selectRepairHole(hole.id)}
+                    aria-pressed={selected}
                     disabled={repairBusy || completed}
                     style={{
                       height: 29, padding: "0 9px", borderRadius: 8,
                       border: selected
-                        ? "1px solid rgba(125,211,252,.58)"
+                        ? "1px solid rgba(255,255,255,.40)"
                         : completed
                           ? "1px solid rgba(134,239,172,.24)"
                           : "1px solid rgba(255,255,255,.07)",
                       background: selected
-                        ? "rgba(56,189,248,.13)"
+                        ? "rgba(255,255,255,.094)"
                         : completed
                           ? "rgba(34,197,94,.055)"
                           : "rgba(255,255,255,.025)",
-                      color: selected ? "#d7f3ff" : completed ? "#9ad9ad" : hole.likely ? "#b5b5b5" : "#777",
-                      boxShadow: selected ? "0 0 0 2px rgba(56,189,248,.055), 0 0 16px rgba(56,189,248,.10)" : "none",
+                      color: selected ? "#f5f5f5" : completed ? "#9ad9ad" : hole.likely ? "#b5b5b5" : "#777",
+                      boxShadow: selected ? "0 0 0 1px rgba(255,255,255,.035), 0 0 14px rgba(255,255,255,.086), inset 0 1px 0 rgba(255,255,255,.05)" : "none",
                       opacity: completed ? 0.72 : 1,
+                      transition: "background .2s ease, border-color .2s ease, color .2s ease, box-shadow .2s ease",
                       fontSize: 8.7, fontWeight: 680,
                       cursor: repairBusy ? "wait" : completed ? "default" : "pointer",
                     }}
@@ -19078,7 +19080,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             {!repairProgressVisible && repairAnalysisComplete && <div className={repairToolbarStyles.checks}><RepairStatus inline clear={repairCleanResult} verticesChecked={repairVertexReport.startsWith("Kontrola vrcholů:")} report={repairVertexReport} /></div>}
             </div>
           </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "center" }}>
+          <div className={repairToolbarStyles.actions}>
             {repairSelectedAutoCount > 0 && (
               <button
                 className={repairToolbarStyles.primary}

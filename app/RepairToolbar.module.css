@@ -9,3 +9,5 @@
 .primary:disabled{cursor:wait;filter:none;opacity:.55}
 .primary[data-leaving]{opacity:0;transform:translateY(2px) scale(.98);pointer-events:none}
 @media(prefers-reduced-motion:reduce){.primary,.primary::after{transition:none}.primary:hover:not(:disabled),.primary:active:not(:disabled),.primary[data-leaving]{transform:none}}
+
+.actions{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap;width:100%;margin-top:2px}
