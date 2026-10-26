@@ -18907,7 +18907,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       `}</style>
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
         <div style={{ minWidth: 0, flex: "1 1 auto" }}>
-          <div style={{ display: "flex", justifyContent: "center", alignItems: "baseline", gap: 6, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", justifyContent: "flex-start", alignItems: "baseline", gap: 6, flexWrap: "wrap" }}>
             <span style={{ color: "#ededed", fontSize: 13, fontWeight: 650 }}>Oprava sítě</span>
           </div>
           <div style={{ marginTop: 7, display: "flex", justifyContent: "center", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
