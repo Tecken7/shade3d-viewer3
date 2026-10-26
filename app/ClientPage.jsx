@@ -1,5 +1,6 @@
 "use client"
 
+import RepairStatus, { RepairStep } from "./RepairStatus"
 import { setRepairFoilMaterial } from "./viewer/repair-foil.mjs"
 
 import { inferSceneOrientation, fitOrientedBounds } from "./viewer/scan-orientation.mjs"
@@ -12501,6 +12502,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [repairStage, setRepairStage] = useState("model") // model | detect | paint | preview | result
   const [repairSelection, setRepairSelection] = useState("")
   const [repairContext, setRepairContext] = useState(null)
+  const [repairAnalysisComplete, setRepairAnalysisComplete] = useState(false)
   const [repairHoles, setRepairHoles] = useState([])
   const [repairSelectedHoleId, setRepairSelectedHoleId] = useState("")
   const [repairSelectedHoleIds, setRepairSelectedHoleIds] = useState([])
@@ -14432,6 +14434,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
 
   const clearRepairWorkingState = useCallback(() => {
+    setRepairAnalysisComplete(false)
     setRepairStage("model")
     setRepairSelection("")
     setRepairContext(null)
@@ -14524,6 +14527,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setRepairBusy(true)
     setRepairMessage("")
     setRepairVertexReport("")
+    setRepairAnalysisComplete(false)
     startRepairProgress("Analyzuji model · připravuji topologii", 8)
     repairPatchCacheRef.current.clear()
 
@@ -14579,7 +14583,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       } else {
         setRepairStage("detect")
       }
-      setRepairMessage(holes.length ? "" : "Automatická analýza nenašla opravovatelnou uzavřenou boundary.")
+      setRepairAnalysisComplete(true)
+      setRepairMessage("")
       finishRepairProgress(holes.length ? `Analýza hotová · ${holes.length} ${holes.length === 1 ? "otvor" : "otvory"}` : "Analýza hotová")
     } catch (error) {
       console.error("Repair context error:", error)
@@ -18678,6 +18683,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const repairLikelyHoles = repairHoles.filter((hole) => hole.likely)
   const repairSelectedAutoCount = repairSelectedHoleIds.filter((id) => !repairCompletedHoleSet.has(id)).length
   const repairAllVisibleSelected = repairPendingHoles.length > 0 && repairSelectedAutoCount === repairPendingHoles.length
+  const repairCleanResult = repairAnalysisComplete && !repairBusy && repairPendingHoles.length === 0
   const repairWorkspace = repairMode && !(cadStandalone && cadStage === "repair") && (
     <div style={{
       position: "absolute", top: cadStandalone && cadStage === "repair" ? 146 : 10, left: "50%", transform: "translateX(-50%)", zIndex: cadStandalone && cadStage === "repair" ? 85 : 73,
@@ -18856,31 +18862,22 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
         <div style={{ minWidth: 0, flex: "1 1 auto" }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 6, flexWrap: "wrap" }}>
-            <span style={{ display: "inline-flex", alignItems: "baseline", gap: 0, fontSize: 13 }}><span style={{ fontWeight: 850 }}>ART</span><span style={{ fontWeight: 300 }}>HETIC</span></span>
-            <span style={{ color: "#d7d7d7", fontSize: 13, fontWeight: 340 }}>Oprava sítě</span>
-            {repairSelectedFile && <span style={{ marginLeft: 4, color: "#777", fontSize: 9.2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stripExt(repairSelectedFile.rawName || repairSelectedFile.name)}</span>}
+            <span style={{ color: "#ededed", fontSize: 13, fontWeight: 650 }}>Oprava sítě</span>
           </div>
           <div style={{ marginTop: 7, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
             {[
-              ["model", "Model"], ["work", repairVariant === "manual" ? "Oblast" : "Analýza"], ["preview", "Výběr"], ["result", "Výsledek"],
+              ["model", "Model"], ["work", "Analýza"], ["preview", "Výběr"], ["result", "Výsledek"],
             ].map(([key, label], index) => {
-              const active = key === "model" ? repairStage === "model" : key === "work" ? ["detect","paint"].includes(repairStage) : key === "preview" ? repairStage === "preview" : repairStage === "result"
-              const done = key === "model" ? !!repairSelection : key === "work" ? (!!repairContext && repairStage !== "model") : key === "preview" ? (repairStage === "preview" || repairStage === "result") : repairStage === "result"
+              const active = key === "model" ? repairStage === "model" : key === "work" ? ["detect","paint"].includes(repairStage) && !repairCleanResult : key === "preview" ? repairStage === "preview" && !repairCleanResult : repairStage === "result" || repairCleanResult
+              const done = key === "model" ? !!repairSelection : key === "work" ? repairAnalysisComplete : key === "preview" ? (repairStage === "preview" || repairStage === "result") : repairStage === "result" || repairCleanResult
               return <React.Fragment key={key}>
-                <div style={analysisStepChipStyle(active, done)}>{done && <span style={{ color: "#86efac" }}>✓</span>}<span>{label}</span></div>
+                <RepairStep active={active} done={done}>{label}</RepairStep>
                 {index < 3 && <div style={{ width: 12, height: 1, background: "rgba(255,255,255,.07)" }} />}
               </React.Fragment>
             })}
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <div style={{ display: "inline-flex", padding: 3, borderRadius: 9, background: "rgba(255,255,255,.025)", border: "1px solid rgba(255,255,255,.07)" }}>
-            {[['auto','Auto'],['manual','Ručně']].map(([key,label]) => (
-              <button key={key} type="button" onClick={() => changeRepairVariant(key)} disabled={repairBusy}
-                style={{ height: 27, padding: "0 10px", borderRadius: 7, border: "none", background: repairVariant === key ? "rgba(96,165,250,.13)" : "transparent", color: repairVariant === key ? "#bfdbfe" : "#777", fontSize: 9, fontWeight: 720, cursor: repairBusy ? "wait" : "pointer" }}>{label}</button>
-            ))}
-          </div>
-        </div>
+
       </div>
 
       <div style={{ height: 1, margin: "10px 0", background: "rgba(255,255,255,.065)" }} />
@@ -18895,11 +18892,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       {repairVariant === "auto" && repairStage !== "model" && repairStage !== "result" && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
           <div style={{ minWidth: 0, flex: "1 1 360px" }}>
-            <div style={{ color: "#858585", fontSize: 9.2, marginBottom: 7 }}>
+            {repairHoles.length > 0 && <div style={{ color: "#858585", fontSize: 9.2, marginBottom: 7 }}>
               {repairHoles.length
                 ? `Nalezeno ${repairHoles.length} opravovatelných ${repairHoles.length === 1 ? "otvor" : "otvorů"} · ${repairLikelyHoles.length} doporučených${repairCompletedHoleIds.length ? ` · ${repairCompletedHoleIds.length} opraveno` : ""}.`
-                : "Nebyla nalezena žádná opravovatelná otevřená hrana."}
-            </div>
+                : ""}
+            </div>}
             <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
               {repairHoles.map((hole, index) => {
                 const selected = repairSelectedHoleIds.includes(hole.id)
@@ -19020,7 +19017,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         </div>
       )}
 
-      {!repairProgressVisible && repairContext && repairVertexReport && <div role="status" style={{ marginTop: 9, color: "#9ad9ad", fontSize: 10, lineHeight: 1.5 }}>{repairVertexReport}</div>}
+      {!repairProgressVisible && repairAnalysisComplete && <RepairStatus clear={repairCleanResult} verticesChecked={repairVertexReport.startsWith("Kontrola vrcholů:")} report={repairVertexReport} />}
       {!repairProgressVisible && repairMessage && /nepodař|nenaš|potřeba|není načten|selhal|chyba/i.test(repairMessage) && (
         <div style={{ marginTop: 9, padding: "7px 9px", borderRadius: 9, background: "rgba(239,68,68,.045)", border: "1px solid rgba(248,113,113,.11)", color: "#ba8585", fontSize: 8.8, lineHeight: 1.45 }}>
           {repairMessage}
