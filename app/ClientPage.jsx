@@ -1,5 +1,7 @@
 "use client"
 
+import { setRepairFoilMaterial } from "./viewer/repair-foil.mjs"
+
 import { inferSceneOrientation, fitOrientedBounds } from "./viewer/scan-orientation.mjs"
 import { cameraChanged } from "./viewer/camera-sync.mjs"
 import { stableSceneValue } from "./viewer/stable-scene-value.mjs"
@@ -5793,6 +5795,7 @@ function AnyModel({
   const comparisonUniform = useRef({ value: 0 })
   const comparisonBlendPosition = useRef(0)
   const reducedMotion = useRef(false)
+  const repairFoilUniforms = useRef({ amount: { value: 0 }, time: { value: 0 } })
   const repairHoverTarget = useRef(false)
   const repairHoverPosition = useRef(0)
   const repairHoverMaterials = useRef([])
@@ -5806,9 +5809,13 @@ function AnyModel({
     if (repairHoverMaterials.current.length) {
       const hover = advanceComparisonBlend(repairHoverPosition.current, repairHoverTarget.current, reducedMotion.current ? 1 : delta, .24)
       repairHoverPosition.current = hover.position
+      repairFoilUniforms.current.amount.value = hover.value
+      if (!reducedMotion.current) repairFoilUniforms.current.time.value += Math.min(delta, .05)
       for (const entry of repairHoverMaterials.current) {
-        const { material, color, emissive, intensity } = entry
+        const { material, color, emissive, intensity, roughness: baseRoughness, metalness: baseMetalness } = entry
         if (color) material.color.copy(color).lerp(repairHoverBlue, hover.value * .22)
+        if (baseRoughness != null) material.roughness = THREE.MathUtils.lerp(baseRoughness, .28, hover.value)
+        if (baseMetalness != null) material.metalness = THREE.MathUtils.lerp(baseMetalness, .62, hover.value)
         if (emissive) {
           material.emissive.copy(emissive).multiplyScalar(intensity).lerp(repairHoverBlue, hover.value * .16)
           material.emissiveIntensity = 1
@@ -6073,6 +6080,16 @@ function AnyModel({
     return () => { cancelled = true }
   }, [object3D, !!onAlignmentSelect])
 
+  useEffect(() => {
+    if (!object3D || !repairHover) return
+    const materials = new Set()
+    object3D.traverse(child => {
+      if (child.isMesh) (Array.isArray(child.material) ? child.material : [child.material]).filter(Boolean).forEach(material => materials.add(material))
+    })
+    materials.forEach(material => setRepairFoilMaterial(material, repairFoilUniforms.current, true))
+    return () => materials.forEach(material => setRepairFoilMaterial(material, repairFoilUniforms.current, false))
+  }, [object3D, repairHover, color, opacity, roughness, metalness, useVertexColors, keepMaterials, wireframe, ghost, analysisMode])
+
   const setAlignmentHoverVisual = (enabled) => {
     if (!object3D) return
     if (enabled && !onAlignmentSelect) return
@@ -6084,7 +6101,7 @@ function AnyModel({
           const materials = Array.isArray(child.material) ? child.material : [child.material]
           materials.filter(Boolean).forEach(material => {
             if (repairHoverMaterials.current.some(entry => entry.material === material)) return
-            repairHoverMaterials.current.push({ material, color: material.color?.clone?.(), emissive: material.emissive?.clone?.(), intensity: material.emissiveIntensity ?? 0 })
+            repairHoverMaterials.current.push({ material, color: material.color?.clone?.(), emissive: material.emissive?.clone?.(), intensity: material.emissiveIntensity ?? 0, roughness: material.roughness, metalness: material.metalness })
           })
         })
       }
@@ -6126,11 +6143,14 @@ function AnyModel({
   useEffect(() => () => {
     repairHoverTarget.current = false
     repairHoverPosition.current = 0
-    for (const { material, color, emissive, intensity } of repairHoverMaterials.current) {
+    for (const { material, color, emissive, intensity, roughness, metalness } of repairHoverMaterials.current) {
       if (color) material.color.copy(color)
       if (emissive) material.emissive.copy(emissive)
       material.emissiveIntensity = intensity
+      if (roughness != null) material.roughness = roughness
+      if (metalness != null) material.metalness = metalness
     }
+    repairFoilUniforms.current.amount.value = 0
     repairHoverMaterials.current = []
   }, [object3D])
 
