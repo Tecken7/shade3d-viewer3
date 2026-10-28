@@ -1,6 +1,7 @@
 'use client'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useThree } from '@react-three/fiber'
+import { useThree, useFrame } from '@react-three/fiber'
+import {baseRevealProgress,BASE_REVEAL_MS,installBaseRevealShader} from './base-reveal.mjs'
 import * as THREE from 'three'
 import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { MeshBVH } from 'three-mesh-bvh'
@@ -21,7 +22,7 @@ function TextShape({result,handlers,hovered}){
   {handlers&&<mesh position={center}><boxGeometry args={size.toArray()}/><meshBasicMaterial colorWrite={false} depthWrite={false} depthTest/></mesh>}
  </group>
 }
-export function BuilderPreview({roughness=.42,metalness=.51,geometry,placing,onSurfaceClick,overlayDragging=false,options,select,change,dragging,controlsRef,onDragEnd,editable=true,onTextStatus}){
+export function BuilderPreview({roughness=.42,metalness=.51,geometry,placing,onSurfaceClick,overlayDragging=false,options,select,change,dragging,controlsRef,onDragEnd,editable=true,onTextStatus,reveal=null,onRevealComplete}){
  const mesh=useRef(),textRoot=useRef(),textDrag=useRef(null)
  const [textHovered,setTextHovered]=useState(false),[candidate,setCandidate]=useState(null),[notice,setNotice]=useState(''),[font,setFont]=useState(null)
  useCursor(textHovered,'grab')
@@ -33,6 +34,22 @@ export function BuilderPreview({roughness=.42,metalness=.51,geometry,placing,onS
   fontRequest.then(value=>{if(live)setFont(value)})
   return()=>{live=false}
  },[])
+ const revealClock=useRef({key:null,start:0,done:false})
+ const revealUniforms=useMemo(()=>({uBaseRevealEnabled:{value:0},uBaseRevealProgress:{value:1},uBaseRevealFrom:{value:0},uBaseRevealTo:{value:0},uBaseRevealDirection:{value:1}}),[])
+ const compileReveal=useCallback(shader=>installBaseRevealShader(shader,revealUniforms),[revealUniforms])
+ useFrame(()=>{
+  revealUniforms.uBaseRevealEnabled.value=reveal?1:0
+  if(!reveal)return
+  const now=performance.now(),clock=revealClock.current
+  if(clock.key!==reveal){clock.key=reveal;clock.start=now;clock.done=false}
+  const elapsed=now-clock.start
+  reveal.progress.value=reveal.reducedMotion?1:baseRevealProgress(elapsed)
+  revealUniforms.uBaseRevealProgress.value=reveal.progress.value
+  revealUniforms.uBaseRevealFrom.value=reveal.from
+  revealUniforms.uBaseRevealTo.value=reveal.to
+  revealUniforms.uBaseRevealDirection.value=reveal.direction
+  if((reveal.reducedMotion||elapsed>=BASE_REVEAL_MS)&&!clock.done){clock.done=true;onRevealComplete?.()}
+ })
  const display=useMemo(()=>{
   if(!geometry)return null
   const result=toCreasedNormals(geometry,Math.PI/6);result.boundsTree=new MeshBVH(result);return result
@@ -127,7 +144,7 @@ export function BuilderPreview({roughness=.42,metalness=.51,geometry,placing,onS
  const badge=placement?new THREE.Vector3(...placement.position).addScaledVector(new THREE.Vector3(...placement.normal),1.5).toArray():null
  return <>
   <mesh ref={mesh} geometry={display} dispose={null} renderOrder={50} onPointerOver={blockHidden} onPointerMove={blockHidden} onPointerDown={blockHidden} onClick={event=>{blockHidden(event);if(editable&&!placing&&!overlayDragging&&event.delta<=4)select(null)}}>
-   <meshStandardMaterial color="#AAA08E" roughness={roughness} metalness={metalness} side={THREE.DoubleSide}/>
+   <meshStandardMaterial onBeforeCompile={compileReveal} customProgramCacheKey={()=>"builder-base-reveal-v1"} color="#AAA08E" roughness={roughness} metalness={metalness} side={THREE.DoubleSide}/>
   </mesh>
   <group ref={textRoot}>{editable&&options&&<TextShape result={result} handlers={textHandlers} hovered={textHovered}/>}</group>
   {editable&&previous?.valid&&<TextShape result={previous}/>}

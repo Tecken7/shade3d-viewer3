@@ -56,6 +56,7 @@ import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter"
 import { HolePreview } from "./model-builder/HolePreview"
 import { BuilderPreview } from "./model-builder/BuilderPreview"
 import BaseHeightPreview from "./model-builder/BaseHeightPreview"
+import {baseHeightGuideLayout} from "./model-builder/base-height-layout.mjs"
 import { FrontDirectionLabel } from "./model-builder/FrontDirectionLabel"
 import { collectTrianglesInRoot, collectTrianglesInRootSteps } from "./model-builder/scene-input.mjs"
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, SAH } from "three-mesh-bvh"
@@ -12003,6 +12004,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadHeightDraft, setCadHeightDraft] = useState("25.0")
   const [cadPreviewActive, setCadPreviewActive] = useState(false)
   const [cadHeightGuide,setCadHeightGuide] = useState(null)
+  const [cadBaseReveal,setCadBaseReveal] = useState(null)
+  const finishCadBaseReveal = useCallback(()=>setCadBaseReveal(null),[])
+  useEffect(()=>{if(cadStage!=="base" || !cadStandalone)setCadBaseReveal(null)},[cadStage,cadStandalone])
   const [cadHeightGuidePending,setCadHeightGuidePending] = useState(false)
   const [cadHeightGuideError,setCadHeightGuideError] = useState("")
   const [cadPreviewGeometry, setCadPreviewGeometry] = useState(null)
@@ -13916,6 +13920,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     const next = Math.round(Math.max(min, Math.min(max, safe)) * 100) / 100
     if (Math.abs(next - cadTotalHeight) <= 1e-6) return
     setCadTotalHeight(next)
+    setCadBaseReveal(null)
     setCadPreviewActive(false)
     setBuilderPlacing(false)
     setBuilderSelected(null)
@@ -13962,6 +13967,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     const sourceObject = modelObjectsRef.current[cadFileUrl]
     if (!sourceObject || !rootGroupRef.current) { setCadMessage("Model ještě není připravený."); return }
     setCadBusy(true)
+    setCadBaseReveal(null)
     const nextOptions = { ...builderOptions, cutHoles: typeof request.cutHoles === "boolean" ? request.cutHoles : builderOptions.cutHoles,
       repairBoundary: typeof request.repairBoundary === "boolean" ? request.repairBoundary : builderOptions.repairBoundary }
     if(typeof request.repairBoundary === "boolean"){
@@ -14004,6 +14010,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         setCadPreviewGeometry(previous => { previous?.dispose?.(); return geometry })
         setCadPreviewStats(result.stats)
         setBuilderOptions(previous => ({ ...previous, holes: result.holes, cutHoles: nextOptions.cutHoles, bottomContour: result.placement.bottomContour, baseDirection:result.placement.direction }))
+        if(request.repairBoundary && cadHeightGuide){
+          const layout=baseHeightGuideLayout(cadHeightGuide,cadTotalHeight,!!nextOptions.flipBaseDirection)
+          setCadBaseReveal({from:layout.direction>0?cadHeightGuide.max[1]:cadHeightGuide.min[1],to:layout.y,direction:layout.direction,progress:{value:0},reducedMotion:window.matchMedia('(prefers-reduced-motion: reduce)').matches})
+        }
         setCadPreviewActive(true)
         setBuilderDirty(false)
         const repairNotice=result.stats.boundaryRepair?.closedMicroHoles ? `Drobné otvory opraveny: ${result.stats.boundaryRepair.closedMicroHoles}. ` : result.stats.boundaryRepair ? "Hranice opravena a vyhlazena. " : ""
@@ -14016,7 +14026,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       }
       worker.postMessage({ positions, options: { ...nextOptions, followContour: true, totalHeight: cadTotalHeight, arch: cadActiveArch }, font }, [positions.buffer])
     } catch (error) { if (builderWorkerRef.current !== pending) return; builderWorkerRef.current = null; setCadBusy(false); setBuilderDirty(true); setCadMessage(error.message) }
-  }, [cadStage, cadBusy, cadFileUrl, cadTotalHeight, cadActiveArch, builderOptions])
+  }, [cadStage, cadBusy, cadFileUrl, cadTotalHeight, cadActiveArch, builderOptions, cadHeightGuide])
 
   const applyCadBase = useCallback(() => {
     if (cadStage !== "base" || !cadPreviewActive || !cadPreviewGeometry || cadBusy || builderDirty) return
@@ -18385,7 +18395,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 <div style={{ color:"#d1d1d1", fontSize:9.4, fontWeight:730 }}>Celková výška</div>
                 <div style={{ color:"#575757", fontSize:8.1, marginTop:2 }}>Otevřená dutá báze · mm</div>
               </div>
-              <input className="artheticCadRange" type="range" min={cadMinHeight} max={cadMaxHeight} step="0.01" value={cadTotalHeight} disabled={cadBusy} onChange={(e) => handleCadTotalHeightChange(e.target.value)} />
+              <input className="artheticCadRange" type="range" min={cadMinHeight} max={cadMaxHeight} step="0.01" value={cadTotalHeight} disabled={cadBusy || !!cadBaseReveal} onChange={(e) => handleCadTotalHeightChange(e.target.value)} />
               <div style={{ position:"relative", height:29 }} title={`Přesná celková výška · ${cadMinHeight.toFixed(2)}–${cadMaxHeight.toFixed(2)} mm`}>
                 <input
                   className="artheticCadNumber"
@@ -18413,8 +18423,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               </div>
             </div>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", flexWrap:"wrap", gap:7 }}>
-              <button type="button" disabled={cadBusy} onClick={()=>toggleCadPreview({repairBoundary:true})} title="Vratně opraví drobné větvení okraje a bezpečně uzavře mikrootvory do 0,35 mm. Hlavní otvor báze a větší otvory ponechá. Původní scan zůstane zachovaný." style={{height:33,padding:"0 10px",borderRadius:9,border:"1px solid rgba(96,165,250,.25)",background:builderOptions.repairBoundary?"rgba(59,130,246,.18)":"rgba(255,255,255,.035)",color:"#bfdbfe",fontSize:9,fontWeight:720,cursor:cadBusy?"wait":"pointer"}}>Generovat bázi</button>
-              {cadPreviewActive && !builderDirty && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={applyCadBase} disabled={cadBusy} style={{ height:33, padding:"0 13px", borderRadius:9, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:"pointer" }}>{builderOptions.cutHoles ? "Dokončit model" : "Dokončit bez otvorů"}</button>}
+              <button type="button" disabled={cadBusy || cadHeightGuidePending || !!cadBaseReveal} onClick={()=>toggleCadPreview({repairBoundary:true})} title="Vratně opraví drobné větvení okraje a bezpečně uzavře mikrootvory do 0,35 mm. Hlavní otvor báze a větší otvory ponechá. Původní scan zůstane zachovaný." style={{height:33,padding:"0 10px",borderRadius:9,border:"1px solid rgba(96,165,250,.25)",background:builderOptions.repairBoundary?"rgba(59,130,246,.18)":"rgba(255,255,255,.035)",color:"#bfdbfe",fontSize:9,fontWeight:720,cursor:cadBusy?"wait":"pointer"}}>Generovat bázi</button>
+              {cadPreviewActive && !builderDirty && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={applyCadBase} disabled={cadBusy || !!cadBaseReveal} style={{ height:33, padding:"0 13px", borderRadius:9, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:"pointer" }}>{builderOptions.cutHoles ? "Dokončit model" : "Dokončit bez otvorů"}</button>}
             </div>
           </div>
         )}
@@ -18443,7 +18453,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         </button>
       </aside>}
 
-      {cadStage === "base" && <BuilderControls options={builderOptions} change={changeBuilderOptions} textStatus={builderTextStatus} selected={builderSelected} select={setBuilderSelected} placing={builderPlacing} setPlacing={setBuilderPlacing} dirty={builderDirty} busy={cadBusy} cancel={cancelBuilder} hasPreview={cadPreviewActive} cutHoles={() => toggleCadPreview({ cutHoles: true })} />}
+      {cadStage === "base" && <BuilderControls options={builderOptions} change={changeBuilderOptions} textStatus={builderTextStatus} selected={builderSelected} select={setBuilderSelected} placing={builderPlacing} setPlacing={setBuilderPlacing} dirty={builderDirty} busy={cadBusy} locked={!!cadBaseReveal} cancel={cancelBuilder} hasPreview={cadPreviewActive} cutHoles={() => toggleCadPreview({ cutHoles: true })} />}
       {cadStage === "result" && <button type="button" className={cadWorkspaceStyles.returnButton} onClick={() => setCadStage("base")}>Zpět k nastavení modelu</button>}
       {cadStage === "scan" && !cadEmbedded && (
         <div style={{ position:"absolute", inset:0, zIndex:6, display:"grid", placeItems:"center", pointerEvents:"none", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif" }}>
@@ -19691,10 +19701,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             <CadOrientationReferencePlane center={cadOrientationPlaneCenter} y={cadOrientationPlaneY} size={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} />
           )}
 
-          {cadStandalone && cadStage === "base" && !cadPreviewActive && !cadBusy && cadHeightGuide && <BaseHeightPreview data={cadHeightGuide} height={cadTotalHeight} min={cadMinHeight} max={cadMaxHeight} flip={!!builderOptions.flipBaseDirection} onChange={handleCadTotalHeightChange} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag}/>}
-          {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && <><HolePreview options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} interactionLocked={builderDragging} /></>}
+          {cadStandalone && cadStage === "base" && (!cadPreviewActive || cadBaseReveal) && cadHeightGuide && <BaseHeightPreview bevel={builderOptions.bevel} busy={cadBusy} reveal={cadBaseReveal} roughness={cadSurfaceRoughness} metalness={cadSurfaceMetalness} data={cadHeightGuide} height={cadTotalHeight} min={cadMinHeight} max={cadMaxHeight} flip={!!builderOptions.flipBaseDirection} onChange={handleCadTotalHeightChange} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag}/>}
+          {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && !cadBaseReveal && <><HolePreview options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} interactionLocked={builderDragging} /></>}
           {cadStandalone && (cadPreviewActive || cadStage === "result") && cadPreviewGeometry && (
-            <BuilderPreview roughness={cadSurfaceRoughness} metalness={cadSurfaceMetalness} geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} onTextStatus={setBuilderTextStatus} overlayDragging={builderDragging} editable={cadStage === "base" && !cadBusy} options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} />
+            <BuilderPreview reveal={cadBaseReveal} onRevealComplete={finishCadBaseReveal} roughness={cadSurfaceRoughness} metalness={cadSurfaceMetalness} geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} onTextStatus={setBuilderTextStatus} overlayDragging={builderDragging} editable={cadStage === "base" && !cadBusy && !cadBaseReveal} options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} />
           )}
 
           {trimMode && trimContext && trimSelection && trimStage !== "result" && (

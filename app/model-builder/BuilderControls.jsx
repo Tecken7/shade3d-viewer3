@@ -8,7 +8,7 @@ const fieldStyle = { width: '100%', boxSizing: 'border-box', background: '#25252
 function NumberField({ label, value, onChange, min, max, step = 0.1 }) {
   return <label style={{ display: 'grid', gap: 5, fontSize: 12 }}>{label}<input aria-label={label} style={fieldStyle} type="number" min={min} max={max} step={step} value={value} onChange={e => { if (e.target.value !== '' && Number.isFinite(e.target.valueAsNumber)) onChange(e.target.valueAsNumber) }} /></label>
 }
-export function BuilderControls({ options: p, change, selected, select, placing, setPlacing, dirty, busy, cancel, hasPreview, cutHoles, textStatus }) {
+export function BuilderControls({ options: p, change, selected, select, placing, setPlacing, dirty, busy, locked=false, cancel, hasPreview, cutHoles, textStatus }) {
   const hole = selected?.startsWith('hole:') ? Number(selected.split(':')[1]) : -1
   const editHole = patch => change({ holes: p.holes.map((h, i) => i === hole ? { ...h, ...patch, autoPosition: false, warning: null } : h) })
   const button = (active = false) => ({ ...fieldStyle, width: 'auto', cursor: 'pointer', background: active ? '#ffffff18' : '#ffffff07', borderColor: active ? '#ffffff66' : '#ffffff1f', fontSize: 12 })
@@ -17,7 +17,7 @@ export function BuilderControls({ options: p, change, selected, select, placing,
     <h2 style={{ fontSize: 16, margin: '0 0 10px' }}>Nastavení modelu</h2>
     <p style={{ fontSize: 12, color: '#bbb', lineHeight: 1.5 }}>Dutina je zespodu otevřená. Bez rozšíření báze a bez výplně.</p>
     {busy && <button type="button" style={button()} onClick={cancel}>Zrušit výpočet</button>}
-    <fieldset disabled={busy} style={{ border: 0, minWidth: 0, padding: 0, margin: 0, display: 'grid', gap: 14 }}>
+    <fieldset disabled={busy || locked} style={{ border: 0, minWidth: 0, padding: 0, margin: 0, display: 'grid', gap: 14 }}>
       <label style={{ fontSize: 13 }}><input type="checkbox" checked={p.hollow} onChange={e => change({ hollow: e.target.checked })} /> Dutý model</label>
       <label style={{ fontSize: 12 }}><input type="checkbox" checked={!!p.flipBaseDirection} onChange={e => change({ flipBaseDirection:e.target.checked })} /> Obrátit směr tvorby báze</label>
       {p.hollow && <NumberField label="Tloušťka stěny (mm)" value={p.wall} min={0.8} max={10} onChange={wall => change({ wall })} />}
