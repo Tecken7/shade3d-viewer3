@@ -15,7 +15,7 @@ export function BuilderControls({ options: p, change, selected, select, placing,
   return <aside className={`artheticBuilderControls ${styles.panel}`} aria-label="Nastavení Model Builderu" style={{ position: 'absolute', top: 160, right: 18, bottom: 20, width: 292, overflowY: 'auto', overflowX: 'hidden', zIndex: 80, background: 'rgba(22,22,22,.96)', border: '1px solid #444', borderRadius: 12, padding: 16, color: '#ddd', fontFamily: 'system-ui', boxSizing: 'border-box' }}>
 
     <h2 style={{ fontSize: 16, margin: '0 0 10px' }}>Nastavení modelu</h2>
-    <p style={{ fontSize: 12, color: '#bbb', lineHeight: 1.5 }}>Dutina je zespodu otevřená. Bez rozšíření báze a bez výplně.</p>
+    <p style={{ fontSize: 12, color: '#bbb', lineHeight: 1.5 }}>{p.hollow ? 'Dutina je zespodu otevřená. Bez rozšíření báze a bez výplně.' : 'Plný model bez dutiny a odtokových otvorů.'}</p>
     {busy && <button type="button" style={button()} onClick={cancel}>Zrušit výpočet</button>}
     <fieldset disabled={busy || locked} style={{ border: 0, minWidth: 0, padding: 0, margin: 0, display: 'grid', gap: 14 }}>
       <label style={{ fontSize: 13 }}><input type="checkbox" checked={p.hollow} onChange={e => change({ hollow: e.target.checked })} /> Dutý model</label>
@@ -37,6 +37,7 @@ export function BuilderControls({ options: p, change, selected, select, placing,
       <button disabled={!hasPreview || !p.text.trim()} type="button" aria-pressed={selected === 'text' && placing} style={button(selected === 'text' && placing)} onClick={() => { select('text'); setPlacing(!(selected === 'text' && placing)) }}>Umístit popisek na povrch</button>
       {p.text.trim()&&textStatus?.error&&<p role="status" style={{margin:0,color:'#fca5a5',fontSize:12,lineHeight:1.5}}>{textStatus.error} Poslední platná poloha zůstává zachovaná.</p>}
       {p.text.trim()&&textStatus?.valid&&<p role="status" style={{margin:0,color:'#93c5fd',fontSize:11}}>Text má vhodný povrch. Modrý náhled lze umístit nebo táhnout po modelu.</p>}
+      {p.hollow && <>
       <hr style={{ width: '100%', border: 0, borderTop: '1px solid #444' }} />
       <strong style={{ fontSize: 13 }}>Odtokové otvory</strong>
       <p style={{ margin: 0, fontSize: 11, color: '#aaa', lineHeight: 1.5 }}>Modré válce jsou pouze náhled. Táhněte je podél spodního obvodu a nastavte průměr i hloubku. Model se vyřízne až po potvrzení.</p>
@@ -58,8 +59,9 @@ export function BuilderControls({ options: p, change, selected, select, placing,
       </>}
       {hasPreview && <button type="button" className={actions.primary} data-primary style={{width:"100%"}} disabled={!p.holes.some(h => h.enabled) || p.cutHoles} onClick={cutHoles}>{p.cutHoles ? 'Otvory jsou vyříznuté' : 'Potvrdit a vyříznout otvory'}</button>}
 
+      </>}
       {selected === "text" && hasPreview && <p style={{ fontSize: 12, color: '#bfe5c8', margin: 0 }}>Popisek posunete tažením přímo po povrchu modelu. Tlačítkem umístění jej můžete přenést na jinou stranu.</p>}
     </fieldset>
-    <p role="status" style={{ color: dirty ? '#f4d28b' : '#bfe5c8', fontSize: 12, lineHeight: 1.5 }}>{dirty && hasPreview ? 'Změny otvorů potvrďte tlačítkem „Potvrdit a vyříznout otvory“. Změny samotné základny přepočítejte v horní liště.' : hasPreview ? p.cutHoles ? 'Otvory jsou součástí modelu.' : 'Základna je bez otvorů. Modré válce čekají na potvrzení.' : 'Nastavte výšku a vytvořte první náhled.'}</p>
+    <p role="status" style={{ color: dirty ? '#f4d28b' : '#bfe5c8', fontSize: 12, lineHeight: 1.5 }}>{!p.hollow ? (hasPreview ? dirty ? 'Změny přepočítejte tlačítkem Generovat bázi.' : 'Plný model je připravený k dokončení.' : 'Nastavte výšku a vygenerujte plný model.') : dirty && hasPreview ? 'Změny otvorů potvrďte tlačítkem „Potvrdit a vyříznout otvory“. Změny samotné základny přepočítejte v horní liště.' : hasPreview ? p.cutHoles ? 'Otvory jsou součástí modelu.' : 'Základna je bez otvorů. Modré válce čekají na potvrzení.' : 'Nastavte výšku a vytvořte první náhled.'}</p>
   </aside>
 }

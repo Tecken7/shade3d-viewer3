@@ -280,3 +280,12 @@ test('patch shading normals follow winding even when the boundary average points
  const result=normals([0,0,0,1,0,0,0,1,0],[0,1,2],anchors,[0,-1,-1],[5],{boundary:[]})
  assert.ok(result.every(n=>n[2]>0.999),'both the interior and boundary normals must agree with the actual face')
 })
+
+test('solid models never propose or cut drainage holes, even with stale hollow settings',async()=>{
+ const messages=[],options={arch:'upper',totalHeight:25,smoothing:0,hollow:false,cutHoles:true}
+ const reference=await buildModel(M,new Float32Array(scan),{...options,holes:[]},font)
+ const result=await buildModel(M,new Float32Array(scan),{...options,holes:[{enabled:true,diameter:4.5,length:8,position:[20,23,0],normal:[1,0,0]}]},font,message=>messages.push(message))
+ assert.deepEqual(result.holes,[]);assert.deepEqual(result.positions,reference.positions);assert.deepEqual(result.indices,reference.indices)
+ assert.ok(!messages.some(message=>typeof message==='string'&&message.includes('odtokové')))
+ assert.equal(result.stats.openBoundaryLoops,0)
+})

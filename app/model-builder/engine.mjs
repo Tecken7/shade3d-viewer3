@@ -353,7 +353,7 @@ export async function buildModel(M, input, options, fontData, progress = () => {
       return { enabled:!!position, autoPosition:false, warning:position?null:`Otvor ${index+1} umístěte ručně na stěnu báze.`, diameter:4.5, length:8, autoDepth:true,
         position:position ? [position[0],baseY-direction*1.5,position[2]] : [(bounds.min.x+bounds.max.x)/2+side*(bounds.max.x-bounds.min.x)*.34,baseY,(bounds.min.z+bounds.max.z)/2], normal:[0,0,posterior] }
     })
-    const holes = (p.holes.length ? p.holes : defaultHoles).map(hole => ({ ...hole,
+    const holes = (p.hollow ? (p.holes.length ? p.holes : defaultHoles) : []).map(hole => ({ ...hole,
       position: hole.position ? [hole.position[0], hole.position[1] + (Number.isFinite(hole.baseY) ? baseY - hole.baseY : 0), hole.position[2]] : undefined,
       baseY, baseDirection: direction }))
     if (p.cutHoles === false) {
@@ -393,6 +393,7 @@ export async function buildModel(M, input, options, fontData, progress = () => {
         result = own(p.textMode === 'engrave' ? result.subtract(textSolid) : result.add(textSolid))
       } finally { text?.dispose() }
     }
+    if (p.hollow && p.cutHoles !== false && holes.some(hole=>hole.enabled)) {
     progress('Vyřezávám odtokové otvory přes spodní bevel…')
     const drainShell = fromManifold(result)
     drainGeometry = bufferGeometry(drainShell.vertices, drainShell.faces)
@@ -461,6 +462,7 @@ export async function buildModel(M, input, options, fontData, progress = () => {
         h.length = originalLength
         h.warning = `Otvor ${i + 1} se nepodařilo automaticky umístit. Základna je vytvořena bez něj; umístěte ho ručně na její stěnu.`
       }
+    }
     }
     if (result.status() !== 'NoError' || result.isEmpty()) throw new Error('Výsledek operace není platná uzavřená síť.')
     result = own(result.simplify(0.0001))
