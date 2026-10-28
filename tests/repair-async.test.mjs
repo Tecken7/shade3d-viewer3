@@ -84,3 +84,28 @@ test('failure while preparing the search tree does not commit partial mesh chang
   assert.equal(mesh.geometry,original)
   assert.equal(mesh.userData._baseGeom,undefined)
 })
+
+
+test('builder continues hole analysis on the unchanged trim when welding would damage topology',async()=>{
+  const geometry=new THREE.BufferGeometry()
+  geometry.setAttribute('position',new THREE.Float32BufferAttribute([0,0,0,.001,0,0,0,1,0,0,0,1],3))
+  geometry.setIndex([0,2,1,0,1,3,0,3,2,1,2,3])
+  const root=new THREE.Group(),mesh=new THREE.Mesh(geometry);root.add(mesh)
+  const positions=geometry.attributes.position.array.slice(),indices=geometry.index.array.slice()
+  await assert.rejects(prepareRepairVerticesAsync(root,.005,{workerFactory}),{code:'UNSAFE_WELD_TOPOLOGY'})
+  const result=await prepareRepairVerticesAsync(root,.005,{workerFactory,preserveUnsafeBoundary:true})
+  assert.equal(result.stats.unsafeWeldSkipped,true)
+  assert.deepEqual(result.backup,[])
+  assert.equal(mesh.geometry,geometry)
+  assert.deepEqual(geometry.attributes.position.array,positions)
+  assert.deepEqual(geometry.index.array,indices)
+  const context=await runStepsAsync(helpers.buildTrimMeshContextSteps(root))
+  const holes=await runStepsAsync(helpers.findRepairBoundaryLoopSteps(context))
+  assert.equal(holes.length,0,'completed analysis can advance instead of leaving an empty repair panel')
+})
+
+test('builder fallback never swallows unrelated worker failures',async()=>{
+ const {root}=splitBox()
+ const failed=()=>({postMessage(){queueMicrotask(()=>this.onmessage({data:{error:'unexpected worker failure'}}))},terminate(){}})
+ await assert.rejects(prepareRepairVerticesAsync(root,.005,{workerFactory:failed,preserveUnsafeBoundary:true}),/unexpected worker failure/)
+})

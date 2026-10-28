@@ -20,5 +20,5 @@ self.onmessage = ({data}) => {
       if (result.indirectBuffer) transfers.push(result.indirectBuffer.buffer)
     } else throw Error('Neznámá úloha přípravy sítě.')
     self.postMessage({result},transfers)
-  } catch(error) { self.postMessage({error:error.message || 'Příprava sítě selhala.'}) }
+  } catch(error) { self.postMessage({error:error.message || 'Příprava sítě selhala.',code:error.code}) }
 }

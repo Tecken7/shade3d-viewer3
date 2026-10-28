@@ -76,10 +76,10 @@ function runPreflightTaskSync(task) {
 export function prepareRepairVertices(sourceObject, tolerance = REPAIR_WELD_TOLERANCE) {
   return runStepsSync(prepareRepairVertexSteps(sourceObject,tolerance),runPreflightTaskSync)
 }
-export async function prepareRepairVerticesAsync(sourceObject, tolerance = REPAIR_WELD_TOLERANCE, {workerFactory = () => new Worker(new URL('../workers/repair-preflight.worker.js',import.meta.url),{type:'module'}), pause} = {}) {
+export async function prepareRepairVerticesAsync(sourceObject, tolerance = REPAIR_WELD_TOLERANCE, {workerFactory = () => new Worker(new URL('../workers/repair-preflight.worker.js',import.meta.url),{type:'module'}), pause, preserveUnsafeBoundary = false} = {}) {
   const worker = workerFactory()
   const runTask = task => new Promise((resolve,reject) => {
-    worker.onmessage = ({data}) => data.error ? reject(Error(data.error)) : resolve(data.result)
+    worker.onmessage = ({data}) => data.error ? reject(Object.assign(Error(data.error), {code:data.code})) : resolve(data.result)
     worker.onerror = () => reject(Error('Přípravu sítě na pozadí se nepodařilo dokončit.'))
     const payload = task.type === 'weld'
       ? {type:'weld',points:Float64Array.from(task.points),triangles:Uint32Array.from(task.triangles),vertexGroups:Uint32Array.from(task.vertexGroups),tolerance:task.tolerance}
@@ -91,5 +91,11 @@ export async function prepareRepairVerticesAsync(sourceObject, tolerance = REPAI
     return result
   })
   try { return await runStepsAsync(prepareRepairVertexSteps(sourceObject,tolerance),{runTask,pause}) }
+  catch (error) {
+    // A refused weld has not committed any geometry. In the builder, keep the
+    // exact trimmed boundary and let hole analysis inspect that original mesh.
+    if (!preserveUnsafeBoundary || error.code !== 'UNSAFE_WELD_TOPOLOGY') throw error
+    return {stats:{moved:0,degenerate:0,duplicateFaces:0,tolerance,unsafeWeldSkipped:true},backup:[]}
+  }
   finally { worker.terminate() }
 }

@@ -14158,7 +14158,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     try {
       await repairWaitForBusyPaint()
       updateRepairProgress("Kontroluji a slučuji blízké vrcholy · 0,005 mm", 14)
-      const preflight = skipWeld ? { stats: {}, backup: [] } : await prepareRepairVerticesAsync(object)
+      const preflight = skipWeld ? { stats: {}, backup: [] } : await prepareRepairVerticesAsync(object, undefined, { preserveUnsafeBoundary: preserveMainBoundary })
       if (preflight.backup.length) {
         const stack = repairHistoryByUrlRef.current[url] || []
         repairHistoryByUrlRef.current[url] = [...stack, { backup: preflight.backup, kind: "vertices", holeIds: [], patchCount: 0, createdAt: Date.now() }]
@@ -14166,7 +14166,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         invalidateComparisonResult()
       }
       const { moved, degenerate, duplicateFaces } = preflight.stats
-      setRepairVertexReport(skipWeld ? "Sloučení vrcholů bylo vráceno; analýza používá původní vrcholy." : moved || degenerate || duplicateFaces
+      setRepairVertexReport(preflight.stats.unsafeWeldSkipped ? "Vrcholky ponechány beze změny, aby se zachovala hranice ořezu." : skipWeld ? "Sloučení vrcholů bylo vráceno; analýza používá původní vrcholy." : moved || degenerate || duplicateFaces
         ? `Kontrola vrcholů: spojeno ${moved.toLocaleString("cs-CZ")} blízkých vrcholů · tolerance 0,005 mm${degenerate + duplicateFaces ? ` · odstraněno ${degenerate + duplicateFaces} neplatných / duplicitních trojúhelníků` : ""}.`
         : "Kontrola vrcholů: bez rozpojených švů v toleranci 0,005 mm.")
       await repairWaitForBusyPaint()
@@ -18217,7 +18217,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       {repairSelection && repairHistoryByUrlRef.current[repairSelection]?.length>0 && <button disabled={repairBusy} onClick={()=>undoLastRepair(repairSelection)}>Vrátit poslední opravu</button>}
       {repairSelectedAutoCount>0 && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={repairBusy||repairReadyActionLeaving} onClick={triggerRepairSelectedAutoHoles}>Opravit vybrané</button>}
     </div>
-    {repairMessage && /nepodař|selhal|chyba/i.test(repairMessage) && <div role="alert">{repairMessage}</div>}
+    {!repairBusy && !repairAnalysisComplete && repairMessage && <div role="alert">{repairMessage}</div>}
   </div>
 
   const cadOrientationLoading = cadStandalone && cadStage === "orient" && (cadBusy || (cadOrientationPrepared && cadViewsPreparing))
@@ -18289,8 +18289,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 <BuilderHelp label="Oprava">Vyberte otvory, které chcete opravit. Spodní okraj pro bázi ponechte otevřený. Na orientaci můžete pokračovat i bez opravy všech otvorů.</BuilderHelp>
               </div>
               <div style={{ marginTop:7, display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
-                {cadUpperUrl && <button type="button" aria-pressed={cadActiveArch === "upper"} onClick={() => startCadRepairForArch("upper")} disabled={repairBusy || cadActiveArch === "upper"} style={{ height:28, padding:"0 10px", borderRadius:8, border:cadActiveArch==="upper"?"1px solid rgba(96,165,250,.28)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="upper"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadArchRepairDone.upper?"#9ad9ad":cadActiveArch==="upper"?"#bfdbfe":"#999", fontSize:8.8, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{cadArchRepairDone.upper?"✓ ":""}Upper</button>}
-                {cadLowerUrl && <button type="button" aria-pressed={cadActiveArch === "lower"} onClick={() => startCadRepairForArch("lower")} disabled={repairBusy || cadActiveArch === "lower"} style={{ height:28, padding:"0 10px", borderRadius:8, border:cadActiveArch==="lower"?"1px solid rgba(96,165,250,.28)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="lower"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadArchRepairDone.lower?"#9ad9ad":cadActiveArch==="lower"?"#bfdbfe":"#999", fontSize:8.8, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{cadArchRepairDone.lower?"✓ ":""}Lower</button>}
+                {cadUpperUrl && <button type="button" aria-pressed={cadActiveArch === "upper"} onClick={() => startCadRepairForArch("upper")} disabled={repairBusy || (cadActiveArch === "upper" && repairAnalysisComplete)} style={{ height:28, padding:"0 10px", borderRadius:8, border:cadActiveArch==="upper"?"1px solid rgba(96,165,250,.28)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="upper"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadArchRepairDone.upper?"#9ad9ad":cadActiveArch==="upper"?"#bfdbfe":"#999", fontSize:8.8, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{cadArchRepairDone.upper?"✓ ":""}Upper</button>}
+                {cadLowerUrl && <button type="button" aria-pressed={cadActiveArch === "lower"} onClick={() => startCadRepairForArch("lower")} disabled={repairBusy || (cadActiveArch === "lower" && repairAnalysisComplete)} style={{ height:28, padding:"0 10px", borderRadius:8, border:cadActiveArch==="lower"?"1px solid rgba(96,165,250,.28)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="lower"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadArchRepairDone.lower?"#9ad9ad":cadActiveArch==="lower"?"#bfdbfe":"#999", fontSize:8.8, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{cadArchRepairDone.lower?"✓ ":""}Lower</button>}
               </div>
             </div>
             <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={continueCadAfterRepair} disabled={!cadRepairCanContinue || repairBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:cadRepairCanContinue?"1px solid rgba(74,222,128,.24)":"1px solid rgba(255,255,255,.07)", background:cadRepairCanContinue?"rgba(34,197,94,.11)":"rgba(255,255,255,.025)", color:cadRepairCanContinue?"#bbf7d0":"#555", fontSize:9, fontWeight:740, cursor:!cadRepairCanContinue||repairBusy?"default":"pointer", whiteSpace:"nowrap" }}>

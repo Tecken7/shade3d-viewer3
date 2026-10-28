@@ -103,7 +103,11 @@ export function weldByDistance(points, triangles, tolerance = REPAIR_WELD_TOLERA
     }
     const after = keep.map(face => triangles.slice(face * 3, face * 3 + 3).map(id => ids[id]))
     const beforeQuality = quality(sourceFaces), afterQuality = quality(after)
-    if (afterQuality.invalid > beforeQuality.invalid || afterQuality.open > beforeQuality.open) throw new Error('Sloučení by vytvořilo neplatnou nebo novou otevřenou hranu. Původní scan zůstal zachovaný.')
+    if (afterQuality.invalid > beforeQuality.invalid || afterQuality.open > beforeQuality.open) {
+      const error = new Error('Sloučení by vytvořilo neplatnou nebo novou otevřenou hranu. Původní scan zůstal zachovaný.')
+      error.code = 'UNSAFE_WELD_TOPOLOGY'
+      throw error
+    }
   }
   return { positions, ids, keep, representatives, stats: { moved, degenerate, duplicateFaces, maxDisplacement, tolerance } }
 }
