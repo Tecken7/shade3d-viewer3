@@ -1,16 +1,6 @@
 import { buildModel } from '../model-builder/engine.mjs'
 
-let runtime
-async function getRuntime() {
-  if (!runtime) runtime = (async () => {
-    const url = new URL('/wasm/model-builder/manifold.js', self.location.origin).href
-    const { default: createModule } = await import(/* webpackIgnore: true */ url)
-    const M = await createModule({ locateFile: file => new URL('/wasm/model-builder/' + file, self.location.origin).href })
-    M.setup()
-    return M
-  })()
-  return runtime
-}
+import {getRuntime} from '../model-builder/manifold-runtime.mjs'
 self.onmessage = async ({ data }) => {
   try {
     const M = await getRuntime()

@@ -9,12 +9,12 @@ import {useBuilderGestureGuard} from './useBuilderGestureGuard'
 import {baseHeightGuideLayout,draggedBaseHeight} from './base-height-layout.mjs'
 
 const noRaycast=()=>null
-export default function BaseHeightPreview({data,height,min,max,flip,onChange,dragging,controlsRef,onDragEnd,bevel=0,busy=false,reveal=null,roughness=.42,metalness=.51}) {
+export default function BaseHeightPreview({data,height,min,max,flip,onChange,dragging,controlsRef,onDragEnd,busy=false,reveal=null,roughness=.42,metalness=.51}) {
   const root=useRef(),visual=useRef(),bodyMaterial=useRef(),opacityCache=useRef(new WeakMap()),active=useRef(null),[hovered,setHovered]=useState(false)
   useCursor(hovered,'ns-resize')
   useBuilderGestureGuard(root,controlsRef,!busy&&!reveal)
   const layout=baseHeightGuideLayout(data,height,flip)
-  const geometry=useMemo(()=>makeBaseGuideGeometry(data.points,bevel),[data,bevel])
+  const geometry=useMemo(()=>makeBaseGuideGeometry(data.profile),[data])
   const colors=useMemo(()=>({blue:new THREE.Color('#3479dd'),model:new THREE.Color('#AAA08E')}),[])
   useFrame(()=>{
     const blend=baseGuideBlend(reveal?.progress.value||0)
@@ -70,10 +70,10 @@ export default function BaseHeightPreview({data,height,min,max,flip,onChange,dra
     {data.points.filter((_,i)=>i%Math.max(1,Math.ceil(data.points.length/8))===0).map((p,i)=><Line key={i} points={[p,[p[0],layout.y,p[2]]]} color="#93c5fd" dashed dashSize={.6} gapSize={.5} transparent opacity={.25} lineWidth={1} raycast={noRaycast}/>)}
     <group ref={root} visible={!busy&&!reveal}>
       <group position={layout.anchor} rotation={layout.direction<0?[Math.PI,0,0]:[0,0,0]}>
-        <mesh position={[0,2.5,0]} renderOrder={2100} {...handlers}><cylinderGeometry args={[.35,.35,5,16]}/><meshBasicMaterial color={hovered?'#ffffff':'#93c5fd'} depthTest={false}/></mesh>
-        <mesh position={[0,5.7,0]} renderOrder={2101} {...handlers}><coneGeometry args={[1.05,2,24]}/><meshBasicMaterial color={hovered?'#ffffff':'#60a5fa'} depthTest={false}/></mesh>
+        <mesh position={[0,2.5,0]} {...handlers}><cylinderGeometry args={[.35,.35,5,16]}/><meshBasicMaterial color={hovered?'#ffffff':'#93c5fd'} depthTest depthWrite/></mesh>
+        <mesh position={[0,5.7,0]} {...handlers}><coneGeometry args={[1.05,2,24]}/><meshBasicMaterial color={hovered?'#ffffff':'#60a5fa'} depthTest depthWrite/></mesh>
       </group>
     </group>
-    {!reveal&&<Html center position={[layout.anchor[0],layout.y+layout.direction*8,layout.anchor[2]]} style={{pointerEvents:'none',whiteSpace:'nowrap',fontFamily:'Inter,system-ui,sans-serif',fontSize:11,color:'#eee',background:'#101010df',border:'1px solid #ffffff25',padding:'5px 8px',borderRadius:7}}><span>Celková výška {height.toLocaleString('cs-CZ',{maximumFractionDigits:2})} mm</span></Html>}
+    {!reveal&&<Html center occlude position={[layout.anchor[0],layout.y+layout.direction*8,layout.anchor[2]]} style={{pointerEvents:'none',whiteSpace:'nowrap',fontFamily:'Inter,system-ui,sans-serif',fontSize:11,color:'#eee',background:'#101010df',border:'1px solid #ffffff25',padding:'5px 8px',borderRadius:7}}><span>Celková výška {height.toLocaleString('cs-CZ',{maximumFractionDigits:2})} mm</span></Html>}
   </group>
 }

@@ -13945,11 +13945,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           else setCadHeightGuide(data.result)
         }
         worker.onerror=()=>{if(!cancelled){worker.terminate();setCadHeightGuidePending(false);setCadHeightGuideError("Náhled výšky se nepodařilo připravit. Můžete zkusit generovat bázi.")}}
-        worker.postMessage({positions,arch:cadActiveArch},[positions.buffer])
+        worker.postMessage({positions,arch:cadActiveArch,options:{smoothing:builderOptions.smoothing,bevel:builderOptions.bevel}},[positions.buffer])
       }catch(error){if(!cancelled){setCadHeightGuidePending(false);setCadHeightGuideError(error.message)}}
     })()
     return()=>{cancelled=true;worker?.terminate()}
-  },[cadStandalone,cadStage,cadFileUrl,cadActiveArch])
+  },[cadStandalone,cadStage,cadFileUrl,cadActiveArch,builderOptions.smoothing,builderOptions.bevel])
 
   const commitCadHeightInput = useCallback((rawValue) => {
     const normalized = String(rawValue ?? "").trim().replace(",", ".")
@@ -19701,7 +19701,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             <CadOrientationReferencePlane center={cadOrientationPlaneCenter} y={cadOrientationPlaneY} size={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} />
           )}
 
-          {cadStandalone && cadStage === "base" && (!cadPreviewActive || cadBaseReveal) && cadHeightGuide && <BaseHeightPreview bevel={builderOptions.bevel} busy={cadBusy} reveal={cadBaseReveal} roughness={cadSurfaceRoughness} metalness={cadSurfaceMetalness} data={cadHeightGuide} height={cadTotalHeight} min={cadMinHeight} max={cadMaxHeight} flip={!!builderOptions.flipBaseDirection} onChange={handleCadTotalHeightChange} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag}/>}
+          {cadStandalone && cadStage === "base" && (!cadPreviewActive || cadBaseReveal) && cadHeightGuide && <BaseHeightPreview busy={cadBusy} reveal={cadBaseReveal} roughness={cadSurfaceRoughness} metalness={cadSurfaceMetalness} data={cadHeightGuide} height={cadTotalHeight} min={cadMinHeight} max={cadMaxHeight} flip={!!builderOptions.flipBaseDirection} onChange={handleCadTotalHeightChange} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag}/>}
           {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && !cadBaseReveal && <><HolePreview options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} interactionLocked={builderDragging} /></>}
           {cadStandalone && (cadPreviewActive || cadStage === "result") && cadPreviewGeometry && (
             <BuilderPreview reveal={cadBaseReveal} onRevealComplete={finishCadBaseReveal} roughness={cadSurfaceRoughness} metalness={cadSurfaceMetalness} geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} onTextStatus={setBuilderTextStatus} overlayDragging={builderDragging} editable={cadStage === "base" && !cadBusy && !cadBaseReveal} options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} />

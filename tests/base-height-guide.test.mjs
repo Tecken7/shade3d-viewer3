@@ -21,7 +21,7 @@ test('guide target plane matches generated bases for both jaws and reversed dire
   const M=await Module();M.setup()
   const original=positions.slice()
   for(const arch of ['upper','lower'])for(const flip of [false,true]){
-    const data=prepareBaseHeightGuide(positions,arch)
+    const data=prepareBaseHeightGuide(M,positions,arch,{smoothing:0})
     const layout=baseHeightGuideLayout(data,20,flip)
     const result=await buildModel(M,positions,{arch,flipBaseDirection:flip,totalHeight:20,smoothing:0,rounding:0,holes:[{enabled:false},{enabled:false}]},null)
     assert.equal(result.placement.direction,layout.direction)
@@ -40,12 +40,13 @@ test('height drag uses the generator direction and preserves slider limits and p
 })
 
 test('the real background worker prepares the same footprint without transferring the original scan',async()=>{
-  const entry=new URL('../app/workers/base-height-guide.worker.js',import.meta.url).href
-  const worker=new Worker(`const {parentPort}=require('node:worker_threads');globalThis.self={postMessage:data=>parentPort.postMessage(data)};import(${JSON.stringify(entry)}).then(()=>parentPort.on('message',data=>self.onmessage({data})));`,{eval:true})
+  const M=await Module();M.setup()
+  const entry=new URL('../app/model-builder/base-height-guide-job.mjs',import.meta.url).href
+  const worker=new Worker(`const {parentPort}=require('node:worker_threads');Promise.all([import(${JSON.stringify(entry)}),import('manifold-3d')]).then(async([job,{default:Module}])=>{const M=await Module();M.setup();parentPort.on('message',data=>job.createBaseHeightGuideHandler(()=>M,(value,transfer)=>parentPort.postMessage(value,transfer))({data}));});`,{eval:true})
   try{
     const result=await new Promise((resolve,reject)=>{worker.on('message',resolve);worker.on('error',reject);worker.postMessage({positions:positions.slice(),arch:'upper'})})
     assert.equal(result.error,undefined)
-    assert.deepEqual(result.result,prepareBaseHeightGuide(positions,'upper'))
+    assert.deepEqual(result.result,prepareBaseHeightGuide(M,positions,'upper'))
     assert.ok(positions.byteLength>0)
   }finally{await worker.terminate()}
 })
