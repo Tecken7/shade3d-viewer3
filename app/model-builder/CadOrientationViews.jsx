@@ -1,19 +1,18 @@
 "use client"
 import React,{useEffect,useRef,useState} from 'react'
 import * as THREE from 'three'
-import AnimatedSceneLoader from '../AnimatedSceneLoader'
 import {orientationViewCamera} from './orientation-view-camera.mjs'
 const views=[['top','Shora · směr FRONT'],['side-left','Levý bok'],['front','Frontální'],['side-right','Pravý bok']]
 // All four demand-rendered views share one context, GPU buffers and shader cache.
-export default function CadOrientationViews({sourceObject,modelMatrix,planeCenter,planeY,planeSize,frontSign=1,onDrag,intensity=1}){
+export default function CadOrientationViews({sourceObject,modelMatrix,planeCenter,planeY,planeSize,frontSign=1,onDrag,onLoadingChange,intensity=1}){
  const root=useRef(),canvas=useRef(),panels=useRef([]),engine=useRef(),gesture=useRef(),config=useRef()
  config.current={modelMatrix,planeCenter,planeY,planeSize,frontSign}
- const [loading,setLoading]=useState(true),[error,setError]=useState('')
+ const [error,setError]=useState('')
  useEffect(()=>{
   if(!sourceObject)return
   let renderer,frame=0,disposed=false,ready=false,observer
   const entries=[]
-  setLoading(true);setError('')
+  onLoadingChange?.(true);setError('')
   const draw=()=>{
    frame=0;if(disposed||!ready)return
    const rect=root.current.getBoundingClientRect(),width=Math.max(1,Math.round(rect.width)),height=Math.max(1,Math.round(rect.height))
@@ -52,11 +51,11 @@ export default function CadOrientationViews({sourceObject,modelMatrix,planeCente
    engine.current={schedule}
    await renderer.compileAsync(entries[0].scene,entries[0].camera)
    if(disposed)return
-   ready=true;draw();setLoading(false)
+   ready=true;draw();onLoadingChange?.(false)
    observer=new ResizeObserver(schedule);observer.observe(root.current)
-  }catch(e){if(!disposed){setError('Kontrolní pohledy se nepodařilo připravit. Orientaci lze ověřit v hlavní scéně.');setLoading(false)}}})()
+  }catch(e){if(!disposed){setError('Kontrolní pohledy se nepodařilo připravit. Orientaci lze ověřit v hlavní scéně.');onLoadingChange?.(false)}}})()
   return()=>{disposed=true;cancelAnimationFrame(frame);observer?.disconnect();engine.current=null;for(const item of entries){item.grid.geometry.dispose();item.grid.material.dispose()}renderer?.dispose();renderer?.forceContextLoss()}
- },[sourceObject,intensity])
+ },[sourceObject,intensity,onLoadingChange])
  useEffect(()=>{engine.current?.schedule()},[modelMatrix,planeCenter,planeY,planeSize,frontSign])
  const end=event=>{gesture.current=null;try{event.currentTarget.releasePointerCapture(event.pointerId)}catch{}}
  return <div ref={root} style={{position:'relative',display:'grid',gap:10}}>
@@ -67,7 +66,6 @@ export default function CadOrientationViews({sourceObject,modelMatrix,planeCente
     <span style={{position:'absolute',left:8,top:7,padding:'4px 6px',borderRadius:7,background:'#0009',color:'#ddd',fontSize:8,fontWeight:700,pointerEvents:'none'}}>{label}</span>
     <span style={{position:'absolute',left:8,bottom:7,color:'#777',fontSize:8,pointerEvents:'none'}}>tažením doladit</span>
   </div>)}
-  <AnimatedSceneLoader visible={loading} status="Připravuji pohledy…" progress={loading?50:100} progressLabel="Příprava orientace"/>
   {error&&<div role="status" style={{position:'absolute',inset:0,background:'#111e',padding:16,color:'#bbb',fontSize:11}}>{error}</div>}
  </div>
 }

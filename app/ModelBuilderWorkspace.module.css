@@ -64,3 +64,5 @@
 .repairTools{margin:10px 0;color:#bbb;font-size:10px}.repairTools button{display:inline-flex;align-items:center;gap:5px;padding:6px 9px}.preparation{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}.preparation progress{width:100%;height:3px;accent-color:white}
 
 .editToolRow{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap}.toolHelp{display:inline-flex;align-items:center;gap:3px}.editTools .editToolRow>button{margin:0}.editTools .editToolRow button{padding:5px 9px}
+
+.brushPresence{display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows 240ms ease,opacity 200ms ease;pointer-events:none}.brushPresence[data-active]{grid-template-rows:1fr;opacity:1;pointer-events:auto}.brushRow{overflow:hidden;min-height:0;display:flex;gap:16px;align-items:center;justify-content:center;flex-wrap:wrap}.brushPresence[data-active] .brushRow{padding-top:8px}@media(prefers-reduced-motion:reduce){.brushPresence{transition:none}}

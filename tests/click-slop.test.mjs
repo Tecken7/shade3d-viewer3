@@ -1,0 +1,7 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import {installClickSlop} from '../app/viewer/click-slop.mjs'
+function fixture(){const listeners=new Map(),element={addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener:(name,fn)=>{assert.equal(listeners.get(name),fn);listeners.delete(name)}};const dispose=installClickSlop(element);return {listeners,dispose,send:(name,overrides={})=>{let blocked=false;listeners.get(name)?.({pointerId:1,button:0,pointerType:'mouse',clientX:10,clientY:20,stopImmediatePropagation:()=>blocked=true,...overrides});return blocked}}}
+test('hand jitter during a point click does not orbit, while deliberate drags do',()=>{const f=fixture();f.send('pointerdown');assert.equal(f.send('pointermove',{clientX:12,clientY:22}),true);assert.equal(f.send('pointermove',{clientX:15}),false);assert.equal(f.send('pointermove',{clientX:12}),false);f.send('pointerup');assert.equal(f.send('pointermove'),false);f.dispose();assert.equal(f.listeners.size,0)})
+test('touch, pan and modifier gestures are not filtered',()=>{for(const event of [{pointerType:'touch'},{button:2},{button:1},{ctrlKey:true},{altKey:true},{shiftKey:true}]){const f=fixture();f.send('pointerdown',event);assert.equal(f.send('pointermove',{clientX:11}),false);f.dispose()}})
+test('cancel and unrelated pointers cannot keep the click filter active',()=>{const f=fixture();f.send('pointerdown');assert.equal(f.send('pointermove',{pointerId:2}),false);f.send('pointercancel');assert.equal(f.send('pointermove'),false);f.dispose()})

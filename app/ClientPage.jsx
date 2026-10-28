@@ -1,5 +1,6 @@
 "use client"
 
+import { installClickSlop } from "./viewer/click-slop.mjs"
 import { captureModelFade, applyModelFade, restoreModelFade } from "./viewer/model-fade.mjs"
 import repairToolbarStyles from "./RepairToolbar.module.css"
 import ViewerBackButton from "./ViewerBackButton"
@@ -6095,7 +6096,7 @@ function Headlight({ enabled = true, intensity = 2, color = "#ffffff" }) {
 }
 
 /* ---------- Trackball ---------- */
-const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], onInteractionChange, enabled = true }, ref) => {
+const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], onInteractionChange, enabled = true, clickSlop = 0 }, ref) => {
   const { camera, gl, size } = useThree()
   const controlsRef = useRef(null)
 
@@ -6128,6 +6129,11 @@ const TouchTrackballControls = React.forwardRef(({ target = [0, 0, 0], onInterac
   useEffect(() => {
     if (controlsRef.current) controlsRef.current.enabled = enabled
   }, [enabled])
+
+  useEffect(()=>{
+    if(!clickSlop)return
+    return installClickSlop(gl.domElement,{slop:clickSlop,enabled:()=>!!controlsRef.current?.enabled})
+  },[gl,clickSlop])
 
   useEffect(() => {
     const c = controlsRef.current; if (!c) return
@@ -11976,6 +11982,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadFileUrl, setCadFileUrl] = useState("")
   const [cadFileName, setCadFileName] = useState("")
   const [cadOrientationPoints, setCadOrientationPoints] = useState([])
+  const [cadViewsPreparing,setCadViewsPreparing] = useState(true)
   const [cadOrientationPrepared, setCadOrientationPrepared] = useState(false)
   const [cadOrientationBaseMatrix, setCadOrientationBaseMatrix] = useState(null)
   const [cadOrientationPivot, setCadOrientationPivot] = useState([0, 0, 0])
@@ -13085,8 +13092,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setTrimMessage("Vyberte model, který chcete oříznout.")
   }, [files, clearTrimWorkingState])
 
-  const selectTrimModel = useCallback(async (url) => {
-    if (trimBusy || !url) return
+  const selectTrimModel = useCallback(async (url, {preparing = false} = {}) => {
+    if ((trimBusy && !preparing) || !url) return
     const object = modelObjectsRef.current[url]
     if (!object) {
       setTrimMessage("Model ještě není načtený. Zkuste to za okamžik.")
@@ -13614,6 +13621,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadFileName(name)
     if (options.resetOrientation !== false) {
       setCadOrientationPoints([])
+      setCadViewsPreparing(true)
       setCadOrientationPrepared(false)
       setCadOrientationBaseMatrix(null)
       setCadOrientationPivot([0, 0, 0])
@@ -13823,6 +13831,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     if (cadBusy || !cadFileUrl) return
     applyModelTransform(cadFileUrl, new THREE.Matrix4().identity().toArray())
     setCadOrientationPoints([])
+    setCadViewsPreparing(true)
     setCadOrientationPrepared(false)
     setCadOrientationBaseMatrix(null)
     setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
@@ -14344,10 +14353,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadActiveArch(arch)
     setCadFileUrl(url)
     setCadFileName(arch === "upper" ? cadUpperName : cadLowerName)
+    setTrimStage("model");setTrimContext(null);setTrimBusy(true)
     setCadStage("trim")
     setTrimMode(true)
     setCadMessage("Ořízněte scan, nebo u připraveného scanu zvolte Nechat vše.")
-    window.setTimeout(() => selectTrimModel(url), 80)
+    window.setTimeout(() => selectTrimModel(url,{preparing:true}), 80)
   }, [cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName, cadBusy, selectTrimModel])
   useEffect(() => {
     if (!cadStandalone || cadStage !== "trim" || trimStage !== "result" || trimBusy || !cadFileUrl) return
@@ -14387,6 +14397,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadOrientationPlaneCenter([0, 0, 0])
     setCadOrientationPlaneSize(80)
     setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
+    setCadViewsPreparing(true)
     setCadStage("orient")
     setCadMessage(`Orientace · ${arch === "upper" ? "Upper" : "Lower"}. Klikněte na levý zadní bod, pravý zadní bod a potom na střed fronty.`)
     // Kamera z Opravy zůstává přesně tam, kde ji uživatel nechal.
@@ -18196,8 +18207,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     {repairMessage && /nepodař|selhal|chyba/i.test(repairMessage) && <div role="alert">{repairMessage}</div>}
   </div>
 
+  const cadOrientationLoading = cadStandalone && cadStage === "orient" && (cadBusy || (cadOrientationPrepared && cadViewsPreparing))
+  const cadOrientationLoader = useLoaderPresence(cadOrientationLoading)
+  const cadTrimLoading = cadStandalone && cadStage === "trim" && trimBusy && (trimStage === "model" || !trimContext)
+  const cadTrimLoader = useLoaderPresence(cadTrimLoading)
   const cadWorkspace = cadStandalone && (
     <>
+      <AnimatedSceneLoader visible={cadOrientationLoader.visible} exiting={cadOrientationLoader.exiting} status={cadBusy ? "Určuji orientaci scanu…" : cadViewsPreparing ? "Připravuji kontrolní pohledy…" : "Orientace připravena"} progress={cadOrientationLoading ? (cadOrientationPrepared?80:30) : 100} progressLabel="Příprava orientace"/>
+      <AnimatedSceneLoader visible={cadTrimLoader.visible} exiting={cadTrimLoader.exiting} status={cadTrimLoading?"Připravuji povrch pro ořez…":"Povrch je připravený"} progress={cadTrimLoading?40:100} progressLabel="Příprava povrchu"/>
       {cadEmbedded && <ViewerBackButton onClick={closeCadEmbedded} disabled={cadBusy || cadEditorBusy || repairBusy || trimBusy} />}
       <div className={cadWorkspaceStyles.scope} style={{"--cad-panel-top": `${cadPanelLayout.top}px`, "--cad-header-top": `${cadPanelLayout.headerTop}px`}}>
       <section ref={cadWorkspaceRef} className={cadWorkspaceStyles.workspace} aria-label="Model Builder">
@@ -18235,10 +18252,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               {[['paint','Označit doplnění','Štětcem přetřete okolí zářezu včetně obou jeho konců. Žlutě se označí hrany pro doplnění a zeleně nová plocha. Tažením mimo scan nebo Alt + tažením otáčíte model. Ctrl při označování odznačuje.'],['artifact','Označit artefakt','Přetřete výstupek a malé okolí. Fialově se zobrazí oblast úpravy. Ctrl označení ubírá; pak potvrďte odstranění artefaktu.']].map(([tool,label,hint])=><span className={cadWorkspaceStyles.toolHelp} key={tool}><button aria-pressed={cadEditorTool===tool} disabled={cadEditorBusy} onClick={()=>setCadEditorTool(previous=>previous===tool?'navigate':tool)}>{label}</button><BuilderHelp label={label}>{hint}</BuilderHelp></span>)}
               <button disabled={cadEditorBusy} onClick={smoothCadBorder} title="Celý hlavní okraj · 3 průchody při 100 % síle">Vyhladit celý okraj</button>
             </div>
-            <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap",marginTop:8}}>
+            <div className={cadWorkspaceStyles.brushPresence} data-active={["paint","artifact"].includes(cadEditorTool)||undefined} aria-hidden={!["paint","artifact"].includes(cadEditorTool)} inert={!["paint","artifact"].includes(cadEditorTool)?"":undefined}><div className={cadWorkspaceStyles.brushRow}>
               <label>Poloměr <input aria-label="Poloměr štětce" type="range" min="0.3" max="12" step="0.1" value={cadBrushOptions.radius} disabled={cadEditorBusy} onChange={e=>setCadBrushOptions(p=>({...p,radius:Number(e.target.value)}))}/>{cadBrushOptions.radius.toFixed(1)} mm</label>
               {!['paint','erase','artifact','navigate'].includes(cadEditorTool)&&<label>Síla <input aria-label="Síla štětce" type="range" min="0.02" max="1" step="0.01" value={cadBrushOptions.strength} disabled={cadEditorBusy} onChange={e=>setCadBrushOptions(p=>({...p,strength:Number(e.target.value)}))}/>{Math.round(cadBrushOptions.strength*100)} %</label>}
-            </div>
+            </div></div>
             {(cadUpperUrl && cadLowerUrl) && <div style={{display:"flex",gap:8,marginTop:6}}>{["upper","lower"].map(arch=><button key={arch} disabled={cadEditorBusy} onClick={()=>{const url=arch==="upper"?cadUpperUrl:cadLowerUrl; const object=modelObjectsRef.current[url]; if(object){prepareRepairVertices(object);refreshCadEdit(object);setCadActiveArch(arch);setCadFileUrl(url);setCadFileName(arch==="upper"?cadUpperName:cadLowerName);setCadEditHistory([])}}}>{arch==="upper"?"Upper":"Lower"}</button>)}</div>}
             {cadEffectiveSelection.length===2 && <label style={{display:"flex",gap:10,alignItems:"center",marginTop:8}}>Prohnutí nové hrany <input aria-label="Prohnutí nové hrany" type="range" min="-2" max="6" step="0.1" value={cadEditBulge} onChange={e=>setCadEditBulge(Number(e.target.value))}/>{cadEditBulge.toFixed(1)} mm</label>}
             {cadEditPreview.pending&&<PatchPendingIndicator/>}
@@ -18278,7 +18295,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               {!cadOrientationPrepared ? <>
                 Klikněte postupně: <b style={{ color:"#cfcfcf" }}>1.</b> levý zadní bod · <b style={{ color:"#cfcfcf" }}>2.</b> pravý zadní bod · <b style={{ color:"#cfcfcf" }}>3.</b> střed fronty. Body: <span style={{ color:cadOrientationPoints.length === 3 ? "#86efac" : "#bdbdbd", fontVariantNumeric:"tabular-nums" }}>{cadOrientationPoints.length}/3</span>
               </> : <>
-                Model je srovnaný k <span style={{ color:"#93c5fd", fontWeight:720 }}>referenční rovině</span>. V pravých pohledech tažením dolaďte náklon; hlavní scénou můžete dál volně otáčet pro kontrolu.
+                Model je srovnaný k referenční rovině. V pravých pohledech tažením dolaďte náklon; hlavní scénou můžete dál volně otáčet pro kontrolu.
               </>}
             </div>
             <div className={cadWorkspaceStyles.stageActions} style={{ display:"flex", gap:6, flex:"0 0 auto" }}>
@@ -18420,7 +18437,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           <div style={{ padding:"0 3px 3px", color:"#666", fontSize:8.4, lineHeight:1.4 }}>
             Kontrolní pohledy · shora, levý bok, fronta a pravý bok · tažením dolaďte směr a sklon
           </div>
-          <CadOrientationViews sourceObject={cadFileUrl?modelObjectsRef.current[cadFileUrl]:null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch==='upper'?-1:1} onDrag={handleCadOrientationMiniDrag} intensity={sceneIntensity}/>
+          <CadOrientationViews onLoadingChange={setCadViewsPreparing} sourceObject={cadFileUrl?modelObjectsRef.current[cadFileUrl]:null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch==='upper'?-1:1} onDrag={handleCadOrientationMiniDrag} intensity={sceneIntensity}/>
 
         </div>
       )}
@@ -19812,7 +19829,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           />
         )}
 
-        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} ref={trackballRef} target={cameraTarget} enabled={!sliceDrawing && !builderDragging && !builderPlacing && !sliceOverlayInteracting && !alignmentBusy && (!cadBusy || cadStage === "scan" || cadStage === "base") && trimDraggingPoint == null && (!trimBusy || trimStage === "model")} onInteractionChange={handleCameraInteraction} />
+        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} clickSlop={(trimMode && !trimClosed) || (cadStandalone && cadStage === "orient" && !cadOrientationPrepared) ? 4 : 0} ref={trackballRef} target={cameraTarget} enabled={!sliceDrawing && !builderDragging && !builderPlacing && !sliceOverlayInteracting && !alignmentBusy && (!cadBusy || cadStage === "scan" || cadStage === "base") && trimDraggingPoint == null && (!trimBusy || trimStage === "model")} onInteractionChange={handleCameraInteraction} />
         <CadOrientationZoom active={cadStandalone && cadStage === "orient" && cadOrientationPrepared}/>
         <RightButtonPan setTarget={setCameraTarget} trackballRef={trackballRef} onInteractionChange={handleCameraInteraction} />
       </Canvas>
