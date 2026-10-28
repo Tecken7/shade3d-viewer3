@@ -1,0 +1,23 @@
+.panel{top:210px!important;bottom:10px!important;right:10px!important;width:292px!important;border-radius:15px!important;padding:14px!important;background:rgba(11,11,11,.955)!important;border-color:#ffffff1a!important;backdrop-filter:blur(22px);font-family:Inter,ui-sans-serif,system-ui,sans-serif!important;box-shadow:0 22px 70px #0007;scrollbar-width:thin;scrollbar-color:#ffffff38 transparent;animation:appear 240ms ease-out}
+.panel h2{font-size:13px!important;margin-bottom:10px!important}
+.panel p{font-size:10px!important;color:#929292!important;line-height:1.6!important}
+.panel strong{font-size:10px!important;text-transform:uppercase;letter-spacing:.025em;color:#a1a1a1}
+.panel label{font-size:10px!important;color:#c6c6c6}
+.panel input:not([type=checkbox]):not([type=range]),.panel select{background:#ffffff07!important;border:1px solid #ffffff1f!important;border-radius:8px!important;color:#ededed!important;font:500 11px Inter,ui-sans-serif,system-ui,sans-serif!important;padding:8px 9px!important;transition:border-color 180ms,background 180ms}
+.panel input:hover,.panel select:hover{border-color:#ffffff40!important}
+.panel input[type=range],.panel input[type=checkbox]{accent-color:#eee!important}
+.panel button{font-family:inherit!important;font-size:10px!important;line-height:1.5;min-height:32px;border-radius:8px!important;padding:7px 10px!important;transition:background 180ms,border-color 180ms,color 180ms,box-shadow 220ms,transform 160ms}
+.panel button:not([data-primary]){background:#ffffff07!important;border-color:#ffffff1f!important;color:#c6c6c6!important}
+.panel button:not([data-primary]):hover:not(:disabled){background:#ffffff16!important;border-color:#ffffff40!important;color:#fff!important;transform:translateY(-1px)}
+.panel button[aria-pressed=true]{background:#ffffff18!important;border-color:#ffffff66!important;color:#f5f5f5!important;box-shadow:0 0 14px #ffffff14}
+.panel button[data-primary]{border-radius:12px!important;min-width:0;width:100%}
+.panel button:disabled{opacity:.4;cursor:default}
+.panel button:focus-visible,.panel input:focus-visible,.panel select:focus-visible{outline:2px solid #ededed;outline-offset:3px}
+.panel hr{border-color:#ffffff14!important}
+.panel fieldset{gap:12px!important}
+@keyframes appear{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:900px){.panel{top:245px!important}}
+@media(max-width:680px){.panel{top:285px!important;width:min(292px,calc(100vw - 20px))!important}}
+@media(prefers-reduced-motion:reduce){.panel{animation:none}.panel input,.panel button,.panel select{transition:none}}
+
+.panel{top:var(--cad-panel-top,210px)!important}

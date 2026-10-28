@@ -1,5 +1,7 @@
 'use client'
 import React from 'react'
+import styles from './BuilderControls.module.css'
+import actions from '../RepairToolbar.module.css'
 import { contourPosition, nearestContourPosition, seatHoleOnContour } from './hole-placement.mjs'
 
 const fieldStyle = { width: '100%', boxSizing: 'border-box', background: '#252525', color: '#eee', border: '1px solid #484848', padding: '7px 8px', borderRadius: 6 }
@@ -9,9 +11,9 @@ function NumberField({ label, value, onChange, min, max, step = 0.1 }) {
 export function BuilderControls({ options: p, change, selected, select, placing, setPlacing, dirty, busy, cancel, hasPreview, cutHoles, textStatus }) {
   const hole = selected?.startsWith('hole:') ? Number(selected.split(':')[1]) : -1
   const editHole = patch => change({ holes: p.holes.map((h, i) => i === hole ? { ...h, ...patch, autoPosition: false, warning: null } : h) })
-  const button = (active = false) => ({ ...fieldStyle, width: 'auto', cursor: 'pointer', background: active ? '#3b5645' : '#303030', fontSize: 12 })
-  return <aside className="artheticBuilderControls" aria-label="Nastavení Model Builderu" style={{ position: 'absolute', top: 160, right: 18, bottom: 20, width: 292, overflowY: 'auto', overflowX: 'hidden', zIndex: 80, background: 'rgba(22,22,22,.96)', border: '1px solid #444', borderRadius: 12, padding: 16, color: '#ddd', fontFamily: 'system-ui', boxSizing: 'border-box' }}>
-    <style>{`.artheticBuilderControls button:not(:disabled):hover {filter:brightness(1.25);border-color:#93c5fd!important}.artheticBuilderControls input:hover,.artheticBuilderControls select:hover {border-color:#93c5fd!important}.artheticBuilderControls button {transition:filter .12s,border-color .12s}`}</style>
+  const button = (active = false) => ({ ...fieldStyle, width: 'auto', cursor: 'pointer', background: active ? '#ffffff18' : '#ffffff07', borderColor: active ? '#ffffff66' : '#ffffff1f', fontSize: 12 })
+  return <aside className={`artheticBuilderControls ${styles.panel}`} aria-label="Nastavení Model Builderu" style={{ position: 'absolute', top: 160, right: 18, bottom: 20, width: 292, overflowY: 'auto', overflowX: 'hidden', zIndex: 80, background: 'rgba(22,22,22,.96)', border: '1px solid #444', borderRadius: 12, padding: 16, color: '#ddd', fontFamily: 'system-ui', boxSizing: 'border-box' }}>
+
     <h2 style={{ fontSize: 16, margin: '0 0 10px' }}>Nastavení modelu</h2>
     <p style={{ fontSize: 12, color: '#bbb', lineHeight: 1.5 }}>Dutina je zespodu otevřená. Bez rozšíření báze a bez výplně.</p>
     {busy && <button type="button" style={button()} onClick={cancel}>Zrušit výpočet</button>}
@@ -32,7 +34,7 @@ export function BuilderControls({ options: p, change, selected, select, placing,
       <NumberField label="Vystoupení / hloubka textu (mm)" value={p.textDepth} min={0.1} max={3} onChange={textDepth => change({ textDepth })} />
       <NumberField label="Velikost textu (mm)" value={p.textSize} min={1} max={12} onChange={textSize => change({ textSize })} />
       <NumberField label="Otočení textu (°)" value={p.textRotation} min={-180} max={180} step={5} onChange={textRotation => change({ textRotation })} />
-      <button disabled={!hasPreview || !p.text.trim()} type="button" style={button(selected === 'text' && placing)} onClick={() => { select('text'); setPlacing(!(selected === 'text' && placing)) }}>Umístit popisek na povrch</button>
+      <button disabled={!hasPreview || !p.text.trim()} type="button" aria-pressed={selected === 'text' && placing} style={button(selected === 'text' && placing)} onClick={() => { select('text'); setPlacing(!(selected === 'text' && placing)) }}>Umístit popisek na povrch</button>
       {p.text.trim()&&textStatus?.error&&<p role="status" style={{margin:0,color:'#fca5a5',fontSize:12,lineHeight:1.5}}>{textStatus.error} Poslední platná poloha zůstává zachovaná.</p>}
       {p.text.trim()&&textStatus?.valid&&<p role="status" style={{margin:0,color:'#93c5fd',fontSize:11}}>Text má vhodný povrch. Modrý náhled lze umístit nebo táhnout po modelu.</p>}
       <hr style={{ width: '100%', border: 0, borderTop: '1px solid #444' }} />
@@ -41,7 +43,7 @@ export function BuilderControls({ options: p, change, selected, select, placing,
       <NumberField label="Odklon otvorů od stěny (°)" value={p.holeYaw ?? 0} min={-75} max={75} step={1} onChange={holeYaw => change({ holeYaw })} />
       {hasPreview && <button type="button" style={button()} onClick={() => { change({ holes: [] }); select(null) }}>Obnovit návrh otvorů</button>}
       {!p.holes.length && <span style={{ fontSize: 12 }}>První náhled navrhne dva otvory Ø 4,5 mm. Jejich polohu zkontrolujte.</span>}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{p.holes.map((h, i) => <button key={i} type="button" style={button(hole === i)} onClick={() => { select(`hole:${i}`); setPlacing(false) }}>Otvor {i + 1}{h.enabled ? '' : ' (vyp.)'}</button>)}</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{p.holes.map((h, i) => <button key={i} type="button" aria-pressed={hole === i} style={button(hole === i)} onClick={() => { select(`hole:${i}`); setPlacing(false) }}>Otvor {i + 1}{h.enabled ? '' : ' (vyp.)'}</button>)}</div>
       {hole >= 0 && p.holes[hole] && <>
         <label style={{ fontSize: 12 }}><input type="checkbox" checked={p.holes[hole].enabled} onChange={e => editHole({ enabled: e.target.checked })} /> Aktivní otvor</label>
         <NumberField label="Průměr otvoru (mm)" value={p.holes[hole].diameter} min={1} max={15} onChange={diameter => editHole({ diameter })} />
@@ -54,7 +56,7 @@ export function BuilderControls({ options: p, change, selected, select, placing,
         <NumberField label="Vnější délka válce (mm)" value={p.holes[hole].outerLength ?? p.holes[hole].length} min={0.5} max={50} onChange={outerLength => editHole({ outerLength })} />
         {p.hollow && p.holes[hole].enabled && p.holes[hole].through === false && p.cutHoles && !dirty && <p role="status" style={{ color: '#f4d28b', fontSize: 12, margin: 0 }}>Otvor není průchozí po celém průřezu. Prodlužte hloubku nebo posuňte válec a znovu potvrďte řez.</p>}
       </>}
-      {hasPreview && <button type="button" style={button(true)} disabled={!p.holes.some(h => h.enabled) || p.cutHoles} onClick={cutHoles}>{p.cutHoles ? 'Otvory jsou vyříznuté' : 'Potvrdit a vyříznout otvory'}</button>}
+      {hasPreview && <button type="button" className={actions.primary} data-primary style={{width:"100%"}} disabled={!p.holes.some(h => h.enabled) || p.cutHoles} onClick={cutHoles}>{p.cutHoles ? 'Otvory jsou vyříznuté' : 'Potvrdit a vyříznout otvory'}</button>}
 
       {selected === "text" && hasPreview && <p style={{ fontSize: 12, color: '#bfe5c8', margin: 0 }}>Popisek posunete tažením přímo po povrchu modelu. Tlačítkem umístění jej můžete přenést na jinou stranu.</p>}
     </fieldset>
