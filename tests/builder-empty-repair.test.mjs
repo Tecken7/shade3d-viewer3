@@ -6,7 +6,7 @@ const start=source.indexOf('  useEffect(()=>{\n    if(!cadStandalone || cadStage
 const body=source.slice(start,end)
 function run(overrides={}){
  let scheduled=null,cleared=false,advanced=false,cleanup
- const values={cadStandalone:true,cadStage:'repair',cadBusy:false,repairBusy:false,repairAnalysisComplete:true,repairContext:{},repairSelection:'scan',cadFileUrl:'scan',repairHoles:[],continueCadAfterRepair:()=>advanced=true,...overrides}
+ const values={cadStandalone:true,cadStage:'repair',cadBusy:false,repairBusy:false,repairAnalysisComplete:true,repairContext:{},repairSelection:'scan',cadFileUrl:'scan',repairHoles:[],repairCompletedHoleIds:[],continueCadAfterRepair:()=>advanced=true,...overrides}
  new Function(...Object.keys(values),'useEffect','window',body)(...Object.values(values),fn=>{cleanup=fn()},{setTimeout:fn=>{scheduled=fn;return 1},clearTimeout:()=>cleared=true})
  return {get scheduled(){return !!scheduled},fire:()=>scheduled?.(),cleanup,get advanced(){return advanced},get cleared(){return cleared}}
 }
@@ -14,3 +14,5 @@ test('a completed empty repair automatically advances and cleans up its delayed 
 test('pending, failed, stale or nonempty analyses never skip the repair step',()=>{
  for(const state of [{cadStage:'trim'},{repairBusy:true},{cadBusy:true},{repairAnalysisComplete:false},{repairContext:null},{repairSelection:'another scan'},{repairHoles:[{id:1}]}])assert.equal(run(state).scheduled,false)
 })
+
+test("all repaired holes advance, while remaining holes keep the selection open",()=>{assert.equal(run({repairHoles:[{id:1}],repairCompletedHoleIds:[1]}).scheduled,true);assert.equal(run({repairHoles:[{id:1},{id:2}],repairCompletedHoleIds:[1]}).scheduled,false)})
