@@ -3,6 +3,8 @@
 import { captureModelFade, applyModelFade, restoreModelFade } from "./viewer/model-fade.mjs"
 import repairToolbarStyles from "./RepairToolbar.module.css"
 import ViewerBackButton from "./ViewerBackButton"
+import BuilderHelp from "./model-builder/BuilderHelp"
+import CadOrientationViews from "./model-builder/CadOrientationViews"
 import TrimControls from "./TrimControls"
 import cadWorkspaceStyles from "./ModelBuilderWorkspace.module.css"
 import RepairStatus, { RepairStep, RepairCheck } from "./RepairStatus"
@@ -51,7 +53,7 @@ import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter"
 import { HolePreview } from "./model-builder/HolePreview"
 import { BuilderPreview } from "./model-builder/BuilderPreview"
 import { FrontDirectionLabel } from "./model-builder/FrontDirectionLabel"
-import { collectTrianglesInRoot } from "./model-builder/scene-input.mjs"
+import { collectTrianglesInRoot, collectTrianglesInRootSteps } from "./model-builder/scene-input.mjs"
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, SAH } from "three-mesh-bvh"
 import { Unzip, UnzipInflate } from "fflate"
 import * as dicomParser from "dicom-parser"
@@ -11464,179 +11466,12 @@ function CadOrientationReferencePlane({ center = [0, 0, 0], y = 0, size = 80, co
   )
 }
 
-function CadOrientationMiniModel({ sourceObject, modelMatrix }) {
-  const clone = useMemo(() => sourceObject?.clone?.(true) || null, [sourceObject])
-  const { invalidate } = useThree()
-
-  useEffect(() => {
-    if (!clone) return
-    clone.matrixAutoUpdate = false
-    if (Array.isArray(modelMatrix) && modelMatrix.length === 16) clone.matrix.fromArray(modelMatrix)
-    else clone.matrix.identity()
-    clone.matrixWorldNeedsUpdate = true
-    clone.updateMatrixWorld(true)
-    invalidate()
-  }, [clone, modelMatrix, invalidate])
-
-  if (!clone) return null
-  return <primitive object={clone} />
-}
-
-function CadOrientationMiniCamera({ rootRef, view, modelMatrix, planeCenter, planeSize, frontSign=1 }) {
-  const { camera, size: canvasSize, invalidate } = useThree()
-
-  useEffect(() => {
-    let raf = 0
-    const frame = () => {
-      const root = rootRef.current
-      if (!root || !camera) return
-      root.updateMatrixWorld(true)
-      const box = new THREE.Box3().setFromObject(root)
-      if (box.isEmpty()) return
-      if(view==='top'&&planeCenter&&planeSize)box.expandByPoint(new THREE.Vector3(planeCenter[0],box.getCenter(new THREE.Vector3()).y,planeCenter[2]+frontSign*planeSize*.48))
-      const center = box.getCenter(new THREE.Vector3())
-      const dims = box.getSize(new THREE.Vector3())
-      const aspect = Math.max(0.35, (canvasSize.width || 1) / Math.max(1, canvasSize.height || 1))
-      let screenWidth = dims.x
-      let screenHeight = dims.y
-      if (view === "top") {
-        screenWidth = dims.x
-        screenHeight = dims.z
-      } else if (view === "side-left" || view === "side-right" || view === "side") {
-        screenWidth = dims.z
-        screenHeight = dims.y
-      }
-      const halfHeight = Math.max(screenHeight * 0.5, screenWidth / (2 * aspect), 1) * 1.24
-      const halfWidth = halfHeight * aspect
-      camera.left = -halfWidth
-      camera.right = halfWidth
-      camera.top = halfHeight
-      camera.bottom = -halfHeight
-      camera.zoom = 1
-      const distance = Math.max(dims.x, dims.y, dims.z, 1) * 3.2 + 8
-      if (view === "top") {
-        camera.position.set(center.x, center.y + distance, center.z)
-        camera.up.set(0, 0, -1)
-      } else if (view === "side-left") {
-        // Pohled z pacientovy levé strany (-X).
-        camera.position.set(center.x - distance, center.y, center.z)
-        camera.up.set(0, 1, 0)
-      } else if (view === "side-right" || view === "side") {
-        // Pohled z pacientovy pravé strany (+X).
-        camera.position.set(center.x + distance, center.y, center.z)
-        camera.up.set(0, 1, 0)
-      } else {
-        camera.position.set(center.x, center.y, center.z + distance)
-        camera.up.set(0, 1, 0)
-      }
-      camera.near = 0.01
-      camera.far = distance * 12 + 100
-      camera.lookAt(center)
-      camera.updateProjectionMatrix()
-      invalidate()
-    }
-    raf = requestAnimationFrame(frame)
-    return () => cancelAnimationFrame(raf)
-  }, [camera, canvasSize.width, canvasSize.height, view, modelMatrix, rootRef, invalidate, planeCenter, planeSize, frontSign])
-
+function CadOrientationZoom({active}) {
+  const {camera}=useThree()
+  useEffect(()=>{if(!active)return;const frame=requestAnimationFrame(()=>{camera.zoom*=.72;camera.updateProjectionMatrix()});return()=>cancelAnimationFrame(frame)},[active,camera])
   return null
 }
 
-function CadOrientationMiniView({ label, view, sourceObject, modelMatrix, planeCenter, planeY, planeSize, frontSign = 1, onDrag, sceneIntensity = 1, highlightIntensity = 1, headlightCfg = { enabled: true, intensity: 2 } }) {
-  const rootRef = useRef(null)
-  const dragRef = useRef(null)
-
-  const beginDrag = (event) => {
-    if (!sourceObject) return
-    event.preventDefault()
-    event.stopPropagation()
-    event.currentTarget.setPointerCapture?.(event.pointerId)
-    dragRef.current = { x: event.clientX, y: event.clientY, pointerId: event.pointerId }
-    event.currentTarget.style.cursor = "grabbing"
-  }
-  const moveDrag = (event) => {
-    const state = dragRef.current
-    if (!state || state.pointerId !== event.pointerId) return
-    event.preventDefault()
-    event.stopPropagation()
-    const dx = event.clientX - state.x
-    const dy = event.clientY - state.y
-    state.x = event.clientX
-    state.y = event.clientY
-    if (Math.abs(dx) + Math.abs(dy) > 0) onDrag?.(view, dx, dy)
-  }
-  const endDrag = (event) => {
-    if (!dragRef.current) return
-    event.preventDefault()
-    event.stopPropagation()
-    try { event.currentTarget.releasePointerCapture?.(event.pointerId) } catch {}
-    dragRef.current = null
-    event.currentTarget.style.cursor = "grab"
-  }
-
-  return (
-    <div className="artheticCadOrthoView" style={{
-      position:"relative", width:"100%", height:"clamp(150px, 18vh, 205px)", borderRadius:14, overflow:"hidden",
-      border:"1px solid rgba(255,255,255,.09)", background:"rgba(10,10,10,.94)",
-      boxShadow:"0 16px 42px rgba(0,0,0,.32)", userSelect:"none",
-    }}>
-      <Canvas
-        onPointerMissed={event=>{if(event.button===0 && cadStandalone && cadStage === "base" && !builderDragging && !builderPlacing)setBuilderSelected(null)}}
-        orthographic
-        camera={{ position:[0,0,100], near:0.01, far:100000, zoom:1 }}
-        dpr={1}
-        frameloop="demand"
-        gl={{ antialias:false, alpha:false, powerPreference:"low-power", preserveDrawingBuffer:false }}
-        style={{ position:"absolute", inset:0, pointerEvents:"none" }}
-      >
-        <color attach="background" args={["#0b0b0b"]} />
-        {/* Stejný light rig jako v hlavní Shade3D scéně. Mini pohled už není
-            nasvícen jedním dominantním světlem a materiál se čte stejně jako
-            v hlavním pracovním okně. */}
-        <ambientLight intensity={0.35 * sceneIntensity} />
-        <directionalLight position={[0, 5, 5]} intensity={1.2 * sceneIntensity} />
-        <directionalLight position={[-10, 0, 0]} intensity={0.9 * sceneIntensity} />
-        <directionalLight position={[10, 0, 0]} intensity={1.0 * sceneIntensity} />
-        <directionalLight position={[0, -5, -5]} intensity={0.7 * sceneIntensity} />
-        <Headlight enabled={headlightCfg?.enabled !== false} intensity={(headlightCfg?.intensity ?? 2) * highlightIntensity} />
-        <group ref={rootRef}>
-          <CadOrientationMiniModel sourceObject={sourceObject} modelMatrix={modelMatrix} />
-        </group>
-        <CadOrientationReferencePlane center={planeCenter} y={planeY} size={planeSize} compact frontSign={frontSign} />
-        <CadOrientationMiniCamera rootRef={rootRef} view={view} modelMatrix={modelMatrix} planeCenter={planeCenter} planeSize={planeSize} frontSign={frontSign} />
-      </Canvas>
-      <div style={{ position:"absolute", left:8, top:7, zIndex:4, padding:"4px 6px", borderRadius:7, background:"rgba(0,0,0,.54)", border:"1px solid rgba(255,255,255,.06)", color:"#d7d7d7", fontSize:8.1, fontWeight:760, letterSpacing:".015em", pointerEvents:"none" }}>{label}</div>
-      <div style={{ position:"absolute", left:8, right:8, bottom:7, zIndex:4, display:"flex", justifyContent:"space-between", alignItems:"center", color:"#606060", fontSize:7.4, pointerEvents:"none" }}>
-        <span>tažením doladit</span><span style={{ color:"#8c8c8c" }}>{view === "top" ? "↻" : view === "front" ? "Z" : view === "side-left" ? "−X" : "+X"}</span>
-      </div>
-      <div
-        onPointerDown={beginDrag}
-        onPointerMove={moveDrag}
-        onPointerUp={endDrag}
-        onPointerCancel={endDrag}
-        style={{ position:"absolute", inset:0, zIndex:5, cursor:sourceObject?"grab":"default", touchAction:"none" }}
-        title="Tažením myší jemně natočte model v tomto pohledu"
-      />
-    </div>
-  )
-}
-
-
-function CadOrientationMiniPlaceholder({ label }) {
-  return (
-    <div style={{
-      position:"relative", width:"100%", height:"clamp(150px, 18vh, 205px)", borderRadius:14,
-      border:"1px solid rgba(255,255,255,.07)", background:"rgba(10,10,10,.90)", overflow:"hidden",
-      display:"grid", placeItems:"center", color:"#525252", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif",
-    }}>
-      <div style={{ position:"absolute", left:8, top:7, padding:"4px 6px", borderRadius:7, background:"rgba(0,0,0,.45)", color:"#777", fontSize:8.1, fontWeight:760 }}>{label}</div>
-      <div style={{ display:"flex", alignItems:"center", gap:7, fontSize:8.2 }}>
-        <span style={{ width:10, height:10, borderRadius:"50%", border:"1.5px solid rgba(255,255,255,.10)", borderTopColor:"#777", animation:"artheticCadSpin .8s linear infinite" }} />
-        připravuji pohled…
-      </div>
-    </div>
-  )
-}
 
 export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = false } = {}) {
   const [clientReady, setClientReady] = useState(false)
@@ -12093,7 +11928,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadEditSelection, setCadEditSelection] = useState([])
   const [cadEditBulge, setCadEditBulge] = useState(0)
   const [cadEditHistory, setCadEditHistory] = useState([])
-  const [cadEditorTool, setCadEditorTool] = useState("paint")
+  const [cadEditorTool, setCadEditorTool] = useState("navigate")
   const [cadEditorBusy, setCadEditorBusy] = useState(false)
   const [cadBrushOptions, setCadBrushOptions] = useState({radius:.8,strength:.3})
   const [cadEditPainted, setCadEditPainted] = useState(new Set())
@@ -12150,7 +11985,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadOrientationAdjust, setCadOrientationAdjust] = useState({ x: 0, y: 0, z: 0 })
   // Mini-view WebGL canvasy se po třetím bodu mountují postupně. Tři nové renderery
   // nad hustým STL už tak nevzniknou ve stejném frame jako auto-orientace.
-  const [cadOrientationMiniCount, setCadOrientationMiniCount] = useState(0)
   const [cadBusy, setCadBusy] = useState(false)
   const [cadMessage, setCadMessage] = useState("Nahrajte Upper a/nebo Lower scan.")
   const [cadNaturalHeight, setCadNaturalHeight] = useState(20)
@@ -12213,21 +12047,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     cadDisposeObjectUrl(cadObjectUrlsRef.current.upper)
     cadDisposeObjectUrl(cadObjectUrlsRef.current.lower)
   }, [])
-
-  useEffect(() => {
-    if (!(cadStandalone && cadStage === "orient" && cadOrientationPrepared)) {
-      setCadOrientationMiniCount(0)
-      return undefined
-    }
-    setCadOrientationMiniCount(0)
-    const timers = [
-      window.setTimeout(() => setCadOrientationMiniCount(1), 70),
-      window.setTimeout(() => setCadOrientationMiniCount(2), 165),
-      window.setTimeout(() => setCadOrientationMiniCount(3), 280),
-      window.setTimeout(() => setCadOrientationMiniCount(4), 390),
-    ]
-    return () => timers.forEach((timer) => window.clearTimeout(timer))
-  }, [cadStandalone, cadStage, cadOrientationPrepared, cadFileUrl])
 
   useEffect(() => {
     const rounded = Math.round((Number(cadTotalHeight) || 0) * 100) / 100
@@ -13719,7 +13538,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadOrientationPlaneCenter([0, 0, 0])
     setCadOrientationPlaneSize(80)
     setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
-    setCadOrientationMiniCount(0)
     setCadStage("scan")
     setCadBusy(false)
     setCadMessage("Nahrajte Upper a/nebo Lower scan.")
@@ -13803,7 +13621,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setCadOrientationPlaneCenter([0, 0, 0])
       setCadOrientationPlaneSize(80)
       setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
-      setCadOrientationMiniCount(0)
     }
     setCadPreviewActive(false)
     setCadPreviewStats(null)
@@ -14002,12 +13819,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     })
   }, [cadOrientationPrepared, cadBusy, cadStage])
 
-  const resetCadOrientationFineTune = useCallback(() => {
-    if (!cadOrientationPrepared || cadBusy) return
-    setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
-    setCadMessage("Jemné doladění bylo vráceno na automatickou orientaci podle 3 bodů.")
-  }, [cadOrientationPrepared, cadBusy])
-
   const restartCadOrientationPoints = useCallback(() => {
     if (cadBusy || !cadFileUrl) return
     applyModelTransform(cadFileUrl, new THREE.Matrix4().identity().toArray())
@@ -14015,7 +13826,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadOrientationPrepared(false)
     setCadOrientationBaseMatrix(null)
     setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
-    setCadOrientationMiniCount(0)
     setCadMessage("Orientace · klikněte znovu na levý zadní bod, pravý zadní bod a potom na střed fronty.")
   }, [cadBusy, cadFileUrl, applyModelTransform])
 
@@ -14121,7 +13931,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     builderWorkerRef.current = pending
     setCadMessage("Připravuji nový model…")
     try {
-      const positions = new Float32Array(cadCollectTrianglesInRoot(sourceObject, rootGroupRef.current))
+      await repairWaitForBusyPaint()
+      const positions = new Float32Array(await runStepsAsync(collectTrianglesInRootSteps(sourceObject, rootGroupRef.current)))
+      if (builderWorkerRef.current !== pending) return
       const fontResponse = await fetch("/wasm/model-builder/font.json")
       if (!fontResponse.ok) throw new Error("Nepodařilo se načíst místní písmo.")
       const font = await fontResponse.json()
@@ -14483,7 +14295,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       setCadActiveArch(arch); setCadFileUrl(url)
       setCadFileName(arch === "upper" ? cadUpperName : cadLowerName)
       setCadStage("edit"); setIsAutoRotating(false)
-      setCadEditorTool("paint")
+      setCadEditorTool("navigate")
       setCadMessage("Úprava · štětcem označte okolí zářezu nebo zvolte nástroj pro okraj a sculpting. Alt + tažení otáčí modelem.")
     } catch(error) { setCadMessage(error.message) }
     finally { setCadBusy(false) }
@@ -14576,7 +14388,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadOrientationPlaneSize(80)
     setCadOrientationAdjust({ x: 0, y: 0, z: 0 })
     setCadStage("orient")
-    setCadOrientationMiniCount(0)
     setCadMessage(`Orientace · ${arch === "upper" ? "Upper" : "Lower"}. Klikněte na levý zadní bod, pravý zadní bod a potom na střed fronty.`)
     // Kamera z Opravy zůstává přesně tam, kde ji uživatel nechal.
   }, [cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName, cadActiveArch, cadBusy, repairBusy, clearRepairWorkingState])
@@ -18398,13 +18209,13 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           </React.Fragment>)}
         </div>
         <div className={cadWorkspaceStyles.stage} key={cadStage}>
-        {cadStage === "scan" && cadEmbedded && <div className={cadWorkspaceStyles.pickers}>
+        {cadStage === "scan" && !cadBusy && cadEmbedded && <div className={cadWorkspaceStyles.pickers}>
           {[{arch:"upper", label:"Horní čelist", value:cadUpperUrl, other:cadLowerUrl}, {arch:"lower", label:"Dolní čelist", value:cadLowerUrl, other:cadUpperUrl}].map(item => <div className={cadWorkspaceStyles.picker} key={item.arch}>
             <span>{item.label}</span>
             <AlignmentModelDropdown badge={item.arch === "upper" ? "Upper" : "Lower"} value={item.value} otherValue={item.other} files={repairVisibleFiles} disabled={cadBusy} onPreview={setCadMenuHoveredUrl} onChange={url => selectCadExisting(item.arch, url)} />
           </div>)}
         </div>}
-        {cadStage === "scan" && (
+        {cadStage === "scan" && !cadBusy && (
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
             <div style={{ color:"#858585", fontSize:9.5, lineHeight:1.45, minWidth:0 }}>
               Vyberte horní a/nebo dolní čelist pro vytvoření modelu.
@@ -18420,12 +18231,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         {cadStage === "edit" && (
           <div className={`artheticEdgeEdit ${cadWorkspaceStyles.editTools}`} role="region" aria-label="Úprava scanu">
             <div style={{fontWeight:750,fontSize:13,marginBottom:8}}>Úprava scanu</div>
-            <div className="cadEditHint">Štětcem přetřete okolí zářezu včetně obou jeho konců. Žlutě se označí hrany pro doplnění a zeleně nová plocha. Tažením mimo scan nebo Alt + tažením otáčíte model. Ctrl při označování odznačuje.</div>
-            <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:8}}>
-              {[["paint","Označit doplnění"],["artifact","Označit artefakt"]].map(([tool,label])=><button key={tool} aria-pressed={cadEditorTool===tool} disabled={cadEditorBusy} onClick={()=>{if(['paint','erase','artifact'].includes(tool)&&!['paint','erase','artifact'].includes(cadEditorTool)&&cadEditContext)refreshCadEdit(cadEditContext.sourceObject);setCadEditorTool(tool)}} style={{background:cadEditorTool===tool?"#215747":"#222",borderColor:cadEditorTool===tool?"#75c6a6":"#444"}}>{label}</button>)}
+            <div className={cadWorkspaceStyles.editToolRow}>
+              {[['paint','Označit doplnění','Štětcem přetřete okolí zářezu včetně obou jeho konců. Žlutě se označí hrany pro doplnění a zeleně nová plocha. Tažením mimo scan nebo Alt + tažením otáčíte model. Ctrl při označování odznačuje.'],['artifact','Označit artefakt','Přetřete výstupek a malé okolí. Fialově se zobrazí oblast úpravy. Ctrl označení ubírá; pak potvrďte odstranění artefaktu.']].map(([tool,label,hint])=><span className={cadWorkspaceStyles.toolHelp} key={tool}><button aria-pressed={cadEditorTool===tool} disabled={cadEditorBusy} onClick={()=>setCadEditorTool(previous=>previous===tool?'navigate':tool)}>{label}</button><BuilderHelp label={label}>{hint}</BuilderHelp></span>)}
+              <button disabled={cadEditorBusy} onClick={smoothCadBorder} title="Celý hlavní okraj · 3 průchody při 100 % síle">Vyhladit celý okraj</button>
             </div>
-            {cadEditorTool==='artifact'&&<div style={{marginTop:8,color:'#c4b5fd'}}>Přetřete výstupek a malé okolí. Fialově se zobrazí oblast úpravy. Ctrl označení ubírá; pak potvrďte odstranění artefaktu.</div>}
-            <button disabled={cadEditorBusy} onClick={smoothCadBorder} title="Celý hlavní okraj · 3 průchody při 100 % síle">Vyhladit celý okraj</button>
             <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap",marginTop:8}}>
               <label>Poloměr <input aria-label="Poloměr štětce" type="range" min="0.3" max="12" step="0.1" value={cadBrushOptions.radius} disabled={cadEditorBusy} onChange={e=>setCadBrushOptions(p=>({...p,radius:Number(e.target.value)}))}/>{cadBrushOptions.radius.toFixed(1)} mm</label>
               {!['paint','erase','artifact','navigate'].includes(cadEditorTool)&&<label>Síla <input aria-label="Síla štětce" type="range" min="0.02" max="1" step="0.01" value={cadBrushOptions.strength} disabled={cadEditorBusy} onChange={e=>setCadBrushOptions(p=>({...p,strength:Number(e.target.value)}))}/>{Math.round(cadBrushOptions.strength*100)} %</label>}
@@ -18450,7 +18259,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
             <div style={{ minWidth:0 }}>
               <div style={{ color:"#858585", fontSize:9.35, lineHeight:1.45 }}>
-                Vyberte otvory, které chcete opravit. Spodní okraj pro bázi ponechte otevřený. Na orientaci můžete pokračovat i bez opravy všech otvorů.
+                <BuilderHelp label="Oprava">Vyberte otvory, které chcete opravit. Spodní okraj pro bázi ponechte otevřený. Na orientaci můžete pokračovat i bez opravy všech otvorů.</BuilderHelp>
               </div>
               <div style={{ marginTop:7, display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
                 {cadUpperUrl && <button type="button" aria-pressed={cadActiveArch === "upper"} onClick={() => startCadRepairForArch("upper")} disabled={repairBusy} style={{ height:28, padding:"0 10px", borderRadius:8, border:cadActiveArch==="upper"?"1px solid rgba(96,165,250,.28)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="upper"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadArchRepairDone.upper?"#9ad9ad":cadActiveArch==="upper"?"#bfdbfe":"#999", fontSize:8.8, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{cadArchRepairDone.upper?"✓ ":""}Upper</button>}
@@ -18479,9 +18288,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
                 <div aria-hidden="true" style={{ width:1, height:21, margin:"5px 1px", background:"rgba(255,255,255,.075)" }} />
               </>}
               {!cadOrientationPrepared && cadOrientationPoints.length > 0 && <button type="button" onClick={undoCadOrientationPoint} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:9, fontWeight:690, cursor:"pointer" }}>Zpět bod</button>}
-              {cadOrientationPrepared && <button type="button" onClick={resetCadOrientationFineTune} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:9, fontWeight:690, cursor:"pointer" }}>Reset sklonu</button>}
-              {cadOrientationPrepared && <label style={{display:'flex',gap:6,alignItems:'center',fontSize:10,color:'#bfdbfe'}}>Natočení shora (°)<input aria-label="Natočení modelu shora (°)" type="number" step="1" disabled={cadBusy} value={Math.round(cadOrientationAdjust.y*180/Math.PI*10)/10} onChange={event=>{if(event.target.value!==''&&Number.isFinite(event.target.valueAsNumber))setCadOrientationAdjust(previous=>({...previous,y:event.target.valueAsNumber*Math.PI/180}))}} style={{width:65,background:'#202020',border:'1px solid #444',borderRadius:6,color:'#eee',padding:6}} /></label>}
-              {cadOrientationPrepared && <button type="button" onClick={restartCadOrientationPoints} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#888", fontSize:9, fontWeight:690, cursor:"pointer" }}>Znovu 3 body</button>}
+              {cadOrientationPrepared && <button type="button" onClick={restartCadOrientationPoints} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#888", fontSize:9, fontWeight:690, cursor:"pointer" }}>Reset</button>}
               {cadOrientationPrepared && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={confirmCadOrientation} disabled={cadBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:cadBusy?"wait":"pointer" }}>Potvrdit orientaci</button>}
             </div>
           </div>
@@ -18613,10 +18420,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           <div style={{ padding:"0 3px 3px", color:"#666", fontSize:8.4, lineHeight:1.4 }}>
             Kontrolní pohledy · shora, levý bok, fronta a pravý bok · tažením dolaďte směr a sklon
           </div>
-          {cadOrientationMiniCount >= 1 ? <CadOrientationMiniView label="Shora · směr FRONT" view="top" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Shora" />}
-          {cadOrientationMiniCount >= 2 ? <CadOrientationMiniView label="Levý bok" view="side-left" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Levý bok" />}
-          {cadOrientationMiniCount >= 3 ? <CadOrientationMiniView label="Frontální" view="front" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Frontální" />}
-          {cadOrientationMiniCount >= 4 ? <CadOrientationMiniView label="Pravý bok" view="side-right" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Pravý bok" />}
+          <CadOrientationViews sourceObject={cadFileUrl?modelObjectsRef.current[cadFileUrl]:null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch==='upper'?-1:1} onDrag={handleCadOrientationMiniDrag} intensity={sceneIntensity}/>
+
         </div>
       )}
       </div>
@@ -20007,7 +19812,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           />
         )}
 
-        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} ref={trackballRef} target={cameraTarget} enabled={!sliceDrawing && !builderDragging && !builderPlacing && !sliceOverlayInteracting && !alignmentBusy && (!cadBusy || cadStage === "scan") && trimDraggingPoint == null && (!trimBusy || trimStage === "model")} onInteractionChange={handleCameraInteraction} />
+        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} ref={trackballRef} target={cameraTarget} enabled={!sliceDrawing && !builderDragging && !builderPlacing && !sliceOverlayInteracting && !alignmentBusy && (!cadBusy || cadStage === "scan" || cadStage === "base") && trimDraggingPoint == null && (!trimBusy || trimStage === "model")} onInteractionChange={handleCameraInteraction} />
+        <CadOrientationZoom active={cadStandalone && cadStage === "orient" && cadOrientationPrepared}/>
         <RightButtonPan setTarget={setCameraTarget} trackballRef={trackballRef} onInteractionChange={handleCameraInteraction} />
       </Canvas>
 

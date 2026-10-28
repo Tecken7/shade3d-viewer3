@@ -62,3 +62,5 @@
 .editTools>div:last-child>:global(.artheticCadPrimary):last-of-type{margin-left:auto}
 
 .repairTools{margin:10px 0;color:#bbb;font-size:10px}.repairTools button{display:inline-flex;align-items:center;gap:5px;padding:6px 9px}.preparation{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}.preparation progress{width:100%;height:3px;accent-color:white}
+
+.editToolRow{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap}.toolHelp{display:inline-flex;align-items:center;gap:3px}.editTools .editToolRow>button{margin:0}.editTools .editToolRow button{padding:5px 9px}

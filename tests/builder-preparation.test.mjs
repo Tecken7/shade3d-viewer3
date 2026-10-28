@@ -24,5 +24,5 @@ test('camera remains available during initial builder preparation, with later co
  const expression=source.slice(source.indexOf('<TouchTrackballControls key={`main-trackball-')).match(/enabled=\{([^}]+)\}/)[1]
  const state={sliceDrawing:false,builderDragging:false,builderPlacing:false,sliceOverlayInteracting:false,alignmentBusy:false,cadBusy:true,cadStage:'scan',trimDraggingPoint:null,trimBusy:false,trimStage:'model'}
  const enabled=overrides=>{const s={...state,...overrides};return new Function(...Object.keys(s),'return '+expression)(...Object.values(s))}
- assert.equal(enabled({}),true);assert.equal(enabled({cadStage:'base'}),false);assert.equal(enabled({sliceDrawing:true}),false)
+ assert.equal(enabled({}),true);assert.equal(enabled({cadStage:'base'}),true);assert.equal(enabled({cadStage:'orient'}),false);assert.equal(enabled({sliceDrawing:true}),false)
 })
