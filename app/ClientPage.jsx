@@ -14395,9 +14395,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     window.setTimeout(() => selectRepairModel(url, { preserveMainBoundary: true }), 80)
   }, [cadStandalone, cadBusy, repairBusy, cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName, clearRepairWorkingState, selectRepairModel])
 
-  const refreshCadEdit = useCallback((object) => {
-    const context = buildTrimMeshContext(object)
-    const loops = findRepairBoundaryLoops(context)
+  const refreshCadEdit = useCallback((object, preparedContext = null, preparedLoops = null) => {
+    const context = preparedContext || buildTrimMeshContext(object)
+    const loops = preparedLoops || findRepairBoundaryLoops(context)
     setCadEditContext(context)
     setCadArtifactPainted(new Set())
     setCadEditLoops(loops)
@@ -14449,8 +14449,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     try {
       await repairWaitForBusyPaint()
       if(cadSessionRef.current)object.traverse(mesh=>{if(mesh.isMesh&&!cadSessionRef.current.backup.some(item=>item.mesh===mesh))cadSessionRef.current.backup.push({mesh,geometry:mesh.geometry,visible:mesh.visible,baseGeom:mesh.userData._baseGeom,derivedGeom:mesh.userData._derivedGeom,originalColors:mesh.userData._originalColors})})
-      prepareRepairVertices(object)
-      refreshCadEdit(object)
+      await prepareRepairVerticesAsync(object)
+      const context = await runStepsAsync(buildTrimMeshContextSteps(object))
+      const loops = await runStepsAsync(findRepairBoundaryLoopSteps(context))
+      refreshCadEdit(object, context, loops)
       setCadEditHistory([])
       setCadActiveArch(arch); setCadFileUrl(url)
       setCadFileName(arch === "upper" ? cadUpperName : cadLowerName)
@@ -17985,14 +17987,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             </div>
             {cadLoadedArchCount > 0 && (
               <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={beginCadEditStage} disabled={cadBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:cadBusy?"wait":"pointer", whiteSpace:"nowrap" }}>
-                Pokračovat · Úprava
+                Pokračovat
               </button>
             )}
           </div>
         )}
 
         {cadStage === "edit" && (
-          <div className={`artheticEdgeEdit ${cadWorkspaceStyles.editPanel}`} role="region" aria-label="Úprava scanu" style={{position:"absolute",top:120,left:"calc(-50vw + 50% + 16px)",width:285,boxSizing:"border-box",maxHeight:"calc(100vh - 155px)",overflowY:"auto",padding:14,borderRadius:15,background:"rgba(12,12,12,.96)",border:"1px solid #333",fontSize:11,color:"#ccc",lineHeight:1.6}}>
+          <div className={`artheticEdgeEdit ${cadWorkspaceStyles.editTools}`} role="region" aria-label="Úprava scanu">
             <div style={{fontWeight:750,fontSize:13,marginBottom:8}}>Úprava scanu</div>
             <div className="cadEditHint">Štětcem přetřete okolí zářezu včetně obou jeho konců. Žlutě se označí hrany pro doplnění a zeleně nová plocha. Tažením mimo scan nebo Alt + tažením otáčíte model. Ctrl při označování odznačuje; Shift při sculptingu vyhlazuje a Ctrl obrátí přidávání/odebírání.</div>
             <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:8}}>
@@ -18013,7 +18015,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               <button disabled={(!cadEditSelection.length&&!cadEditPainted.size&&!cadArtifactPainted.size)||cadEditorBusy} onClick={()=>{setCadEditSelection([]);setCadEditPainted(new Set());setCadArtifactPainted(new Set())}}>Zrušit výběr</button>
               {cadEditorTool==='artifact'&&<button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={!cadArtifactPainted.size||cadEditorBusy} onClick={removeCadArtifact}>Odstranit artefakt</button>}
               <button disabled={!cadEditHistory.length||cadEditorBusy} onClick={undoCadEdgePatch}>Vrátit úpravu</button>
-              <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={cadEditorBusy} onClick={()=>{setCadEditSelection([]);beginCadTrimStage()}}>Pokračovat · Ořez</button>
+              <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={cadEditorBusy} onClick={()=>{setCadEditSelection([]);beginCadTrimStage()}}>Pokračovat</button>
               {cadEditorBusy&&<span role="status">Přepočítávám tah štětce…</span>}
             </div>
           </div>
@@ -18123,11 +18125,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             </div>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", flexWrap:"wrap", gap:7 }}>
               <button type="button" disabled={cadBusy} aria-pressed={!!builderOptions.repairBoundary} onClick={()=>toggleCadPreview({repairBoundary:!builderOptions.repairBoundary})} title="Vratně opraví drobné větvení okraje a bezpečně uzavře mikrootvory do 0,35 mm. Hlavní otvor báze a větší otvory ponechá. Původní scan zůstane zachovaný." style={{height:33,padding:"0 10px",borderRadius:9,border:"1px solid rgba(96,165,250,.25)",background:builderOptions.repairBoundary?"rgba(59,130,246,.18)":"rgba(255,255,255,.035)",color:"#bfdbfe",fontSize:9,fontWeight:720,cursor:cadBusy?"wait":"pointer"}}>{builderOptions.repairBoundary?"Vrátit opravu povrchu":"Opravit hranici a drobné otvory"}</button>
-              <button type="button" onClick={toggleCadPreview} aria-pressed={cadPreviewActive} disabled={cadBusy} title={cadPreviewActive ? "Ukončit Preview" : "Zobrazit Preview"} style={{
-                height:33, minWidth:84, padding:"0 10px", borderRadius:9, border:cadPreviewActive?"1px solid rgba(74,222,128,.28)":"1px solid rgba(255,255,255,.09)",
-                background:cadPreviewActive?"rgba(34,197,94,.11)":"rgba(255,255,255,.035)", color:cadPreviewActive?"#bbf7d0":"#c8c8c8",
-                display:"inline-flex", alignItems:"center", justifyContent:"center", gap:6, fontSize:9, fontWeight:720, cursor:cadBusy?"wait":"pointer",
-              }}><CadEyeIcon active={cadPreviewActive}/><span>{builderDirty && cadPreviewActive ? "Přepočítat náhled" : "Vytvořit náhled"}</span></button>
               {cadPreviewActive && !builderDirty && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={applyCadBase} disabled={cadBusy} style={{ height:33, padding:"0 13px", borderRadius:9, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:"pointer" }}>{builderOptions.cutHoles ? "Dokončit model" : "Dokončit bez otvorů"}</button>}
             </div>
           </div>
@@ -18155,12 +18152,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         )}
       </div>
       </section>
-      <aside className={cadWorkspaceStyles.utility} aria-label="Akce Model Builderu">
+      {cadStage !== "scan" && <aside className={cadWorkspaceStyles.utility} aria-label="Akce Model Builderu">
         <button type="button" onClick={downloadCadSnapshot} disabled={!(cadUpperUrl || cadLowerUrl || cadPreviewGeometry) || cadSnapshotBusy || cadBusy || cadEditorBusy || repairBusy || trimBusy}>
           {cadSnapshotBusy ? "Připravuji ZIP…" : "Stáhnout rozpracovaný scan"}
         </button>
         <button type="button" onClick={resetCadBuilder} disabled={cadBusy || cadEditorBusy || repairBusy || trimBusy}>Nový model</button>
-      </aside>
+      </aside>}
 
       {cadStage === "base" && <BuilderControls options={builderOptions} change={changeBuilderOptions} textStatus={builderTextStatus} selected={builderSelected} select={setBuilderSelected} placing={builderPlacing} setPlacing={setBuilderPlacing} dirty={builderDirty} busy={cadBusy} cancel={cancelBuilder} hasPreview={cadPreviewActive} cutHoles={() => toggleCadPreview({ cutHoles: true })} />}
       {cadStage === "result" && <button type="button" className={cadWorkspaceStyles.returnButton} onClick={() => setCadStage("base")}>Zpět k nastavení modelu</button>}
@@ -20101,7 +20098,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           />
         )}
 
-        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} ref={trackballRef} target={cameraTarget} enabled={!sliceDrawing && !builderDragging && !builderPlacing && !sliceOverlayInteracting && !alignmentBusy && !cadBusy && trimDraggingPoint == null && (!trimBusy || trimStage === "model")} onInteractionChange={handleCameraInteraction} />
+        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} ref={trackballRef} target={cameraTarget} enabled={!sliceDrawing && !builderDragging && !builderPlacing && !sliceOverlayInteracting && !alignmentBusy && (!cadBusy || cadStage === "scan") && trimDraggingPoint == null && (!trimBusy || trimStage === "model")} onInteractionChange={handleCameraInteraction} />
         <RightButtonPan setTarget={setCameraTarget} trackballRef={trackballRef} onInteractionChange={handleCameraInteraction} />
       </Canvas>
 

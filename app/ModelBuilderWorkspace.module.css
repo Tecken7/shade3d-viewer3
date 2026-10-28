@@ -11,8 +11,8 @@
 .pickers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:0 auto 12px;max-width:620px}
 .picker{display:grid;gap:7px;min-width:0}
 .picker>span{font-size:10px;font-weight:600;color:#a1a1a1}
-.scope button:not(:global(.artheticCadPrimary)):not(:global(.artheticCadRepairPrimary)){font-family:inherit!important;font-size:10px!important;min-height:29px;border:1px solid #ffffff1f!important;background:#ffffff07!important;color:#bdbdbd!important;border-radius:8px!important;transition:background 180ms,border-color 180ms,color 180ms,box-shadow 220ms,transform 160ms}
-.scope button:not(:global(.artheticCadPrimary)):not(:global(.artheticCadRepairPrimary)):hover:not(:disabled){background:#ffffff16!important;border-color:#ffffff40!important;color:#fff!important;transform:translateY(-1px)}
+.scope button:not([role=option]):not(:global(.artheticCadPrimary)):not(:global(.artheticCadRepairPrimary)){font-family:inherit!important;font-size:10px!important;min-height:29px;border:1px solid #ffffff1f!important;background:#ffffff07!important;color:#bdbdbd!important;border-radius:8px!important;transition:background 180ms,border-color 180ms,color 180ms,box-shadow 220ms,transform 160ms}
+.scope button:not([role=option]):not(:global(.artheticCadPrimary)):not(:global(.artheticCadRepairPrimary)):hover:not(:disabled){background:#ffffff16!important;border-color:#ffffff40!important;color:#fff!important;transform:translateY(-1px)}
 .scope button[aria-pressed=true]:not(:global(.artheticCadPrimary)):not(:global(.artheticCadRepairPrimary)){background:#ffffff18!important;border-color:#ffffff66!important;color:#f5f5f5!important;box-shadow:0 0 14px #ffffff14}
 .scope button:disabled{opacity:.4;cursor:default!important}
 .scope button:focus-visible,.scope input:focus-visible,.scope select:focus-visible{outline:2px solid #ededed;outline-offset:3px}
@@ -51,3 +51,12 @@
 .scope :global(.artheticCadOrthoViews){top:var(--cad-panel-top,210px)!important;max-height:calc(100vh - var(--cad-panel-top,210px) - 20px)!important}
 
 .repairPanel{top:var(--cad-panel-top,210px)!important;max-height:calc(100vh - var(--cad-panel-top,210px) - 20px)!important}
+
+.editTools{font-size:10px;color:#ccc;line-height:1.6}
+.editTools>div:first-child{display:none}
+.editTools :global(.cadEditHint){font-size:10px;line-height:1.5;color:#929292;max-width:720px;margin:0 auto 10px;text-align:center}
+.editTools>div{justify-content:center}
+.editTools>button{display:block;margin:8px auto}
+.editTools label{display:flex;align-items:center;gap:8px;font-size:10px}
+.editTools input[type=range]{width:min(240px,40vw)}
+.editTools>div:last-child>:global(.artheticCadPrimary):last-of-type{margin-left:auto}
