@@ -9,6 +9,7 @@ import { prepareSurface } from './prepare-surface.mjs'
 import { holeDirection, seatHoleOnContour } from './hole-placement.mjs'
 import { baseDirection } from './base-direction.mjs'
 import { repairBaseBoundary } from './boundary-repair.mjs'
+import { closeBaseMicroHoles } from './micro-holes.mjs'
 
 import { DEFAULTS } from "./defaults.mjs"
 export { DEFAULTS } from "./defaults.mjs"
@@ -266,10 +267,18 @@ export async function buildModel(M, input, options, fontData, progress = () => {
     const prepared = prepareSurface(source.vertices, source.faces)
     if(p.repairBoundary)progress('Opravuji a vyhlazuji hranici pro napojení báze…')
     const boundaryRepair = p.repairBoundary ? repairBaseBoundary(prepared.vertices,prepared.faces) : null
-    const { vertices: v, faces: f } = boundaryRepair || prepared
-    const topology = meshTopology(v, f)
+    const { vertices: v } = boundaryRepair || prepared
+    let f = (boundaryRepair || prepared).faces
+    let topology = meshTopology(v, f)
+    const microRepair = p.repairBoundary && !topology.nonManifold ? closeBaseMicroHoles(v, f, topology.loops) : null
+    if (microRepair?.closedMicroHoles) {
+      progress(`Uzavírám drobné otvory ve scanu (${microRepair.closedMicroHoles})…`)
+      f = microRepair.faces
+      topology = meshTopology(v, f)
+    }
     if (topology.nonManifold) throw new Error('Scan obsahuje neplatné nebo obrácené hrany. Nejprve použijte opravu sítě.')
-    if (topology.loops.length !== 1) throw new Error(`Scan má ${topology.loops.length} otevřených hranic. Potřebuji jednu hlavní hranici; ostatní díry nejprve opravte.`)
+    if (!topology.loops.length) throw new Error('Scan nemá otevřený okraj pro napojení báze. Vytvořte jej v kroku Ořez.')
+    if (topology.loops.length !== 1) throw new Error(`Scan má ${topology.loops.length} otevřených hranic místo jedné hlavní. ${p.repairBoundary ? 'Zbývající otvory nelze bezpečně doplnit automaticky; opravte je v kroku Oprava.' : 'Pro mikrootvory zapněte „Opravit hranici a drobné otvory“. Větší otvory opravte v kroku Oprava.'}`)
     const bounds = new THREE.Box3().setFromBufferAttribute(new THREE.Float32BufferAttribute(v, 3))
     const direction = baseDirection(v,topology.loops[0],options.arch,p.flipBaseDirection)
     const naturalHeight = bounds.max.y - bounds.min.y
@@ -537,7 +546,7 @@ export async function buildModel(M, input, options, fontData, progress = () => {
     const components = 1
     return { positions: new Float32Array(output.vertices), indices: new Uint32Array(output.faces), holes, placement, warnings: holes.map(h => h.warning).filter(Boolean),
       stats: { triangles: output.faces.length / 3, totalHeight: p.totalHeight, wall: p.wall, openBoundaryLoops: 0, volume: signedVolume(output.vertices, output.faces), components, sealedPockets, separatedContacts,
-        boundaryRepair: boundaryRepair ? {removedDegenerate:boundaryRepair.removedDegenerate,removedFans:boundaryRepair.removedFans,removedArea:boundaryRepair.removedArea} : null } }
+        boundaryRepair: boundaryRepair ? {removedDegenerate:boundaryRepair.removedDegenerate,removedFans:boundaryRepair.removedFans,removedArea:boundaryRepair.removedArea,closedMicroHoles:microRepair?.closedMicroHoles || 0,microHoleArea:microRepair?.microHoleArea || 0} : null } }
   } finally {
     surfaceGeometry?.dispose(); closedGeometry?.dispose(); textSurfaceGeometry?.dispose(); drainGeometry?.dispose()
     for (const obj of allocated.reverse()) obj.delete()

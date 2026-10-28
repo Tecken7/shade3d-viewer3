@@ -5,7 +5,7 @@ import repairToolbarStyles from "./RepairToolbar.module.css"
 import ViewerBackButton from "./ViewerBackButton"
 import TrimControls from "./TrimControls"
 import cadWorkspaceStyles from "./ModelBuilderWorkspace.module.css"
-import RepairStatus, { RepairStep } from "./RepairStatus"
+import RepairStatus, { RepairStep, RepairCheck } from "./RepairStatus"
 import { ensureAnalysisPickingTree } from "./viewer/analysis-picking.mjs"
 import { setRepairFoilMaterial } from "./viewer/repair-foil.mjs"
 import { visibleAnalysisModels, visibleAnalysisSelection, analysisCalculationAvailability } from "./viewer/visible-analysis-models.mjs"
@@ -14125,7 +14125,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         setBuilderOptions(previous => ({ ...previous, holes: result.holes, cutHoles: nextOptions.cutHoles, bottomContour: result.placement.bottomContour, baseDirection:result.placement.direction }))
         setCadPreviewActive(true)
         setBuilderDirty(false)
-        const repairNotice=result.stats.boundaryRepair?"Hranice opravena a vyhlazena. ":""
+        const repairNotice=result.stats.boundaryRepair?.closedMicroHoles ? `Drobné otvory opraveny: ${result.stats.boundaryRepair.closedMicroHoles}. ` : result.stats.boundaryRepair ? "Hranice opravena a vyhlazena. " : ""
         setCadMessage(repairNotice+(result.warnings?.length ? result.warnings.join(" ") : nextOptions.cutHoles ? "Otvory jsou vyříznuté. Zkontrolujte výsledek a dokončete model." : "Základna je připravena bez otvorů. Posuňte modré válce, nastavte průměr a hloubku, potom potvrďte vyříznutí otvorů."))
       }
       worker.onerror = (event) => {
@@ -18122,7 +18122,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
               </div>
             </div>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", flexWrap:"wrap", gap:7 }}>
-              <button type="button" disabled={cadBusy} aria-pressed={!!builderOptions.repairBoundary} onClick={()=>toggleCadPreview({repairBoundary:!builderOptions.repairBoundary})} title="Vratně opraví drobné větvení okraje a vyhladí jeho napojení na bázi. Původní scan zůstane zachovaný." style={{height:33,padding:"0 10px",borderRadius:9,border:"1px solid rgba(96,165,250,.25)",background:builderOptions.repairBoundary?"rgba(59,130,246,.18)":"rgba(255,255,255,.035)",color:"#bfdbfe",fontSize:9,fontWeight:720,cursor:cadBusy?"wait":"pointer"}}>{builderOptions.repairBoundary?"Vrátit úpravu hranice":"Opravit a vyhladit hranici"}</button>
+              <button type="button" disabled={cadBusy} aria-pressed={!!builderOptions.repairBoundary} onClick={()=>toggleCadPreview({repairBoundary:!builderOptions.repairBoundary})} title="Vratně opraví drobné větvení okraje a bezpečně uzavře mikrootvory do 0,35 mm. Hlavní otvor báze a větší otvory ponechá. Původní scan zůstane zachovaný." style={{height:33,padding:"0 10px",borderRadius:9,border:"1px solid rgba(96,165,250,.25)",background:builderOptions.repairBoundary?"rgba(59,130,246,.18)":"rgba(255,255,255,.035)",color:"#bfdbfe",fontSize:9,fontWeight:720,cursor:cadBusy?"wait":"pointer"}}>{builderOptions.repairBoundary?"Vrátit opravu povrchu":"Opravit hranici a drobné otvory"}</button>
               <button type="button" onClick={toggleCadPreview} aria-pressed={cadPreviewActive} disabled={cadBusy} title={cadPreviewActive ? "Ukončit Preview" : "Zobrazit Preview"} style={{
                 height:33, minWidth:84, padding:"0 10px", borderRadius:9, border:cadPreviewActive?"1px solid rgba(74,222,128,.28)":"1px solid rgba(255,255,255,.09)",
                 background:cadPreviewActive?"rgba(34,197,94,.11)":"rgba(255,255,255,.035)", color:cadPreviewActive?"#bbf7d0":"#c8c8c8",
@@ -18132,6 +18132,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             </div>
           </div>
         )}
+
+        {cadStage === "base" && cadPreviewActive && !builderDirty && cadPreviewStats?.boundaryRepair?.closedMicroHoles > 0 && <div role="status" style={{display:"flex",alignItems:"center",gap:7,marginTop:10,padding:"7px 9px",borderRadius:8,border:"1px solid #ffffff20",background:"#ffffff07",color:"#d1d1d1",fontSize:10}}>
+          <RepairCheck /><span>Drobné otvory opraveny: {cadPreviewStats.boundaryRepair.closedMicroHoles}</span>
+        </div>}
 
         {cadStage === "result" && (
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12 }}>
