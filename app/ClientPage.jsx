@@ -18324,7 +18324,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         {cadStage === "trim" && (
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
             <div className={cadWorkspaceStyles.trimInstruction}>
-              {!trimBusy && <TrimGuide selecting={trimClosed}/>}
+              {!trimBusy && trimKeepComponent == null && <TrimGuide selecting={trimClosed}/>}
               <div style={{ minWidth:0, color:"#858585", fontSize:9.3, lineHeight:1.45 }}>
               {!trimClosed && trimControlNodes.length === 0 && <>Klikáním vytvořte hranici, nebo zvolte <b style={{ color:"#cfcfcf" }}>Nechat vše</b>, pokud je scan už předem oříznutý.</>}
               {!trimClosed && trimControlNodes.length > 0 && <>Klikáním pokračujte v hranici · kuličky lze přetahovat · smyčku uzavřete dvojklikem na první bod nebo tlačítkem.</>}
