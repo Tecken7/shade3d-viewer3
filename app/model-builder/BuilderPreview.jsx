@@ -21,7 +21,7 @@ function TextShape({result,handlers,hovered}){
   {handlers&&<mesh position={center}><boxGeometry args={size.toArray()}/><meshBasicMaterial colorWrite={false} depthWrite={false} depthTest/></mesh>}
  </group>
 }
-export function BuilderPreview({geometry,placing,onSurfaceClick,overlayDragging=false,options,select,change,dragging,controlsRef,onDragEnd,editable=true,onTextStatus}){
+export function BuilderPreview({roughness=.42,metalness=.51,geometry,placing,onSurfaceClick,overlayDragging=false,options,select,change,dragging,controlsRef,onDragEnd,editable=true,onTextStatus}){
  const mesh=useRef(),textRoot=useRef(),textDrag=useRef(null)
  const [textHovered,setTextHovered]=useState(false),[candidate,setCandidate]=useState(null),[notice,setNotice]=useState(''),[font,setFont]=useState(null)
  useCursor(textHovered,'grab')
@@ -127,7 +127,7 @@ export function BuilderPreview({geometry,placing,onSurfaceClick,overlayDragging=
  const badge=placement?new THREE.Vector3(...placement.position).addScaledVector(new THREE.Vector3(...placement.normal),1.5).toArray():null
  return <>
   <mesh ref={mesh} geometry={display} dispose={null} renderOrder={50} onPointerOver={blockHidden} onPointerMove={blockHidden} onPointerDown={blockHidden} onClick={event=>{blockHidden(event);if(editable&&!placing&&!overlayDragging&&event.delta<=4)select(null)}}>
-   <meshStandardMaterial color="#AAA08E" roughness={.55} metalness={0} side={THREE.DoubleSide}/>
+   <meshStandardMaterial color="#AAA08E" roughness={roughness} metalness={metalness} side={THREE.DoubleSide}/>
   </mesh>
   <group ref={textRoot}>{editable&&options&&<TextShape result={result} handlers={textHandlers} hovered={textHovered}/>}</group>
   {editable&&previous?.valid&&<TextShape result={previous}/>}

@@ -5,6 +5,7 @@ import { captureModelFade, applyModelFade, restoreModelFade } from "./viewer/mod
 import repairToolbarStyles from "./RepairToolbar.module.css"
 import ViewerBackButton from "./ViewerBackButton"
 import BuilderHelp from "./model-builder/BuilderHelp"
+import useAnimatedPanelHeight from "./model-builder/useAnimatedPanelHeight"
 import CadOrientationViews from "./model-builder/CadOrientationViews"
 import TrimControls from "./TrimControls"
 import cadWorkspaceStyles from "./ModelBuilderWorkspace.module.css"
@@ -11486,6 +11487,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadEmbedded, setCadEmbedded] = useState(false)
   const [cadMenuHoveredUrl, setCadMenuHoveredUrl] = useState("")
   const cadWorkspaceRef = useRef(null)
+  const cadWorkspaceContentRef = useRef(null)
   const cadAutoOrientationAttempt = useRef("")
   const [cadPanelLayout, setCadPanelLayout] = useState({ top: 210, headerTop: 10 })
   const cadSessionRef = useRef(null)
@@ -14402,6 +14404,12 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadMessage(`Orientace · ${arch === "upper" ? "Upper" : "Lower"}. Klikněte na levý zadní bod, pravý zadní bod a potom na střed fronty.`)
     // Kamera z Opravy zůstává přesně tam, kde ji uživatel nechal.
   }, [cadUpperUrl, cadLowerUrl, cadUpperName, cadLowerName, cadActiveArch, cadBusy, repairBusy, clearRepairWorkingState])
+
+  useEffect(()=>{
+    if(!cadStandalone || cadStage!=="repair" || cadBusy || repairBusy || !repairAnalysisComplete || !repairContext || repairSelection!==cadFileUrl || repairHoles.length!==0)return
+    const timer=window.setTimeout(continueCadAfterRepair,320)
+    return()=>window.clearTimeout(timer)
+  },[cadStandalone,cadStage,cadBusy,repairBusy,repairAnalysisComplete,repairContext,repairSelection,cadFileUrl,repairHoles.length,continueCadAfterRepair])
 
   const changeRepairVariant = useCallback((variant) => {
     if (variant !== "auto" && variant !== "manual") return
@@ -17800,6 +17808,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     observer.observe(header)
     return () => observer.disconnect()
   }, [cadStandalone, cadStage])
+  useAnimatedPanelHeight(cadWorkspaceRef,cadWorkspaceContentRef,cadStandalone)
+  const cadSurfaceIndex = files.findIndex(file=>file.url===cadFileUrl)
+  const cadSurfaceRoughness = roughnesses[cadSurfaceIndex] ?? (typeof files[cadSurfaceIndex]?.r === 'number' ? files[cadSurfaceIndex].r : .42)
+  const cadSurfaceMetalness = metalnesses[cadSurfaceIndex] ?? (typeof files[cadSurfaceIndex]?.m === 'number' ? files[cadSurfaceIndex].m : .51)
   const cadStepOrder = ["scan", "edit", "trim", "repair", "orient", "base", "result"]
   const cadStepLabels = { scan: "Scan", edit: "Úprava", repair: "Oprava", orient: "Orientace", trim: "Ořez", base: "Báze", result: "Výsledek" }
   const cadLoadedArchCount = (cadUpperUrl ? 1 : 0) + (cadLowerUrl ? 1 : 0)
@@ -18217,7 +18229,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       <AnimatedSceneLoader visible={cadTrimLoader.visible} exiting={cadTrimLoader.exiting} status={cadTrimLoading?"Připravuji povrch pro ořez…":"Povrch je připravený"} progress={cadTrimLoading?40:100} progressLabel="Příprava povrchu"/>
       {cadEmbedded && <ViewerBackButton onClick={closeCadEmbedded} disabled={cadBusy || cadEditorBusy || repairBusy || trimBusy} />}
       <div className={cadWorkspaceStyles.scope} style={{"--cad-panel-top": `${cadPanelLayout.top}px`, "--cad-header-top": `${cadPanelLayout.headerTop}px`}}>
-      <section ref={cadWorkspaceRef} className={cadWorkspaceStyles.workspace} aria-label="Model Builder">
+      <section ref={cadWorkspaceRef} className={cadWorkspaceStyles.workspace} aria-label="Model Builder"><div ref={cadWorkspaceContentRef}>
         <h2>Model Builder</h2>
         <div className={cadWorkspaceStyles.steps}>
           {cadStepOrder.map((step, index) => <React.Fragment key={step}>
@@ -18234,9 +18246,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         </div>}
         {cadStage === "scan" && !cadBusy && (
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
-            <div style={{ color:"#858585", fontSize:9.5, lineHeight:1.45, minWidth:0 }}>
-              Vyberte horní a/nebo dolní čelist pro vytvoření modelu.
-            </div>
             {cadLoadedArchCount > 0 && (
               <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={beginCadEditStage} disabled={cadBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:cadBusy?"wait":"pointer", whiteSpace:"nowrap" }}>
                 Pokračovat
@@ -18261,9 +18270,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             {cadEditPreview.pending&&<PatchPendingIndicator/>}
             {['paint','erase'].includes(cadEditorTool)&&cadEditPreview.error && <div role="alert" style={{color:"#fbbf24"}}>{cadEditPreview.error}</div>}
             <div style={{display:"flex",gap:8,marginTop:8,flexWrap:"wrap"}}>
-              {['paint','erase'].includes(cadEditorTool)&&<button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={!cadEditPreview.patch||cadEditorBusy} onClick={applyCadEdgePatch}>Doplnit plochu</button>}
+              {['paint','erase'].includes(cadEditorTool)&&cadEditPreview.patch&&!cadEditPreview.pending&&<button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={!cadEditPreview.patch||cadEditorBusy} onClick={applyCadEdgePatch}>Doplnit plochu</button>}
               <button disabled={(!cadEditSelection.length&&!cadEditPainted.size&&!cadArtifactPainted.size)||cadEditorBusy} onClick={()=>{setCadEditSelection([]);setCadEditPainted(new Set());setCadArtifactPainted(new Set())}}>Zrušit výběr</button>
-              {cadEditorTool==='artifact'&&<button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={!cadArtifactPainted.size||cadEditorBusy} onClick={removeCadArtifact}>Odstranit artefakt</button>}
+              {cadEditorTool==='artifact'&&cadArtifactPainted.size>0&&<button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={!cadArtifactPainted.size||cadEditorBusy} onClick={removeCadArtifact}>Odstranit artefakt</button>}
               <button disabled={!cadEditHistory.length||cadEditorBusy} onClick={undoCadEdgePatch}>Vrátit úpravu</button>
               <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={cadEditorBusy} onClick={()=>{setCadEditSelection([]);beginCadTrimStage()}}>Pokračovat</button>
               {cadEditorBusy&&<span role="status">Přepočítávám tah štětce…</span>}
@@ -18396,7 +18405,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           </div>
         )}
       </div>
-      </section>
+      </div></section>
       {cadStage !== "scan" && <aside className={cadWorkspaceStyles.utility} aria-label="Akce Model Builderu">
         <button type="button" onClick={downloadCadSnapshot} disabled={!(cadUpperUrl || cadLowerUrl || cadPreviewGeometry) || cadSnapshotBusy || cadBusy || cadEditorBusy || repairBusy || trimBusy}>
           {cadSnapshotBusy ? "Připravuji ZIP…" : "Stáhnout rozpracovaný scan"}
@@ -19653,7 +19662,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
           {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && <><HolePreview options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} interactionLocked={builderDragging} /></>}
           {cadStandalone && (cadPreviewActive || cadStage === "result") && cadPreviewGeometry && (
-            <BuilderPreview geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} onTextStatus={setBuilderTextStatus} overlayDragging={builderDragging} editable={cadStage === "base" && !cadBusy} options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} />
+            <BuilderPreview roughness={cadSurfaceRoughness} metalness={cadSurfaceMetalness} geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} onTextStatus={setBuilderTextStatus} overlayDragging={builderDragging} editable={cadStage === "base" && !cadBusy} options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} />
           )}
 
           {trimMode && trimContext && trimSelection && trimStage !== "result" && (
