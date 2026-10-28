@@ -1,6 +1,6 @@
 'use client'
 import {useCallback,useEffect,useMemo,useRef,useState} from 'react'
-import {Edges,Html,Line,useCursor} from '@react-three/drei'
+import {Edges,Line,useCursor} from '@react-three/drei'
 import * as THREE from 'three'
 import {useFrame} from '@react-three/fiber'
 import {makeBaseGuideGeometry} from './base-guide-geometry.mjs'
@@ -74,6 +74,6 @@ export default function BaseHeightPreview({data,height,min,max,flip,onChange,dra
         <mesh position={[0,5.7,0]} {...handlers}><coneGeometry args={[1.05,2,24]}/><meshBasicMaterial color={hovered?'#ffffff':'#60a5fa'} depthTest depthWrite/></mesh>
       </group>
     </group>
-    {!reveal&&<Html center occlude position={[layout.anchor[0],layout.y+layout.direction*8,layout.anchor[2]]} style={{pointerEvents:'none',whiteSpace:'nowrap',fontFamily:'Inter,system-ui,sans-serif',fontSize:11,color:'#eee',background:'#101010df',border:'1px solid #ffffff25',padding:'5px 8px',borderRadius:7}}><span>Celková výška {height.toLocaleString('cs-CZ',{maximumFractionDigits:2})} mm</span></Html>}
+
   </group>
 }

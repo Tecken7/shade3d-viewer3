@@ -1,67 +1,29 @@
 'use client'
-import React from 'react'
+import React,{useRef} from 'react'
 import styles from './BuilderControls.module.css'
-import actions from '../RepairToolbar.module.css'
-import { contourPosition, nearestContourPosition, seatHoleOnContour } from './hole-placement.mjs'
 
-const fieldStyle = { width: '100%', boxSizing: 'border-box', background: '#252525', color: '#eee', border: '1px solid #484848', padding: '7px 8px', borderRadius: 6 }
-function NumberField({ label, value, onChange, min, max, step = 0.1 }) {
-  return <label style={{ display: 'grid', gap: 5, fontSize: 12 }}>{label}<input aria-label={label} style={fieldStyle} type="number" min={min} max={max} step={step} value={value} onChange={e => { if (e.target.value !== '' && Number.isFinite(e.target.valueAsNumber)) onChange(e.target.valueAsNumber) }} /></label>
+function ModeIcon({kind}){
+  return <svg viewBox="0 0 32 32" width="30" height="30" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    {kind==='shell'?<><ellipse cx="16" cy="8" rx="10" ry="4"/><ellipse cx="16" cy="8" rx="6" ry="2"/><path d="M6 8v15c0 5 20 5 20 0V8M10 9v14M22 9v14"/><path d="M6 22c0 5 20 5 20 0"/></>:kind==='bevel'?<><path d="m5 10 11-5 11 5v12l-4 4H9l-4-4zM5 22h22M9 26v-4m14 4v-4M5 10l11 5 11-5M16 15v7"/></>:<><path d="M5 12v11c3 5 19 5 22 0V12M5 12c2-8 20-8 22 0M5 20c3 5 19 5 22 0"/><ellipse cx="9" cy="19" rx="2" ry="3"/><ellipse cx="23" cy="19" rx="2" ry="3"/></>}
+  </svg>
 }
-export function BuilderControls({ options: p, change, selected, select, placing, setPlacing, dirty, busy, locked=false, cancel, hasPreview, cutHoles, textStatus }) {
-  const hole = selected?.startsWith('hole:') ? Number(selected.split(':')[1]) : -1
-  const editHole = patch => change({ holes: p.holes.map((h, i) => i === hole ? { ...h, ...patch, autoPosition: false, warning: null } : h) })
-  const button = (active = false) => ({ ...fieldStyle, width: 'auto', cursor: 'pointer', background: active ? '#ffffff18' : '#ffffff07', borderColor: active ? '#ffffff66' : '#ffffff1f', fontSize: 12 })
-  return <aside className={`artheticBuilderControls ${styles.panel}`} aria-label="Nastavení Model Builderu" style={{ position: 'absolute', top: 160, right: 18, bottom: 20, width: 292, overflowY: 'auto', overflowX: 'hidden', zIndex: 80, background: 'rgba(22,22,22,.96)', border: '1px solid #444', borderRadius: 12, padding: 16, color: '#ddd', fontFamily: 'system-ui', boxSizing: 'border-box' }}>
-
-    <h2 style={{ fontSize: 16, margin: '0 0 10px' }}>Nastavení modelu</h2>
-    <p style={{ fontSize: 12, color: '#bbb', lineHeight: 1.5 }}>{p.hollow ? 'Dutina je zespodu otevřená. Bez rozšíření báze a bez výplně.' : 'Plný model bez dutiny a odtokových otvorů.'}</p>
-    {busy && <button type="button" style={button()} onClick={cancel}>Zrušit výpočet</button>}
-    <fieldset disabled={busy || locked} style={{ border: 0, minWidth: 0, padding: 0, margin: 0, display: 'grid', gap: 14 }}>
-      <label style={{ fontSize: 13 }}><input type="checkbox" checked={p.hollow} onChange={e => change({ hollow: e.target.checked })} /> Dutý model</label>
-      <label style={{ fontSize: 12 }}><input type="checkbox" checked={!!p.flipBaseDirection} onChange={e => change({ flipBaseDirection:e.target.checked })} /> Obrátit směr tvorby báze</label>
-      {p.hollow && <NumberField label="Tloušťka stěny (mm)" value={p.wall} min={0.8} max={10} onChange={wall => change({ wall })} />}
-      <NumberField label="Spodní bevel (mm)" value={p.bevel} min={0} max={Math.min(2, p.wall * 0.7)} onChange={bevel => change({ bevel })} />
-      <p style={{ margin: 0, fontSize: 11, color: '#aaa' }}>Výchozí bevel 1 mm / 45° odpovídá dodanému modelu z Meditu.</p>
-      <NumberField label="Vyhlazení okraje (mm)" value={p.smoothing ?? 0.8} min={0} max={2} onChange={smoothing => change({ smoothing })} />
-      <p style={{ margin: 0, fontSize: 11, color: '#aaa' }}>Vyhlazuje jen úzký pás u ořezu a napojení na bázi. Nula vyhlazení vypne.</p>
-      <NumberField label="Zaoblení napojení scanu (mm)" value={p.rounding ?? 1} min={0} max={3} onChange={rounding => change({ rounding })} />
-      <p style={{ margin: 0, fontSize: 11, color: '#aaa' }}>Plynulý přechod scanu do stěny báze. Hodnota určuje šířku upravovaného pásu; nula zachová ostré napojení.</p>
-      <hr style={{ width: '100%', border: 0, borderTop: '1px solid #444' }} />
-      <strong style={{ fontSize: 13 }}>Popisek</strong>
-      <label style={{ display: 'grid', gap: 5, fontSize: 12 }}>Text<input aria-label="Text popisku" style={fieldStyle} maxLength={60} value={p.text} onChange={e => change({ text: e.target.value })} /></label>
-      <label style={{ display: 'grid', gap: 5, fontSize: 12 }}>Provedení<select aria-label="Provedení popisku" style={fieldStyle} value={p.textMode} onChange={e => change({ textMode: e.target.value })}><option value="emboss">Vystouplý</option><option value="engrave">Vyrytý</option></select></label>
-      <NumberField label="Vystoupení / hloubka textu (mm)" value={p.textDepth} min={0.1} max={3} onChange={textDepth => change({ textDepth })} />
-      <NumberField label="Velikost textu (mm)" value={p.textSize} min={1} max={12} onChange={textSize => change({ textSize })} />
-      <NumberField label="Otočení textu (°)" value={p.textRotation} min={-180} max={180} step={5} onChange={textRotation => change({ textRotation })} />
-      <button disabled={!hasPreview || !p.text.trim()} type="button" aria-pressed={selected === 'text' && placing} style={button(selected === 'text' && placing)} onClick={() => { select('text'); setPlacing(!(selected === 'text' && placing)) }}>Umístit popisek na povrch</button>
-      {p.text.trim()&&textStatus?.error&&<p role="status" style={{margin:0,color:'#fca5a5',fontSize:12,lineHeight:1.5}}>{textStatus.error} Poslední platná poloha zůstává zachovaná.</p>}
-      {p.text.trim()&&textStatus?.valid&&<p role="status" style={{margin:0,color:'#93c5fd',fontSize:11}}>Text má vhodný povrch. Modrý náhled lze umístit nebo táhnout po modelu.</p>}
-      {p.hollow && <>
-      <hr style={{ width: '100%', border: 0, borderTop: '1px solid #444' }} />
-      <strong style={{ fontSize: 13 }}>Odtokové otvory</strong>
-      <p style={{ margin: 0, fontSize: 11, color: '#aaa', lineHeight: 1.5 }}>Modré válce jsou pouze náhled. Táhněte je podél spodního obvodu a nastavte průměr i hloubku. Model se vyřízne až po potvrzení.</p>
-      <NumberField label="Odklon otvorů od stěny (°)" value={p.holeYaw ?? 0} min={-75} max={75} step={1} onChange={holeYaw => change({ holeYaw })} />
-      {hasPreview && <button type="button" style={button()} onClick={() => { change({ holes: [] }); select(null) }}>Obnovit návrh otvorů</button>}
-      {!p.holes.length && <span style={{ fontSize: 12 }}>První náhled navrhne dva otvory Ø 4,5 mm. Jejich polohu zkontrolujte.</span>}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>{p.holes.map((h, i) => <button key={i} type="button" aria-pressed={hole === i} style={button(hole === i)} onClick={() => { select(`hole:${i}`); setPlacing(false) }}>Otvor {i + 1}{h.enabled ? '' : ' (vyp.)'}</button>)}</div>
-      {hole >= 0 && p.holes[hole] && <>
-        <label style={{ fontSize: 12 }}><input type="checkbox" checked={p.holes[hole].enabled} onChange={e => editHole({ enabled: e.target.checked })} /> Aktivní otvor</label>
-        <NumberField label="Průměr otvoru (mm)" value={p.holes[hole].diameter} min={1} max={15} onChange={diameter => editHole({ diameter })} />
-        <NumberField label="Zapuštění od spodní hrany (mm)" value={p.holes[hole].heightOffset ?? .5} min={0} max={25} onChange={heightOffset => editHole({ heightOffset, position:seatHoleOnContour(p.bottomContour,{...p.holes[hole],heightOffset}) })} />
-        <NumberField label="Natočení vybraného válce (°)" value={p.holes[hole].yaw ?? 0} min={-180} max={180} step={1} onChange={yaw => editHole({ yaw })} />
-        {p.bottomContour?.length > 0 && <label style={{ display: 'grid', gap: 5, fontSize: 12 }}>Poloha po spodním obvodu
-          <input aria-label="Poloha otvoru po spodním obvodu" type="range" min={0} max={100} step={0.1} value={nearestContourPosition(p.bottomContour, p.holes[hole].position).fraction * 100} onChange={e => editHole({ position: seatHoleOnContour(p.bottomContour,p.holes[hole],contourPosition(p.bottomContour, Number(e.target.value) / 100)) })} />
-        </label>}
-        <NumberField label="Hloubka řezu otvoru (mm)" value={p.holes[hole].length} min={0.5} max={50} onChange={length => editHole({ length, autoDepth: false })} />
-        <NumberField label="Vnější délka válce (mm)" value={p.holes[hole].outerLength ?? p.holes[hole].length} min={0.5} max={50} onChange={outerLength => editHole({ outerLength })} />
-        {p.hollow && p.holes[hole].enabled && p.holes[hole].through === false && p.cutHoles && !dirty && <p role="status" style={{ color: '#f4d28b', fontSize: 12, margin: 0 }}>Otvor není průchozí po celém průřezu. Prodlužte hloubku nebo posuňte válec a znovu potvrďte řez.</p>}
-      </>}
-      {hasPreview && <button type="button" className={actions.primary} data-primary style={{width:"100%"}} disabled={!p.holes.some(h => h.enabled) || p.cutHoles} onClick={cutHoles}>{p.cutHoles ? 'Otvory jsou vyříznuté' : 'Potvrdit a vyříznout otvory'}</button>}
-
-      </>}
-      {selected === "text" && hasPreview && <p style={{ fontSize: 12, color: '#bfe5c8', margin: 0 }}>Popisek posunete tažením přímo po povrchu modelu. Tlačítkem umístění jej můžete přenést na jinou stranu.</p>}
-    </fieldset>
-    <p role="status" style={{ color: dirty ? '#f4d28b' : '#bfe5c8', fontSize: 12, lineHeight: 1.5 }}>{!p.hollow ? (hasPreview ? dirty ? 'Změny přepočítejte tlačítkem Generovat bázi.' : 'Plný model je připravený k dokončení.' : 'Nastavte výšku a vygenerujte plný model.') : dirty && hasPreview ? 'Změny otvorů potvrďte tlačítkem „Potvrdit a vyříznout otvory“. Změny samotné základny přepočítejte v horní liště.' : hasPreview ? p.cutHoles ? 'Otvory jsou součástí modelu.' : 'Základna je bez otvorů. Modré válce čekají na potvrzení.' : 'Nastavte výšku a vytvořte první náhled.'}</p>
-  </aside>
+function Mode({label,value,active,disabled,onClick,kind}){
+ return <button type="button" className={styles.mode} aria-label={label} aria-pressed={active} disabled={disabled} onClick={onClick}><span className={styles.icon}><ModeIcon kind={kind}/></span><span className={styles.modeText}><span>{label}</span><strong>{value}</strong></span><span className={styles.switch} aria-hidden="true"><i/></span></button>
+}
+export function BuilderControls({options:p,change,busy,locked=false,cancel,height,minHeight,maxHeight,onHeightChange,heightDraft,onHeightDraft,onCommitHeight}){
+ const savedBevel=useRef(p.bevel||1)
+ const toggleBevel=()=>{if(p.bevel>0){savedBevel.current=p.bevel;change({bevel:0})}else change({bevel:Math.min(savedBevel.current,2,p.wall*.7)})}
+ return <aside className={`artheticBuilderControls ${styles.panel}`} aria-label="Nastavení Model Builderu">
+  <h2>Nastavení báze</h2>
+  <fieldset disabled={busy||locked}>
+   <Mode label="Dutý model" value={p.hollow?'Dutý':'Plný'} kind="shell" active={p.hollow} onClick={()=>change({hollow:!p.hollow})}/>
+   <Mode label="Bevel" value={p.bevel>0?'Zapnuto':'Vypnuto'} kind="bevel" active={p.bevel>0} onClick={toggleBevel}/>
+   <Mode label="Odtokové otvory" value={p.hollow&&p.drainsEnabled!==false?'Zapnuto':'Vypnuto'} kind="drains" active={p.hollow&&p.drainsEnabled!==false} disabled={!p.hollow} onClick={()=>change({drainsEnabled:p.drainsEnabled===false})}/>
+   <div className={styles.height}>
+    <div className={styles.heightHeading}><label htmlFor="builder-base-height">Celková výška</label><span className={styles.exactHeight}><input aria-label="Přesná celková výška modelu v milimetrech" inputMode="decimal" value={heightDraft} onChange={e=>onHeightDraft(e.target.value)} onBlur={e=>onCommitHeight(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();e.currentTarget.blur()}if(e.key==='Escape'){onHeightDraft(height.toFixed(2));e.currentTarget.value=height.toFixed(2);e.currentTarget.blur()}}}/><span>mm</span></span></div>
+    <input id="builder-base-height" aria-label="Celková výška báze" type="range" min={minHeight} max={maxHeight} step=".01" value={height} onChange={e=>onHeightChange(e.target.value)}/>
+   </div>
+  </fieldset>
+  {busy&&<button type="button" className={styles.cancel} onClick={cancel}>Zrušit výpočet</button>}
+ </aside>
 }

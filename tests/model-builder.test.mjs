@@ -289,3 +289,8 @@ test('solid models never propose or cut drainage holes, even with stale hollow s
  assert.ok(!messages.some(message=>typeof message==='string'&&message.includes('odtokové')))
  assert.equal(result.stats.openBoundaryLoops,0)
 })
+
+test('disabling drainage ignores stale cutters in a hollow model',async()=>{
+ const result=await build({hollow:true,drainsEnabled:false,cutHoles:true,holes:[{enabled:true,diameter:4.5,length:8,position:[20,23,0]}]})
+ assert.deepEqual(result.holes,[]);assert.equal(result.stats.openBoundaryLoops,0)
+})
