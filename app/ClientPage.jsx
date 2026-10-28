@@ -55,6 +55,7 @@ import { PLYExporter } from "three/examples/jsm/exporters/PLYExporter"
 import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter"
 import { HolePreview } from "./model-builder/HolePreview"
 import { BuilderPreview } from "./model-builder/BuilderPreview"
+import BaseHeightPreview from "./model-builder/BaseHeightPreview"
 import { FrontDirectionLabel } from "./model-builder/FrontDirectionLabel"
 import { collectTrianglesInRoot, collectTrianglesInRootSteps } from "./model-builder/scene-input.mjs"
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast, SAH } from "three-mesh-bvh"
@@ -12001,6 +12002,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadTotalHeight, setCadTotalHeight] = useState(20)
   const [cadHeightDraft, setCadHeightDraft] = useState("25.0")
   const [cadPreviewActive, setCadPreviewActive] = useState(false)
+  const [cadHeightGuide,setCadHeightGuide] = useState(null)
+  const [cadHeightGuidePending,setCadHeightGuidePending] = useState(false)
+  const [cadHeightGuideError,setCadHeightGuideError] = useState("")
   const [cadPreviewGeometry, setCadPreviewGeometry] = useState(null)
   const [cadPreviewStats, setCadPreviewStats] = useState(null)
   const [builderOptions, setBuilderOptions] = useState(() => ({ ...BUILDER_DEFAULTS, cutHoles: false, followContour: true }))
@@ -13912,8 +13916,35 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     const next = Math.round(Math.max(min, Math.min(max, safe)) * 100) / 100
     if (Math.abs(next - cadTotalHeight) <= 1e-6) return
     setCadTotalHeight(next)
+    setCadPreviewActive(false)
+    setBuilderPlacing(false)
+    setBuilderSelected(null)
     invalidateCadPreview()
   }, [cadNaturalHeight, cadTotalHeight, invalidateCadPreview])
+
+  useEffect(()=>{
+    setCadHeightGuide(null);setCadHeightGuideError("")
+    if(!cadStandalone || cadStage!=="base" || !cadFileUrl){setCadHeightGuidePending(false);return}
+    let cancelled=false,worker
+    setCadHeightGuidePending(true)
+    ;(async()=>{
+      try{
+        await repairWaitForBusyPaint()
+        const positions=new Float32Array(await runStepsAsync(collectTrianglesInRootSteps(modelObjectsRef.current[cadFileUrl],rootGroupRef.current)))
+        if(cancelled)return
+        worker=new Worker(new URL("./workers/base-height-guide.worker.js",import.meta.url),{type:"module"})
+        worker.onmessage=({data})=>{
+          if(cancelled)return
+          worker.terminate();setCadHeightGuidePending(false)
+          if(data.error)setCadHeightGuideError(data.error)
+          else setCadHeightGuide(data.result)
+        }
+        worker.onerror=()=>{if(!cancelled){worker.terminate();setCadHeightGuidePending(false);setCadHeightGuideError("Náhled výšky se nepodařilo připravit. Můžete zkusit generovat bázi.")}}
+        worker.postMessage({positions,arch:cadActiveArch},[positions.buffer])
+      }catch(error){if(!cancelled){setCadHeightGuidePending(false);setCadHeightGuideError(error.message)}}
+    })()
+    return()=>{cancelled=true;worker?.terminate()}
+  },[cadStandalone,cadStage,cadFileUrl,cadActiveArch])
 
   const commitCadHeightInput = useCallback((rawValue) => {
     const normalized = String(rawValue ?? "").trim().replace(",", ".")
@@ -18347,12 +18378,14 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
         {cadStage === "base" && (
           <div style={{ display:"grid", gridTemplateColumns:"minmax(0,1fr)", gap:10, alignItems:"center" }}>
+            {cadHeightGuidePending && <div role="status" className={cadWorkspaceStyles.preparation}><span className={repairToolbarStyles.spinner}/>Připravuji náhled výšky báze…</div>}
+            {cadHeightGuideError && !cadPreviewActive && <div role="status" style={{fontSize:10,color:"#aaa"}}>{cadHeightGuideError}</div>}
             <div style={{ display:"grid", gridTemplateColumns:"110px minmax(180px,1fr) 76px", gap:9, alignItems:"center", minWidth:0 }}>
               <div>
                 <div style={{ color:"#d1d1d1", fontSize:9.4, fontWeight:730 }}>Celková výška</div>
                 <div style={{ color:"#575757", fontSize:8.1, marginTop:2 }}>Otevřená dutá báze · mm</div>
               </div>
-              <input className="artheticCadRange" type="range" min={cadMinHeight} max={cadMaxHeight} step="0.1" value={cadTotalHeight} disabled={cadBusy} onChange={(e) => handleCadTotalHeightChange(e.target.value)} />
+              <input className="artheticCadRange" type="range" min={cadMinHeight} max={cadMaxHeight} step="0.01" value={cadTotalHeight} disabled={cadBusy} onChange={(e) => handleCadTotalHeightChange(e.target.value)} />
               <div style={{ position:"relative", height:29 }} title={`Přesná celková výška · ${cadMinHeight.toFixed(2)}–${cadMaxHeight.toFixed(2)} mm`}>
                 <input
                   className="artheticCadNumber"
@@ -19658,6 +19691,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             <CadOrientationReferencePlane center={cadOrientationPlaneCenter} y={cadOrientationPlaneY} size={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} />
           )}
 
+          {cadStandalone && cadStage === "base" && !cadPreviewActive && !cadBusy && cadHeightGuide && <BaseHeightPreview data={cadHeightGuide} height={cadTotalHeight} min={cadMinHeight} max={cadMaxHeight} flip={!!builderOptions.flipBaseDirection} onChange={handleCadTotalHeightChange} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag}/>}
           {cadStandalone && cadStage === "base" && cadPreviewActive && !cadBusy && <><HolePreview options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} interactionLocked={builderDragging} /></>}
           {cadStandalone && (cadPreviewActive || cadStage === "result") && cadPreviewGeometry && (
             <BuilderPreview roughness={cadSurfaceRoughness} metalness={cadSurfaceMetalness} geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} onTextStatus={setBuilderTextStatus} overlayDragging={builderDragging} editable={cadStage === "base" && !cadBusy} options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} />
