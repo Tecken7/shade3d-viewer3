@@ -1,7 +1,7 @@
 .guide{width:76px;height:47px;flex:0 0 76px;overflow:visible}
-.video{display:block;width:112px;height:84px;flex:0 0 112px;object-fit:contain;border-radius:8px;mix-blend-mode:screen;pointer-events:none;animation:videoIn 240ms ease-out}
+.video{display:block;width:176px;height:132px;flex:0 0 176px;object-fit:contain;border-radius:8px;mix-blend-mode:screen;pointer-events:none;animation:videoIn 240ms ease-out}
 @keyframes videoIn{from{opacity:0}to{opacity:1}}
-@media(max-width:600px){.video{width:88px;height:66px;flex-basis:88px}}
+@media(max-width:600px){.video{width:112px;height:84px;flex-basis:112px}}
 @media(prefers-reduced-motion:reduce){.video{animation:none}}
 .line{animation:draw 4s ease infinite;stroke-dasharray:3 3;stroke-dashoffset:0}
 .point{animation:point 4s ease infinite;animation-delay:calc(var(--i)*.55s);opacity:0}
