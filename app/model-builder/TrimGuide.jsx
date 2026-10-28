@@ -22,5 +22,5 @@ export default function TrimGuide({selecting=false}) {
     }
   },[selecting])
   const clip=selecting?'selection':'points'
-  return <video key={clip} ref={videoRef} className={styles.video} width="480" height="360" muted loop playsInline preload="metadata" poster={`/guides/builder-trim-${clip}.webp`} src={selecting?'/guides/builder-trim-selection-zoom.mp4':'/guides/builder-trim-points-zoom.mp4'} aria-hidden="true" disablePictureInPicture/>
+  return <video key={clip} ref={videoRef} className={styles.video} width="480" height="360" muted loop playsInline preload="metadata" poster={`/guides/builder-trim-${clip}.webp`} src={selecting?'/guides/builder-trim-selection-zoom-upper-left.mp4':'/guides/builder-trim-points-zoom.mp4'} aria-hidden="true" disablePictureInPicture/>
 }
