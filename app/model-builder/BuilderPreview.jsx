@@ -1,7 +1,7 @@
 'use client'
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useThree, useFrame } from '@react-three/fiber'
-import {baseRevealProgress,BASE_REVEAL_MS,installBaseRevealShader} from './base-reveal.mjs'
+import {advanceBaseReveal,BASE_REVEAL_MS,installBaseRevealShader} from './base-reveal.mjs'
 import * as THREE from 'three'
 import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { MeshBVH } from 'three-mesh-bvh'
@@ -35,20 +35,20 @@ export function BuilderPreview({roughness=.42,metalness=.51,geometry,placing,onS
   return()=>{live=false}
  },[])
  const revealClock=useRef({key:null,start:0,done:false})
- const revealUniforms=useMemo(()=>({uBaseRevealEnabled:{value:0},uBaseRevealProgress:{value:1},uBaseRevealFrom:{value:0},uBaseRevealTo:{value:0},uBaseRevealDirection:{value:1}}),[])
+ const revealUniforms=useMemo(()=>({uBaseRevealHasStart:{value:0},uBaseRevealEnabled:{value:0},uBaseRevealProgress:{value:1},uBaseRevealFrom:{value:0},uBaseRevealTo:{value:0},uBaseRevealDirection:{value:1}}),[])
  const compileReveal=useCallback(shader=>installBaseRevealShader(shader,revealUniforms),[revealUniforms])
- useFrame(()=>{
+ useFrame((_,delta)=>{
   revealUniforms.uBaseRevealEnabled.value=reveal?1:0
   if(!reveal)return
-  const now=performance.now(),clock=revealClock.current
-  if(clock.key!==reveal){clock.key=reveal;clock.start=now;clock.done=false}
-  const elapsed=now-clock.start
-  reveal.progress.value=reveal.reducedMotion?1:baseRevealProgress(elapsed)
+  const clock=revealClock.current
+  const progress=advanceBaseReveal(clock,reveal,delta)
+  reveal.progress.value=reveal.reducedMotion?1:progress
+  revealUniforms.uBaseRevealHasStart.value=geometry?.hasAttribute('baseRevealStart')?1:0
   revealUniforms.uBaseRevealProgress.value=reveal.progress.value
   revealUniforms.uBaseRevealFrom.value=reveal.from
   revealUniforms.uBaseRevealTo.value=reveal.to
   revealUniforms.uBaseRevealDirection.value=reveal.direction
-  if((reveal.reducedMotion||elapsed>=BASE_REVEAL_MS)&&!clock.done){clock.done=true;onRevealComplete?.()}
+  if((reveal.reducedMotion||clock.elapsed>=BASE_REVEAL_MS)&&!clock.done){clock.done=true;onRevealComplete?.()}
  })
  const display=useMemo(()=>{
   if(!geometry)return null
@@ -144,7 +144,7 @@ export function BuilderPreview({roughness=.42,metalness=.51,geometry,placing,onS
  const badge=placement?new THREE.Vector3(...placement.position).addScaledVector(new THREE.Vector3(...placement.normal),1.5).toArray():null
  return <>
   <mesh ref={mesh} geometry={display} dispose={null} renderOrder={50} onPointerOver={blockHidden} onPointerMove={blockHidden} onPointerDown={blockHidden} onClick={event=>{blockHidden(event);if(editable&&!placing&&!overlayDragging&&event.delta<=4)select(null)}}>
-   <meshStandardMaterial onBeforeCompile={compileReveal} customProgramCacheKey={()=>"builder-base-reveal-v1"} color="#AAA08E" roughness={roughness} metalness={metalness} side={THREE.DoubleSide}/>
+   <meshStandardMaterial onBeforeCompile={compileReveal} customProgramCacheKey={()=>"builder-base-reveal-v2"} color="#AAA08E" roughness={roughness} metalness={metalness} side={THREE.DoubleSide}/>
   </mesh>
   <group ref={textRoot}>{editable&&options&&<TextShape result={result} handlers={textHandlers} hovered={textHovered}/>}</group>
   {editable&&previous?.valid&&<TextShape result={previous}/>}

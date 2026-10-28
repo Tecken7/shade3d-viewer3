@@ -33,10 +33,22 @@ export function prepareBaseHeightGuide(M,positions,arch,options={}) {
       if(ids.length)stitch(v,f,ids[ids.length-1],current)
       ids.push(current)
     }
+    // At the underside, the opening follows an inward wall offset of the
+    // terminal bevel contour. Extrude that opening through this thin guide;
+    // the full anatomical cavity remains the job of the final solid generator.
+    const foot=rings[rings.length-1].points
+    const openings=p.hollow?own(own(new M.CrossSection([foot],'EvenOdd')).offset(-p.wall,'Round',2,48)).toPolygons():[]
+    const inner=[]
+    for(const polygon of openings){
+      const ends=[-depth,0].map(y=>polygon.map(pt=>{const id=v.length/3;v.push(pt[0],y,pt[1]);return id}))
+      stitch(v,f,ends[1],ends[0]);inner.push(ends)
+    }
     for(const index of [0,ids.length-1]){
-      const ring=ids[index],shape=ring.map(id=>new THREE.Vector2(v[id*3],v[id*3+2]))
-      for(const triangle of THREE.ShapeUtils.triangulateShape(shape,[])){
-        const face=triangle.map(i=>ring[i]);if(index===0)face.reverse();f.push(...face)
+      const ring=ids[index],side=index===0?0:1,holes=inner.map(ends=>ends[side]),all=[...ring,...holes.flat()]
+      const shape=ring.map(id=>new THREE.Vector2(v[id*3],v[id*3+2]))
+      const holeShapes=holes.map(hole=>hole.map(id=>new THREE.Vector2(v[id*3],v[id*3+2])))
+      for(const triangle of THREE.ShapeUtils.triangulateShape(shape,holeShapes)){
+        const face=triangle.map(i=>all[i]);if(index===0)face.reverse();f.push(...face)
       }
     }
     // Connector origins follow the smooth contour, using the nearest scan rim height.

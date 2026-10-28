@@ -13945,11 +13945,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           else setCadHeightGuide(data.result)
         }
         worker.onerror=()=>{if(!cancelled){worker.terminate();setCadHeightGuidePending(false);setCadHeightGuideError("Náhled výšky se nepodařilo připravit. Můžete zkusit generovat bázi.")}}
-        worker.postMessage({positions,arch:cadActiveArch,options:{smoothing:builderOptions.smoothing,bevel:builderOptions.bevel}},[positions.buffer])
+        worker.postMessage({positions,arch:cadActiveArch,options:{smoothing:builderOptions.smoothing,bevel:builderOptions.bevel,hollow:builderOptions.hollow,wall:builderOptions.wall}},[positions.buffer])
       }catch(error){if(!cancelled){setCadHeightGuidePending(false);setCadHeightGuideError(error.message)}}
     })()
     return()=>{cancelled=true;worker?.terminate()}
-  },[cadStandalone,cadStage,cadFileUrl,cadActiveArch,builderOptions.smoothing,builderOptions.bevel])
+  },[cadStandalone,cadStage,cadFileUrl,cadActiveArch,builderOptions.smoothing,builderOptions.bevel,builderOptions.hollow,builderOptions.wall])
 
   const commitCadHeightInput = useCallback((rawValue) => {
     const normalized = String(rawValue ?? "").trim().replace(",", ".")
@@ -14000,6 +14000,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         const geometry = new THREE.BufferGeometry()
         geometry.setAttribute("position", new THREE.BufferAttribute(result.positions, 3))
         geometry.setIndex(new THREE.BufferAttribute(result.indices, 1))
+        if(result.revealStarts)geometry.setAttribute("baseRevealStart",new THREE.BufferAttribute(result.revealStarts,1))
         geometry.computeVertexNormals()
         geometry.computeBoundingBox()
         if (!nextOptions.cutHoles) {
@@ -14024,7 +14025,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         worker.terminate(); builderWorkerRef.current = null; setCadBusy(false); setBuilderDirty(true)
         setCadMessage(event.message || "Výpočet selhal. Zkuste menší model nebo upravte ořez.")
       }
-      worker.postMessage({ positions, options: { ...nextOptions, followContour: true, totalHeight: cadTotalHeight, arch: cadActiveArch }, font }, [positions.buffer])
+      worker.postMessage({ positions, options: { ...nextOptions, revealBase:!!request.repairBoundary, followContour: true, totalHeight: cadTotalHeight, arch: cadActiveArch }, font }, [positions.buffer])
     } catch (error) { if (builderWorkerRef.current !== pending) return; builderWorkerRef.current = null; setCadBusy(false); setBuilderDirty(true); setCadMessage(error.message) }
   }, [cadStage, cadBusy, cadFileUrl, cadTotalHeight, cadActiveArch, builderOptions, cadHeightGuide])
 

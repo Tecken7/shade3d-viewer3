@@ -38,3 +38,18 @@ test('changing smoothing or bevel changes preview profile, but not its target he
  assert.deepEqual(a.min,b.min);assert.deepEqual(a.max,b.max);assert.equal(a.direction,b.direction)
  assert.notDeepEqual(a.profile.positions,b.profile.positions)
 })
+
+test('hollow guide leaves the underside open and follows wall thickness; solid guide stays capped',async()=>{
+ const M=await Module();M.setup()
+ const hit=(hollow,wall,x)=>{
+  const data=prepareBaseHeightGuide(M,positions,'lower',{smoothing:.8,bevel:1,hollow,wall})
+  const geometry=makeBaseGuideGeometry(data.profile),material=new THREE.MeshBasicMaterial({side:THREE.DoubleSide}),mesh=new THREE.Mesh(geometry,material)
+  mesh.updateMatrixWorld(true)
+  const hits=new THREE.Raycaster(new THREE.Vector3(x,10,0),new THREE.Vector3(0,-1,0)).intersectObject(mesh)
+  geometry.dispose();material.dispose();return hits.length
+ }
+ assert.ok(hit(false,2.5,14)>0,'solid cap covers the middle of the arch arm')
+ assert.equal(hit(true,2.5,14),0,'hollow guide is open through the middle')
+ assert.equal(hit(true,1,10.5),0,'thin wall keeps a wider opening')
+ assert.ok(hit(true,2.5,10.5)>0,'increasing the wall visibly reduces the opening')
+})
