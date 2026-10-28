@@ -10,6 +10,7 @@ import { ensureAnalysisPickingTree } from "./viewer/analysis-picking.mjs"
 import { setRepairFoilMaterial } from "./viewer/repair-foil.mjs"
 import { visibleAnalysisModels, visibleAnalysisSelection, analysisCalculationAvailability } from "./viewer/visible-analysis-models.mjs"
 
+import { orientationLandmarks } from "./model-builder/auto-orientation.mjs"
 import { inferSceneOrientation, fitOrientedBounds } from "./viewer/scan-orientation.mjs"
 import { cameraChanged } from "./viewer/camera-sync.mjs"
 import { stableSceneValue } from "./viewer/stable-scene-value.mjs"
@@ -5151,6 +5152,7 @@ function AlignmentPreviewViewport({ badge, file, sourceObject, color, points, ac
       )}
 
       <Canvas
+        onPointerMissed={event=>{if(event.button===0 && cadStandalone && cadStage === "base" && !builderDragging && !builderPlacing)setBuilderSelected(null)}}
         orthographic
         camera={{ position: [0, 0, 250], near: 0.01, far: 100000, zoom: 1 }}
         gl={{ antialias: true }}
@@ -11579,6 +11581,7 @@ function CadOrientationMiniView({ label, view, sourceObject, modelMatrix, planeC
       boxShadow:"0 16px 42px rgba(0,0,0,.32)", userSelect:"none",
     }}>
       <Canvas
+        onPointerMissed={event=>{if(event.button===0 && cadStandalone && cadStage === "base" && !builderDragging && !builderPlacing)setBuilderSelected(null)}}
         orthographic
         camera={{ position:[0,0,100], near:0.01, far:100000, zoom:1 }}
         dpr={1}
@@ -11642,6 +11645,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadEmbedded, setCadEmbedded] = useState(false)
   const [cadMenuHoveredUrl, setCadMenuHoveredUrl] = useState("")
   const cadWorkspaceRef = useRef(null)
+  const cadAutoOrientationAttempt = useRef("")
   const [cadPanelLayout, setCadPanelLayout] = useState({ top: 210, headerTop: 10 })
   const cadSessionRef = useRef(null)
   const cadStandalone = cadEmbedded || forceCadMode || (clientReady && getParam("mode") === "cad" && (getParam("cadTool") || "model") === "model")
@@ -12091,7 +12095,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadEditHistory, setCadEditHistory] = useState([])
   const [cadEditorTool, setCadEditorTool] = useState("paint")
   const [cadEditorBusy, setCadEditorBusy] = useState(false)
-  const [cadBrushOptions, setCadBrushOptions] = useState({radius:2,strength:.3})
+  const [cadBrushOptions, setCadBrushOptions] = useState({radius:.8,strength:.3})
   const [cadEditPainted, setCadEditPainted] = useState(new Set())
   const [cadArtifactPainted, setCadArtifactPainted] = useState(new Set())
   const cadPaintSelection = useMemo(()=>paintedEdgeSelection(cadEditLoops,cadEditPainted),[cadEditLoops,cadEditPainted])
@@ -12150,7 +12154,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [cadBusy, setCadBusy] = useState(false)
   const [cadMessage, setCadMessage] = useState("Nahrajte Upper a/nebo Lower scan.")
   const [cadNaturalHeight, setCadNaturalHeight] = useState(20)
-  const [cadTotalHeight, setCadTotalHeight] = useState(25)
+  const [cadTotalHeight, setCadTotalHeight] = useState(20)
   const [cadHeightDraft, setCadHeightDraft] = useState("25.0")
   const [cadPreviewActive, setCadPreviewActive] = useState(false)
   const [cadPreviewGeometry, setCadPreviewGeometry] = useState(null)
@@ -13720,7 +13724,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setCadBusy(false)
     setCadMessage("Nahrajte Upper a/nebo Lower scan.")
     setCadNaturalHeight(20)
-    setCadTotalHeight(25)
+    setCadTotalHeight(20)
     setBuilderOptions({ ...BUILDER_DEFAULTS, cutHoles: false, followContour: true })
     setBuilderDirty(true)
     setBuilderSelected(null)
@@ -13945,6 +13949,28 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   }, [cadFileUrl, cadOrientationPoints, cadBusy, cadOrientationPrepared, cadActiveArch, applyModelTransform])
 
   useEffect(() => {
+    if(cadStage !== "orient"){cadAutoOrientationAttempt.current="";return}
+    if(!cadStandalone || cadBusy || cadOrientationPrepared || cadOrientationPoints.length || !cadFileUrl)return
+    const key=`${cadFileUrl}:${cadActiveArch}`
+    if(cadAutoOrientationAttempt.current===key)return
+    const object=modelObjectsRef.current[cadFileUrl],root=rootGroupRef.current
+    if(!object||!root)return
+    cadAutoOrientationAttempt.current=key
+    setCadBusy(true);setCadMessage("Odhaduji orientaci scanu…")
+    ;(async()=>{try{
+      await repairWaitForBusyPaint()
+      const orientation=inferSceneOrientation(object)
+      const bounds=cadObjectBoundsInRoot(object,root)
+      root.updateMatrixWorld(true)
+      const points=orientationLandmarks(orientation,bounds.getCenter(new THREE.Vector3()),bounds.getSize(new THREE.Vector3()).length(),cadActiveArch,root.matrixWorld.clone().invert())
+      if(points)setCadOrientationPoints(points)
+      else setCadMessage("Orientace není jednoznačná. Zvolte tři referenční body ručně.")
+    }catch(error){setCadMessage("Automatický odhad se nepodařil. Zvolte tři referenční body ručně.")}
+    finally{setCadBusy(false)}})()
+    // The attempt is single-shot; manual reset deliberately keeps it marked.
+  },[cadStandalone,cadStage,cadFileUrl,cadActiveArch,cadBusy,cadOrientationPrepared,cadOrientationPoints.length])
+
+  useEffect(() => {
     if (!cadStandalone || cadStage !== "orient" || cadOrientationPrepared || cadBusy || cadOrientationPoints.length !== 3) return
     prepareCadOrientation()
   }, [cadStandalone, cadStage, cadOrientationPrepared, cadBusy, cadOrientationPoints.length, prepareCadOrientation])
@@ -13998,7 +14024,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     const box = cadObjectBoundsInRoot(modelObjectsRef.current[cadFileUrl], rootGroupRef.current)
     const naturalHeight = Math.max(1, box.max.y - box.min.y)
     setCadNaturalHeight(naturalHeight)
-    setCadTotalHeight(Math.max(25, Math.ceil((naturalHeight + 1.5) * 10) / 10))
+    setCadTotalHeight(Math.max(20, Math.ceil((naturalHeight + 1.5) * 10) / 10))
     setCadOrientationPoints([])
     setCadTrimBoundaryPoints([])
     setBuilderOptions({ ...BUILDER_DEFAULTS, cutHoles: false, followContour: true })
@@ -14006,7 +14032,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setBuilderSelected(null)
     setBuilderPlacing(false)
     setCadStage("base")
-    setCadMessage("Nastavte celkovou výšku a vytvořte náhled dutého modelu.")
+    setCadMessage("Nastavte celkovou výšku a zvolte Generovat bázi.")
   }, [cadFileUrl, cadOrientationPrepared, cadBusy])
 
   // Medit-style "Nechat vše": žádný nový řez ani změna source geometrie.
@@ -14051,7 +14077,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     }
   }, [cadFileUrl, cadBusy, trimBusy])
 
-  const invalidateCadPreview = useCallback((message = "Parametry byly změněny. Klikněte na Preview pro nový náhled.") => {
+  const invalidateCadPreview = useCallback((message = "Parametry byly změněny. Zvolte Generovat bázi pro přepočítání.") => {
     setBuilderDirty(true)
     if (cadStage === "base") setCadMessage(message)
   }, [cadStage])
@@ -17961,250 +17987,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const cadMaxHeight = Math.max(cadMinHeight + 4, cadNaturalHeight + 35)
   const cadMarkerRadius = Math.max(0.32, Math.min(1.0, cadNaturalHeight * 0.03))
 
-  const cadWorkspace = cadStandalone && (
-    <>
-      {cadEmbedded && <ViewerBackButton onClick={closeCadEmbedded} disabled={cadBusy || cadEditorBusy || repairBusy || trimBusy} />}
-      <div className={cadWorkspaceStyles.scope} style={{"--cad-panel-top": `${cadPanelLayout.top}px`, "--cad-header-top": `${cadPanelLayout.headerTop}px`}}>
-      <section ref={cadWorkspaceRef} className={cadWorkspaceStyles.workspace} aria-label="Model Builder">
-        <h2>Model Builder</h2>
-        <div className={cadWorkspaceStyles.steps}>
-          {cadStepOrder.map((step, index) => <React.Fragment key={step}>
-            {index > 0 && <span className={cadWorkspaceStyles.divider} aria-hidden="true" />}
-            <RepairStep active={cadStage === step} done={cadStepDone(step)}>{cadStepLabels[step]}</RepairStep>
-          </React.Fragment>)}
-        </div>
-        <div className={cadWorkspaceStyles.stage} key={cadStage}>
-        {cadStage === "scan" && cadEmbedded && <div className={cadWorkspaceStyles.pickers}>
-          {[{arch:"upper", label:"Horní čelist", value:cadUpperUrl, other:cadLowerUrl}, {arch:"lower", label:"Dolní čelist", value:cadLowerUrl, other:cadUpperUrl}].map(item => <div className={cadWorkspaceStyles.picker} key={item.arch}>
-            <span>{item.label}</span>
-            <AlignmentModelDropdown badge={item.arch === "upper" ? "Upper" : "Lower"} value={item.value} otherValue={item.other} files={repairVisibleFiles} disabled={cadBusy} onPreview={setCadMenuHoveredUrl} onChange={url => selectCadExisting(item.arch, url)} />
-          </div>)}
-        </div>}
-        {cadStage === "scan" && (
-          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
-            <div style={{ color:"#858585", fontSize:9.5, lineHeight:1.45, minWidth:0 }}>
-              Vyberte horní a/nebo dolní čelist pro vytvoření modelu.
-            </div>
-            {cadLoadedArchCount > 0 && (
-              <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={beginCadEditStage} disabled={cadBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:cadBusy?"wait":"pointer", whiteSpace:"nowrap" }}>
-                Pokračovat
-              </button>
-            )}
-          </div>
-        )}
-
-        {cadStage === "edit" && (
-          <div className={`artheticEdgeEdit ${cadWorkspaceStyles.editTools}`} role="region" aria-label="Úprava scanu">
-            <div style={{fontWeight:750,fontSize:13,marginBottom:8}}>Úprava scanu</div>
-            <div className="cadEditHint">Štětcem přetřete okolí zářezu včetně obou jeho konců. Žlutě se označí hrany pro doplnění a zeleně nová plocha. Tažením mimo scan nebo Alt + tažením otáčíte model. Ctrl při označování odznačuje; Shift při sculptingu vyhlazuje a Ctrl obrátí přidávání/odebírání.</div>
-            <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:8}}>
-              {[["navigate","Otáčet"],["paint","Označit doplnění"],["erase","Odznačit doplnění"],["edgeFlatten","Vyrovnat okraj"],["add","Přidávat"],["subtract","Odebírat"],["smooth","Smooth"],["artifact","Označit artefakt"]].map(([tool,label])=><button key={tool} aria-pressed={cadEditorTool===tool} disabled={cadEditorBusy} onClick={()=>{if(['paint','erase','artifact'].includes(tool)&&!['paint','erase','artifact'].includes(cadEditorTool)&&cadEditContext)refreshCadEdit(cadEditContext.sourceObject);setCadEditorTool(tool)}} style={{background:cadEditorTool===tool?"#215747":"#222",borderColor:cadEditorTool===tool?"#75c6a6":"#444"}}>{label}</button>)}
-            </div>
-            {cadEditorTool==='artifact'&&<div style={{marginTop:8,color:'#c4b5fd'}}>Přetřete výstupek a malé okolí. Fialově se zobrazí oblast úpravy. Ctrl označení ubírá; pak potvrďte odstranění artefaktu.</div>}
-            <button disabled={cadEditorBusy} onClick={smoothCadBorder} title="Celý hlavní okraj · 3 průchody při 100 % síle">Vyhladit celý okraj</button>
-            <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap",marginTop:8}}>
-              <label>Poloměr <input aria-label="Poloměr štětce" type="range" min="0.3" max="12" step="0.1" value={cadBrushOptions.radius} disabled={cadEditorBusy} onChange={e=>setCadBrushOptions(p=>({...p,radius:Number(e.target.value)}))}/>{cadBrushOptions.radius.toFixed(1)} mm</label>
-              {!['paint','erase','artifact','navigate'].includes(cadEditorTool)&&<label>Síla <input aria-label="Síla štětce" type="range" min="0.02" max="1" step="0.01" value={cadBrushOptions.strength} disabled={cadEditorBusy} onChange={e=>setCadBrushOptions(p=>({...p,strength:Number(e.target.value)}))}/>{Math.round(cadBrushOptions.strength*100)} %</label>}
-            </div>
-            {(cadUpperUrl && cadLowerUrl) && <div style={{display:"flex",gap:8,marginTop:6}}>{["upper","lower"].map(arch=><button key={arch} disabled={cadEditorBusy} onClick={()=>{const url=arch==="upper"?cadUpperUrl:cadLowerUrl; const object=modelObjectsRef.current[url]; if(object){prepareRepairVertices(object);refreshCadEdit(object);setCadActiveArch(arch);setCadFileUrl(url);setCadFileName(arch==="upper"?cadUpperName:cadLowerName);setCadEditHistory([])}}}>{arch==="upper"?"Upper":"Lower"}</button>)}</div>}
-            {cadEffectiveSelection.length===2 && <label style={{display:"flex",gap:10,alignItems:"center",marginTop:8}}>Prohnutí nové hrany <input aria-label="Prohnutí nové hrany" type="range" min="-2" max="6" step="0.1" value={cadEditBulge} onChange={e=>setCadEditBulge(Number(e.target.value))}/>{cadEditBulge.toFixed(1)} mm</label>}
-            {cadEditPreview.pending&&<PatchPendingIndicator/>}
-            {['paint','erase'].includes(cadEditorTool)&&cadEditPreview.error && <div role="alert" style={{color:"#fbbf24"}}>{cadEditPreview.error}</div>}
-            <div style={{display:"flex",gap:8,marginTop:8,flexWrap:"wrap"}}>
-              {['paint','erase'].includes(cadEditorTool)&&<button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={!cadEditPreview.patch||cadEditorBusy} onClick={applyCadEdgePatch}>Doplnit plochu</button>}
-              <button disabled={(!cadEditSelection.length&&!cadEditPainted.size&&!cadArtifactPainted.size)||cadEditorBusy} onClick={()=>{setCadEditSelection([]);setCadEditPainted(new Set());setCadArtifactPainted(new Set())}}>Zrušit výběr</button>
-              {cadEditorTool==='artifact'&&<button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={!cadArtifactPainted.size||cadEditorBusy} onClick={removeCadArtifact}>Odstranit artefakt</button>}
-              <button disabled={!cadEditHistory.length||cadEditorBusy} onClick={undoCadEdgePatch}>Vrátit úpravu</button>
-              <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={cadEditorBusy} onClick={()=>{setCadEditSelection([]);beginCadTrimStage()}}>Pokračovat</button>
-              {cadEditorBusy&&<span role="status">Přepočítávám tah štětce…</span>}
-            </div>
-          </div>
-        )}
-
-        {cadStage === "repair" && (
-          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
-            <div style={{ minWidth:0 }}>
-              <div style={{ color:"#858585", fontSize:9.35, lineHeight:1.45 }}>
-                Vyberte otvory, které chcete opravit. Spodní okraj pro bázi ponechte otevřený. Na orientaci můžete pokračovat i bez opravy všech otvorů.
-              </div>
-              <div style={{ marginTop:7, display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
-                {cadUpperUrl && <button type="button" aria-pressed={cadActiveArch === "upper"} onClick={() => startCadRepairForArch("upper")} disabled={repairBusy} style={{ height:28, padding:"0 10px", borderRadius:8, border:cadActiveArch==="upper"?"1px solid rgba(96,165,250,.28)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="upper"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadArchRepairDone.upper?"#9ad9ad":cadActiveArch==="upper"?"#bfdbfe":"#999", fontSize:8.8, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{cadArchRepairDone.upper?"✓ ":""}Upper</button>}
-                {cadLowerUrl && <button type="button" aria-pressed={cadActiveArch === "lower"} onClick={() => startCadRepairForArch("lower")} disabled={repairBusy} style={{ height:28, padding:"0 10px", borderRadius:8, border:cadActiveArch==="lower"?"1px solid rgba(96,165,250,.28)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="lower"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadArchRepairDone.lower?"#9ad9ad":cadActiveArch==="lower"?"#bfdbfe":"#999", fontSize:8.8, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{cadArchRepairDone.lower?"✓ ":""}Lower</button>}
-              </div>
-            </div>
-            <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={continueCadAfterRepair} disabled={!cadRepairCanContinue || repairBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:cadRepairCanContinue?"1px solid rgba(74,222,128,.24)":"1px solid rgba(255,255,255,.07)", background:cadRepairCanContinue?"rgba(34,197,94,.11)":"rgba(255,255,255,.025)", color:cadRepairCanContinue?"#bbf7d0":"#555", fontSize:9, fontWeight:740, cursor:!cadRepairCanContinue||repairBusy?"default":"pointer", whiteSpace:"nowrap" }}>
-              Pokračovat · Orientace
-            </button>
-          </div>
-        )}
-
-        {cadStage === "orient" && (
-          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
-            <div style={{ minWidth:0, color:"#858585", fontSize:9.4, lineHeight:1.45 }}>
-              {!cadOrientationPrepared ? <>
-                Klikněte postupně: <b style={{ color:"#cfcfcf" }}>1.</b> levý zadní bod · <b style={{ color:"#cfcfcf" }}>2.</b> pravý zadní bod · <b style={{ color:"#cfcfcf" }}>3.</b> střed fronty. Body: <span style={{ color:cadOrientationPoints.length === 3 ? "#86efac" : "#bdbdbd", fontVariantNumeric:"tabular-nums" }}>{cadOrientationPoints.length}/3</span>
-              </> : <>
-                Model je srovnaný k <span style={{ color:"#93c5fd", fontWeight:720 }}>referenční rovině</span>. V pravých pohledech tažením dolaďte náklon; hlavní scénou můžete dál volně otáčet pro kontrolu.
-              </>}
-            </div>
-            <div className={cadWorkspaceStyles.stageActions} style={{ display:"flex", gap:6, flex:"0 0 auto" }}>
-              {cadUpperUrl && cadLowerUrl && !cadOrientationPrepared && cadOrientationPoints.length === 0 && <>
-                <button type="button" aria-pressed={cadActiveArch === "upper"} onClick={() => { activateCadArch("upper"); setCadMessage("Orientace · Upper. Klikněte na levý zadní bod, pravý zadní bod a potom na střed fronty.") }} disabled={cadBusy} style={{ height:31, padding:"0 9px", borderRadius:8, border:cadActiveArch==="upper"?"1px solid rgba(96,165,250,.26)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="upper"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadActiveArch==="upper"?"#bfdbfe":"#777", fontSize:8.8, fontWeight:720, cursor:"pointer" }}>Upper</button>
-                <button type="button" aria-pressed={cadActiveArch === "lower"} onClick={() => { activateCadArch("lower"); setCadMessage("Orientace · Lower. Klikněte na levý zadní bod, pravý zadní bod a potom na střed fronty.") }} disabled={cadBusy} style={{ height:31, padding:"0 9px", borderRadius:8, border:cadActiveArch==="lower"?"1px solid rgba(96,165,250,.26)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="lower"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadActiveArch==="lower"?"#bfdbfe":"#777", fontSize:8.8, fontWeight:720, cursor:"pointer" }}>Lower</button>
-                <div aria-hidden="true" style={{ width:1, height:21, margin:"5px 1px", background:"rgba(255,255,255,.075)" }} />
-              </>}
-              {!cadOrientationPrepared && cadOrientationPoints.length > 0 && <button type="button" onClick={undoCadOrientationPoint} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:9, fontWeight:690, cursor:"pointer" }}>Zpět bod</button>}
-              {cadOrientationPrepared && <button type="button" onClick={resetCadOrientationFineTune} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:9, fontWeight:690, cursor:"pointer" }}>Reset sklonu</button>}
-              {cadOrientationPrepared && <label style={{display:'flex',gap:6,alignItems:'center',fontSize:10,color:'#bfdbfe'}}>Natočení shora (°)<input aria-label="Natočení modelu shora (°)" type="number" step="1" disabled={cadBusy} value={Math.round(cadOrientationAdjust.y*180/Math.PI*10)/10} onChange={event=>{if(event.target.value!==''&&Number.isFinite(event.target.valueAsNumber))setCadOrientationAdjust(previous=>({...previous,y:event.target.valueAsNumber*Math.PI/180}))}} style={{width:65,background:'#202020',border:'1px solid #444',borderRadius:6,color:'#eee',padding:6}} /></label>}
-              {cadOrientationPrepared && <button type="button" onClick={restartCadOrientationPoints} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#888", fontSize:9, fontWeight:690, cursor:"pointer" }}>Znovu 3 body</button>}
-              {cadOrientationPrepared && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={confirmCadOrientation} disabled={cadBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:cadBusy?"wait":"pointer" }}>Potvrdit orientaci</button>}
-            </div>
-          </div>
-        )}
-
-        {cadStage === "trim" && (
-          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
-            <div style={{ minWidth:0, color:"#858585", fontSize:9.3, lineHeight:1.45 }}>
-              {!trimClosed && trimControlNodes.length === 0 && <>Klikáním vytvořte hranici, nebo zvolte <b style={{ color:"#cfcfcf" }}>Nechat vše</b>, pokud je scan už předem oříznutý.</>}
-              {!trimClosed && trimControlNodes.length > 0 && <>Klikáním pokračujte v hranici · kuličky lze přetahovat · smyčku uzavřete dvojklikem na první bod nebo tlačítkem.</>}
-              {trimClosed && trimKeepComponent == null && <>Smyčka je uzavřená. Najeďte na část scanu a klikněte na oblast, kterou chcete zachovat.</>}
-              {trimKeepComponent != null && !trimBusy && <>Zelená oblast zůstane zachovaná. Potvrďte Oříznout.</>}
-              {trimBusy && <>Ořezávám vybranou oblast…</>}
-            </div>
-            <div style={{ display:"flex", gap:6, flexWrap:"wrap", justifyContent:"flex-end", flex:"0 0 auto", alignItems:"center" }}>
-              {!trimClosed && trimControlNodes.length === 0 && (
-                <label title="Ponechá původní scan beze změny a použije jeho existující otevřenou hranici pro bázi." style={{
-                  height:29, padding:"0 9px", borderRadius:8, border:"1px solid rgba(255,255,255,.09)", background:"rgba(255,255,255,.03)",
-                  color:"#bdbdbd", fontSize:8.8, fontWeight:700, cursor:(cadBusy || trimBusy)?"wait":"pointer", display:"inline-flex", alignItems:"center", gap:7, userSelect:"none",
-                }}>
-                  <input type="checkbox" checked={false} disabled={cadBusy || trimBusy} onChange={(event) => { if (event.target.checked) keepCadWholeScan() }} style={{ width:13, height:13, margin:0, accentColor:"#4ade80", cursor:(cadBusy || trimBusy)?"wait":"pointer" }} />
-                  <span>Nechat vše</span>
-                </label>
-              )}
-              {!trimClosed && trimControlNodes.length > 0 && <button type="button" onClick={removeLastTrimPoint} style={{ height:29, padding:"0 9px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:8.8, fontWeight:680, cursor:"pointer" }}>Smazat poslední</button>}
-              {trimControlNodes.length > 0 && <button type="button" onClick={resetTrimBoundary} style={{ height:29, padding:"0 9px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:8.8, fontWeight:680, cursor:"pointer" }}>Reset hranice</button>}
-              {!trimClosed && trimControlNodes.length >= 3 && <button type="button" onClick={closeTrimLoop} style={{ height:29, padding:"0 10px", borderRadius:8, border:"1px solid rgba(251,191,36,.18)", background:"rgba(245,158,11,.065)", color:"#fde68a", fontSize:8.8, fontWeight:710, cursor:"pointer" }}>Uzavřít hranici</button>}
-              {trimKeepComponent != null && !trimBusy && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={applyTrimResult} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:"pointer" }}>Oříznout</button>}
-            </div>
-          </div>
-        )}
-
-        {cadStage === "base" && (
-          <div style={{ display:"grid", gridTemplateColumns:"minmax(0,1fr)", gap:10, alignItems:"center" }}>
-            <div style={{ display:"grid", gridTemplateColumns:"110px minmax(180px,1fr) 76px", gap:9, alignItems:"center", minWidth:0 }}>
-              <div>
-                <div style={{ color:"#d1d1d1", fontSize:9.4, fontWeight:730 }}>Celková výška</div>
-                <div style={{ color:"#575757", fontSize:8.1, marginTop:2 }}>Otevřená dutá báze · mm</div>
-              </div>
-              <input className="artheticCadRange" type="range" min={cadMinHeight} max={cadMaxHeight} step="0.1" value={cadTotalHeight} disabled={cadBusy} onChange={(e) => handleCadTotalHeightChange(e.target.value)} />
-              <div style={{ position:"relative", height:29 }} title={`Přesná celková výška · ${cadMinHeight.toFixed(2)}–${cadMaxHeight.toFixed(2)} mm`}>
-                <input
-                  className="artheticCadNumber"
-                  type="text"
-                  inputMode="decimal"
-                  value={cadHeightDraft}
-                  onChange={(e) => setCadHeightDraft(e.target.value)}
-                  onBlur={(e) => commitCadHeightInput(e.currentTarget.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur() }
-                    if (e.key === "Escape") {
-                      e.preventDefault()
-                      const rounded = Math.round((Number(cadTotalHeight) || 0) * 100) / 100
-                      const reset = rounded.toFixed(2).replace(/0$/, "")
-                      setCadHeightDraft(reset)
-                      e.currentTarget.value = reset
-                      e.currentTarget.blur()
-                    }
-                  }}
-                  disabled={cadBusy}
-                  aria-label="Přesná celková výška modelu v milimetrech"
-                  style={{ width:"100%", height:"100%", boxSizing:"border-box", padding:"0 22px 0 7px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", outline:"none", background:"rgba(255,255,255,.03)", color:"#e4e4e4", fontSize:9.2, fontWeight:720, fontVariantNumeric:"tabular-nums", textAlign:"right" }}
-                />
-                <span style={{ position:"absolute", right:6, top:"50%", transform:"translateY(-50%)", color:"#666", fontSize:7.6, fontWeight:700, pointerEvents:"none" }}>mm</span>
-              </div>
-            </div>
-            <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", flexWrap:"wrap", gap:7 }}>
-              <button type="button" disabled={cadBusy} aria-pressed={!!builderOptions.repairBoundary} onClick={()=>toggleCadPreview({repairBoundary:!builderOptions.repairBoundary})} title="Vratně opraví drobné větvení okraje a bezpečně uzavře mikrootvory do 0,35 mm. Hlavní otvor báze a větší otvory ponechá. Původní scan zůstane zachovaný." style={{height:33,padding:"0 10px",borderRadius:9,border:"1px solid rgba(96,165,250,.25)",background:builderOptions.repairBoundary?"rgba(59,130,246,.18)":"rgba(255,255,255,.035)",color:"#bfdbfe",fontSize:9,fontWeight:720,cursor:cadBusy?"wait":"pointer"}}>{builderOptions.repairBoundary?"Vrátit opravu povrchu":"Opravit hranici a drobné otvory"}</button>
-              {cadPreviewActive && !builderDirty && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={applyCadBase} disabled={cadBusy} style={{ height:33, padding:"0 13px", borderRadius:9, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:"pointer" }}>{builderOptions.cutHoles ? "Dokončit model" : "Dokončit bez otvorů"}</button>}
-            </div>
-          </div>
-        )}
-
-        {cadStage === "base" && cadPreviewActive && !builderDirty && cadPreviewStats?.boundaryRepair?.closedMicroHoles > 0 && <div role="status" style={{display:"flex",alignItems:"center",gap:7,marginTop:10,padding:"7px 9px",borderRadius:8,border:"1px solid #ffffff20",background:"#ffffff07",color:"#d1d1d1",fontSize:10}}>
-          <RepairCheck /><span>Drobné otvory opraveny: {cadPreviewStats.boundaryRepair.closedMicroHoles}</span>
-        </div>}
-
-        {cadStage === "result" && (
-          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12 }}>
-            <div style={{ color:"#858585", fontSize:9.35, lineHeight:1.5 }}>
-              <span style={{ color:cadPreviewStats?.openBoundaryLoops === 0 ? "#86efac" : "#fbbf24", fontWeight:750 }}>{cadPreviewStats?.openBoundaryLoops === 0 ? "✓ Uzavřený mesh" : `⚠ Otevřené smyčky: ${cadPreviewStats?.openBoundaryLoops ?? "?"}`}</span>
-              {cadPreviewStats && <> · {cadPreviewStats.triangles.toLocaleString("cs-CZ")} trojúhelníků · výška {cadPreviewStats.totalHeight.toFixed(1)} mm</>}
-            </div>
-            <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={downloadCadModel} style={{ height:33, padding:"0 12px", borderRadius:9, border:"1px solid rgba(255,255,255,.11)", background:"#ededed", color:"#0b0b0b", fontSize:9.2, fontWeight:780, cursor:"pointer" }}>Stáhnout STL</button>
-          </div>
-        )}
-
-        {(cadBusy || /nepodař|chyba|selhal|nelze|otevřené smyčky/i.test(cadMessage || "")) && (
-          <div style={{ marginTop:9, paddingTop:8, borderTop:"1px solid rgba(255,255,255,.055)", display:"flex", alignItems:"center", gap:8, minHeight:18 }}>
-            {cadBusy && <span style={{ width:11, height:11, borderRadius:"50%", border:"1.5px solid rgba(255,255,255,.12)", borderTopColor:"#f4f4f4", animation:"artheticAnalysisSpin .75s linear infinite", flex:"0 0 auto" }} />}
-            <span style={{ color:cadBusy?"#c7c7c7":"#696969", fontSize:8.7, lineHeight:1.35 }}>{cadStage === "trim" ? (trimMessage || cadMessage) : cadMessage}</span>
-          </div>
-        )}
-      </div>
-      </section>
-      {cadStage !== "scan" && <aside className={cadWorkspaceStyles.utility} aria-label="Akce Model Builderu">
-        <button type="button" onClick={downloadCadSnapshot} disabled={!(cadUpperUrl || cadLowerUrl || cadPreviewGeometry) || cadSnapshotBusy || cadBusy || cadEditorBusy || repairBusy || trimBusy}>
-          {cadSnapshotBusy ? "Připravuji ZIP…" : "Stáhnout rozpracovaný scan"}
-        </button>
-        <button type="button" onClick={resetCadBuilder} disabled={cadBusy || cadEditorBusy || repairBusy || trimBusy}>Nový model</button>
-      </aside>}
-
-      {cadStage === "base" && <BuilderControls options={builderOptions} change={changeBuilderOptions} textStatus={builderTextStatus} selected={builderSelected} select={setBuilderSelected} placing={builderPlacing} setPlacing={setBuilderPlacing} dirty={builderDirty} busy={cadBusy} cancel={cancelBuilder} hasPreview={cadPreviewActive} cutHoles={() => toggleCadPreview({ cutHoles: true })} />}
-      {cadStage === "result" && <button type="button" className={cadWorkspaceStyles.returnButton} onClick={() => setCadStage("base")}>Zpět k nastavení modelu</button>}
-      {cadStage === "scan" && !cadEmbedded && (
-        <div style={{ position:"absolute", inset:0, zIndex:6, display:"grid", placeItems:"center", pointerEvents:"none", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif" }}>
-          <div style={{ pointerEvents:"auto", width:"min(760px, calc(100vw - 44px))", padding:"22px", borderRadius:18, border:"1px solid rgba(255,255,255,.10)", background:"rgba(12,12,12,.84)", boxShadow:"0 24px 80px rgba(0,0,0,.42)", backdropFilter:"blur(18px)" }}>
-            <div style={{ color:"#ededed", fontSize:13, fontWeight:760, textAlign:"center" }}>Vyberte čelisti</div>
-            <div style={{ marginTop:5, color:"#666", fontSize:9.2, lineHeight:1.5, textAlign:"center" }}>Upper a Lower se evidují zvlášť, aby orientace i pozdější báze věděly, na které straně okluzní roviny mají být.</div>
-            <div style={{ marginTop:16, display:"grid", gridTemplateColumns:"repeat(2,minmax(0,1fr))", gap:12 }}>
-              {[{ arch:"upper", label:"Nahrát Upper", url:cadUpperUrl, name:cadUpperName }, { arch:"lower", label:"Nahrát Lower", url:cadLowerUrl, name:cadLowerName }].map((item) => (
-                <label key={item.arch} className={cadWorkspaceStyles.upload} data-loaded={!!item.url || undefined} style={{ minHeight:142, padding:"18px 16px", borderRadius:15, border:item.url?"1px solid rgba(74,222,128,.20)":"1px dashed rgba(255,255,255,.13)", background:item.url?"rgba(34,197,94,.045)":"rgba(255,255,255,.022)", display:"grid", placeItems:"center", textAlign:"center", cursor:"pointer", transition:"all .18s ease" }}>
-                  <div>
-                    <div style={{ width:38, height:38, margin:"0 auto", borderRadius:12, display:"grid", placeItems:"center", border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.035)", color:item.url?"#bbf7d0":"#cfcfcf" }}>
-                      {item.url ? <span style={{ fontSize:15, fontWeight:800 }}>✓</span> : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M5 20h14"/></svg>}
-                    </div>
-                    <div style={{ marginTop:10, color:item.url?"#e7f8ec":"#ededed", fontSize:12, fontWeight:760 }}>{item.label}</div>
-                    <div style={{ marginTop:4, minHeight:28, color:item.url?"#7ea88a":"#5f5f5f", fontSize:8.8, lineHeight:1.45, overflow:"hidden", textOverflow:"ellipsis" }}>{item.url ? item.name : "STL · PLY · OBJ"}</div>
-                  </div>
-                  <input type="file" accept=".stl,.ply,.obj" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) handleCadLocalFile(file, item.arch); event.target.value = "" }} />
-                </label>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {cadStage === "orient" && cadOrientationPrepared && (
-        <div className="artheticCadOrthoViews" style={{
-          position:"absolute", right:20, top:132, zIndex:84,
-          width:"clamp(300px, 22vw, 380px)",
-          display:"grid", gap:10, maxHeight:"calc(100vh - 150px)", overflowY:"auto", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif",
-        }}>
-          <div style={{ padding:"0 3px 3px", color:"#666", fontSize:8.4, lineHeight:1.4 }}>
-            Kontrolní pohledy · shora, levý bok, fronta a pravý bok · tažením dolaďte směr a sklon
-          </div>
-          {cadOrientationMiniCount >= 1 ? <CadOrientationMiniView label="Shora · směr FRONT" view="top" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Shora" />}
-          {cadOrientationMiniCount >= 2 ? <CadOrientationMiniView label="Levý bok" view="side-left" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Levý bok" />}
-          {cadOrientationMiniCount >= 3 ? <CadOrientationMiniView label="Frontální" view="front" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Frontální" />}
-          {cadOrientationMiniCount >= 4 ? <CadOrientationMiniView label="Pravý bok" view="side-right" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Pravý bok" />}
-        </div>
-      )}
-      </div>
-    </>
-  )
-
-
-  const trimShowStatusMessage = !!trimMessage && /nepodař|potřeba|není|nenavazuje|nerozdělila|jednoznačně|alespoň|zkuste/i.test(trimMessage)
   const trimWorkspace = trimMode && !cadStandalone && <TrimControls
     stage={trimStage} closed={trimClosed} pointCount={trimControlNodes.length}
     busy={trimBusy} message={trimMessage} showMessage={trimShowStatusMessage}
@@ -18584,138 +18366,265 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   )
 
 
-  // V Model Builderu je Oprava sítě pracovní nástroj na pravém okraji. Hlavní
-  // CAD krok zůstává nahoře a samotný scan tak má maximum prostoru ve scéně.
-  const cadRepairWorkspace = repairMode && cadStandalone && cadStage === "repair" && (
-    <div className={`${cadWorkspaceStyles.scope} ${cadWorkspaceStyles.editPanel} ${cadWorkspaceStyles.repairPanel}`} style={{
-      position:"absolute", inset:"auto", top:cadPanelLayout.top, right:16, zIndex:90, pointerEvents:"auto", "--cad-panel-top": `${cadPanelLayout.top}px`,
-      width:"min(332px, calc(100vw - 32px))", maxHeight:"calc(100vh - 150px)", overflowY:"auto", overflowX:"hidden",
-      boxSizing:"border-box", padding:"12px", borderRadius:16,
-      background:"rgba(10,10,10,.965)", border:"1px solid rgba(255,255,255,.10)",
-      boxShadow:"0 24px 72px rgba(0,0,0,.50)", backdropFilter:"blur(24px)", WebkitBackdropFilter:"blur(24px)",
-      color:"#f2f2f2", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif",
-      animation:"artheticAlignMenuIn .24s ease-out both",
-    }}>
-      <style>{`
-        .artheticCadRepairScroll::-webkit-scrollbar{width:5px}
-        .artheticCadRepairScroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:999px}
-        @keyframes artheticCadRepairSpin{to{transform:rotate(360deg)}}
-        .artheticCadRepairSpinner{width:11px;height:11px;border-radius:50%;border:1.7px solid rgba(255,255,255,.15);border-top-color:#f4f4f5;display:inline-block;animation:artheticCadRepairSpin .68s linear infinite}
-        @keyframes artheticCadRepairReadyPulse{0%,100%{box-shadow:0 0 0 1px rgba(74,222,128,.05),0 8px 24px rgba(34,197,94,.03)}50%{box-shadow:0 0 0 1px rgba(134,239,172,.22),0 8px 30px rgba(34,197,94,.12)}}
-        .artheticCadRepairPrimary{animation:artheticCadRepairReadyPulse 1.8s ease-in-out infinite}
-      `}</style>
-
-      <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:10 }}>
-        <div style={{ minWidth:0 }}>
-          <div style={{ display:"flex", alignItems:"baseline", gap:6, minWidth:0 }}>
-
-            <span style={{ color:"#d7d7d7", fontSize:12.5, fontWeight:350 }}>Oprava sítě</span>
-          </div>
-          {repairSelectedFile && <div style={{ marginTop:3, color:"#666", fontSize:8.4, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{stripExt(repairSelectedFile.rawName || repairSelectedFile.name)}</div>}
-        </div>
-        <div style={{ display:"inline-flex", padding:3, borderRadius:9, background:"rgba(255,255,255,.025)", border:"1px solid rgba(255,255,255,.07)", flex:"0 0 auto" }}>
-          {[['auto','Auto'],['manual','Ručně']].map(([key,label]) => (
-            <button key={key} type="button" aria-pressed={repairVariant === key} onClick={() => changeRepairVariant(key)} disabled={repairBusy}
-              style={{ height:26, padding:"0 8px", borderRadius:7, border:"none", background:repairVariant===key?"rgba(96,165,250,.13)":"transparent", color:repairVariant===key?"#bfdbfe":"#6f6f6f", fontSize:8.5, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{label}</button>
-          ))}
-        </div>
-      </div>
-
-      <div style={{ height:1, margin:"10px 0", background:"rgba(255,255,255,.065)" }} />
-
-      {repairVariant === "auto" && repairStage !== "model" && repairStage !== "result" && (
-        <div>
-          <div style={{ color:"#858585", fontSize:9, lineHeight:1.45 }}>
-            {repairHoles.length > 0 ? "Otvory:" : ""}
-          </div>
-
-          {repairHoles.length > 0 && (
-            <div className="artheticCadRepairScroll" style={{ marginTop:9, display:"grid", gap:5, maxHeight:"min(330px, 42vh)", overflowY:"auto", paddingRight:2 }}>
-              {repairHoles.map((hole,index) => {
-                const selected=repairSelectedHoleIds.includes(hole.id)
-                const completed=repairCompletedHoleSet.has(hole.id)
-                const processing=repairProcessingHoleIds.includes(hole.id)
-                return (
-                  <button key={hole.id} type="button" aria-pressed={selected} onClick={() => selectRepairHole(hole.id)} disabled={repairBusy||completed}
-                    style={{ minHeight:34, width:"100%", padding:"7px 9px", borderRadius:9, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between", gap:8,
-                      border:selected?"1px solid rgba(125,211,252,.52)":completed?"1px solid rgba(134,239,172,.22)":"1px solid rgba(255,255,255,.07)",
-                      background:selected?"rgba(56,189,248,.12)":completed?"rgba(34,197,94,.05)":"rgba(255,255,255,.024)",
-                      color:selected?"#d7f3ff":completed?"#9ad9ad":"#aaa", opacity:completed ? 0.72 : 1, cursor:repairBusy?"wait":completed?"default":"pointer" }}>
-                    <span style={{ minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", fontSize:8.8, fontWeight:690 }}>{processing ? <span className={repairToolbarStyles.spinner} role="progressbar" aria-label={`Opravuji otvor ${index + 1}`} /> : completed ? "✓ " : selected ? "● " : ""}{index+1}. otvor</span>
-                    <span style={{ flex:"0 0 auto", color:completed?"#79b98b":selected?"#bfe9fb":"#707070", fontSize:8.3, fontVariantNumeric:"tabular-nums" }}>Ø {(hole.equivalentRadius*2).toFixed(1)}</span>
-                  </button>
-                )
-              })}
-            </div>
-          )}
-
-          {repairPendingHoles.length > 1 && (
-            <button type="button" onClick={repairAllVisibleSelected?clearRepairHoleSelection:selectAllRepairHoles} disabled={repairBusy}
-              style={{ marginTop:7, width:"100%", height:30, borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#9d9d9d", fontSize:8.7, fontWeight:690, cursor:repairBusy?"wait":"pointer" }}>
-              {repairAllVisibleSelected?"Zrušit výběr":"Vybrat vše"}
-            </button>
-          )}
-
-          {repairSelectedAutoCount > 0 && (
-            <button className={`artheticCadRepairPrimary ${repairToolbarStyles.primary}`} type="button" onClick={triggerRepairSelectedAutoHoles} disabled={repairBusy||repairReadyActionLeaving}
-              style={{ marginTop:8, width:"100%", height:36, borderRadius:9, border:"1px solid rgba(74,222,128,.26)", background:"rgba(34,197,94,.10)", color:"#bbf7d0", fontSize:9.2, fontWeight:760, cursor:repairBusy?"wait":"pointer", opacity:repairReadyActionLeaving?0:1, transition:"opacity .16s ease-out, transform .18s ease-out", transform:repairReadyActionLeaving?"translateY(2px) scale(.98)":"none" }}>
-              Opravit vybrané
-            </button>
-          )}
-        </div>
-      )}
-
-      {repairVariant === "manual" && repairStage === "paint" && (
-        <div>
-          <div style={{ color:"#858585", fontSize:8.9, lineHeight:1.5 }}>LMB táhnout = označit oblast · RMB = kamera. Označte okolí problematické otevřené hrany.</div>
-          <div style={{ marginTop:9 }}>
-            <div style={{ display:"flex", justifyContent:"space-between", gap:8, color:"#737373", fontSize:8.4 }}><span>Velikost štětce</span><span>{repairContext?(repairContext.diagonal*repairBrushFactor).toFixed(1):"–"}</span></div>
-            <input type="range" min={0.012} max={0.10} step={0.002} value={repairBrushFactor} onChange={(event)=>setRepairBrushFactor(Number(event.target.value))} style={{ width:"100%", marginTop:5, accentColor:"#f2f2f2" }} />
-          </div>
-          <div style={{ marginTop:8, display:"grid", gridTemplateColumns:"1fr 1fr", gap:6 }}>
-            <button type="button" onClick={clearRepairPaint} disabled={!repairPaintedTriangles.size} style={{ height:31, borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:repairPaintedTriangles.size?"#aaa":"#555", fontSize:8.6, fontWeight:680 }}>Vymazat</button>
-            <button type="button" onClick={findRepairInPaint} disabled={!repairPaintedTriangles.size||repairBusy} style={{ height:31, borderRadius:8, border:"1px solid rgba(96,165,250,.20)", background:"rgba(59,130,246,.075)", color:repairPaintedTriangles.size?"#bfdbfe":"#607087", fontSize:8.6, fontWeight:710 }}>Najít otvor</button>
-          </div>
-        </div>
-      )}
-
-      {repairVariant === "manual" && repairStage === "preview" && (
-        <div>
-          <div style={{ color:"#858585", fontSize:8.9, lineHeight:1.5 }}>Klikněte na zvýrazněnou boundary ve scéně a potvrďte opravu.</div>
-          <div style={{ marginTop:8, display:"grid", gridTemplateColumns:"1fr 1fr", gap:6 }}>
-            <button type="button" onClick={() => { setRepairStage("paint"); setRepairSelectedHoleId(""); setRepairPreviewPatch(null) }} style={{ height:31, borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:8.6, fontWeight:680 }}>Zpět</button>
-            <button type="button" onClick={repairSelectedHole} disabled={!repairSelectedHoleId||repairBusy} style={{ height:31, borderRadius:8, border:"1px solid rgba(74,222,128,.20)", background:"rgba(34,197,94,.075)", color:"#bbf7d0", fontSize:8.6, fontWeight:720 }}>Opravit</button>
-          </div>
-        </div>
-      )}
-
-      {repairStage === "result" && !repairProgressVisible && (
-        <div style={{ padding:"9px 10px", borderRadius:10, border:"1px solid rgba(134,239,172,.13)", background:"rgba(34,197,94,.045)", color:"#9ad9ad", fontSize:8.9, lineHeight:1.45 }}>✓ Oprava vybraných otvorů je hotová. Pokud už nezůstává žádná další díra, můžete pokračovat k orientaci.</div>
-      )}
-      {!repairBusy && repairSelection && repairHistoryByUrlRef.current[repairSelection]?.length > 0 && (
-        <button type="button" onClick={() => undoLastRepair(repairSelection)} style={{ marginTop: 9, width: "100%", padding: 8, borderRadius: 8, border: "1px solid #444", background: "#252525", color: "#ddd", cursor: "pointer", fontSize: 10 }}>
-          {repairHistoryByUrlRef.current[repairSelection].at(-1)?.kind === "vertices" ? "Vrátit sloučení vrcholů" : "Vrátit poslední opravu"}
-        </button>
-      )}
-
-      {repairProgressVisible && (
-        <div style={{ marginTop:repairHoles.length?9:0, padding:"9px", borderRadius:10, background:"rgba(255,255,255,.026)", border:"1px solid rgba(255,255,255,.065)" }}>
-          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-            <span className="artheticCadRepairSpinner" aria-hidden="true" />
-            <span style={{ minWidth:0, flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", color:"#d1d1d1", fontSize:8.6 }}>{repairProgressLabel||"Pracuji…"}</span>
-            <span style={{ flex:"0 0 auto", minWidth:32, textAlign:"right", color:"#f4f4f5", fontSize:8.7, fontWeight:760, fontVariantNumeric:"tabular-nums" }}>{Math.round(repairProgressPercent)} %</span>
-          </div>
-          <div style={{ marginTop:7, height:2, borderRadius:999, overflow:"hidden", background:"rgba(255,255,255,.055)" }}><div style={{ height:"100%", width:`${Math.max(1.5,repairProgressPercent)}%`, borderRadius:999, background:"rgba(255,255,255,.88)", transition:"width .3s ease-out" }} /></div>
-        </div>
-      )}
-
-      {!repairProgressVisible && repairContext && repairVertexReport && <RepairStatus clear={repairPendingHoles.length === 0} verticesChecked={repairVertexReport.startsWith("Kontrola vrcholů:")} report={repairVertexReport} />}
-      {!repairProgressVisible && repairMessage && /nepodař|nenaš|potřeba|není načten|selhal|chyba/i.test(repairMessage) && (
-        <div style={{ marginTop:9, padding:"8px 9px", borderRadius:9, background:"rgba(239,68,68,.045)", border:"1px solid rgba(248,113,113,.11)", color:"#ba8585", fontSize:8.6, lineHeight:1.45 }}>{repairMessage}</div>
-      )}
+  // The builder shares the repair statuses and hole controls in its header.
+  const cadRepairWorkspace = repairMode && cadStandalone && cadStage === "repair" && <div className={cadWorkspaceStyles.repairTools}>
+    {repairShowAnalysisProgress && <div role="status" className={cadWorkspaceStyles.preparation}><span className={repairToolbarStyles.spinner}/><span>{repairProgressLabel || "Analyzuji model…"}</span><span>{Math.round(repairProgressPercent)} %</span><progress max="100" value={repairProgressPercent}/></div>}
+    <div className={repairToolbarStyles.row}>
+      {repairHoles.length > 0 && <div className={repairToolbarStyles.holesGroup}><div className={repairToolbarStyles.label}>Otvory:</div><div className={repairToolbarStyles.holes}>
+        {repairHoles.map((hole,index)=>{const selected=repairSelectedHoleIds.includes(hole.id),completed=repairCompletedHoleSet.has(hole.id),processing=repairProcessingHoleIds.includes(hole.id);return <button key={hole.id} className={repairToolbarStyles.hole} aria-pressed={selected} aria-busy={processing||undefined} disabled={repairBusy||completed} onClick={()=>selectRepairHole(hole.id)}>
+          {processing ? <span className={repairToolbarStyles.spinner} role="progressbar" aria-label={`Opravuji otvor ${index+1}`}/> : completed ? <RepairCheck/> : null} {index+1}. Ø {(hole.equivalentRadius*2).toFixed(1)}
+        </button>})}
+        {repairPendingHoles.length>1 && <button disabled={repairBusy} onClick={repairAllVisibleSelected?clearRepairHoleSelection:selectAllRepairHoles}>{repairAllVisibleSelected?"Zrušit výběr":"Vybrat vše"}</button>}
+      </div></div>}
+      {!repairShowAnalysisProgress && repairAnalysisComplete && <div className={repairToolbarStyles.checks}><RepairStatus inline clear={repairCleanResult} verticesChecked={repairVertexReport.startsWith("Kontrola vrcholů:")} report={repairVertexReport}/></div>}
     </div>
+    <div className={repairToolbarStyles.actions}>
+      {repairSelection && repairHistoryByUrlRef.current[repairSelection]?.length>0 && <button disabled={repairBusy} onClick={()=>undoLastRepair(repairSelection)}>Vrátit poslední opravu</button>}
+      {repairSelectedAutoCount>0 && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={repairBusy||repairReadyActionLeaving} onClick={triggerRepairSelectedAutoHoles}>Opravit vybrané</button>}
+    </div>
+    {repairMessage && /nepodař|selhal|chyba/i.test(repairMessage) && <div role="alert">{repairMessage}</div>}
+  </div>
+
+  const cadWorkspace = cadStandalone && (
+    <>
+      {cadEmbedded && <ViewerBackButton onClick={closeCadEmbedded} disabled={cadBusy || cadEditorBusy || repairBusy || trimBusy} />}
+      <div className={cadWorkspaceStyles.scope} style={{"--cad-panel-top": `${cadPanelLayout.top}px`, "--cad-header-top": `${cadPanelLayout.headerTop}px`}}>
+      <section ref={cadWorkspaceRef} className={cadWorkspaceStyles.workspace} aria-label="Model Builder">
+        <h2>Model Builder</h2>
+        <div className={cadWorkspaceStyles.steps}>
+          {cadStepOrder.map((step, index) => <React.Fragment key={step}>
+            {index > 0 && <span className={cadWorkspaceStyles.divider} aria-hidden="true" />}
+            <RepairStep active={cadStage === step} done={cadStepDone(step)}>{cadStepLabels[step]}</RepairStep>
+          </React.Fragment>)}
+        </div>
+        <div className={cadWorkspaceStyles.stage} key={cadStage}>
+        {cadStage === "scan" && cadEmbedded && <div className={cadWorkspaceStyles.pickers}>
+          {[{arch:"upper", label:"Horní čelist", value:cadUpperUrl, other:cadLowerUrl}, {arch:"lower", label:"Dolní čelist", value:cadLowerUrl, other:cadUpperUrl}].map(item => <div className={cadWorkspaceStyles.picker} key={item.arch}>
+            <span>{item.label}</span>
+            <AlignmentModelDropdown badge={item.arch === "upper" ? "Upper" : "Lower"} value={item.value} otherValue={item.other} files={repairVisibleFiles} disabled={cadBusy} onPreview={setCadMenuHoveredUrl} onChange={url => selectCadExisting(item.arch, url)} />
+          </div>)}
+        </div>}
+        {cadStage === "scan" && (
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
+            <div style={{ color:"#858585", fontSize:9.5, lineHeight:1.45, minWidth:0 }}>
+              Vyberte horní a/nebo dolní čelist pro vytvoření modelu.
+            </div>
+            {cadLoadedArchCount > 0 && (
+              <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={beginCadEditStage} disabled={cadBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:cadBusy?"wait":"pointer", whiteSpace:"nowrap" }}>
+                Pokračovat
+              </button>
+            )}
+          </div>
+        )}
+
+        {cadStage === "edit" && (
+          <div className={`artheticEdgeEdit ${cadWorkspaceStyles.editTools}`} role="region" aria-label="Úprava scanu">
+            <div style={{fontWeight:750,fontSize:13,marginBottom:8}}>Úprava scanu</div>
+            <div className="cadEditHint">Štětcem přetřete okolí zářezu včetně obou jeho konců. Žlutě se označí hrany pro doplnění a zeleně nová plocha. Tažením mimo scan nebo Alt + tažením otáčíte model. Ctrl při označování odznačuje.</div>
+            <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:8}}>
+              {[["paint","Označit doplnění"],["artifact","Označit artefakt"]].map(([tool,label])=><button key={tool} aria-pressed={cadEditorTool===tool} disabled={cadEditorBusy} onClick={()=>{if(['paint','erase','artifact'].includes(tool)&&!['paint','erase','artifact'].includes(cadEditorTool)&&cadEditContext)refreshCadEdit(cadEditContext.sourceObject);setCadEditorTool(tool)}} style={{background:cadEditorTool===tool?"#215747":"#222",borderColor:cadEditorTool===tool?"#75c6a6":"#444"}}>{label}</button>)}
+            </div>
+            {cadEditorTool==='artifact'&&<div style={{marginTop:8,color:'#c4b5fd'}}>Přetřete výstupek a malé okolí. Fialově se zobrazí oblast úpravy. Ctrl označení ubírá; pak potvrďte odstranění artefaktu.</div>}
+            <button disabled={cadEditorBusy} onClick={smoothCadBorder} title="Celý hlavní okraj · 3 průchody při 100 % síle">Vyhladit celý okraj</button>
+            <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap",marginTop:8}}>
+              <label>Poloměr <input aria-label="Poloměr štětce" type="range" min="0.3" max="12" step="0.1" value={cadBrushOptions.radius} disabled={cadEditorBusy} onChange={e=>setCadBrushOptions(p=>({...p,radius:Number(e.target.value)}))}/>{cadBrushOptions.radius.toFixed(1)} mm</label>
+              {!['paint','erase','artifact','navigate'].includes(cadEditorTool)&&<label>Síla <input aria-label="Síla štětce" type="range" min="0.02" max="1" step="0.01" value={cadBrushOptions.strength} disabled={cadEditorBusy} onChange={e=>setCadBrushOptions(p=>({...p,strength:Number(e.target.value)}))}/>{Math.round(cadBrushOptions.strength*100)} %</label>}
+            </div>
+            {(cadUpperUrl && cadLowerUrl) && <div style={{display:"flex",gap:8,marginTop:6}}>{["upper","lower"].map(arch=><button key={arch} disabled={cadEditorBusy} onClick={()=>{const url=arch==="upper"?cadUpperUrl:cadLowerUrl; const object=modelObjectsRef.current[url]; if(object){prepareRepairVertices(object);refreshCadEdit(object);setCadActiveArch(arch);setCadFileUrl(url);setCadFileName(arch==="upper"?cadUpperName:cadLowerName);setCadEditHistory([])}}}>{arch==="upper"?"Upper":"Lower"}</button>)}</div>}
+            {cadEffectiveSelection.length===2 && <label style={{display:"flex",gap:10,alignItems:"center",marginTop:8}}>Prohnutí nové hrany <input aria-label="Prohnutí nové hrany" type="range" min="-2" max="6" step="0.1" value={cadEditBulge} onChange={e=>setCadEditBulge(Number(e.target.value))}/>{cadEditBulge.toFixed(1)} mm</label>}
+            {cadEditPreview.pending&&<PatchPendingIndicator/>}
+            {['paint','erase'].includes(cadEditorTool)&&cadEditPreview.error && <div role="alert" style={{color:"#fbbf24"}}>{cadEditPreview.error}</div>}
+            <div style={{display:"flex",gap:8,marginTop:8,flexWrap:"wrap"}}>
+              {['paint','erase'].includes(cadEditorTool)&&<button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={!cadEditPreview.patch||cadEditorBusy} onClick={applyCadEdgePatch}>Doplnit plochu</button>}
+              <button disabled={(!cadEditSelection.length&&!cadEditPainted.size&&!cadArtifactPainted.size)||cadEditorBusy} onClick={()=>{setCadEditSelection([]);setCadEditPainted(new Set());setCadArtifactPainted(new Set())}}>Zrušit výběr</button>
+              {cadEditorTool==='artifact'&&<button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={!cadArtifactPainted.size||cadEditorBusy} onClick={removeCadArtifact}>Odstranit artefakt</button>}
+              <button disabled={!cadEditHistory.length||cadEditorBusy} onClick={undoCadEdgePatch}>Vrátit úpravu</button>
+              <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={cadEditorBusy} onClick={()=>{setCadEditSelection([]);beginCadTrimStage()}}>Pokračovat</button>
+              {cadEditorBusy&&<span role="status">Přepočítávám tah štětce…</span>}
+            </div>
+          </div>
+        )}
+
+        {cadRepairWorkspace}
+        {cadStage === "repair" && (
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
+            <div style={{ minWidth:0 }}>
+              <div style={{ color:"#858585", fontSize:9.35, lineHeight:1.45 }}>
+                Vyberte otvory, které chcete opravit. Spodní okraj pro bázi ponechte otevřený. Na orientaci můžete pokračovat i bez opravy všech otvorů.
+              </div>
+              <div style={{ marginTop:7, display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
+                {cadUpperUrl && <button type="button" aria-pressed={cadActiveArch === "upper"} onClick={() => startCadRepairForArch("upper")} disabled={repairBusy} style={{ height:28, padding:"0 10px", borderRadius:8, border:cadActiveArch==="upper"?"1px solid rgba(96,165,250,.28)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="upper"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadArchRepairDone.upper?"#9ad9ad":cadActiveArch==="upper"?"#bfdbfe":"#999", fontSize:8.8, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{cadArchRepairDone.upper?"✓ ":""}Upper</button>}
+                {cadLowerUrl && <button type="button" aria-pressed={cadActiveArch === "lower"} onClick={() => startCadRepairForArch("lower")} disabled={repairBusy} style={{ height:28, padding:"0 10px", borderRadius:8, border:cadActiveArch==="lower"?"1px solid rgba(96,165,250,.28)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="lower"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadArchRepairDone.lower?"#9ad9ad":cadActiveArch==="lower"?"#bfdbfe":"#999", fontSize:8.8, fontWeight:720, cursor:repairBusy?"wait":"pointer" }}>{cadArchRepairDone.lower?"✓ ":""}Lower</button>}
+              </div>
+            </div>
+            <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={continueCadAfterRepair} disabled={!cadRepairCanContinue || repairBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:cadRepairCanContinue?"1px solid rgba(74,222,128,.24)":"1px solid rgba(255,255,255,.07)", background:cadRepairCanContinue?"rgba(34,197,94,.11)":"rgba(255,255,255,.025)", color:cadRepairCanContinue?"#bbf7d0":"#555", fontSize:9, fontWeight:740, cursor:!cadRepairCanContinue||repairBusy?"default":"pointer", whiteSpace:"nowrap" }}>
+              Pokračovat
+            </button>
+          </div>
+        )}
+
+        {cadStage === "orient" && (
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
+            <div style={{ minWidth:0, color:"#858585", fontSize:9.4, lineHeight:1.45 }}>
+              {!cadOrientationPrepared ? <>
+                Klikněte postupně: <b style={{ color:"#cfcfcf" }}>1.</b> levý zadní bod · <b style={{ color:"#cfcfcf" }}>2.</b> pravý zadní bod · <b style={{ color:"#cfcfcf" }}>3.</b> střed fronty. Body: <span style={{ color:cadOrientationPoints.length === 3 ? "#86efac" : "#bdbdbd", fontVariantNumeric:"tabular-nums" }}>{cadOrientationPoints.length}/3</span>
+              </> : <>
+                Model je srovnaný k <span style={{ color:"#93c5fd", fontWeight:720 }}>referenční rovině</span>. V pravých pohledech tažením dolaďte náklon; hlavní scénou můžete dál volně otáčet pro kontrolu.
+              </>}
+            </div>
+            <div className={cadWorkspaceStyles.stageActions} style={{ display:"flex", gap:6, flex:"0 0 auto" }}>
+              {cadUpperUrl && cadLowerUrl && !cadOrientationPrepared && cadOrientationPoints.length === 0 && <>
+                <button type="button" aria-pressed={cadActiveArch === "upper"} onClick={() => { activateCadArch("upper"); setCadMessage("Orientace · Upper. Klikněte na levý zadní bod, pravý zadní bod a potom na střed fronty.") }} disabled={cadBusy} style={{ height:31, padding:"0 9px", borderRadius:8, border:cadActiveArch==="upper"?"1px solid rgba(96,165,250,.26)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="upper"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadActiveArch==="upper"?"#bfdbfe":"#777", fontSize:8.8, fontWeight:720, cursor:"pointer" }}>Upper</button>
+                <button type="button" aria-pressed={cadActiveArch === "lower"} onClick={() => { activateCadArch("lower"); setCadMessage("Orientace · Lower. Klikněte na levý zadní bod, pravý zadní bod a potom na střed fronty.") }} disabled={cadBusy} style={{ height:31, padding:"0 9px", borderRadius:8, border:cadActiveArch==="lower"?"1px solid rgba(96,165,250,.26)":"1px solid rgba(255,255,255,.08)", background:cadActiveArch==="lower"?"rgba(59,130,246,.10)":"rgba(255,255,255,.025)", color:cadActiveArch==="lower"?"#bfdbfe":"#777", fontSize:8.8, fontWeight:720, cursor:"pointer" }}>Lower</button>
+                <div aria-hidden="true" style={{ width:1, height:21, margin:"5px 1px", background:"rgba(255,255,255,.075)" }} />
+              </>}
+              {!cadOrientationPrepared && cadOrientationPoints.length > 0 && <button type="button" onClick={undoCadOrientationPoint} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:9, fontWeight:690, cursor:"pointer" }}>Zpět bod</button>}
+              {cadOrientationPrepared && <button type="button" onClick={resetCadOrientationFineTune} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:9, fontWeight:690, cursor:"pointer" }}>Reset sklonu</button>}
+              {cadOrientationPrepared && <label style={{display:'flex',gap:6,alignItems:'center',fontSize:10,color:'#bfdbfe'}}>Natočení shora (°)<input aria-label="Natočení modelu shora (°)" type="number" step="1" disabled={cadBusy} value={Math.round(cadOrientationAdjust.y*180/Math.PI*10)/10} onChange={event=>{if(event.target.value!==''&&Number.isFinite(event.target.valueAsNumber))setCadOrientationAdjust(previous=>({...previous,y:event.target.valueAsNumber*Math.PI/180}))}} style={{width:65,background:'#202020',border:'1px solid #444',borderRadius:6,color:'#eee',padding:6}} /></label>}
+              {cadOrientationPrepared && <button type="button" onClick={restartCadOrientationPoints} disabled={cadBusy} style={{ height:31, padding:"0 10px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#888", fontSize:9, fontWeight:690, cursor:"pointer" }}>Znovu 3 body</button>}
+              {cadOrientationPrepared && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={confirmCadOrientation} disabled={cadBusy} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:cadBusy?"wait":"pointer" }}>Potvrdit orientaci</button>}
+            </div>
+          </div>
+        )}
+
+        {cadStage === "trim" && (
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, minWidth:0 }}>
+            <div style={{ minWidth:0, color:"#858585", fontSize:9.3, lineHeight:1.45 }}>
+              {!trimClosed && trimControlNodes.length === 0 && <>Klikáním vytvořte hranici, nebo zvolte <b style={{ color:"#cfcfcf" }}>Nechat vše</b>, pokud je scan už předem oříznutý.</>}
+              {!trimClosed && trimControlNodes.length > 0 && <>Klikáním pokračujte v hranici · kuličky lze přetahovat · smyčku uzavřete dvojklikem na první bod nebo tlačítkem.</>}
+              {trimClosed && trimKeepComponent == null && <>Smyčka je uzavřená. Najeďte na část scanu a klikněte na oblast, kterou chcete zachovat.</>}
+              {trimKeepComponent != null && !trimBusy && <>Zelená oblast zůstane zachovaná. Potvrďte Oříznout.</>}
+              {trimBusy && <>Ořezávám vybranou oblast…</>}
+            </div>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap", justifyContent:"flex-end", flex:"0 0 auto", alignItems:"center" }}>
+              {!trimClosed && trimControlNodes.length === 0 && (
+                <label title="Ponechá původní scan beze změny a použije jeho existující otevřenou hranici pro bázi." style={{
+                  height:29, padding:"0 9px", borderRadius:8, border:"1px solid rgba(255,255,255,.09)", background:"rgba(255,255,255,.03)",
+                  color:"#bdbdbd", fontSize:8.8, fontWeight:700, cursor:(cadBusy || trimBusy)?"wait":"pointer", display:"inline-flex", alignItems:"center", gap:7, userSelect:"none",
+                }}>
+                  <input type="checkbox" checked={false} disabled={cadBusy || trimBusy} onChange={(event) => { if (event.target.checked) keepCadWholeScan() }} style={{ width:13, height:13, margin:0, accentColor:"#4ade80", cursor:(cadBusy || trimBusy)?"wait":"pointer" }} />
+                  <span>Nechat vše</span>
+                </label>
+              )}
+              {!trimClosed && trimControlNodes.length > 0 && <button type="button" onClick={removeLastTrimPoint} style={{ height:29, padding:"0 9px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:8.8, fontWeight:680, cursor:"pointer" }}>Smazat poslední</button>}
+              {trimControlNodes.length > 0 && <button type="button" onClick={resetTrimBoundary} style={{ height:29, padding:"0 9px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.03)", color:"#aaa", fontSize:8.8, fontWeight:680, cursor:"pointer" }}>Reset hranice</button>}
+              {!trimClosed && trimControlNodes.length >= 3 && <button type="button" onClick={closeTrimLoop} style={{ height:29, padding:"0 10px", borderRadius:8, border:"1px solid rgba(251,191,36,.18)", background:"rgba(245,158,11,.065)", color:"#fde68a", fontSize:8.8, fontWeight:710, cursor:"pointer" }}>Uzavřít hranici</button>}
+              {trimKeepComponent != null && !trimBusy && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={applyTrimResult} style={{ height:31, padding:"0 13px", borderRadius:8, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:"pointer" }}>Oříznout</button>}
+            </div>
+          </div>
+        )}
+
+        {cadStage === "base" && (
+          <div style={{ display:"grid", gridTemplateColumns:"minmax(0,1fr)", gap:10, alignItems:"center" }}>
+            <div style={{ display:"grid", gridTemplateColumns:"110px minmax(180px,1fr) 76px", gap:9, alignItems:"center", minWidth:0 }}>
+              <div>
+                <div style={{ color:"#d1d1d1", fontSize:9.4, fontWeight:730 }}>Celková výška</div>
+                <div style={{ color:"#575757", fontSize:8.1, marginTop:2 }}>Otevřená dutá báze · mm</div>
+              </div>
+              <input className="artheticCadRange" type="range" min={cadMinHeight} max={cadMaxHeight} step="0.1" value={cadTotalHeight} disabled={cadBusy} onChange={(e) => handleCadTotalHeightChange(e.target.value)} />
+              <div style={{ position:"relative", height:29 }} title={`Přesná celková výška · ${cadMinHeight.toFixed(2)}–${cadMaxHeight.toFixed(2)} mm`}>
+                <input
+                  className="artheticCadNumber"
+                  type="text"
+                  inputMode="decimal"
+                  value={cadHeightDraft}
+                  onChange={(e) => setCadHeightDraft(e.target.value)}
+                  onBlur={(e) => commitCadHeightInput(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur() }
+                    if (e.key === "Escape") {
+                      e.preventDefault()
+                      const rounded = Math.round((Number(cadTotalHeight) || 0) * 100) / 100
+                      const reset = rounded.toFixed(2).replace(/0$/, "")
+                      setCadHeightDraft(reset)
+                      e.currentTarget.value = reset
+                      e.currentTarget.blur()
+                    }
+                  }}
+                  disabled={cadBusy}
+                  aria-label="Přesná celková výška modelu v milimetrech"
+                  style={{ width:"100%", height:"100%", boxSizing:"border-box", padding:"0 22px 0 7px", borderRadius:8, border:"1px solid rgba(255,255,255,.08)", outline:"none", background:"rgba(255,255,255,.03)", color:"#e4e4e4", fontSize:9.2, fontWeight:720, fontVariantNumeric:"tabular-nums", textAlign:"right" }}
+                />
+                <span style={{ position:"absolute", right:6, top:"50%", transform:"translateY(-50%)", color:"#666", fontSize:7.6, fontWeight:700, pointerEvents:"none" }}>mm</span>
+              </div>
+            </div>
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", flexWrap:"wrap", gap:7 }}>
+              <button type="button" disabled={cadBusy} onClick={()=>toggleCadPreview({repairBoundary:true})} title="Vratně opraví drobné větvení okraje a bezpečně uzavře mikrootvory do 0,35 mm. Hlavní otvor báze a větší otvory ponechá. Původní scan zůstane zachovaný." style={{height:33,padding:"0 10px",borderRadius:9,border:"1px solid rgba(96,165,250,.25)",background:builderOptions.repairBoundary?"rgba(59,130,246,.18)":"rgba(255,255,255,.035)",color:"#bfdbfe",fontSize:9,fontWeight:720,cursor:cadBusy?"wait":"pointer"}}>Generovat bázi</button>
+              {cadPreviewActive && !builderDirty && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={applyCadBase} disabled={cadBusy} style={{ height:33, padding:"0 13px", borderRadius:9, border:"1px solid rgba(74,222,128,.24)", background:"rgba(34,197,94,.11)", color:"#bbf7d0", fontSize:9, fontWeight:740, cursor:"pointer" }}>{builderOptions.cutHoles ? "Dokončit model" : "Dokončit bez otvorů"}</button>}
+            </div>
+          </div>
+        )}
+
+        {cadStage === "result" && (
+          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:12 }}>
+            <div style={{ color:"#858585", fontSize:9.35, lineHeight:1.5 }}>
+              <span style={{ color:cadPreviewStats?.openBoundaryLoops === 0 ? "#86efac" : "#fbbf24", fontWeight:750 }}>{cadPreviewStats?.openBoundaryLoops === 0 ? "✓ Uzavřený mesh" : `⚠ Otevřené smyčky: ${cadPreviewStats?.openBoundaryLoops ?? "?"}`}</span>
+              {cadPreviewStats && <> · {cadPreviewStats.triangles.toLocaleString("cs-CZ")} trojúhelníků · výška {cadPreviewStats.totalHeight.toFixed(1)} mm</>}
+            </div>
+            <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} type="button" onClick={downloadCadModel} style={{ height:33, padding:"0 12px", borderRadius:9, border:"1px solid rgba(255,255,255,.11)", background:"#ededed", color:"#0b0b0b", fontSize:9.2, fontWeight:780, cursor:"pointer" }}>Stáhnout STL</button>
+          </div>
+        )}
+
+        {(cadBusy || /nepodař|chyba|selhal|nelze|otevřené smyčky/i.test(cadMessage || "")) && (
+          <div style={{ marginTop:9, paddingTop:8, borderTop:"1px solid rgba(255,255,255,.055)", display:"flex", alignItems:"center", gap:8, minHeight:18 }}>
+            {cadBusy && <span className={repairToolbarStyles.spinner} role="progressbar" aria-label="Připravuji model" />}
+            <span style={{ color:cadBusy?"#c7c7c7":"#696969", fontSize:8.7, lineHeight:1.35 }}>{cadStage === "trim" ? (trimMessage || cadMessage) : cadMessage}</span>
+          </div>
+        )}
+      </div>
+      </section>
+      {cadStage !== "scan" && <aside className={cadWorkspaceStyles.utility} aria-label="Akce Model Builderu">
+        <button type="button" onClick={downloadCadSnapshot} disabled={!(cadUpperUrl || cadLowerUrl || cadPreviewGeometry) || cadSnapshotBusy || cadBusy || cadEditorBusy || repairBusy || trimBusy}>
+          {cadSnapshotBusy ? "Připravuji ZIP…" : "Stáhnout rozpracovaný scan"}
+        </button>
+      </aside>}
+
+      {cadStage === "base" && <BuilderControls options={builderOptions} change={changeBuilderOptions} textStatus={builderTextStatus} selected={builderSelected} select={setBuilderSelected} placing={builderPlacing} setPlacing={setBuilderPlacing} dirty={builderDirty} busy={cadBusy} cancel={cancelBuilder} hasPreview={cadPreviewActive} cutHoles={() => toggleCadPreview({ cutHoles: true })} />}
+      {cadStage === "result" && <button type="button" className={cadWorkspaceStyles.returnButton} onClick={() => setCadStage("base")}>Zpět k nastavení modelu</button>}
+      {cadStage === "scan" && !cadEmbedded && (
+        <div style={{ position:"absolute", inset:0, zIndex:6, display:"grid", placeItems:"center", pointerEvents:"none", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif" }}>
+          <div style={{ pointerEvents:"auto", width:"min(760px, calc(100vw - 44px))", padding:"22px", borderRadius:18, border:"1px solid rgba(255,255,255,.10)", background:"rgba(12,12,12,.84)", boxShadow:"0 24px 80px rgba(0,0,0,.42)", backdropFilter:"blur(18px)" }}>
+            <div style={{ color:"#ededed", fontSize:13, fontWeight:760, textAlign:"center" }}>Vyberte čelisti</div>
+            <div style={{ marginTop:5, color:"#666", fontSize:9.2, lineHeight:1.5, textAlign:"center" }}>Upper a Lower se evidují zvlášť, aby orientace i pozdější báze věděly, na které straně okluzní roviny mají být.</div>
+            <div style={{ marginTop:16, display:"grid", gridTemplateColumns:"repeat(2,minmax(0,1fr))", gap:12 }}>
+              {[{ arch:"upper", label:"Nahrát Upper", url:cadUpperUrl, name:cadUpperName }, { arch:"lower", label:"Nahrát Lower", url:cadLowerUrl, name:cadLowerName }].map((item) => (
+                <label key={item.arch} className={cadWorkspaceStyles.upload} data-loaded={!!item.url || undefined} style={{ minHeight:142, padding:"18px 16px", borderRadius:15, border:item.url?"1px solid rgba(74,222,128,.20)":"1px dashed rgba(255,255,255,.13)", background:item.url?"rgba(34,197,94,.045)":"rgba(255,255,255,.022)", display:"grid", placeItems:"center", textAlign:"center", cursor:"pointer", transition:"all .18s ease" }}>
+                  <div>
+                    <div style={{ width:38, height:38, margin:"0 auto", borderRadius:12, display:"grid", placeItems:"center", border:"1px solid rgba(255,255,255,.08)", background:"rgba(255,255,255,.035)", color:item.url?"#bbf7d0":"#cfcfcf" }}>
+                      {item.url ? <span style={{ fontSize:15, fontWeight:800 }}>✓</span> : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M5 20h14"/></svg>}
+                    </div>
+                    <div style={{ marginTop:10, color:item.url?"#e7f8ec":"#ededed", fontSize:12, fontWeight:760 }}>{item.label}</div>
+                    <div style={{ marginTop:4, minHeight:28, color:item.url?"#7ea88a":"#5f5f5f", fontSize:8.8, lineHeight:1.45, overflow:"hidden", textOverflow:"ellipsis" }}>{item.url ? item.name : "STL · PLY · OBJ"}</div>
+                  </div>
+                  <input type="file" accept=".stl,.ply,.obj" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) handleCadLocalFile(file, item.arch); event.target.value = "" }} />
+                </label>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {cadStage === "orient" && cadOrientationPrepared && (
+        <div className="artheticCadOrthoViews" style={{
+          position:"absolute", right:20, top:132, zIndex:84,
+          width:"clamp(300px, 22vw, 380px)",
+          display:"grid", gap:10, maxHeight:"calc(100vh - 150px)", overflowY:"auto", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif",
+        }}>
+          <div style={{ padding:"0 3px 3px", color:"#666", fontSize:8.4, lineHeight:1.4 }}>
+            Kontrolní pohledy · shora, levý bok, fronta a pravý bok · tažením dolaďte směr a sklon
+          </div>
+          {cadOrientationMiniCount >= 1 ? <CadOrientationMiniView label="Shora · směr FRONT" view="top" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Shora" />}
+          {cadOrientationMiniCount >= 2 ? <CadOrientationMiniView label="Levý bok" view="side-left" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Levý bok" />}
+          {cadOrientationMiniCount >= 3 ? <CadOrientationMiniView label="Frontální" view="front" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Frontální" />}
+          {cadOrientationMiniCount >= 4 ? <CadOrientationMiniView label="Pravý bok" view="side-right" sourceObject={cadFileUrl ? modelObjectsRef.current[cadFileUrl] : null} modelMatrix={modelTransforms[cadFileUrl]} planeCenter={cadOrientationPlaneCenter} planeY={cadOrientationPlaneY} planeSize={cadOrientationPlaneSize} frontSign={cadActiveArch === "upper" ? -1 : 1} onDrag={handleCadOrientationMiniDrag} sceneIntensity={sceneIntensity} highlightIntensity={highlightIntensity} headlightCfg={headlightCfg} /> : <CadOrientationMiniPlaceholder label="Pravý bok" />}
+        </div>
+      )}
+      </div>
+    </>
   )
 
+
+  const trimShowStatusMessage = !!trimMessage && /nepodař|potřeba|není|nenavazuje|nerozdělila|jednoznačně|alespoň|zkuste/i.test(trimMessage)
   const repairActionsPanel = repairMode && !(cadStandalone && cadStage === "repair") && repairSelection && repairedExportsByUrl[repairSelection] && (
     <div className="artheticRepairSideActions">
       <div style={{ display: "grid", gap: 6 }}>
@@ -19590,7 +19499,6 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       {trimMode && !cadStandalone && <ViewerBackButton onClick={closeTrimMode} disabled={trimBusy || !!trimExportBusyUrl} />}
       {repairWorkspace}
       {repairMode && !(cadStandalone && cadStage === "repair") && <ViewerBackButton onClick={closeRepairMode} disabled={repairBusy} />}
-      {cadRepairWorkspace}
       {repairActionsPanel}
       {alignmentWorkspace}
 
@@ -19820,6 +19728,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       )}
 
       <Canvas
+        onPointerMissed={event=>{if(event.button===0 && cadStandalone && cadStage === "base" && !builderDragging && !builderPlacing)setBuilderSelected(null)}}
         orthographic
         camera={{ position: [0, 0, 300], near: 0.01, far: 100000, zoom: 0.9 }}
         gl={{ preserveDrawingBuffer: true }}

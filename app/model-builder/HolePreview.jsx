@@ -86,11 +86,11 @@ export function HolePreview({ options, selected, select, change, dragging, contr
       return <group key={index}>
         <mesh position={center} quaternion={rotation} renderOrder={80} onPointerOver={e=>hover(e,`${index}:body`)} onPointerOut={e=>unhover(e,`${index}:body`)} onPointerDown={e=>begin(e,index,'body',hole,normal)} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish}>
           <cylinderGeometry args={[hole.diameter/2,hole.diameter/2,hole.length+outer,48]}/>
-          <meshBasicMaterial color={hovered===`${index}:body`?'#93c5fd':selected===`hole:${index}`?'#60a5fa':'#2563eb'} depthTest depthWrite/>
+          <meshStandardMaterial color={hovered===`${index}:body`?'#5393ee':selected===`hole:${index}`?'#3479dd':'#245ac2'} roughness={.3} metalness={.28} depthTest depthWrite/>
           <Edges color="#93c5fd" threshold={20} raycast={()=>null}/>
         </mesh>
         {[['outer',outer,1],['inner',hole.length,-1]].map(([side,length,sign])=>{
-          const endpoint=anchor.clone().addScaledVector(normal,sign*(length+.8)),axis=normal.clone().multiplyScalar(sign)
+          const endpoint=anchor.clone().addScaledVector(normal,sign*(length+1.65)),axis=normal.clone().multiplyScalar(sign)
           const quaternion=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),axis)
           const key=`${index}:${side}`,lit=hovered===key
           return <group key={side} position={endpoint} quaternion={quaternion} scale={lit?1.18:1}>
@@ -104,7 +104,7 @@ export function HolePreview({ options, selected, select, change, dragging, contr
         })}
         {selected===`hole:${index}`&&<>
           <mesh position={gizmo} rotation={[Math.PI/2,0,0]} onPointerOver={e=>hover(e,`${index}:rotate`)} onPointerOut={e=>unhover(e,`${index}:rotate`)} onPointerDown={e=>begin(e,index,'rotate',hole,normal,gizmo)} onPointerMove={move} onPointerUp={finish}>
-            <torusGeometry args={[radius,hovered===`${index}:rotate` ? .23 : .16,10,64]}/><meshBasicMaterial color={hovered===`${index}:rotate`?'#ffffff':'#60a5fa'} depthTest depthWrite/>
+            <torusGeometry args={[radius,hovered===`${index}:rotate` ? .23 : .19,10,64]}/><meshBasicMaterial color={hovered===`${index}:rotate`?'#ffffff':'#dceaff'} depthTest depthWrite/>
           </mesh>
           {[-1,1].map(sign=>{
             const key=`${index}:height`,lit=hovered===key,point=center.clone().add(new THREE.Vector3(0,sign*(hole.diameter/2+1.5),0))

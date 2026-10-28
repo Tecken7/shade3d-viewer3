@@ -21,7 +21,7 @@ const scan=[]
 for(const tri of THREE.ShapeUtils.triangulateShape(contour,[])){
  const vs=tri.map(i=>[contour[i].x,0,contour[i].y]);const [a,b,c]=vs.map(p=>new THREE.Vector3(...p));if(b.sub(a).cross(c.sub(a)).y>0)vs.reverse();scan.push(...vs.flat())
 }
-const build=opts=>buildModel(M,new Float32Array(scan),{arch:'upper',smoothing:0,...opts},font)
+const build=opts=>buildModel(M,new Float32Array(scan),{arch:'upper',totalHeight:25,smoothing:0,...opts},font)
 let baseline
 
 test('opt-in rim repair builds a closed base from a tiny pinched border and remains reversible',async()=>{

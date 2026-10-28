@@ -6,7 +6,7 @@ import { toCreasedNormals } from 'three/examples/jsm/utils/BufferGeometryUtils.j
 import { sampleContour, roundShoulder } from './transition.mjs'
 import { drainPassage } from './drains.mjs'
 import { prepareSurface } from './prepare-surface.mjs'
-import { holeDirection, seatHoleOnContour } from './hole-placement.mjs'
+import { holeDirection, seatHoleOnContour, distalHolePositions } from './hole-placement.mjs'
 import { baseDirection } from './base-direction.mjs'
 import { repairBaseBoundary } from './boundary-repair.mjs'
 import { closeBaseMicroHoles } from './micro-holes.mjs'
@@ -405,14 +405,12 @@ export async function buildModel(M, input, options, fontData, progress = () => {
     }
     const bottomContour = baseRings[0].map(id => v.slice(id * 3, id * 3 + 3))
     const placement = { baseY, direction, bottomContour, min: bounds.min.toArray(), max: bounds.max.toArray(), boundary: boundary.map(id => v.slice(id * 3, id * 3 + 3)) }
-    // Defaults are found by raycasting onto each distal end of the actual base.
-    const defaultHoles = [-1, 1].map(side => {
-      const x = (bounds.min.x + bounds.max.x) / 2 + side * (bounds.max.x - bounds.min.x) * 0.34
-      const posterior = direction > 0 ? 1 : -1
-      ray.origin.set(x, baseY - direction * 1.5, posterior > 0 ? bounds.max.z + 10 : bounds.min.z - 10)
-      ray.direction.set(0, 0, -posterior)
-      const hit = outerBVH.raycastFirst(ray, THREE.DoubleSide)
-      return { enabled: !!hit, autoPosition: true, warning: hit ? null : `Otvor ${side < 0 ? 1 : 2} se nepodařilo automaticky umístit. Základna je vytvořena bez něj; umístěte ho ručně na její stěnu.`, diameter: 4.5, length: 8, autoDepth: true, position: hit ? hit.point.toArray() : [x, baseY - direction * 1.5, (bounds.max.z + bounds.min.z) / 2], normal: [0, 0, posterior] }
+    const distal = distalHolePositions(bottomContour, options.arch === 'upper' ? 1 : -1)
+    const defaultHoles = [-1, 1].map((side,index) => {
+      const posterior = options.arch === 'upper' ? 1 : -1
+      const position = distal?.[index]
+      return { enabled:!!position, autoPosition:false, warning:position?null:`Otvor ${index+1} umístěte ručně na stěnu báze.`, diameter:4.5, length:8, autoDepth:true,
+        position:position ? [position[0],baseY-direction*1.5,position[2]] : [(bounds.min.x+bounds.max.x)/2+side*(bounds.max.x-bounds.min.x)*.34,baseY,(bounds.min.z+bounds.max.z)/2], normal:[0,0,posterior] }
     })
     const holes = (p.holes.length ? p.holes : defaultHoles).map(hole => ({ ...hole,
       position: hole.position ? [hole.position[0], hole.position[1] + (Number.isFinite(hole.baseY) ? baseY - hole.baseY : 0), hole.position[2]] : undefined,

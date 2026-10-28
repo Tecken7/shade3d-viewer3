@@ -126,7 +126,7 @@ export function BuilderPreview({geometry,placing,onSurfaceClick,overlayDragging=
  const blockHidden=event=>{if(!overlayDragging)event.stopPropagation()}
  const badge=placement?new THREE.Vector3(...placement.position).addScaledVector(new THREE.Vector3(...placement.normal),1.5).toArray():null
  return <>
-  <mesh ref={mesh} geometry={display} dispose={null} renderOrder={50} onPointerOver={blockHidden} onPointerMove={blockHidden} onPointerDown={blockHidden} onClick={blockHidden}>
+  <mesh ref={mesh} geometry={display} dispose={null} renderOrder={50} onPointerOver={blockHidden} onPointerMove={blockHidden} onPointerDown={blockHidden} onClick={event=>{blockHidden(event);if(editable&&!placing&&!overlayDragging&&event.delta<=4)select(null)}}>
    <meshStandardMaterial color="#AAA08E" roughness={.55} metalness={0} side={THREE.DoubleSide}/>
   </mesh>
   <group ref={textRoot}>{editable&&options&&<TextShape result={result} handlers={textHandlers} hovered={textHovered}/>}</group>

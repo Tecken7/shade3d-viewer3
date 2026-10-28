@@ -49,3 +49,19 @@ export function seatHoleOnContour(contour, hole, point = hole.position) {
  position[1]-=(hole.baseDirection ?? 1)*offset
  return position
 }
+// Pick each distal cap from the posterior-most part of its half of the rim.
+// Uses the confirmed CAD anterior direction, never camera direction or loop order.
+export function distalHolePositions(contour, posteriorSign = 1) {
+ if(!contour?.length)return null
+ const xs=contour.map(p=>p[0]),mid=(Math.min(...xs)+Math.max(...xs))/2,width=Math.max(...xs)-Math.min(...xs)
+ if(width<1e-6)return null
+ return [-1,1].map(side=>{
+   const arm=contour.filter(p=>side*(p[0]-mid)>width*.12)
+   if(!arm.length)return null
+   const depths=arm.map(p=>p[2]*posteriorSign).sort((a,b)=>a-b)
+   const end=depths[Math.floor((depths.length-1)*.94)]
+   const cap=arm.filter(p=>p[2]*posteriorSign>=end)
+   const mean=cap.reduce((sum,p)=>sum.map((v,i)=>v+p[i]),[0,0,0]).map(v=>v/cap.length)
+   return nearestContourPosition(contour,mean).position
+ })
+}
