@@ -9,10 +9,12 @@ import { FontLoader } from 'three/examples/jsm/loaders/FontLoader.js'
 import { Html, useCursor } from '@react-three/drei'
 import { useBuilderGestureGuard } from './useBuilderGestureGuard'
 import { beginSurfaceTextDrag,moveSurfaceTextDrag } from './text-drag.mjs'
+import {updateLiveTextPreview,isTextPlacementClick} from './text-live-preview.mjs'
+import {textFontUrl} from './text-font.mjs'
 import {useTextProjection} from './useTextProjection'
 
 
-let fontRequest
+const fontRequests=new Map()
 function TextShape({result,handlers,hovered}){
  const geometry=result?.geometry
  if(!geometry)return null
@@ -23,17 +25,19 @@ function TextShape({result,handlers,hovered}){
  </group>
 }
 export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,roughness=.42,metalness=.51,geometry,placing,onSurfaceClick,overlayDragging=false,options,select,change,dragging,controlsRef,onDragEnd,editable=true,onTextStatus,reveal=null,onRevealComplete}){
- const mesh=useRef(),textRoot=useRef(),textDrag=useRef(null),placementRequest=useRef(false)
- const [textHovered,setTextHovered]=useState(false),[candidate,setCandidate]=useState(null),[notice,setNotice]=useState(''),[font,setFont]=useState(null)
+ const mesh=useRef(),textRoot=useRef(),textDrag=useRef(null),placementRequest=useRef(false),livePoint=useRef(null),liveTimer=useRef(0),liveApplied=useRef(null)
+ const [textHovered,setTextHovered]=useState(false),[candidate,setCandidate]=useState(null),[notice,setNotice]=useState(''),[font,setFont]=useState(null),[moving,setMoving]=useState(false),[fastValid,setFastValid]=useState(null)
  useCursor(textHovered,'grab')
  useBuilderGestureGuard(textRoot,controlsRef,editable&&!placing)
  const {camera,gl}=useThree()
  useEffect(()=>{
   let live=true
-  fontRequest??=fetch('/wasm/model-builder/inter-font.json').then(r=>{if(!r.ok)throw new Error('font');return r.json()}).then(data=>new FontLoader().parse(data)).catch(()=>{fontRequest=null;return null})
-  fontRequest.then(value=>{if(live)setFont(value)})
+  const url=textFontUrl(options?.textWeight)
+  setFont(null)
+  if(!fontRequests.has(url))fontRequests.set(url,fetch(url).then(r=>{if(!r.ok)throw new Error('font');return r.json()}).then(data=>new FontLoader().parse(data)).catch(()=>{fontRequests.delete(url);return null}))
+  fontRequests.get(url).then(value=>{if(live)setFont(value)})
   return()=>{live=false}
- },[])
+ },[options?.textWeight])
  const revealClock=useRef({key:null,start:0,done:false})
  const revealUniforms=useMemo(()=>({uBaseRevealHasStart:{value:0},uBaseRevealEnabled:{value:0},uBaseRevealProgress:{value:1},uBaseRevealFrom:{value:0},uBaseRevealTo:{value:0},uBaseRevealDirection:{value:1}}),[])
  const compileReveal=useCallback(shader=>installBaseRevealShader(shader,revealUniforms),[revealUniforms])
@@ -65,22 +69,42 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
  const committed=useMemo(()=>options?.textPosition&&options?.textNormal?{position:options.textPosition,normal:options.textNormal}:null,[options?.textPosition,options?.textNormal])
  const placement=candidate||(placing?null:committed)
  const {result,pending,project}=useTextProjection(editable&&showTextPreview&&options?.text?.trim()?textSurface:null,font,options)
- useEffect(()=>{project(placement)},[project,placement,font,textSurface,options?.text,options?.textSize,options?.textDepth,options?.textRotation,options?.textMode,options?.baseDirection,editable,showTextPreview])
+ useEffect(()=>{project(placement)},[project,placement,font,textSurface,options?.text,options?.textSize,options?.textDepth,options?.textRotation,options?.textMode,options?.textWeight,options?.baseDirection,editable,showTextPreview])
+ const liveGeometry=useMemo(()=>{const copy=result.geometry?.clone();copy?.attributes.position.setUsage(THREE.DynamicDrawUsage);return copy||null},[result.geometry])
+ useEffect(()=>()=>liveGeometry?.dispose(),[liveGeometry])
+ const resultRef=useRef(result);resultRef.current=result
+ useFrame(()=>{
+  const point=livePoint.current
+  if(!point||!liveGeometry||liveApplied.current?.point===point&&liveApplied.current?.geometry===liveGeometry)return
+  liveApplied.current={point,geometry:liveGeometry}
+  const valid=updateLiveTextPreview(liveGeometry,options,point,textSurface)
+  setFastValid(valid?true:null)
+ })
+ const settleLive=useCallback((point,check)=>{
+  if(livePoint.current===point){livePoint.current=null;setMoving(false);setFastValid(null);setNotice(check.error||'')}
+ },[])
+ const queueLive=useCallback(point=>{
+  livePoint.current=point;setMoving(true);setNotice('');clearTimeout(liveTimer.current)
+  if(!resultRef.current.geometry)project(point,check=>settleLive(point,check))
+  liveTimer.current=setTimeout(()=>project(point,check=>settleLive(point,check)),120)
+ },[project,settleLive])
+ useEffect(()=>()=>clearTimeout(liveTimer.current),[])
+ const shownResult=moving&&liveGeometry?{...result,geometry:liveGeometry,valid:fastValid??result.valid}:result
  const error=notice||result.error
- useEffect(()=>{onTextStatus?.({valid:!pending&&!!result.valid,error:pending?'Přizpůsobuji text povrchu…':error})},[pending,result.valid,error,onTextStatus])
+ useEffect(()=>{onTextStatus?.({valid:!!font&&!placing&&!moving&&!pending&&!!result.valid,error:!font?'Načítám písmo…':moving||pending?'Přizpůsobuji text povrchu…':error})},[font,placing,moving,pending,result.valid,error,onTextStatus])
  useEffect(()=>{if(overlayDragging&&!textDrag.current)setTextHovered(false)},[overlayDragging])
- useEffect(()=>{placementRequest.current=false;setNotice('')},[options?.text,options?.textSize,options?.textDepth,options?.textRotation,options?.textMode,font])
+ useEffect(()=>{placementRequest.current=false;livePoint.current=null;clearTimeout(liveTimer.current);setMoving(false);setFastValid(null);setNotice('')},[options?.text,options?.textSize,options?.textDepth,options?.textRotation,options?.textMode,options?.textWeight,font])
  const finishText=useCallback(()=>{
   const gesture=textDrag.current;if(!gesture)return
-  textDrag.current=null;setTextHovered(false)
+  textDrag.current=null;setTextHovered(false);clearTimeout(liveTimer.current)
   if(gesture.nextPoint){
    const point=gesture.nextPoint;setCandidate(point)
-   project(point,check=>{if(check.valid){change?.({textPosition:point.position,textNormal:point.normal});setCandidate(null)}else setNotice(check.error)})
-  }else{setCandidate(null);project(committed)}
+   project(point,check=>{settleLive(point,check);if(check.valid){change?.({textPosition:point.position,textNormal:point.normal});setCandidate(null)}else setNotice(check.error)})
+  }else{livePoint.current=null;setMoving(false);setCandidate(null);project(committed)}
   try{gesture.target.releasePointerCapture?.(gesture.pointerId)}catch{}
   if(controlsRef?.current)controlsRef.current.enabled=false
   dragging?.(false);onDragEnd?.()
- },[controlsRef,dragging,onDragEnd,project,change,committed])
+ },[controlsRef,dragging,onDragEnd,project,change,committed,settleLive])
  const finishRef=useRef(finishText);finishRef.current=finishText
  useEffect(()=>{
   const finish=()=>finishRef.current()
@@ -92,7 +116,7 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
   onPointerOver:event=>{event.stopPropagation();if(!textDrag.current&&!overlayDragging)setTextHovered(true)},
   onPointerOut:event=>{event.stopPropagation();if(!textDrag.current)setTextHovered(false)},
   onPointerDown:event=>{
-   if(event.button!==0||!editable||placing||overlayDragging||pending||!change||!committed)return
+   if(event.button!==0||!editable||placing||overlayDragging||pending||!font||!change||!committed)return
    event.stopPropagation()
    mesh.current.updateWorldMatrix(true,false)
    const ray=event.ray.clone().applyMatrix4(mesh.current.matrixWorld.clone().invert()),grab=beginSurfaceTextDrag(textSurface,ray,candidate||committed)
@@ -106,14 +130,14 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
    event.stopPropagation();mesh.current.updateWorldMatrix(true,false)
    const ray=event.ray.clone().applyMatrix4(mesh.current.matrixWorld.clone().invert()),point=moveSurfaceTextDrag(textSurface,ray,gesture)
    if(!point){gesture.nextPoint=null;setNotice('Kurzor je mimo souvislý povrch. Poslední platná poloha textu zůstala zachovaná.');return}
-   gesture.nextPoint=point;setNotice('');project(point)
+   gesture.nextPoint=point;queueLive(point)
   },
   onPointerUp:finishText,onPointerCancel:finishText,
  }
  useEffect(()=>{
   if(!editable||!placing||!display)return
   const raycaster=new THREE.Raycaster(),pointer=new THREE.Vector2();raycaster.firstHitOnly=true
-  let frame=0
+  let frame=0,start=null
   const hitAt=event=>{
    if(!mesh.current)return null
    const rect=gl.domElement.getBoundingClientRect()
@@ -123,27 +147,30 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
   }
   const pointAt=hit=>({position:mesh.current.worldToLocal(hit.point.clone()).toArray(),normal:hit.face.normal.toArray()})
   const move=event=>{
-   if(event.buttons||placementRequest.current)return
+   if(start&&Math.hypot(event.clientX-start.x,event.clientY-start.y)>4)start.moved=true
+   if(!font||event.buttons||placementRequest.current)return
    cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>{
     const hit=hitAt(event)
-    if(!hit){setCandidate(null);return}
+    if(!hit){leave();return}
     const point=pointAt(hit)
-    setNotice('');setCandidate(point)
+    queueLive(point)
    })
   }
-  const leave=()=>{if(!placementRequest.current)setCandidate(null)}
+  const leave=()=>{start=null;if(!placementRequest.current){clearTimeout(liveTimer.current);livePoint.current=null;setMoving(false);setCandidate(null);project(null)}}
+  const down=event=>{start=event.button===0&&!event.altKey&&!event.ctrlKey&&!event.shiftKey?{x:event.clientX,y:event.clientY}:null}
+  const cancel=()=>{start=null}
   const pick=event=>{
-   if(event.button!==0||placementRequest.current)return
+   const click=isTextPlacementClick(start,event);start=null
+   if(!click||placementRequest.current)return
    if(!font){setNotice('Načítám písmo. Zkuste umístění za okamžik.');return}
-   cancelAnimationFrame(frame);const hit=hitAt(event);if(!hit)return
-   event.preventDefault();event.stopPropagation()
-   const point=pointAt(hit);setCandidate(point)
+   clearTimeout(liveTimer.current);cancelAnimationFrame(frame);const hit=hitAt(event);if(!hit)return
+   const point=pointAt(hit);livePoint.current=point;setMoving(true);setCandidate(point)
    placementRequest.current=true
-   project(point,check=>{if(!placementRequest.current)return;placementRequest.current=false;if(check.valid){onSurfaceClick?.({...hit,stopPropagation(){}});setCandidate(null)}else setNotice(check.error)})
+   project(point,check=>{if(!placementRequest.current)return;placementRequest.current=false;settleLive(point,check);if(check.valid){onSurfaceClick?.({...hit,stopPropagation(){}});setCandidate(null)}else setNotice(check.error)})
   }
-  gl.domElement.addEventListener('pointerdown',pick,true);gl.domElement.addEventListener('pointermove',move,true);gl.domElement.addEventListener('pointerleave',leave)
-  return()=>{cancelAnimationFrame(frame);gl.domElement.removeEventListener('pointerdown',pick,true);gl.domElement.removeEventListener('pointermove',move,true);gl.domElement.removeEventListener('pointerleave',leave)}
- },[editable,placing,display,gl,camera,onSurfaceClick,project,font])
+  gl.domElement.addEventListener('pointerdown',down,true);gl.domElement.addEventListener('pointerup',pick,true);gl.domElement.addEventListener('pointercancel',cancel,true);gl.domElement.addEventListener('pointermove',move,true);gl.domElement.addEventListener('pointerleave',leave)
+  return()=>{cancelAnimationFrame(frame);gl.domElement.removeEventListener('pointerdown',down,true);gl.domElement.removeEventListener('pointerup',pick,true);gl.domElement.removeEventListener('pointercancel',cancel,true);gl.domElement.removeEventListener('pointermove',move,true);gl.domElement.removeEventListener('pointerleave',leave)}
+ },[editable,placing,display,gl,camera,onSurfaceClick,project,font,queueLive,settleLive])
  if(!display)return null
  const blockHidden=event=>{if(!overlayDragging)event.stopPropagation()}
  const proposal=result.point||placement
@@ -152,7 +179,7 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
   <mesh ref={mesh} geometry={display} dispose={null} renderOrder={50} onPointerOver={blockHidden} onPointerMove={blockHidden} onPointerDown={blockHidden} onClick={event=>{blockHidden(event);if(editable&&!placing&&!overlayDragging&&event.delta<=4)select(null)}}>
    <meshStandardMaterial onBeforeCompile={compileReveal} customProgramCacheKey={()=>"builder-base-reveal-v2"} color="#AAA08E" roughness={roughness} metalness={metalness} side={THREE.DoubleSide}/>
   </mesh>
-  <group ref={textRoot}>{editable&&showTextPreview&&options&&<TextShape result={result} handlers={textHandlers} hovered={textHovered}/>}</group>
-  {editable&&candidate&&!result.valid&&result.error&&badge&&<Html center position={badge} occlude style={{pointerEvents:'none',width:200,background:'rgba(35,12,12,.94)',border:'1px solid #a34a4a',borderRadius:7,padding:7,color:'#fecaca',fontSize:11,lineHeight:1.4}}>Tady nelze text umístit. Posuňte jej nebo zmenšete písmo.</Html>}
+  <group ref={textRoot}>{editable&&showTextPreview&&options&&<TextShape result={shownResult} handlers={textHandlers} hovered={textHovered}/>}</group>
+  {editable&&candidate&&!shownResult.valid&&result.error&&badge&&<Html center position={badge} occlude style={{pointerEvents:'none',width:200,background:'rgba(35,12,12,.94)',border:'1px solid #a34a4a',borderRadius:7,padding:7,color:'#fecaca',fontSize:11,lineHeight:1.4}}>Tady nelze text umístit. Posuňte jej nebo zmenšete písmo.</Html>}
  </>
 }

@@ -6,10 +6,10 @@ const sharp='Na této hraně by se písmena zlomila nebo deformovala. Posuňte t
 // A small intrinsic chart: horizontal distance is travelled along the surface,
 // then vertical columns are transported with the local normal. Unlike a single
 // view-axis projection, millimetres of type remain millimetres on a cylinder.
-export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset=0,preferVertical=true){
+export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset=0,preferVertical=true,quality={}){
  const horizontalLabel=Math.abs(right.y)<1e-6&&Math.abs(up.y)>.94
  let tracingBaseline=true
- const step=.2,tree=surface.boundsTree,ray=new THREE.Ray(),rotation=new THREE.Quaternion()
+ const step=quality.step??.2,tree=surface.boundsTree,ray=new THREE.Ray(),rotation=new THREE.Quaternion()
  const normalAt=hit=>{
   const positions=surface.attributes.position,normals=surface.attributes.normal,index=surface.index
   if(!normals||!Number.isInteger(hit.faceIndex))return hit.face.normal.clone()
@@ -38,7 +38,7 @@ export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,vis
  }
  // Curved crowns, sloped walls and rotated labels cannot use the vertical
  // shortcut. Do not trace their entire baseline twice before discovering it.
- if(preferVertical&&(Math.abs(normal.y)>1e-6||Math.abs(right.y)>1e-6||Math.abs(up.y)<.999999))return createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset,false)
+ if(preferVertical&&(Math.abs(normal.y)>1e-6||Math.abs(right.y)>1e-6||Math.abs(up.y)<.999999))return createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset,false,quality)
  const advance=(frame,direction,distance)=>{
   let point=frame.point.clone(),n=frame.normal.clone(),geometricNormal=(frame.faceNormal||frame.normal).clone(),tangent=direction.clone(),remaining=distance
   while(remaining>1e-7){
@@ -111,7 +111,7 @@ export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,vis
   }
   columns.set(x,column)
  }
- if(!verticalWall&&preferVertical)return createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset,false)
+ if(!verticalWall&&preferVertical)return createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset,false,quality)
  if(!verticalWall){
   columns.clear()
   for(let x=lowX;x<=highX;x++){
@@ -128,11 +128,11 @@ export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,vis
  // Curved sheets cannot always accept flat lettering without strain (e.g. a
  // large word on a tiny spherical cusp). Reject it instead of stretching ink.
  const strained=new Set()
- for(let x=lowX;x<highX;x++)for(let y=lowY;y<highY;y++){
+ if(quality.validate!==false)for(let x=lowX;x<highX;x++)for(let y=lowY;y<highY;y++){
   const visible=frame=>frame.point.clone().addScaledVector(frame.normal,visibleOffset)
   const p=visible(columns.get(x).get(y)),dx=visible(columns.get(x+1).get(y)).sub(p),dy=visible(columns.get(x).get(y+1)).sub(p)
   if(Math.abs(dx.length()/step-1)>.13||Math.abs(dy.length()/step-1)>.13||Math.abs(dx.dot(dy))/(dx.length()*dy.length())>.16){
-   if(verticalWall)return createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset,false)
+   if(verticalWall)return createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset,false,quality)
    strained.add(`${x}:${y}`)
   }
  }

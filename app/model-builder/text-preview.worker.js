@@ -12,8 +12,8 @@ self.onmessage=({data})=>{
    surface.boundsTree=new MeshBVH(surface);font=new FontLoader().parse(data.font);options=data.options;return
   }
   const result=projectSurfaceText(font,options,data.point,surface,{preview:true})
-  const positions=result.geometry?.attributes.position.array,normals=result.geometry?.attributes.normal.array
-  self.postMessage({id:data.id,valid:result.valid,error:result.error,positions,normals},[positions?.buffer,normals?.buffer].filter(Boolean))
+  const positions=result.geometry?.attributes.position.array,normals=result.geometry?.attributes.normal.array,local=result.geometry?.attributes.textLocal.array
+  self.postMessage({id:data.id,valid:result.valid,error:result.error,positions,normals,local},[positions?.buffer,normals?.buffer,local?.buffer].filter(Boolean))
   result.geometry?.dispose()
  }catch(error){self.postMessage({id:data.id,valid:false,error:error.message})}
 }

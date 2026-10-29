@@ -40,7 +40,7 @@ export function projectSurfaceText(font,options,placement,surface,{preview=false
  if(unsupported)return {geometry:null,valid:false,error:`Písmo nepodporuje znak „${unsupported}“.`}
  if(!(options.textSize>=1&&options.textSize<=12&&options.textDepth>0&&options.textDepth<=3))return {geometry:null,valid:false,error:'Velikost textu musí být 1–12 mm a hloubka nejvýše 3 mm.'}
  const template=textTemplate(font,options),bounds=template.bounds
- const text=new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(template.positions.slice(),3))
+ const text=new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(template.positions.slice(),3)).setAttribute('textLocal',new THREE.BufferAttribute(template.positions.slice(),3))
  const attr=text.attributes.position,local=template.positions,n=new THREE.Vector3(...placement.normal).normalize(),up=new THREE.Vector3(0,-(options.baseDirection??options.holes?.[0]?.baseDirection??1),0)
  const right=new THREE.Vector3().crossVectors(up,n)
  if(right.lengthSq()<.04)right.set(1,0,0).addScaledVector(n,-n.x)

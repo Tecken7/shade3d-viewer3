@@ -18,13 +18,13 @@ export function useTextProjection(surface,font,options){
   s.queue=createTextProjectionQueue(job=>{setPending(true);worker.postMessage(job)},(data,point)=>{
    if(state.current!==s)return
    let geometry=null
-   if(data.positions){geometry=new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(data.positions,3));if(data.normals)geometry.setAttribute('normal',new THREE.BufferAttribute(data.normals,3));geometry.computeBoundingBox();geometry.computeBoundingSphere()}
+   if(data.positions){geometry=new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(data.positions,3));if(data.normals)geometry.setAttribute('normal',new THREE.BufferAttribute(data.normals,3));if(data.local)geometry.setAttribute('textLocal',new THREE.BufferAttribute(data.local,3));geometry.computeBoundingBox();geometry.computeBoundingSphere()}
    setResult({geometry,valid:data.valid,error:data.error,point});setPending(false)
   })
   worker.onmessage=({data})=>s.queue.receive(data)
   worker.onerror=()=>{if(state.current===s){setPending(false);setResult({geometry:null,valid:false,error:'Náhled textu se nepodařilo připravit. Zkuste umístění znovu.'})}}
   return()=>{state.current=null;s.queue.close();worker.terminate()}
- },[surface,font,options.text,options.textSize,options.textDepth,options.textMode,options.textRotation,options.baseDirection])
+ },[surface,font,options.text,options.textSize,options.textDepth,options.textMode,options.textRotation,options.textWeight,options.baseDirection])
  useEffect(()=>()=>result.geometry?.dispose(),[result.geometry])
  return {result,pending,project:send}
 }

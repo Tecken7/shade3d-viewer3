@@ -49,3 +49,15 @@ test('fast text motion carries the anchor and normal while preserving all letter
  const a=new THREE.Vector3(2,2,3),b=new THREE.Vector3(4,5,3),distance=a.distanceTo(b)
  assert.ok(Math.abs(a.applyMatrix4(matrix).distanceTo(b.applyMatrix4(matrix))-distance)<1e-10)
 })
+
+
+test('Inter Extra Light and Extra Bold survive the actual label boolean with their selected stroke weight',async()=>{
+ const base=await getBase(),volumes=[]
+ for(const weight of [200,400,800]){
+  const data=JSON.parse(fs.readFileSync(new URL(`../public/wasm/model-builder/inter${weight===400?'':`-${weight}`}-font.json`,import.meta.url)))
+  const result=await applyModelText(M,base,{...label,text:'A',textWeight:weight},data)
+  const topology=meshTopology(Array.from(result.positions),Array.from(result.indices));assert.equal(topology.openEdges,0);assert.equal(topology.nonManifold,0)
+  volumes.push(result.stats.volume)
+ }
+ assert.ok(volumes[0]<volumes[1]&&volumes[1]<volumes[2],'selected weight must affect the final printed geometry, not only the UI preview')
+})

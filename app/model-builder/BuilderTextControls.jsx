@@ -1,5 +1,6 @@
 'use client'
 import React from 'react'
+import {TEXT_WEIGHTS,textWeight} from './text-font.mjs'
 import styles from './BuilderControls.module.css'
 
 export default function BuilderTextControls({options:p,change,busy,cancel,placing,setPlacing,select,textStatus}){
@@ -12,11 +13,12 @@ export default function BuilderTextControls({options:p,change,busy,cancel,placin
     <button type="button" aria-pressed={p.textMode==='emboss'} onClick={()=>change({textMode:'emboss'})}>Vystouplý</button>
     <button type="button" aria-pressed={p.textMode==='engrave'} onClick={()=>change({textMode:'engrave'})}>Vyrytý</button>
    </div>
+   <label className={styles.textField}>Řez písma Inter<select aria-label="Řez písma Inter" value={textWeight(p.textWeight)} onChange={event=>change({textWeight:Number(event.target.value)})}>{TEXT_WEIGHTS.map(weight=><option key={weight.value} value={weight.value}>{weight.label}</option>)}</select></label>
    {field('Velikost textu (mm)','textSize',1,12)}
    {field('Hloubka textu (mm)','textDepth',.1,3)}
    {field('Otočení textu (°)','textRotation',-180,180,5)}
    <button type="button" aria-pressed={placing} disabled={!p.text.trim()} onClick={()=>{select('text');setPlacing(!placing)}}>{placing?'Klikněte na model':'Umístit text na model'}</button>
-   {p.text.trim()&&<p role="status">{textStatus?.error||'Text umístěte kliknutím na povrch. Potom ho můžete po modelu posouvat tažením.'}</p>}
+   {p.text.trim()&&<p role="status">{textStatus?.error||'Kliknutím umístěte text, tažením otáčejte modelem. Umístěný text přesunete tažením za písmena.'}</p>}
   </fieldset>
   {busy&&<button type="button" className={styles.cancel} onClick={cancel}>Zrušit výpočet</button>}
  </aside>

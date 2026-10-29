@@ -46,6 +46,6 @@ test('leaving the surface produces no replacement placement or mutation of the g
 test('releasing outside the surface restores the geometry that belongs to the stored placement',async()=>{
  const fs=await import('node:fs'),source=fs.readFileSync(new URL('../app/model-builder/BuilderPreview.jsx',import.meta.url),'utf8'),start=source.indexOf(' const finishText=useCallback('),body=source.slice(start,source.indexOf('},[controlsRef',start)).split('useCallback(')[1]+'}'
  const stored={position:[0,0,1],normal:[0,0,1]},projected=[],changed=[],gesture={nextPoint:null,target:{releasePointerCapture(){}},pointerId:1}
- const finish=new Function('textDrag','setTextHovered','setCandidate','project','change','setNotice','controlsRef','dragging','onDragEnd','committed',`return (${body})`)({current:gesture},()=>{},()=>{},point=>projected.push(point),point=>changed.push(point),()=>{},{current:{enabled:false}},()=>{},()=>{},stored)
+ const finish=new Function('textDrag','setTextHovered','setCandidate','project','change','setNotice','controlsRef','dragging','onDragEnd','committed','liveTimer','livePoint','setMoving','settleLive',`return (${body})`)({current:gesture},()=>{},()=>{},point=>projected.push(point),point=>changed.push(point),()=>{},{current:{enabled:false}},()=>{},()=>{},stored,{current:0},{current:null},()=>{},()=>{})
  finish();assert.deepEqual(projected,[stored]);assert.deepEqual(changed,[])
 })

@@ -56,6 +56,7 @@ import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter"
 import { HolePreview } from "./model-builder/HolePreview"
 import { BuilderPreview } from "./model-builder/BuilderPreview"
 import BaseHeightPreview from "./model-builder/BaseHeightPreview"
+import {textFontUrl} from "./model-builder/text-font.mjs"
 import BuilderTextControls from "./model-builder/BuilderTextControls"
 import {BUILDER_STEPS,BUILDER_STEP_LABELS,nextBuilderStage,canApplyBuilderText,builderGeometryOptions,builderTextSignature} from "./model-builder/builder-workflow.mjs"
 import {baseHeightGuideLayout} from "./model-builder/base-height-layout.mjs"
@@ -14053,7 +14054,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       const positions = labelOnly ? Float32Array.from(labelBase.attributes.position.array) : new Float32Array(await runStepsAsync(collectTrianglesInRootSteps(sourceObject, rootGroupRef.current)))
       const indices=labelOnly?Uint32Array.from(labelBase.index.array):null
       if (builderWorkerRef.current !== pending) return
-      const fontResponse = await fetch("/wasm/model-builder/inter-font.json")
+      const fontResponse = await fetch(textFontUrl(builderOptions.textWeight))
       if (!fontResponse.ok) throw new Error("Nepodařilo se načíst místní písmo.")
       const font = await fontResponse.json()
       if (builderWorkerRef.current !== pending) return
@@ -19922,7 +19923,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           />
         )}
 
-        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} clickSlop={(trimMode && !trimClosed) || (cadStandalone && cadStage === "orient" && !cadOrientationPrepared) ? 4 : 0} ref={trackballRef} target={cameraTarget} enabled={!sliceDrawing && !builderDragging && !builderPlacing && !sliceOverlayInteracting && !alignmentBusy && (!cadBusy || cadStage === "scan" || cadStage === "base" || cadStage === "text") && trimDraggingPoint == null && (!trimBusy || trimStage === "model")} onInteractionChange={handleCameraInteraction} />
+        <TouchTrackballControls key={`main-trackball-${trackballResetNonce}`} clickSlop={builderPlacing || (trimMode && !trimClosed) || (cadStandalone && cadStage === "orient" && !cadOrientationPrepared) ? 4 : 0} ref={trackballRef} target={cameraTarget} enabled={!sliceDrawing && !builderDragging && !sliceOverlayInteracting && !alignmentBusy && (!cadBusy || cadStage === "scan" || cadStage === "base" || cadStage === "text") && trimDraggingPoint == null && (!trimBusy || trimStage === "model")} onInteractionChange={handleCameraInteraction} />
         <CadOrientationZoom active={cadStandalone && cadStage === "orient" && cadOrientationPrepared}/>
         <RightButtonPan setTarget={setCameraTarget} trackballRef={trackballRef} onInteractionChange={handleCameraInteraction} />
       </Canvas>
