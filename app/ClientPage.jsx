@@ -58,6 +58,8 @@ import { BuilderPreview } from "./model-builder/BuilderPreview"
 import BaseHeightPreview from "./model-builder/BaseHeightPreview"
 import {textFontUrl} from "./model-builder/text-font.mjs"
 import BuilderTextControls from "./model-builder/BuilderTextControls"
+import LabLogoPreview from "./model-builder/LabLogoPreview"
+import {LAB_LOGO_FONT} from "./model-builder/lab-logo.mjs"
 import {BUILDER_STEPS,BUILDER_STEP_LABELS,nextBuilderStage,canApplyBuilderText,builderGeometryOptions,builderTextSignature} from "./model-builder/builder-workflow.mjs"
 import {baseHeightGuideLayout} from "./model-builder/base-height-layout.mjs"
 import { FrontDirectionLabel } from "./model-builder/FrontDirectionLabel"
@@ -12060,6 +12062,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const [builderDirty, setBuilderDirty] = useState(true)
   const [builderSelected, setBuilderSelected] = useState(null)
   const [builderTextStatus, setBuilderTextStatus] = useState({valid:false,error:''})
+  const [builderLogoStatus,setBuilderLogoStatus]=useState({valid:false,error:''})
   const [builderPlacing, setBuilderPlacing] = useState(false)
   const [builderDragging, setBuilderDragging] = useState(false)
   const [cadSnapshotBusy, setCadSnapshotBusy] = useState(false)
@@ -12108,6 +12111,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     const position = event.object.worldToLocal(event.point.clone()).toArray()
     const normal = event.face.normal.clone().normalize().toArray()
     if (builderSelected === "text") changeBuilderOptions({ textPosition: position, textNormal: normal })
+    else if(builderSelected === "logo") changeBuilderOptions({textLogoPosition:position,textLogoNormal:normal})
     else if (builderSelected?.startsWith("hole:")) {
       const index = Number(builderSelected.split(":")[1])
       changeBuilderOptions({ holes: builderOptions.holes.map((hole, i) => i === index ? { ...hole, position, normal, enabled: true, autoPosition: false, warning: null } : hole) })
@@ -14057,6 +14061,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       const fontResponse = await fetch(textFontUrl(builderOptions.textWeight))
       if (!fontResponse.ok) throw new Error("Nepodařilo se načíst místní písmo.")
       const font = await fontResponse.json()
+      if(labelOnly&&builderOptions.textLogoEnabled){const response=await fetch(LAB_LOGO_FONT);if(!response.ok)throw Error("Nepodařilo se načíst písmo loga.");font.brandFont=await response.json()}
       if (builderWorkerRef.current !== pending) return
       const worker = new Worker(new URL("./workers/model-builder.worker.js", import.meta.url), { type: "module" })
       builderWorkerRef.current = worker
@@ -14090,7 +14095,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         builderHasCutPreviewRef.current = !!nextOptions.cutHoles
         setCadPreviewGeometry(previous => { previous?.dispose?.(); return geometry })
         setCadPreviewStats(result.stats)
-        setBuilderOptions(previous => ({ ...previous, holes: result.holes, cutHoles: nextOptions.cutHoles, bottomContour: result.placement.bottomContour, baseDirection:result.placement.direction }))
+        setBuilderOptions(previous => ({ ...previous, holes: result.holes, cutHoles: nextOptions.cutHoles, bottomContour: result.placement.bottomContour, baseDirection:result.placement.direction,...(!labelOnly?{textLogoPosition:null,textLogoNormal:null}:{}) }))
         if(request.repairBoundary && cadHeightGuide){
           const layout=baseHeightGuideLayout(cadHeightGuide,cadTotalHeight,!!nextOptions.flipBaseDirection)
           setCadBaseReveal({from:layout.direction>0?cadHeightGuide.max[1]:cadHeightGuide.min[1],to:layout.y,direction:layout.direction,progress:{value:0},reducedMotion:window.matchMedia('(prefers-reduced-motion: reduce)').matches})
@@ -18467,7 +18472,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
             if(builderTextSurfaceRef.current){const geometry=builderTextSurfaceRef.current.clone();setCadPreviewGeometry(previous=>{previous?.dispose();return geometry});setCadPreviewStats(builderTextBaseRef.current?.stats)}
             builderTextAppliedRef.current=false;setBuilderDirty(false);setCadStage("base")
           }}>Zpět k bázi</button>
-          {builderDirty && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={!canApplyBuilderText(builderOptions,builderTextStatus,cadBusy)} onClick={()=>toggleCadPreview()}>Použít změny</button>}
+          {builderDirty && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={!canApplyBuilderText(builderOptions,{...builderTextStatus,logo:builderLogoStatus},cadBusy)} onClick={()=>toggleCadPreview()}>Použít změny</button>}
           <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={cadBusy||builderDirty} onClick={()=>{setBuilderPlacing(false);setBuilderSelected(null);setCadStage(nextBuilderStage("text"))}}>Dokončit model</button>
         </div>}
 
@@ -18496,7 +18501,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       </aside>}
 
       {cadStage === "base" && <BuilderControls height={cadTotalHeight} minHeight={cadMinHeight} maxHeight={cadMaxHeight} onHeightChange={handleCadTotalHeightChange} heightDraft={cadHeightDraft} onHeightDraft={setCadHeightDraft} onCommitHeight={commitCadHeightInput} options={builderOptions} change={changeBuilderOptions} textStatus={builderTextStatus} selected={builderSelected} select={setBuilderSelected} placing={builderPlacing} setPlacing={setBuilderPlacing} dirty={builderDirty} busy={cadBusy} locked={!!cadBaseReveal} cancel={cancelBuilder} hasPreview={cadPreviewActive} cutHoles={() => toggleCadPreview({ cutHoles: true })} />}
-      {cadStage === "text" && <BuilderTextControls options={builderOptions} change={changeBuilderOptions} busy={cadBusy} cancel={cancelBuilder} placing={builderPlacing} setPlacing={value=>{if(value&&builderTextAppliedRef.current)changeBuilderOptions({});setBuilderPlacing(value)}} select={setBuilderSelected} textStatus={builderTextStatus}/>}
+      {cadStage === "text" && <BuilderTextControls selected={builderSelected} logoStatus={builderLogoStatus} options={builderOptions} change={changeBuilderOptions} busy={cadBusy} cancel={cancelBuilder} placing={builderPlacing} setPlacing={value=>{if(value&&builderTextAppliedRef.current)changeBuilderOptions({});setBuilderPlacing(value)}} select={setBuilderSelected} textStatus={builderTextStatus}/>}
       {cadStage === "result" && <button type="button" className={cadWorkspaceStyles.returnButton} onClick={() => setCadStage("text")}>Zpět k nastavení textu</button>}
       {cadStage === "scan" && !cadEmbedded && (
         <div style={{ position:"absolute", inset:0, zIndex:6, display:"grid", placeItems:"center", pointerEvents:"none", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif" }}>
@@ -19747,7 +19752,8 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
           {cadStandalone && cadStage === "base" && (!cadPreviewActive || cadBaseReveal) && cadHeightGuide && <BaseHeightPreview busy={cadBusy} reveal={cadBaseReveal} roughness={cadSurfaceRoughness} metalness={cadSurfaceMetalness} data={cadHeightGuide} height={cadTotalHeight} min={cadMinHeight} max={cadMaxHeight} flip={!!builderOptions.flipBaseDirection} onChange={handleCadTotalHeightChange} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag}/>}
           {cadStandalone && cadStage === "base" && cadPreviewActive && builderOptions.hollow && builderOptions.drainsEnabled!==false && !cadBusy && !cadBaseReveal && <><HolePreview options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} interactionLocked={builderDragging} /></>}
           {cadStandalone && (cadPreviewActive || cadStage === "result") && cadPreviewGeometry && (
-            <BuilderPreview textSurfaceGeometry={cadStage === "text" ? builderTextSurfaceRef.current : null} showTextPreview={builderDirty||builderPlacing} reveal={cadBaseReveal} onRevealComplete={finishCadBaseReveal} roughness={cadSurfaceRoughness} metalness={cadSurfaceMetalness} geometry={cadPreviewGeometry} placing={builderPlacing} onSurfaceClick={placeBuilderFeature} onTextStatus={setBuilderTextStatus} overlayDragging={builderDragging} editable={cadStage === "text" && !cadBusy} options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} />
+            <><BuilderPreview textSurfaceGeometry={cadStage === "text" ? builderTextSurfaceRef.current : null} showTextPreview={builderDirty||builderPlacing} reveal={cadBaseReveal} onRevealComplete={finishCadBaseReveal} roughness={cadSurfaceRoughness} metalness={cadSurfaceMetalness} geometry={cadPreviewGeometry} placing={builderPlacing&&builderSelected==="text"} interactionLocked={builderPlacing&&builderSelected!=="text"} onSurfaceClick={placeBuilderFeature} onTextStatus={setBuilderTextStatus} overlayDragging={builderDragging} editable={cadStage === "text" && !cadBusy} options={builderOptions} selected={builderSelected} select={setBuilderSelected} change={changeBuilderOptions} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag} />
+            {cadStage === "text" && builderOptions.textLogoEnabled && <LabLogoPreview geometry={builderTextSurfaceRef.current} placement={builderTextBaseRef.current?.placement} options={builderOptions} selected={builderSelected} placing={builderPlacing} select={setBuilderSelected} change={changeBuilderOptions} onStatus={setBuilderLogoStatus} showTextPreview={builderDirty||builderPlacing} onSurfaceClick={placeBuilderFeature} overlayDragging={builderDragging} editable={!cadBusy} dragging={setBuilderDragging} controlsRef={trackballRef} onDragEnd={finishBuilderDrag}/>}</>
           )}
 
           {trimMode && trimContext && trimSelection && trimStage !== "result" && (

@@ -1,3 +1,4 @@
+import {labLogoOptions} from './lab-logo.mjs'
 import * as THREE from 'three'
 import { MeshBVH } from 'three-mesh-bvh'
 import { FontLoader } from 'three/examples/jsm/loaders/FontLoader.js'
@@ -250,12 +251,13 @@ function addSurfaceLabel(M,result,p,fontData,direction,own){
 
 export async function applyModelText(M,base,options,fontData,progress=()=>{}){
  const p={...DEFAULTS,...options},allocated=[],own=value=>{allocated.push(value);return value}
- if(!p.text.trim())return {...base,positions:base.positions.slice(),indices:base.indices.slice()}
+ if(!p.text.trim()&&!p.textLogoEnabled)return {...base,positions:base.positions.slice(),indices:base.indices.slice()}
  try{
   progress('Připravuji popisek…')
   let result=asSolid(M,Array.from(base.positions),Array.from(base.indices),own)
   progress('Spojuji text s povrchem…')
   result=addSurfaceLabel(M,result,p,fontData,p.baseDirection??base.placement.direction,own)
+  if(p.textLogoEnabled){if(!fontData.brandFont)throw Error('Nepodařilo se načíst písmo loga.');progress('Spojuji logo s vnitřní stěnou…');result=addSurfaceLabel(M,result,labLogoOptions(p),fontData.brandFont,p.baseDirection??base.placement.direction,own)}
   if(result.status()!=='NoError'||result.isEmpty())throw Error('Text se nepodařilo spojit s povrchem.')
   result=own(result.simplify(.0001))
   const parts=result.decompose().map(own)
@@ -427,6 +429,7 @@ export async function buildModel(M, input, options, fontData, progress = () => {
       progress('Přidávám popisek na stěnu modelu…')
       result=addSurfaceLabel(M,result,p,fontData,direction,own)
     }
+    if(p.textLogoEnabled){if(!fontData?.brandFont)throw Error('Nepodařilo se načíst písmo loga.');result=addSurfaceLabel(M,result,labLogoOptions(p),fontData.brandFont,direction,own)}
     if (p.hollow && p.cutHoles !== false && holes.some(hole=>hole.enabled)) {
     progress('Vyřezávám odtokové otvory přes spodní bevel…')
     const drainShell = fromManifold(result)

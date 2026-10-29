@@ -24,20 +24,20 @@ function TextShape({result,handlers,hovered}){
   {handlers&&<mesh position={center}><boxGeometry args={size.toArray()}/><meshBasicMaterial colorWrite={false} depthWrite={false} depthTest/></mesh>}
  </group>
 }
-export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,roughness=.42,metalness=.51,geometry,placing,onSurfaceClick,overlayDragging=false,options,select,change,dragging,controlsRef,onDragEnd,editable=true,onTextStatus,reveal=null,onRevealComplete}){
+export function BuilderPreview({overlayOnly=false,fontUrlOverride=null,interactionLocked=false,textSurfaceGeometry=null,showTextPreview=true,roughness=.42,metalness=.51,geometry,placing,onSurfaceClick,overlayDragging=false,options,select,change,dragging,controlsRef,onDragEnd,editable=true,onTextStatus,reveal=null,onRevealComplete}){
  const mesh=useRef(),textRoot=useRef(),textDrag=useRef(null),placementRequest=useRef(false),livePoint=useRef(null),liveTimer=useRef(0),liveApplied=useRef(null)
  const [textHovered,setTextHovered]=useState(false),[candidate,setCandidate]=useState(null),[notice,setNotice]=useState(''),[font,setFont]=useState(null),[moving,setMoving]=useState(false),[fastValid,setFastValid]=useState(null)
  useCursor(textHovered,'grab')
- useBuilderGestureGuard(textRoot,controlsRef,editable&&!placing)
+ useBuilderGestureGuard(textRoot,controlsRef,editable&&!placing&&!interactionLocked)
  const {camera,gl}=useThree()
  useEffect(()=>{
   let live=true
-  const url=textFontUrl(options?.textWeight)
+  const url=fontUrlOverride||textFontUrl(options?.textWeight)
   setFont(null)
   if(!fontRequests.has(url))fontRequests.set(url,fetch(url).then(r=>{if(!r.ok)throw new Error('font');return r.json()}).then(data=>new FontLoader().parse(data)).catch(()=>{fontRequests.delete(url);return null}))
   fontRequests.get(url).then(value=>{if(live)setFont(value)})
   return()=>{live=false}
- },[options?.textWeight])
+ },[options?.textWeight,fontUrlOverride])
  const revealClock=useRef({key:null,start:0,done:false})
  const revealUniforms=useMemo(()=>({uBaseRevealHasStart:{value:0},uBaseRevealEnabled:{value:0},uBaseRevealProgress:{value:1},uBaseRevealFrom:{value:0},uBaseRevealTo:{value:0},uBaseRevealDirection:{value:1}}),[])
  const compileReveal=useCallback(shader=>installBaseRevealShader(shader,revealUniforms),[revealUniforms])
@@ -113,10 +113,10 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
  },[])
  useEffect(()=>{if(!placing)placementRequest.current=false},[placing])
  const textHandlers={
-  onPointerOver:event=>{event.stopPropagation();if(!textDrag.current&&!overlayDragging)setTextHovered(true)},
+  onPointerOver:event=>{event.stopPropagation();if(!interactionLocked&&!textDrag.current&&!overlayDragging)setTextHovered(true)},
   onPointerOut:event=>{event.stopPropagation();if(!textDrag.current)setTextHovered(false)},
   onPointerDown:event=>{
-   if(event.button!==0||!editable||placing||overlayDragging||pending||!font||!change||!committed)return
+   if(event.button!==0||!editable||interactionLocked||placing||overlayDragging||pending||!font||!change||!committed)return
    event.stopPropagation()
    mesh.current.updateWorldMatrix(true,false)
    const ray=event.ray.clone().applyMatrix4(mesh.current.matrixWorld.clone().invert()),grab=beginSurfaceTextDrag(textSurface,ray,candidate||committed)
@@ -135,7 +135,7 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
   onPointerUp:finishText,onPointerCancel:finishText,
  }
  useEffect(()=>{
-  if(!editable||!placing||!display)return
+  if(!editable||interactionLocked||!placing||!display)return
   const raycaster=new THREE.Raycaster(),pointer=new THREE.Vector2();raycaster.firstHitOnly=true
   let frame=0,start=null
   const hitAt=event=>{
@@ -170,16 +170,16 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
   }
   gl.domElement.addEventListener('pointerdown',down,true);gl.domElement.addEventListener('pointerup',pick,true);gl.domElement.addEventListener('pointercancel',cancel,true);gl.domElement.addEventListener('pointermove',move,true);gl.domElement.addEventListener('pointerleave',leave)
   return()=>{cancelAnimationFrame(frame);gl.domElement.removeEventListener('pointerdown',down,true);gl.domElement.removeEventListener('pointerup',pick,true);gl.domElement.removeEventListener('pointercancel',cancel,true);gl.domElement.removeEventListener('pointermove',move,true);gl.domElement.removeEventListener('pointerleave',leave)}
- },[editable,placing,display,gl,camera,onSurfaceClick,project,font,queueLive,settleLive])
+ },[editable,interactionLocked,placing,display,gl,camera,onSurfaceClick,project,font,queueLive,settleLive])
  if(!display)return null
  const blockHidden=event=>{if(!overlayDragging)event.stopPropagation()}
  const proposal=result.point||placement
  const badge=proposal?new THREE.Vector3(...proposal.position).addScaledVector(new THREE.Vector3(...proposal.normal),1.5).toArray():null
  return <>
-  <mesh ref={mesh} geometry={display} dispose={null} renderOrder={50} onPointerOver={blockHidden} onPointerMove={blockHidden} onPointerDown={blockHidden} onClick={event=>{blockHidden(event);if(editable&&!placing&&!overlayDragging&&event.delta<=4)select(null)}}>
+  <mesh ref={mesh} geometry={display} dispose={null} renderOrder={50} visible={!overlayOnly} {...(!overlayOnly?{onPointerOver:blockHidden,onPointerMove:blockHidden,onPointerDown:blockHidden,onClick:event=>{blockHidden(event);if(editable&&!placing&&!overlayDragging&&event.delta<=4)select(null)}}:{})}>
    <meshStandardMaterial onBeforeCompile={compileReveal} customProgramCacheKey={()=>"builder-base-reveal-v2"} color="#AAA08E" roughness={roughness} metalness={metalness} side={THREE.DoubleSide}/>
   </mesh>
-  <group ref={textRoot}>{editable&&showTextPreview&&options&&<TextShape result={shownResult} handlers={textHandlers} hovered={textHovered}/>}</group>
+  <group ref={textRoot}>{editable&&showTextPreview&&options&&<TextShape result={shownResult} handlers={interactionLocked?undefined:textHandlers} hovered={textHovered}/>}</group>
   {editable&&candidate&&!shownResult.valid&&result.error&&badge&&<Html center position={badge} occlude style={{pointerEvents:'none',width:200,background:'rgba(35,12,12,.94)',border:'1px solid #a34a4a',borderRadius:7,padding:7,color:'#fecaca',fontSize:11,lineHeight:1.4}}>Tady nelze text umístit. Posuňte jej nebo zmenšete písmo.</Html>}
  </>
 }

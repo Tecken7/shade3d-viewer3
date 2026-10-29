@@ -5,7 +5,12 @@ import Module from 'manifold-3d'
 import * as THREE from 'three'
 import {buildModel,applyModelText,meshTopology} from '../app/model-builder/engine.mjs'
 import {DEFAULTS} from '../app/model-builder/defaults.mjs'
-import {builderTextSignature} from '../app/model-builder/builder-workflow.mjs'
+import {findLabLogoPlacement} from '../app/model-builder/lab-logo-placement.mjs'
+import {LAB_LOGO_TEXT,labLogoOptions} from '../app/model-builder/lab-logo.mjs'
+import {FontLoader} from 'three/examples/jsm/loaders/FontLoader.js'
+import {toCreasedNormals} from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+import {MeshBVH} from 'three-mesh-bvh'
+import {canApplyBuilderText,builderGeometryOptions,builderTextSignature} from '../app/model-builder/builder-workflow.mjs'
 import {textPreviewTransform} from '../app/model-builder/text-preview-motion.mjs'
 
 const M=await Module();M.setup()
@@ -60,4 +65,38 @@ test('Inter Extra Light and Extra Bold survive the actual label boolean with the
   volumes.push(result.stats.volume)
  }
  assert.ok(volumes[0]<volumes[1]&&volumes[1]<volumes[2],'selected weight must affect the final printed geometry, not only the UI preview')
+})
+
+
+test('lab logo preserves mixed weights, finds an interior wall and merges without rebuilding the base',async()=>{
+ const brandFont=JSON.parse(fs.readFileSync(new URL('../public/wasm/model-builder/arthetic-logo-font.json',import.meta.url))),bold=JSON.parse(fs.readFileSync(new URL('../public/wasm/model-builder/inter-800-font.json',import.meta.url)))
+ assert.equal(brandFont.glyphs[LAB_LOGO_TEXT[2]].o,bold.glyphs.T.o)
+ assert.equal(brandFont.glyphs.T.o,font.glyphs.T.o)
+ const base=await getBase(),before=base.positions.slice(),geometry=new THREE.BufferGeometry()
+ geometry.setAttribute('position',new THREE.BufferAttribute(base.positions,3));geometry.setIndex(new THREE.BufferAttribute(base.indices,1))
+ const surface=toCreasedNormals(geometry,Math.PI/6);surface.boundsTree=new MeshBVH(surface)
+ try{
+  const candidate=findLabLogoPlacement(surface,new FontLoader().parse(brandFont),{...DEFAULTS,totalHeight:25},base.placement)
+  assert.ok(candidate,'a sufficiently wide inner wall receives an automatic proposal')
+  const delta=surface.boundingBox.getCenter(new THREE.Vector3()).sub(new THREE.Vector3(...candidate.position));delta.y=0
+  assert.ok(delta.dot(new THREE.Vector3(...candidate.normal))>0,'the proposed normal faces inward')
+  const options={...label,textLogoEnabled:true,textLogoPosition:candidate.position,textLogoNormal:candidate.normal,textLogoSize:candidate.size}
+  const result=await applyModelText(M,base,options,{...font,brandFont})
+  assert.ok(result.stats.volume>base.stats.volume)
+  assert.deepEqual(base.positions,before);assert.deepEqual(result.holes,base.holes)
+  const topology=meshTopology(Array.from(result.positions),Array.from(result.indices));assert.equal(topology.openEdges,0);assert.equal(topology.nonManifold,0)
+  const logoOnly=await applyModelText(M,base,{...options,text:''},{...font,brandFont})
+  assert.ok(logoOnly.stats.volume>base.stats.volume);assert.ok(logoOnly.stats.volume<result.stats.volume)
+  assert.equal(findLabLogoPlacement(surface,new FontLoader().parse(brandFont),{totalHeight:25},{...base.placement,baseY:1000}),null)
+ }finally{surface.dispose();geometry.dispose()}
+})
+test('logo approval requires valid placement and is stripped from base generation',()=>{
+ const options={...DEFAULTS,text:'',textLogoEnabled:true}
+ assert.equal(canApplyBuilderText(options,{logo:{valid:true}}),false)
+ const placed={...options,textLogoPosition:[1,2,3],textLogoNormal:[0,0,1]}
+ assert.equal(canApplyBuilderText(placed,{logo:{valid:true}}),true)
+ assert.equal(canApplyBuilderText(placed,{logo:{valid:false}}),false)
+ assert.equal(builderGeometryOptions(placed,'base').textLogoEnabled,false)
+ assert.notEqual(builderTextSignature(options),builderTextSignature(placed))
+ assert.equal(labLogoOptions(placed).text,LAB_LOGO_TEXT)
 })

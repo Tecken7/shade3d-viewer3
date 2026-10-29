@@ -40,7 +40,9 @@
 .cancel{width:100%;margin-top:12px;border:1px solid #ffffff24}
 @media(prefers-reduced-motion:reduce){.switch,.switch i{transition:none}}
 
-.textField{display:grid;gap:6px}
+.textField{display:grid;gap:6px;font-size:10px;font-weight:500;color:#c6c6c6}
 .textField input{width:100%;box-sizing:border-box}
 .textModes{display:grid;grid-template-columns:1fr 1fr;gap:7px}
 .textModes button,.textField+button{border:1px solid #ffffff24}
+
+.logoSection{display:grid;gap:10px;border-top:1px solid #ffffff14;padding-top:12px;margin-top:4px}.logoSection .mode{min-height:55px!important;padding:10px!important}.logoSection .modeText{gap:5px}.logoSection p{margin:0}
