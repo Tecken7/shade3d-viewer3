@@ -7,6 +7,8 @@ const sharp='Na této hraně by se písmena zlomila nebo deformovala. Posuňte t
 // then vertical columns are transported with the local normal. Unlike a single
 // view-axis projection, millimetres of type remain millimetres on a cylinder.
 export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset=0,preferVertical=true){
+ const horizontalLabel=Math.abs(right.y)<1e-6&&Math.abs(up.y)>.94
+ let tracingBaseline=true
  const step=.2,tree=surface.boundsTree,ray=new THREE.Ray(),rotation=new THREE.Quaternion()
  const normalAt=hit=>{
   const positions=surface.attributes.position,normals=surface.attributes.normal,index=surface.index
@@ -15,7 +17,7 @@ export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,vis
   const bary=triangle.getBarycoord(hit.point,new THREE.Vector3())
   const normal=ids.reduce((normal,id,i)=>normal.addScaledVector(new THREE.Vector3().fromBufferAttribute(normals,id),bary.getComponent(i)),new THREE.Vector3()).normalize()
   // Smooth shading at a bevel must not bend an otherwise vertical base wall.
-  if(preferVertical&&Math.abs(hit.face?.normal.y??1)<1e-5)normal.y=0
+  if(preferVertical&&Math.abs(hit.face?.normal.y??1)<(tracingBaseline ? .35 : 1e-5))normal.y=0
   return normal.normalize()
  }
  // Pointer hits carry a flat triangle normal, while chart integration uses
@@ -30,6 +32,10 @@ export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,vis
    normal=smooth;right=right.clone().applyQuaternion(align);up=up.clone().applyQuaternion(align)
   }
  }
+ if(preferVertical&&horizontalLabel&&Math.abs(normal.y)<.35){
+  normal=normal.clone();normal.y=0;normal.normalize()
+  up=new THREE.Vector3(0,Math.sign(up.y),0);right=new THREE.Vector3().crossVectors(up,normal).normalize()
+ }
  // Curved crowns, sloped walls and rotated labels cannot use the vertical
  // shortcut. Do not trace their entire baseline twice before discovering it.
  if(preferVertical&&(Math.abs(normal.y)>1e-6||Math.abs(right.y)>1e-6||Math.abs(up.y)<.999999))return createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset,false)
@@ -42,9 +48,13 @@ export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,vis
     for(let attempt=0;attempt<3;attempt++){
      const candidate=point.clone().addScaledVector(tangent,proposal)
      ray.origin.copy(candidate).addScaledVector(n,.8);ray.direction.copy(n).negate()
-     const hits=tree.raycast(ray,THREE.DoubleSide).filter(h=>h.face.normal.dot(n)>.35&&h.point.distanceTo(point)<length*2.5+.005)
-     hits.sort((a,b)=>a.point.distanceToSquared(candidate)-b.point.distanceToSquared(candidate))
-     hit=hits[0]
+     const first=tree.raycastFirst(ray,THREE.DoubleSide)
+     if(first&&Math.abs(first.distance-.8)<length*.1&&first.face.normal.dot(n)>.35&&first.point.distanceTo(point)<length*2.5+.005)hit=first
+     else{
+      const hits=tree.raycast(ray,THREE.DoubleSide).filter(h=>h.face.normal.dot(n)>.35&&h.point.distanceTo(point)<length*2.5+.005)
+      hits.sort((a,b)=>a.point.distanceToSquared(candidate)-b.point.distanceToSquared(candidate))
+      hit=hits[0]
+     }
      // A ray can land exactly on a shared triangle edge and miss both faces
      // through roundoff. Only snap a very nearby point; never bridge a gap.
      if(!hit){
@@ -83,8 +93,9 @@ export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,vis
   const previous=baseline.get(x-sign),frame=advance(previous,previous.tangent.clone().multiplyScalar(sign),step)
   frame.tangent.multiplyScalar(sign);baseline.set(x,frame)
  }
- // Try the whole patch in the exact vertical-wall frame. Mixing transported
- // and vertical columns would create an artificial seam near the shoulder.
+ tracingBaseline=false
+ // Project complete rows onto near-vertical base walls, including mild taper.
+ // Mixing these rows with transported columns would create a shoulder seam.
  let verticalWall=preferVertical
  for(let x=lowX;x<=highX&&verticalWall;x++){
   const base=baseline.get(x),vertical=new THREE.Vector3().crossVectors(base.normal,base.tangent).normalize()
@@ -92,11 +103,11 @@ export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,vis
   if(Math.abs(base.normal.y)>1e-6||Math.abs(vertical.y)<.999999){verticalWall=false;break}
   const column=new Map()
   for(let y=lowY;y<=highY;y++){
-   const point=base.point.clone().addScaledVector(vertical,y*step),hit=tree.closestPointToPoint(point,{},0,1e-4)
-   if(!hit||hit.distance>1e-4){verticalWall=false;break}
-   const positions=surface.attributes.position,index=surface.index,triangle=new THREE.Triangle(...[0,1,2].map(corner=>new THREE.Vector3().fromBufferAttribute(positions,index?index.getX(hit.faceIndex*3+corner):hit.faceIndex*3+corner)))
-   if(Math.abs(triangle.getNormal(new THREE.Vector3()).y)>1e-5){verticalWall=false;break}
-   column.set(y,{...base,point,tangent:vertical})
+   const candidate=base.point.clone().addScaledVector(vertical,y*step)
+   ray.origin.copy(candidate).addScaledVector(base.normal,.6);ray.direction.copy(base.normal).negate()
+   const hit=tree.raycastFirst(ray,THREE.DoubleSide)
+   if(!hit||hit.face.normal.dot(base.normal)<.7||Math.abs(hit.face.normal.y)>.45||hit.point.distanceTo(candidate)>.5){verticalWall=false;break}
+   column.set(y,{...base,point:hit.point,normal:Math.abs(hit.face.normal.y)<1e-5?base.normal:normalAt(hit),tangent:vertical})
   }
   columns.set(x,column)
  }
@@ -116,13 +127,18 @@ export function createTextSurfaceChart(surface,anchor,normal,right,up,bounds,vis
  }
  // Curved sheets cannot always accept flat lettering without strain (e.g. a
  // large word on a tiny spherical cusp). Reject it instead of stretching ink.
+ const strained=new Set()
  for(let x=lowX;x<highX;x++)for(let y=lowY;y<highY;y++){
   const visible=frame=>frame.point.clone().addScaledVector(frame.normal,visibleOffset)
   const p=visible(columns.get(x).get(y)),dx=visible(columns.get(x+1).get(y)).sub(p),dy=visible(columns.get(x).get(y+1)).sub(p)
-  if(Math.abs(dx.length()/step-1)>.13||Math.abs(dy.length()/step-1)>.13||Math.abs(dx.dot(dy))/(dx.length()*dy.length())>.16)throw new Error('Zakřivení by příliš změnilo proporce písmen. Zmenšete text nebo vyberte rovnoměrnější povrch.')
+  if(Math.abs(dx.length()/step-1)>.13||Math.abs(dy.length()/step-1)>.13||Math.abs(dx.dot(dy))/(dx.length()*dy.length())>.16){
+   if(verticalWall)return createTextSurfaceChart(surface,anchor,normal,right,up,bounds,visibleOffset,false)
+   strained.add(`${x}:${y}`)
+  }
  }
  return (x,y)=>{
   const fx=Math.max(lowX,Math.min(highX,x/step)),fy=Math.max(lowY,Math.min(highY,y/step)),ix=Math.min(highX-1,Math.floor(fx)),iy=Math.min(highY-1,Math.floor(fy)),tx=fx-ix,ty=fy-iy
+  if(strained.has(`${ix}:${iy}`))throw new Error('Zakřivení by příliš změnilo proporce písmen. Zmenšete text nebo vyberte rovnoměrnější povrch.')
   const a=columns.get(ix)?.get(iy),b=columns.get(ix+1)?.get(iy),c=columns.get(ix)?.get(iy+1),d=columns.get(ix+1)?.get(iy+1)
   if(!a||!b||!c||!d)throw new Error(missing)
   const blend=key=>a[key].clone().multiplyScalar((1-tx)*(1-ty)).addScaledVector(b[key],tx*(1-ty)).addScaledVector(c[key],(1-tx)*ty).addScaledVector(d[key],tx*ty)

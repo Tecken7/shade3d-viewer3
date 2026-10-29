@@ -12,9 +12,21 @@ function textTemplate(font,options){
  let refined,error=''
  try{
   raw.computeBoundingBox()
-  raw.translate(-(raw.boundingBox.min.x+raw.boundingBox.max.x)/2,-(raw.boundingBox.min.y+raw.boundingBox.max.y)/2,options.textMode==='engrave'?-options.textDepth:-.2)
+  const cx=(raw.boundingBox.min.x+raw.boundingBox.max.x)/2,cy=(raw.boundingBox.min.y+raw.boundingBox.max.y)/2,ranges=[]
+  let cursor=0
+  for(const char of options.text.slice(0,60)){
+   const glyph=font.data.glyphs[char],advance=(glyph?.ha||0)/font.data.resolution*options.textSize
+   if(char.trim()){
+    const g=new TextGeometry(char,{font,size:options.textSize,depth:.1,curveSegments:8,bevelEnabled:false});g.computeBoundingBox()
+    const box=g.boundingBox
+    if(box&&!box.isEmpty())ranges.push({center:cursor+(box.min.x+box.max.x)/2-cx,min:cursor+box.min.x-cx,max:cursor+box.max.x-cx,minY:box.min.y-cy,maxY:box.max.y-cy})
+    g.dispose()
+   }
+   cursor+=advance
+  }
+  raw.translate(-cx,-cy,options.textMode==='engrave'?-options.textDepth:-.2)
   try{refined=tessellateText(raw)}catch(reason){error=reason.message}
-  const template={positions:(refined||raw).attributes.position.array.slice(),bounds:raw.boundingBox.clone(),error}
+  const template={positions:(refined||raw).attributes.position.array.slice(),bounds:raw.boundingBox.clone(),ranges,error}
   if(cache.size>=6)cache.delete(cache.keys().next().value)
   cache.set(key,template);return template
  }finally{raw.dispose();refined?.dispose()}
@@ -22,7 +34,7 @@ function textTemplate(font,options){
 
 // Both preview and boolean construction use this projection and its limits.
 // A steep/missing surface is a rejected placement, never a partial inscription.
-export function projectSurfaceText(font,options,placement,surface,{preview=false}={}){
+export function projectSurfaceText(font,options,placement,surface,{preview=false,perGlyph=false}={}){
  if(!font||!placement||!options.text?.trim())return {geometry:null,valid:false,error:''}
  const unsupported=[...options.text].find(char=>!font.data.glyphs[char])
  if(unsupported)return {geometry:null,valid:false,error:`Písmo nepodporuje znak „${unsupported}“.`}
@@ -46,7 +58,25 @@ export function projectSurfaceText(font,options,placement,surface,{preview=false
  try{
   if(template.error)throw new Error(template.error)
   if(n.lengthSq()<.9)throw new Error('Vyberte povrch modelu pro umístění textu.')
-  chart=createTextSurfaceChart(surface,anchor,n,right.clone().multiplyScalar(co).addScaledVector(up,si),up.clone().multiplyScalar(co).addScaledVector(right,-si),bounds,options.textMode==='engrave'?0:options.textDepth)
+  const chartRight=right.clone().multiplyScalar(co).addScaledVector(up,si),chartUp=up.clone().multiplyScalar(co).addScaledVector(right,-si),offset=options.textMode==='engrave'?0:options.textDepth
+  if(!perGlyph)chart=createTextSurfaceChart(surface,anchor,n,chartRight,chartUp,bounds,offset)
+  else{
+   // Each glyph gets its own intrinsic patch. A long word can follow an arch
+   // without accumulating shear across empty space between its letters.
+   const lineBounds=bounds.clone();lineBounds.min.y=-.01;lineBounds.max.y=.01
+   const baseline=createTextSurfaceChart(surface,anchor,n,chartRight,chartUp,lineBounds,offset),charts=new Map()
+   chart=(x,y)=>{
+    const distance=g=>x<g.min?g.min-x:x>g.max?x-g.max:0
+    const glyph=template.ranges.reduce((best,g)=>distance(g)<distance(best)?g:best)
+    if(!charts.has(glyph)){
+     const frame=baseline(glyph.center,0),tangent=baseline(glyph.center+.025,0).point.clone().sub(baseline(glyph.center-.025,0).point).normalize(),vertical=new THREE.Vector3().crossVectors(frame.normal,tangent).normalize()
+     if(vertical.dot(chartUp)<0)vertical.negate()
+     const localBounds=new THREE.Box3(new THREE.Vector3(glyph.min-glyph.center,glyph.minY,0),new THREE.Vector3(glyph.max-glyph.center,glyph.maxY,0))
+     charts.set(glyph,createTextSurfaceChart(surface,frame.point,frame.normal,tangent,vertical,localBounds,offset))
+    }
+    return charts.get(glyph)(x-glyph.center,y)
+   }
+  }
   for(let i=0;i<attr.count;i++){
    const frame=project(local[i*3],local[i*3+1]),z=preview?(options.textMode==='engrave' ? .02+(local[i*3+2]+options.textDepth)/(options.textDepth+.2)*.02 : local[i*3+2]+.015):local[i*3+2]
    attr.setXYZ(i,frame.point.x+frame.normal.x*z,frame.point.y+frame.normal.y*z,frame.point.z+frame.normal.z*z)
@@ -68,7 +98,12 @@ export function projectSurfaceText(font,options,placement,surface,{preview=false
     previous=point
    }
   }
- }catch(reason){error=reason.message}
+ }catch(reason){
+  if(!perGlyph&&template.ranges.length>1&&reason.message.includes('proporce')){
+   text.dispose();return projectSurfaceText(font,options,placement,surface,{preview,perGlyph:true})
+  }
+  error=reason.message
+ }
  if(error){
   // Keep an explicit red, flat proposal visible instead of deleting the text.
   for(let i=0;i<attr.count;i++){

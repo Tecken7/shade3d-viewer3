@@ -554,13 +554,15 @@ function buildTrimSurfaceSplineSamples(context, controlNodes, closed = false, sa
         append({
           point: [...controlNodes[span].point],
           triangleIndex: controlNodes[span].triangleIndex,
+          spanIndex: span,
           distance: 0,
         })
         continue
       }
       const t = (span + step / steps) / spanCount
       const sample = curve.getPoint(THREE.MathUtils.clamp(t, 0, 1))
-      append(projectTrimPointToSurface(context, sample, maxProjectionDistance))
+      const hit=projectTrimPointToSurface(context, sample, maxProjectionDistance)
+      if(hit)append({...hit,spanIndex:span})
     }
   }
 
@@ -571,16 +573,23 @@ function buildTrimSurfaceSplineSamples(context, controlNodes, closed = false, sa
   return result
 }
 
-function buildTrimSurfaceSplineSegments(context, controlNodes, closed = false, samplesPerSpan = 4) {
+function buildTrimSurfaceSplineSegments(context, controlNodes, closed = false, samplesPerSpan = 4, directSpans = new Set()) {
   const samples = buildTrimSurfaceSplineSamples(context, controlNodes, closed, samplesPerSpan)
   if (samples.length < 2) return []
   const segments = []
   const count = closed ? samples.length : samples.length - 1
+  const added=new Set()
   for (let i = 0; i < count; i++) {
     const a = samples[i]
     const b = samples[(i + 1) % samples.length]
     if (!a || !b || trimVec(a.point).distanceToSquared(trimVec(b.point)) <= 1e-14) continue
-    const path = trimTriangleSurfacePath(context, a, b)
+    const spanIndex=a.spanIndex??controlNodes.length-2
+    if(directSpans.has(spanIndex)&&added.has(spanIndex))continue
+    const path = directSpans.has(spanIndex)
+      ? trimTriangleSurfacePath(context,controlNodes[spanIndex],controlNodes[(spanIndex+1)%controlNodes.length],true)
+      : trimTriangleSurfacePath(context, a, b)
+    added.add(spanIndex)
+    if(path)path.spanIndex=spanIndex
     if (!path?.pieces?.length) throw new Error('Ořezová křivka v tomto místě nenavazuje na povrch. Posuňte nejbližší bod.')
     // visualPoints jsou hladké, na povrch promítnuté spline body. Samotné pieces
     // jsou sub-face cesta použitá pro skutečné rozdělení triangulace.
@@ -588,6 +597,25 @@ function buildTrimSurfaceSplineSegments(context, controlNodes, closed = false, s
     segments.push(path)
   }
   return segments
+}
+
+// Correct local projection folds without moving user control points.
+function buildValidatedTrimSurfaceBoundary(context,nodes) {
+  const directSpans=new Set(),originalLengths=new Map()
+  const length=segment=>segment.pieces.reduce((sum,p)=>sum+trimVec(p.a).distanceTo(trimVec(p.b)),0)
+  for(let attempt=0;attempt<5;attempt++){
+    const segments=buildTrimSurfaceSplineSegments(context,nodes,true,4,directSpans)
+    if(attempt===0)for(const segment of segments)originalLengths.set(segment.spanIndex,(originalLengths.get(segment.spanIndex)||0)+length(segment))
+    for(const segment of segments)if(directSpans.has(segment.spanIndex)&&length(segment)>(originalLengths.get(segment.spanIndex)||0)*1.05+1e-5)throw new Error('Cesta kolem záhybu je příliš dlouhá. Posuňte nejbližší body hranice.')
+    try{return {segments,plan:buildTrimBoundaryPlan(context,segments)}}catch(error){
+      if(!Number.isInteger(error.triangleIndex))throw error
+      const spans=[...new Set(segments.filter(s=>s.pieces.some(p=>p.triangleIndex===error.triangleIndex)).map(s=>s.spanIndex))]
+      const adjacent=spans.length===1||spans.length===2&&(Math.abs(spans[0]-spans[1])===1||Math.abs(spans[0]-spans[1])===nodes.length-1)
+      if(!adjacent||spans.every(i=>directSpans.has(i)))throw error
+      for(const i of spans)directSpans.add(i)
+    }
+  }
+  throw new Error('Hranice v záhybu nenavazuje. Posuňte nejbližší body dál od ostré hrany.')
 }
 
 function trimSharedEdgeNodes(context, triA, triB) {
@@ -598,7 +626,7 @@ function trimSharedEdgeNodes(context, triA, triB) {
   return Number.isInteger(a) && Number.isInteger(b) ? [a, b] : null
 }
 
-function trimTriangleSurfacePath(context, startHit, endHit) {
+function trimTriangleSurfacePath(context, startHit, endHit, preferGeodesic = false) {
   if (!context || !startHit || !endHit) return null
   const startTriangle = startHit.triangleIndex
   const endTriangle = endHit.triangleIndex
@@ -612,7 +640,7 @@ function trimTriangleSurfacePath(context, startHit, endHit) {
     }
   }
 
-  const planePath=trimPlaneSurfacePath(context,startHit,endHit)
+  const planePath=!preferGeodesic&&trimPlaneSurfacePath(context,startHit,endHit)
   if(planePath)return planePath
 
   const count = context.triangles.length
@@ -13179,12 +13207,13 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       // Celou smyčku přegenerujeme jako jednu hladkou surface-spline. Tím nevzniká
       // zvláštní fallback closing segment u žlutého bodu a výsledný cut má stejný
       // plynulý tangent po obou stranách startu.
-      const smoothSegments = buildTrimSurfaceSplineSegments(trimContext, trimControlNodes, true, 4)
+      const boundary=buildValidatedTrimSurfaceBoundary(trimContext,trimControlNodes)
+      const smoothSegments = boundary.segments
       if (!smoothSegments.length) {
         setTrimMessage("Uzavřenou hladkou hranici se nepodařilo promítnout na povrch.")
         return
       }
-      const plan = validateClosedTrimPlan(buildTrimBoundaryPlan(trimContext, smoothSegments))
+      const plan = validateClosedTrimPlan(boundary.plan)
       trimBoundaryPlanCacheRef.current = {context:trimContext, segments:smoothSegments, plan}
       trimPendingDragHitRef.current = null
       setTrimDraggingPoint(null)
@@ -13391,7 +13420,10 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
 
       if (trimClosed && trimContext && finalPoints.length >= 3) {
         try {
-          const smoothSegments = buildTrimSurfaceSplineSegments(trimContext, finalPoints, true, 4)
+          const boundary=buildValidatedTrimSurfaceBoundary(trimContext,finalPoints)
+          const smoothSegments=boundary.segments
+          validateClosedTrimPlan(boundary.plan)
+          trimBoundaryPlanCacheRef.current={context:trimContext,segments:smoothSegments,plan:boundary.plan}
           if (smoothSegments.length) setTrimSegments(smoothSegments)
           setTrimMessage("Hranice byla upravena. Najeďte na požadovanou část pro nový náhled a kliknutím ji vyberte.")
         } catch (error) {

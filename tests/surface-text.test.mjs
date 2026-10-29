@@ -137,3 +137,42 @@ test('small strain on a gently changing surface is accepted while pronounced dis
   result.geometry.dispose();surface.dispose()
  }
 })
+
+
+test('near-vertical tapered base walls wrap each row onto the actual surface without tilted chart drift',()=>{
+ const surface=tree(new THREE.CylinderGeometry(12,10,20,256,12)),normal=new THREE.Vector3(0,-.1,1).normalize()
+ const chart=createTextSurfaceChart(surface,new THREE.Vector3(0,0,11),normal,new THREE.Vector3(1,0,0),new THREE.Vector3(0,1,.1).normalize(),new THREE.Box3(new THREE.Vector3(-4,-2,0),new THREE.Vector3(4,2,0)),.5)
+ for(const x of [-3,0,3])for(const y of [-1,0,1]){
+  const frame=chart(x,y),hit=surface.boundsTree.closestPointToPoint(frame.point)
+  assert.ok(hit.distance<.002,`wrapped row must touch the tapered wall: ${hit.distance}`)
+  assert.ok(Math.abs(frame.point.y-y)<.005,'rows stay at their intended height instead of tilting with smooth shoulder normals')
+ }
+ surface.dispose()
+})
+
+
+test('small user rotations are preserved instead of being flattened by the base-wall shortcut',()=>{
+ const surface=tree(new THREE.PlaneGeometry(30,20)),placement={position:[0,0,0],normal:[0,0,1]},angle=10*Math.PI/180
+ const plain=projectSurfaceText(font,{...options,text:'ART'},placement,surface),rotated=projectSurfaceText(font,{...options,text:'ART',textRotation:10},placement,surface)
+ assert.equal(plain.valid,true,plain.error);assert.equal(rotated.valid,true,rotated.error)
+ const a=plain.geometry.attributes.position,b=rotated.geometry.attributes.position
+ for(let i=0;i<a.count;i++){
+  assert.ok(Math.abs(b.getX(i)-(a.getX(i)*Math.cos(angle)-a.getY(i)*Math.sin(angle)))<1e-5)
+  assert.ok(Math.abs(b.getY(i)-(a.getX(i)*Math.sin(angle)+a.getY(i)*Math.cos(angle)))<1e-5)
+ }
+ plain.geometry.dispose();rotated.geometry.dispose();surface.dispose()
+})
+
+
+test('per-letter wrapping keeps Czech glyphs attached as one closed printable result',async()=>{
+ const M=await Module();M.setup()
+ const surface=tree(new THREE.CylinderGeometry(8,8,20,128)),result=projectSurfaceText(font,{...options,text:'Novák',textSize:3},{position:[0,0,8],normal:[0,0,1]},surface,{perGlyph:true})
+ assert.equal(result.valid,true,result.error)
+ const solid=g=>{const data=indexed(g.index?g.toNonIndexed().attributes.position.array:g.attributes.position.array);return new M.Manifold(new M.Mesh({numProp:3,vertProperties:new Float32Array(data.vertices),triVerts:new Uint32Array(data.faces)}))}
+ const body=solid(surface),letters=solid(result.geometry);let union,parts=[]
+ try{
+  assert.equal(letters.status(),'NoError');union=body.add(letters);assert.equal(union.status(),'NoError')
+  parts=union.decompose();assert.equal(parts.length,1)
+  const data=union.getMesh(),topology=meshTopology(Array.from(data.vertProperties),Array.from(data.triVerts));assert.equal(topology.openEdges,0);assert.equal(topology.nonManifold,0)
+ }finally{for(const part of parts)part.delete();union?.delete();letters.delete();body.delete();result.geometry.dispose();surface.dispose()}
+})

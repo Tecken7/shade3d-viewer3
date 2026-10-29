@@ -39,7 +39,7 @@ test('closure prepares selectable regions before publishing closed state and rel
   const body=source.slice(start,source.indexOf('\n  }, [',start)).split('useCallback(')[1]+'\n  }'
   for(const valid of [true,false]){
     const states={},segments=[{pieces:[]}],context={},plan={components:valid?[[1],[2]]:[[1]]}
-    const env={trimContext:context,trimClosed:false,trimControlNodes:[1,2,3],buildTrimSurfaceSplineSegments:()=>segments,buildTrimBoundaryPlan:()=>plan,validateClosedTrimPlan,
+    const env={trimContext:context,trimClosed:false,trimControlNodes:[1,2,3],buildValidatedTrimSurfaceBoundary:()=>({segments,plan}),validateClosedTrimPlan,
       trimBoundaryPlanCacheRef:{current:null},trimPendingDragHitRef:{current:'stale'},trimSuppressClickUntilRef:{current:Infinity},cameraInteractingRef:{current:true},console:{error(){}}}
     for(const name of body.match(/\bset\w+(?=\()/g))env[name]=value=>{states[name]=value}
     new Function(...Object.keys(env),`return (${body})`)(...Object.values(env))()

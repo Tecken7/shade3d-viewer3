@@ -54,11 +54,13 @@ export function buildTrimRegions(context,plan){
  for(const [id,pieces]of plan.piecesByTriangle){
   const triangle=context.triangles[id];let polygons=[triangle.corners.map(c=>c.sourcePos)]
   for(const piece of pieces)if(pointKey(piece.a)!==pointKey(piece.b))cutEdges.add(edgeKey(piece.a,piece.b))
+  try{
   for(const chain of chains(pieces)){
    let found=false
    for(let i=0;i<polygons.length;i++){const parts=split(polygons[i],chain);if(parts){polygons.splice(i,1,...parts);found=true;break}}
    if(!found)throw new Error('Ořezová křivka se v této oblasti kříží. Posuňte její body.')
   }
+  }catch(error){error.triangleIndex=id;throw error}
   const records=polygons.map(polygon=>({polygon,triangleIndex:id,component:null,neighbors:new Set()}));regions.set(id,records)
   for(const record of records){
    all.push(record)
