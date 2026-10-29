@@ -76,17 +76,18 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
   if(gesture.nextPoint){
    const point=gesture.nextPoint;setCandidate(point)
    project(point,check=>{if(check.valid){change?.({textPosition:point.position,textNormal:point.normal});setCandidate(null)}else setNotice(check.error)})
-  }
+  }else{setCandidate(null);project(committed)}
   try{gesture.target.releasePointerCapture?.(gesture.pointerId)}catch{}
   if(controlsRef?.current)controlsRef.current.enabled=false
   dragging?.(false);onDragEnd?.()
- },[controlsRef,dragging,onDragEnd,project,change])
+ },[controlsRef,dragging,onDragEnd,project,change,committed])
  const finishRef=useRef(finishText);finishRef.current=finishText
  useEffect(()=>{
   const finish=()=>finishRef.current()
   window.addEventListener('pointerup',finish,true);window.addEventListener('pointercancel',finish,true);window.addEventListener('blur',finish,true)
   return()=>{window.removeEventListener('pointerup',finish,true);window.removeEventListener('pointercancel',finish,true);window.removeEventListener('blur',finish,true)}
  },[])
+ useEffect(()=>{if(!placing)placementRequest.current=false},[placing])
  const textHandlers={
   onPointerOver:event=>{event.stopPropagation();if(!textDrag.current&&!overlayDragging)setTextHovered(true)},
   onPointerOut:event=>{event.stopPropagation();if(!textDrag.current)setTextHovered(false)},
@@ -133,15 +134,16 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
   const leave=()=>{if(!placementRequest.current)setCandidate(null)}
   const pick=event=>{
    if(event.button!==0||placementRequest.current)return
+   if(!font){setNotice('Načítám písmo. Zkuste umístění za okamžik.');return}
    cancelAnimationFrame(frame);const hit=hitAt(event);if(!hit)return
    event.preventDefault();event.stopPropagation()
    const point=pointAt(hit);setCandidate(point)
    placementRequest.current=true
-   project(point,check=>{placementRequest.current=false;if(check.valid){onSurfaceClick?.({...hit,stopPropagation(){}});setCandidate(null)}else setNotice(check.error)})
+   project(point,check=>{if(!placementRequest.current)return;placementRequest.current=false;if(check.valid){onSurfaceClick?.({...hit,stopPropagation(){}});setCandidate(null)}else setNotice(check.error)})
   }
   gl.domElement.addEventListener('pointerdown',pick,true);gl.domElement.addEventListener('pointermove',move,true);gl.domElement.addEventListener('pointerleave',leave)
   return()=>{cancelAnimationFrame(frame);gl.domElement.removeEventListener('pointerdown',pick,true);gl.domElement.removeEventListener('pointermove',move,true);gl.domElement.removeEventListener('pointerleave',leave)}
- },[editable,placing,display,gl,camera,onSurfaceClick,project])
+ },[editable,placing,display,gl,camera,onSurfaceClick,project,font])
  if(!display)return null
  const blockHidden=event=>{if(!overlayDragging)event.stopPropagation()}
  const proposal=result.point||placement
