@@ -1,18 +1,28 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import fs from 'node:fs'
-const source=fs.readFileSync(new URL('../app/ClientPage.jsx',import.meta.url),'utf8').replace(/\r\n/g,'\n')
-const start=source.indexOf('  useEffect(()=>{\n    if(!cadStandalone || cadStage!=="repair"'),end=source.indexOf('  const changeRepairVariant',start)
-const body=source.slice(start,end)
-function run(overrides={}){
- let scheduled=null,cleared=false,advanced=false,cleanup
- const values={cadStandalone:true,cadStage:'repair',cadBusy:false,repairBusy:false,repairAnalysisComplete:true,repairContext:{},repairSelection:'scan',cadFileUrl:'scan',repairHoles:[],repairCompletedHoleIds:[],continueCadAfterRepair:()=>advanced=true,...overrides}
- new Function(...Object.keys(values),'useEffect','window',body)(...Object.values(values),fn=>{cleanup=fn()},{setTimeout:fn=>{scheduled=fn;return 1},clearTimeout:()=>cleared=true})
- return {get scheduled(){return !!scheduled},fire:()=>scheduled?.(),cleanup,get advanced(){return advanced},get cleared(){return cleared}}
-}
-test('a completed empty repair automatically advances and cleans up its delayed transition',()=>{const result=run();assert.equal(result.scheduled,true);result.fire();assert.equal(result.advanced,true);result.cleanup();assert.equal(result.cleared,true)})
-test('pending, failed, stale or nonempty analyses never skip the repair step',()=>{
- for(const state of [{cadStage:'trim'},{repairBusy:true},{cadBusy:true},{repairAnalysisComplete:false},{repairContext:null},{repairSelection:'another scan'},{repairHoles:[{id:1}]}])assert.equal(run(state).scheduled,false)
+import {BUILDER_STEPS,nextBuilderStage,canApplyBuilderText,builderGeometryOptions} from '../app/model-builder/builder-workflow.mjs'
+
+test('builder flow has repair inside Edit and Text after Base',()=>{
+ let stage='scan';const visited=[stage]
+ while(stage!=='result'){stage=nextBuilderStage(stage);visited.push(stage)}
+ assert.deepEqual(visited,['scan','edit','trim','orient','base','text','result'])
+ assert.deepEqual(visited,BUILDER_STEPS)
+})
+test('a completed trim proceeds straight to orientation',()=>assert.equal(nextBuilderStage('trim'),'orient'))
+test('optional text can be skipped, but floating or invalid labels cannot be applied',()=>{
+ const options={text:'',textPosition:null,textNormal:null}
+ assert.equal(canApplyBuilderText(options,null),true)
+ assert.equal(canApplyBuilderText({...options,text:'Arthetic'},null),false)
+ const placed={text:'Arthetic',textPosition:[0,1,2],textNormal:[1,0,0]}
+ assert.equal(canApplyBuilderText(placed,{valid:false}),false)
+ assert.equal(canApplyBuilderText(placed,{valid:true},true),false)
+ assert.equal(canApplyBuilderText(placed,{valid:true}),true)
 })
 
-test("all repaired holes advance, while remaining holes keep the selection open",()=>{assert.equal(run({repairHoles:[{id:1}],repairCompletedHoleIds:[1]}).scheduled,true);assert.equal(run({repairHoles:[{id:1},{id:2}],repairCompletedHoleIds:[1]}).scheduled,false)})
+test('regenerating a base defers its label and keeps the original text and drain settings',()=>{
+ const options={text:'TEST',textPosition:[1,2,3],textNormal:[1,0,0],cutHoles:true,holes:[{enabled:true}]}
+ const base=builderGeometryOptions(options,'base')
+ assert.equal(base.text,'');assert.equal(base.textPosition,null);assert.equal(base.cutHoles,true)
+ assert.equal(options.text,'TEST');assert.deepEqual(base.holes,options.holes)
+ assert.equal(builderGeometryOptions(options,'text'),options)
+})

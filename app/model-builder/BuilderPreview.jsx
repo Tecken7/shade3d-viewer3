@@ -22,7 +22,7 @@ function TextShape({result,handlers,hovered}){
   {handlers&&<mesh position={center}><boxGeometry args={size.toArray()}/><meshBasicMaterial colorWrite={false} depthWrite={false} depthTest/></mesh>}
  </group>
 }
-export function BuilderPreview({roughness=.42,metalness=.51,geometry,placing,onSurfaceClick,overlayDragging=false,options,select,change,dragging,controlsRef,onDragEnd,editable=true,onTextStatus,reveal=null,onRevealComplete}){
+export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,roughness=.42,metalness=.51,geometry,placing,onSurfaceClick,overlayDragging=false,options,select,change,dragging,controlsRef,onDragEnd,editable=true,onTextStatus,reveal=null,onRevealComplete}){
  const mesh=useRef(),textRoot=useRef(),textDrag=useRef(null)
  const [textHovered,setTextHovered]=useState(false),[candidate,setCandidate]=useState(null),[notice,setNotice]=useState(''),[font,setFont]=useState(null)
  useCursor(textHovered,'grab')
@@ -55,9 +55,15 @@ export function BuilderPreview({roughness=.42,metalness=.51,geometry,placing,onS
   const result=toCreasedNormals(geometry,Math.PI/6);result.boundsTree=new MeshBVH(result);return result
  },[geometry])
  useEffect(()=>()=>{display?.dispose();if(display)display.boundsTree=null},[display])
+ // Keep label projection on the unlabelled base when a committed label is edited again.
+ const textSurface=useMemo(()=>{
+  if(!textSurfaceGeometry)return display
+  const result=textSurfaceGeometry.clone();result.boundsTree=new MeshBVH(result);return result
+ },[textSurfaceGeometry,display])
+ useEffect(()=>()=>{if(textSurface!==display){textSurface?.dispose();if(textSurface)textSurface.boundsTree=null}},[textSurface,display])
  const committed=useMemo(()=>options?.textPosition&&options?.textNormal?{position:options.textPosition,normal:options.textNormal}:null,[options?.textPosition,options?.textNormal])
  const placement=candidate||(placing?null:committed)
- const previewCache=useMemo(()=>createTextPreviewCache(point=>projectSurfaceText(font,options,point,display,{preview:true})),[font,options?.text,options?.textSize,options?.textDepth,options?.textRotation,options?.textMode,options?.baseDirection,display])
+ const previewCache=useMemo(()=>createTextPreviewCache(point=>projectSurfaceText(font,options,point,textSurface,{preview:true})),[font,options?.text,options?.textSize,options?.textDepth,options?.textRotation,options?.textMode,options?.baseDirection,textSurface])
  const project=useCallback(point=>previewCache.get(point),[previewCache])
  useEffect(()=>()=>previewCache.dispose(),[previewCache])
  const result=useMemo(()=>project(placement),[project,placement])
@@ -96,7 +102,7 @@ export function BuilderPreview({roughness=.42,metalness=.51,geometry,placing,onS
    if(event.button!==0||!editable||placing||overlayDragging||!change||!committed)return
    event.stopPropagation()
    mesh.current.updateWorldMatrix(true,false)
-   const ray=event.ray.clone().applyMatrix4(mesh.current.matrixWorld.clone().invert()),grab=beginSurfaceTextDrag(display,ray,committed)
+   const ray=event.ray.clone().applyMatrix4(mesh.current.matrixWorld.clone().invert()),grab=beginSurfaceTextDrag(textSurface,ray,committed)
    if(!grab)return
    textDrag.current={...grab,target:event.target,pointerId:event.pointerId};select?.('text')
    if(controlsRef?.current)controlsRef.current.enabled=false
@@ -105,7 +111,7 @@ export function BuilderPreview({roughness=.42,metalness=.51,geometry,placing,onS
   onPointerMove:event=>{
    const gesture=textDrag.current;if(!gesture)return
    event.stopPropagation();mesh.current.updateWorldMatrix(true,false)
-   const ray=event.ray.clone().applyMatrix4(mesh.current.matrixWorld.clone().invert()),point=moveSurfaceTextDrag(display,ray,gesture)
+   const ray=event.ray.clone().applyMatrix4(mesh.current.matrixWorld.clone().invert()),point=moveSurfaceTextDrag(textSurface,ray,gesture)
    if(!point){dragQueue.clear();setNotice('Kurzor je mimo souvislý povrch. Poslední platná poloha textu zůstala zachovaná.');return}
    dragQueue.push(point)
   },
@@ -146,8 +152,8 @@ export function BuilderPreview({roughness=.42,metalness=.51,geometry,placing,onS
   <mesh ref={mesh} geometry={display} dispose={null} renderOrder={50} onPointerOver={blockHidden} onPointerMove={blockHidden} onPointerDown={blockHidden} onClick={event=>{blockHidden(event);if(editable&&!placing&&!overlayDragging&&event.delta<=4)select(null)}}>
    <meshStandardMaterial onBeforeCompile={compileReveal} customProgramCacheKey={()=>"builder-base-reveal-v2"} color="#AAA08E" roughness={roughness} metalness={metalness} side={THREE.DoubleSide}/>
   </mesh>
-  <group ref={textRoot}>{editable&&options&&<TextShape result={result} handlers={textHandlers} hovered={textHovered}/>}</group>
-  {editable&&previous?.valid&&<TextShape result={previous}/>}
+  <group ref={textRoot}>{editable&&showTextPreview&&options&&<TextShape result={result} handlers={textHandlers} hovered={textHovered}/>}</group>
+  {editable&&showTextPreview&&previous?.valid&&<TextShape result={previous}/>}
   {editable&&candidate&&!result.valid&&result.error&&badge&&<Html center position={badge} occlude style={{pointerEvents:'none',width:200,background:'rgba(35,12,12,.94)',border:'1px solid #a34a4a',borderRadius:7,padding:7,color:'#fecaca',fontSize:11,lineHeight:1.4}}>Tady nelze text umístit. Posuňte jej nebo zmenšete písmo.</Html>}
  </>
 }

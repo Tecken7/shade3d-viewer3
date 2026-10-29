@@ -39,3 +39,8 @@
 .height input[type=range]{width:100%;margin:0;cursor:ew-resize}
 .cancel{width:100%;margin-top:12px;border:1px solid #ffffff24}
 @media(prefers-reduced-motion:reduce){.switch,.switch i{transition:none}}
+
+.textField{display:grid;gap:6px}
+.textField input{width:100%;box-sizing:border-box}
+.textModes{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+.textModes button,.textField+button{border:1px solid #ffffff24}
