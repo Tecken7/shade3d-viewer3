@@ -22,6 +22,7 @@ import { stableSceneValue } from "./viewer/stable-scene-value.mjs"
 import { createViewerReceiver } from "../public/integrations/viewer-bridge-v1.mjs"
 import ViewerToolsPanel from "./ViewerToolsPanel"
 import LightingControls from "./LightingControls"
+import SceneLighting from "./viewer/SceneLighting"
 import ComparisonControls from "./ComparisonControls"
 import useAnimatedPresence from "./useAnimatedPresence"
 import { advanceComparisonBlend, setComparisonBlendMaterial } from "./viewer/comparison-transition.mjs"
@@ -19660,14 +19661,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         style={{ position: "absolute", top: 0, bottom: alignmentSceneInsetActive ? alignmentBottomHeight : (mobileSliceSplitActive ? `calc(${mobileSlicePaneHeight} + 18px)` : 0), left: 0, right: dicomLayoutActive ? dicomPanelWidth : 0, zIndex: 1, background: "transparent", transition: "bottom .44s cubic-bezier(.2,.8,.2,1), right .34s ease", willChange: "bottom" }}
       >
         <SliceDrawController enabled={sliceAwaiting && !alignmentMode && !trimMode && !repairMode} getAnchor={getSliceDrawingAnchor} onComplete={applyDrawnSlice} onDrawingChange={setSliceDrawing} />
-        <ambientLight intensity={.35 * sceneIntensity * sceneLighting.brightness * (.65 + sceneLighting.softness)} />
-        <group rotation={[0, THREE.MathUtils.degToRad(sceneLighting.azimuth), 0]}>
-          <directionalLight position={[0, Math.sin(THREE.MathUtils.degToRad(sceneLighting.elevation))*7, Math.cos(THREE.MathUtils.degToRad(sceneLighting.elevation))*7]} intensity={1.2 * sceneIntensity * sceneLighting.brightness * (1.35-sceneLighting.softness)} />
-          <directionalLight position={[-10,0,0]} intensity={.9 * sceneIntensity * sceneLighting.brightness * (.65+sceneLighting.softness)} />
-          <directionalLight position={[10,0,0]} intensity={sceneIntensity * sceneLighting.brightness * (.65+sceneLighting.softness)} />
-          <directionalLight position={[0,-5,-5]} intensity={.7 * sceneIntensity * sceneLighting.brightness * (.65+sceneLighting.softness)} />
-        </group>
-        <Headlight enabled={headlightCfg.enabled} intensity={headlightCfg.intensity * highlightIntensity * sceneLighting.brightness * (1.35-sceneLighting.softness)} />
+        <SceneLighting value={sceneLighting} intensity={sceneIntensity} highlightIntensity={highlightIntensity} headlight={headlightCfg}/>
         <AlignmentFastRaycast enabled={(cadStandalone && cadStage === "orient") || (alignmentMode && alignmentStep === "models" && !alignmentModelsSelected && !alignmentBusy) || (trimMode && !!trimSelection) || (repairMode && !!repairSelection) || occlusionVisualPresence.present || comparisonVisualPresence.present} />
 
         <AutoRotateScene enabled={!standaloneToolMode && !alignmentMode && !trimMode && !repairMode && !sliceAwaiting && !sliceDrawing && isAutoRotating} target={cameraTarget} speedFactor={spinSpeed} />

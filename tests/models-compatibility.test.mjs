@@ -8,6 +8,8 @@ import {encodeSTL,readSTL} from '../app/models/stl.mjs'
 import {indexed} from '../app/model-builder/engine.mjs'
 import {fromManifold} from '../app/model-builder/engine.mjs'
 import {separateFloat32Contacts} from '../app/models/float32-contacts.mjs'
+import {convertFinishedBase} from '../app/models/convert-finished-base.mjs'
+import {contactArea} from '../app/model-builder/finished-model-tags.mjs'
 const M=await Module();M.setup()
 function bytes(solid){const m=solid.getMesh();return encodeSTL(m.vertProperties,m.triVerts)}
 function solid(buffer){const raw=readSTL(buffer),d=indexed(raw,{exact:true}),mesh=new M.Mesh({numProp:3,vertProperties:Float32Array.from(d.vertices),triVerts:Uint32Array.from(d.faces)});mesh.merge();return new M.Manifold(mesh)}
@@ -51,4 +53,19 @@ test('touching cavity sheets remain printable after Float32 welding and the prin
   for(let i=0;i<p.length;i+=3)assert.ok(Math.hypot(...[0,1,2].map(k=>p[i+k]-repaired[i+k]))<.00301)
   parts.forEach(p=>p.delete());roundtrip.delete()
  }finally{shape.delete();roof.delete();b.delete();a.delete()}
+})
+test('drain crowns fit completely inside short extensions instead of being cut flat at the original base',async()=>{
+ const contour=[]
+ for(let i=0;i<=64;i++){const t=i*Math.PI/64;contour.push([33*Math.cos(t),28*Math.sin(t)])}
+ for(let i=64;i>=0;i--){const t=i*Math.PI/64;contour.push([23*Math.cos(t),18*Math.sin(t)])}
+ const section=new M.CrossSection([contour],'EvenOdd'),inside=section.offset(-2.5,'Round',2,32),outer=section.extrude(18),cavity=inside.extrude(15),shape=outer.subtract(cavity)
+ try{
+  for(const [height,bevel] of [[1.5,1],[2.5,1],[5,1],[2.5,0]]){
+   const result=await convertFinishedBase(M,readSTL(bytes(shape)),{replaceHeight:height,bevel,holes:true,diameter:4.5})
+   assert.equal(result.holes.length,2)
+   assert.ok(contactArea(result)>=section.area()-inside.area()-.05)
+   for(const hole of result.holes){assert.ok(hole.removedVolume>0);assert.ok(hole.position[1]+hole.diameter/2<=result.extendedBy-.09);assert.ok(hole.position[1]-hole.diameter/2<0)}
+   const p=result.positions.slice();for(let i=0;i<p.length;i+=3){const y=p[i+1];p[i+1]=-p[i+2];p[i+2]=y+result.baseZ}assert.ok(encodeSTL(p,result.indices).byteLength>84)
+  }
+ }finally{shape.delete();cavity.delete();outer.delete();inside.delete();section.delete()}
 })

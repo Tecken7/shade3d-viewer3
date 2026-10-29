@@ -7,6 +7,7 @@ import {toCreasedNormals} from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import {unzip,zip,strToU8} from 'fflate'
 import {BuilderPreview} from '../model-builder/BuilderPreview'
 import {DEFAULTS} from '../model-builder/engine.mjs'
+import SceneLighting from '../viewer/SceneLighting'
 import ViewerBackButton from '../ViewerBackButton'
 import AnimatedSceneLoader,{useLoaderPresence} from '../AnimatedSceneLoader'
 import '../SceneLoader.css'
@@ -16,7 +17,7 @@ const initial={convertBase:true,autoHeight:true,preserveOriginal:true,autoHollow
 function Model({data}){
  const geometry=useMemo(()=>{const raw=new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(data.positions,3)).setIndex(new THREE.BufferAttribute(data.indices,1));const g=toCreasedNormals(raw,Math.PI/6);raw.dispose();return g},[data])
  useEffect(()=>()=>geometry.dispose(),[geometry])
- return <mesh geometry={geometry}><meshStandardMaterial color="#afa28a" roughness={.42} metalness={.51} side={THREE.DoubleSide}/></mesh>
+ return <mesh geometry={geometry}><meshStandardMaterial color="#AAA08E" roughness={.42} metalness={.51} side={THREE.DoubleSide}/></mesh>
 }
 function save(bytes,name){const url=URL.createObjectURL(new Blob([bytes],{type:name.endsWith('.zip')?'application/zip':'application/octet-stream'})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000)}
 const safeName=name=>name.replace(/\.stl$/i,'').replace(/[<>:"/\\|?*\x00-\x1f]/g,'_')+'-ARTHETIC.stl'
@@ -124,5 +125,5 @@ function Preview({result,original,manual,placing,onPick,onChange,onStatus}){
  const changeText=useCallback(patch=>onChange({position:patch.textPosition,normal:patch.textNormal}),[onChange])
  const restoreControls=useCallback(()=>{if(controls.current)controls.current.enabled=true},[])
  useEffect(()=>{let live=true;if(original)import('./stl.mjs').then(async({readSTL})=>{const p=readSTL(original),{indexed}=await import('../model-builder/engine.mjs');let base=Infinity;for(let i=2;i<p.length;i+=3)base=Math.min(base,p[i]);const local=p.slice();for(let i=0;i<p.length;i+=3){local[i+1]=p[i+2]-base;local[i+2]=-p[i+1]}const mesh=indexed(local,{exact:true});if(live)setData({positions:Float32Array.from(mesh.vertices),indices:Uint32Array.from(mesh.faces)})});return()=>{live=false}},[original])
- return <Canvas camera={{position:[0,45,90],fov:35}} dpr={[1,1.5]}><ambientLight intensity={.8}/><directionalLight position={[40,60,50]} intensity={3}/><directionalLight position={[-40,20,-40]} intensity={2}/><Bounds fit clip observe margin={1.35}>{manual?<BuilderPreview geometry={geometry} fontUrlOverride={manual.brand?'/wasm/model-builder/arthetic-logo-font.json':undefined} options={options} placing={placing} onSurfaceClick={onPick} change={changeText} select={()=>{}} controlsRef={controls} onDragEnd={restoreControls} onTextStatus={onStatus}/>:<Model data={data}/>}</Bounds><OrbitControls ref={controls} makeDefault enableDamping dampingFactor={.12}/></Canvas>
+ return <Canvas camera={{position:[0,45,90],fov:35}} dpr={[1,1.5]}><SceneLighting/><Bounds fit clip observe margin={1.35}>{manual?<BuilderPreview geometry={geometry} fontUrlOverride={manual.brand?'/wasm/model-builder/arthetic-logo-font.json':undefined} options={options} placing={placing} onSurfaceClick={onPick} change={changeText} select={()=>{}} controlsRef={controls} onDragEnd={restoreControls} onTextStatus={onStatus}/>:<Model data={data}/>}</Bounds><OrbitControls ref={controls} makeDefault enableDamping dampingFactor={.12}/></Canvas>
 }

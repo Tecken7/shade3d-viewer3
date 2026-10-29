@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import {indexed,stitch,meshTopology,fromManifold} from '../model-builder/engine.mjs'
 import {prepareBevelRings} from '../model-builder/base-profile.mjs'
 import {distalHolePositions,holeDirection} from '../model-builder/hole-placement.mjs'
+import {contactArea} from '../model-builder/finished-model-tags.mjs'
 import {separateFloat32Contacts} from './float32-contacts.mjs'
 import {finishedModelEnds} from './distal-ends.mjs'
 export async function convertFinishedBase(M,positions,settings={},progress=()=>{}){
@@ -43,8 +44,8 @@ const rimMesh=new M.Mesh({numProp:3,vertProperties:Float32Array.from(world),triV
 // lip that fades into the original cavity at the untouched joint.
 const cavitySection=own(new M.CrossSection([inners[0]],'EvenOdd')),cv=[],cf=[]
 let supportInset=bevel
-if(preserve&&bevel>0){
- const bottom=previous.map(i=>[vertices[i*3],-vertices[i*3+2]]),loss=area(outers[0])-Math.abs(area(bottom)),target=Math.max(1,Math.abs(area(inners[0]))-loss-(settings.holes===false?1:diameter*8+1)),baseSection=own(new M.CrossSection([inners[0]],'EvenOdd'));let lo=0,hi=4
+if(preserve&&(bevel>0||settings.holes!==false)){
+ const bottom=previous.map(i=>[vertices[i*3],-vertices[i*3+2]]),loss=area(outers[0])-Math.abs(area(bottom)),target=Math.max(1,Math.abs(area(inners[0]))-loss-(settings.holes===false?1:diameter*10+1)-(settings._contactReserve??0)),baseSection=own(new M.CrossSection([inners[0]],'EvenOdd'));let lo=0,hi=4
  for(let i=0;i<18;i++){const mid=(lo+hi)/2,cs=own(baseSection.offset(-mid,'Round',2,48));if(cs.area()>target)lo=mid;else hi=mid}supportInset=hi
 }
 const profiles=[replaceHeight+.1,...Array.from({length:11},(_,i)=>replaceHeight*(1-i/10)),-.1]
@@ -81,11 +82,13 @@ if(preserve)for(const boss of outers.slice(1)){
 const upper=preserve?own(original.translate([0,0,extension-.001])):own(original.trimByPlane([0,0,1],replaceHeight))
 let result=own(upper.add(rim));if(result.status()!=='NoError')throw Error('Failed joint '+result.status())
 const contourBottom=previous.map(i=>vertices.slice(i*3,i*3+3)),ends=settings.holes===false?[]:finishedModelEnds(contourBottom),holes=[]
+// Keep the complete circular crown below the untouched original surface.
+// A short extension needs a lower centre, not a horizontally cropped cylinder.
+const drainHeight=preserve?Math.min(1.5,extension-diameter/2-.1):1.5
 progress('Umísťuji otvory na konce oblouku…')
-for(const end of settings.holes===false?[]:ends){if(!end)throw Error('Missing arch end');const local=[end[0],1.5,end[2]],normal=holeDirection(contourBottom,end),point=new THREE.Vector3(local[0],-local[2],local[1]),axis=new THREE.Vector3(normal[0],-normal[2],normal[1]).normalize(),q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1),axis.clone().negate()),matrix=new THREE.Matrix4().compose(point.clone().addScaledVector(axis,3),q,new THREE.Vector3(1,1,1)),cutter=own(own(M.Manifold.cylinder(14,diameter/2,diameter/2,96,false)).transform(matrix.toArray()))
+for(const end of settings.holes===false?[]:ends){if(!end)throw Error('Missing arch end');const local=[end[0],drainHeight,end[2]],normal=holeDirection(contourBottom,end),point=new THREE.Vector3(local[0],-local[2],local[1]),axis=new THREE.Vector3(normal[0],-normal[2],normal[1]).normalize(),q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1),axis.clone().negate()),matrix=new THREE.Matrix4().compose(point.clone().addScaledVector(axis,3),q,new THREE.Vector3(1,1,1)),cutter=own(own(M.Manifold.cylinder(14,diameter/2,diameter/2,96,false)).transform(matrix.toArray()))
  const safeCutter=preserve?own(cutter.trimByPlane([0,0,-1],-extension+.002)):cutter
  const removed=own(result.intersect(safeCutter)).volume();result=own(result.subtract(safeCutter));holes.push({position:point.toArray(),normal:axis.toArray(),diameter,removedVolume:removed})}
-
 
 progress('Kontroluji spojení a dosedací plochu…')
 const protectedHeight=Math.max(replaceHeight,1.5+diameter/2)+.3
@@ -105,6 +108,21 @@ for(let i=0;i<canonical.vertices.length;i+=3){const key=canonical.vertices.slice
 for(const group of groups.values())if(group.length>1){const active=group.filter(o=>new THREE.Vector3().fromArray(normals,o).lengthSq()>1e-16);if(active.length<2)continue;if(preserve&&!settings.repairCoincident)continue;for(const o of active){const floor=Math.abs(canonical.vertices[o+2])<.001,n=new THREE.Vector3().fromArray(normals,o).normalize();for(let k=0;k<3;k++)canonical.vertices[o+k]+=n.getComponent(k)*.002;if(floor)canonical.vertices[o+2]=0}}
 const outPositions=Float32Array.from(canonical.vertices)
 for(let i=0;i<outPositions.length;i+=3){const y=outPositions[i+1];outPositions[i+1]=outPositions[i+2];outPositions[i+2]=-y}
-return {positions:settings.repairCoincident?separateFloat32Contacts(outPositions,Uint32Array.from(canonical.faces)):outPositions,indices:Uint32Array.from(canonical.faces),placement:{baseY:0,direction:-1},holes:holes.map(h=>({...h,position:[h.position[0],h.position[2],-h.position[1]],normal:[h.normal[0],h.normal[2],-h.normal[1]]})),stats:{volume:result.volume()},baseZ:baseZ-extension+.001*(preserve?1:0),replaceHeight,extendedBy:extension,protectedHeight}
+const output={positions:settings.repairCoincident?separateFloat32Contacts(outPositions,Uint32Array.from(canonical.faces)):outPositions,indices:Uint32Array.from(canonical.faces),placement:{baseY:0,direction:-1},holes:holes.map(h=>({...h,position:[h.position[0],h.position[2],-h.position[1]],normal:[h.normal[0],h.normal[2],-h.normal[1]]})),stats:{volume:result.volume()},baseZ:baseZ-extension+.001*(preserve?1:0),replaceHeight,extendedBy:extension,protectedHeight}
+// Use the actual cut footprint rather than assuming the same wall thickness
+// at both arch ends. Widen only the internal support lip if drainage took more
+// contact area than predicted, without enlarging implant bosses or the outside.
+if(preserve&&(bevel>0||settings.holes!==false)&&(settings._contactAttempt??0)<3){
+ const expected=own(original.slice(.001)).area(),actual=contactArea(output)
+ if(actual+.05<expected){
+  const reserve=(settings._contactReserve??0)+(expected+.75-actual)*1.15
+  progress('Dolaďuji dosedací lem kolem otvorů…')
+  allocated.reverse().forEach(o=>o.delete());allocated.length=0
+  return await convertFinishedBase(M,positions,{...settings,_contactReserve:reserve,_contactAttempt:(settings._contactAttempt??0)+1},progress)
+ }
+}
+
+return output
+
  }finally{allocated.reverse().forEach(o=>o.delete())}
 }
