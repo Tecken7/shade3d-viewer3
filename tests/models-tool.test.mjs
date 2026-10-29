@@ -4,6 +4,7 @@ import Module from 'manifold-3d'
 import {processFinishedModel} from '../app/models/process.mjs'
 import {encodeSTL,readSTL} from '../app/models/stl.mjs'
 import {indexed} from '../app/model-builder/engine.mjs'
+import {finishedModelEnds} from '../app/models/distal-ends.mjs'
 const M=await Module();M.setup()
 const outer=M.Manifold.cube([60,35,16],true).translate([0,0,8]),inner=M.Manifold.cube([55,30,20],true).translate([0,0,5]),shape=outer.subtract(inner),mesh=shape.getMesh()
 const buffer=encodeSTL(mesh.vertProperties,mesh.triVerts);shape.delete();inner.delete();outer.delete()
@@ -22,4 +23,15 @@ test('text-only pass-through keeps a model unchanged and invalid base settings a
 test('corrupt or non-finite STL is never processed as a printable result',()=>{
  assert.throws(()=>readSTL(new ArrayBuffer(4)))
  const bad=buffer.slice(0);new DataView(bad).setFloat32(96,NaN,true);assert.throws(()=>readSTL(bad),/platné/)
+})
+test('distal holes follow the arch when a finished model is rotated for export',()=>{
+ const contour=[]
+ for(let i=0;i<=160;i++){const t=i*Math.PI/160;contour.push([33*Math.cos(t),0,28*Math.sin(t)])}
+ for(let i=160;i>=0;i--){const t=i*Math.PI/160;contour.push([27*Math.cos(t),0,22*Math.sin(t)])}
+ const ends=finishedModelEnds(contour);assert.ok(ends.every(p=>p[2]<5))
+ for(const angle of [Math.PI/2,Math.PI,Math.PI/4]){
+  const rotate=p=>[p[0]*Math.cos(angle)-p[2]*Math.sin(angle)+100,p[1],p[0]*Math.sin(angle)+p[2]*Math.cos(angle)-40]
+  const actual=finishedModelEnds(contour.map(rotate)),expected=ends.map(rotate)
+  assert.ok(actual.every(p=>Math.min(...expected.map(q=>Math.hypot(p[0]-q[0],p[2]-q[2])))<2))
+ }
 })

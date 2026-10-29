@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import {indexed,stitch,meshTopology,fromManifold} from '../model-builder/engine.mjs'
 import {prepareBevelRings} from '../model-builder/base-profile.mjs'
 import {distalHolePositions,holeDirection} from '../model-builder/hole-placement.mjs'
+import {finishedModelEnds} from './distal-ends.mjs'
 export async function convertFinishedBase(M,positions,settings={},progress=()=>{}){
  const allocated=[],own=o=>{allocated.push(o);return o}
  let replaceHeight=Number(settings.replaceHeight??2.5);const bevel=Number(settings.bevel??1),diameter=Number(settings.diameter??4.5)
@@ -61,7 +62,7 @@ let rim=own(outerRim.subtract(cavity))
 for(const extra of inners.slice(1)){const section=own(new M.CrossSection([extra],'EvenOdd')),voidSolid=own(section.extrude(replaceHeight+.2).translate([0,0,-.1]));rim=own(rim.subtract(voidSolid))}
 const upper=own(original.trimByPlane([0,0,1],replaceHeight))
 let result=own(upper.add(rim));if(result.status()!=='NoError')throw Error('Failed joint '+result.status())
-const contourBottom=previous.map(i=>vertices.slice(i*3,i*3+3)),ends=distalHolePositions(contourBottom,-1),holes=[]
+const contourBottom=previous.map(i=>vertices.slice(i*3,i*3+3)),ends=settings.holes===false?[]:finishedModelEnds(contourBottom),holes=[]
 progress('Umísťuji otvory na konce oblouku…')
 for(const end of settings.holes===false?[]:ends){if(!end)throw Error('Missing arch end');const local=[end[0],1.5,end[2]],normal=holeDirection(contourBottom,end),point=new THREE.Vector3(local[0],-local[2],local[1]),axis=new THREE.Vector3(normal[0],-normal[2],normal[1]).normalize(),q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1),axis.clone().negate()),matrix=new THREE.Matrix4().compose(point.clone().addScaledVector(axis,3),q,new THREE.Vector3(1,1,1)),cutter=own(own(M.Manifold.cylinder(14,diameter/2,diameter/2,96,false)).transform(matrix.toArray()))
  const removed=own(result.intersect(cutter)).volume();result=own(result.subtract(cutter));holes.push({position:point.toArray(),normal:axis.toArray(),diameter,removedVolume:removed})}
