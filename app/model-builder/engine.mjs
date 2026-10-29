@@ -266,7 +266,7 @@ export async function applyModelText(M,base,options,fontData,progress=()=>{}){
   if(check.openEdges||check.nonManifold)throw Error('Po vložení textu není síť uzavřená.')
   const expanded=new Float32Array(output.faces.length*3)
   output.faces.forEach((id,i)=>expanded.set(output.vertices.slice(id*3,id*3+3),i*3))
-  const stl=indexed(expanded),stlCheck=meshTopology(stl.vertices,stl.faces)
+  const stl=indexed(expanded,{exact:true}),stlCheck=meshTopology(stl.vertices,stl.faces)
   if(stlCheck.openEdges||stlCheck.nonManifold)throw Error('Text nelze bezpečně převést do STL. Upravte jeho polohu nebo velikost.')
   progress('Kontroluji hotový popisek…')
   return {...base,positions:new Float32Array(output.vertices),indices:new Uint32Array(output.faces),stats:{...base.stats,triangles:output.faces.length/3,volume:signedVolume(output.vertices,output.faces),openBoundaryLoops:0,components:1}}

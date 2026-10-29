@@ -49,7 +49,7 @@ export async function decorateFinishedModel(M,base,config,fonts,progress=()=>{})
     const projection=projectSurfaceText(font,{...common,text:tag.text,textSize:tag.size,textDepth:tag.depth,textMode:tag.mode,textRotation:tag.rotation},candidate,surface,{preview:true})
     const valid=projection.valid&&(!tag.brand||isCavityWall(surface,new THREE.Vector3(...tag.position),new THREE.Vector3(...tag.normal),base.placement));projection.geometry?.dispose();if(!valid)candidate=null
    }else candidate=findSurfaceLabelPlacement(surface,font,common,base.placement,layout)
-   if(!candidate)return {status:'needs-placement',output:null,items:planned.map(item=>item.report),message:`Pro ${tag.name||tag.text} není dost vhodného místa. Je nutné ruční umístění.`}
+   if(!candidate)return {status:'needs-placement',output:config.allowManual?base:null,pending:tags,items:planned.map(item=>item.report),message:`Pro ${tag.name||tag.text} není dost vhodného místa. Je nutné ruční umístění.`}
    const measurement=new TextGeometry(tag.text,{font,size:candidate.size,depth:tag.depth,curveSegments:4,bevelEnabled:false});measurement.computeBoundingBox()
    const width=measurement.boundingBox.max.x-measurement.boundingBox.min.x;measurement.dispose()
    reserved.push({...candidate,width})
@@ -58,10 +58,15 @@ export async function decorateFinishedModel(M,base,config,fonts,progress=()=>{})
   let output=base
   for(const {tag,data,candidate} of planned){
    progress(`Spojuji s modelem: ${tag.name||tag.text}`)
-   output=await applyModelText(M,output,{...common,text:tag.text,textSize:candidate.size,textDepth:tag.depth,textMode:tag.mode,textRotation:tag.rotation,textPosition:candidate.position,textNormal:candidate.normal,textLogoEnabled:false},data,progress)
+   let point=candidate,lastError
+   for(let attempt=0;attempt<4;attempt++){
+    try{output=await applyModelText(M,output,{...common,text:tag.text,textSize:point.size,textDepth:tag.depth,textMode:tag.mode,textRotation:tag.rotation,textPosition:point.position,textNormal:point.normal,textLogoEnabled:false},data,progress);Object.assign(planned.find(p=>p.tag===tag).report,point);lastError=null;break}
+    catch(error){lastError=error;if(tag.position||attempt===3)break;reserved.push({...point,width:6});point=findSurfaceLabelPlacement(surface,new FontLoader().parse(data),common,base.placement,{...tag,blocked:reserved,sizes:[tag.size]});if(!point)break}
+   }
+   if(lastError)throw lastError
   }
   const before=contactArea(base),after=contactArea(output)
   if(after+.01<before)throw Error('Popisek zmenšil dosedací plochu. Změňte jeho umístění.')
   return {status:'ready',output,items:planned.map(item=>item.report),contactAreaBefore:before,contactAreaAfter:after}
- }finally{surface.dispose();raw.dispose()}
+ }catch(error){if(config.allowManual)return {status:'needs-placement',output:base,pending:tags,items:planned.map(item=>item.report),message:error.message};throw error}finally{surface.dispose();raw.dispose()}
 }

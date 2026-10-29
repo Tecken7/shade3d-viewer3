@@ -11,7 +11,8 @@ const buffer=encodeSTL(mesh.vertProperties,mesh.triVerts);shape.delete();inner.d
 test('browser pipeline modifies a hollow base, preserves contact and exports a closed STL',async()=>{
  const before=new Uint8Array(buffer).slice(),result=await processFinishedModel(M,buffer,{convertBase:true,replaceHeight:2.5,bevel:0,holes:false,logo:false},{})
  assert.deepEqual(new Uint8Array(buffer),before);assert.ok(result.report.contactAfter>=result.report.contactBefore-.05)
- await assert.rejects(()=>processFinishedModel(M,buffer,{convertBase:true,replaceHeight:2.5,bevel:1,holes:false,logo:false},{}),/dosedací plochu/)
+ const beveled=await processFinishedModel(M,buffer,{convertBase:true,replaceHeight:2.5,bevel:1,holes:false,logo:false},{})
+ assert.ok(beveled.report.contactAfter>=beveled.report.contactBefore-.05);assert.equal(beveled.report.extendedBy,2.5)
  assert.equal(result.report.openEdges,0);assert.equal(result.report.components,1)
  const raw=readSTL(result.stl);assert.ok(raw.length>0);assert.ok(indexed(raw,{exact:true}).faces.length)
 })
