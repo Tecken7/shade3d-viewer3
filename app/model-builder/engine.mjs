@@ -83,7 +83,7 @@ function bufferGeometry(v, f) {
   return g
 }
 
-function fromManifold(solid) {
+export function fromManifold(solid) {
   const m = solid.getMesh(), vertices = [], faces = [], remap = new Map()
   const parents = Array.from({ length: m.vertProperties.length / m.numProp }, (_, i) => i)
   const root = id => { while (parents[id] !== id) { parents[id] = parents[parents[id]]; id = parents[id] } return id }
