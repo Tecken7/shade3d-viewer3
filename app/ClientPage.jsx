@@ -57,7 +57,7 @@ import { HolePreview } from "./model-builder/HolePreview"
 import { BuilderPreview } from "./model-builder/BuilderPreview"
 import BaseHeightPreview from "./model-builder/BaseHeightPreview"
 import BuilderTextControls from "./model-builder/BuilderTextControls"
-import {BUILDER_STEPS,BUILDER_STEP_LABELS,nextBuilderStage,canApplyBuilderText,builderGeometryOptions} from "./model-builder/builder-workflow.mjs"
+import {BUILDER_STEPS,BUILDER_STEP_LABELS,nextBuilderStage,canApplyBuilderText,builderGeometryOptions,builderTextSignature} from "./model-builder/builder-workflow.mjs"
 import {baseHeightGuideLayout} from "./model-builder/base-height-layout.mjs"
 import { FrontDirectionLabel } from "./model-builder/FrontDirectionLabel"
 import { collectTrianglesInRoot, collectTrianglesInRootSteps } from "./model-builder/scene-input.mjs"
@@ -12037,15 +12037,26 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
   const builderWorkerRef = useRef(null)
   const builderUncutRef = useRef(null)
   const builderTextSurfaceRef = useRef(null)
+  const builderTextBaseRef = useRef(null)
+  const builderTextResultRef = useRef(null)
+  const builderTextAppliedRef = useRef(false)
   const builderHasCutPreviewRef = useRef(false)
   useEffect(() => () => {
     builderUncutRef.current?.dispose()
     builderUncutRef.current = null
     builderTextSurfaceRef.current?.dispose();builderTextSurfaceRef.current=null
+    builderTextResultRef.current?.geometry.dispose();builderTextResultRef.current=null
+    builderTextBaseRef.current=null;builderTextAppliedRef.current=false
     builderHasCutPreviewRef.current = false
   }, [cadFileUrl])
   const changeBuilderOptions = useCallback((patch) => {
     const textOnly=Object.keys(patch).every(key=>key.startsWith("text"))
+    if(textOnly && builderTextAppliedRef.current && builderTextSurfaceRef.current){
+      const clean=builderTextSurfaceRef.current.clone()
+      setCadPreviewGeometry(previous=>{previous?.dispose();return clean})
+      setCadPreviewStats(builderTextBaseRef.current?.stats)
+      builderTextAppliedRef.current=false
+    }
     if (!textOnly && builderHasCutPreviewRef.current && builderUncutRef.current) {
       const restored = builderUncutRef.current.clone()
       setCadPreviewGeometry(previous => { previous?.dispose(); return restored })
@@ -13989,6 +14000,9 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     if (!["base","text"].includes(cadStage) || cadBusy || !cadFileUrl || (request.cutHoles && (!builderOptions.hollow || builderOptions.drainsEnabled===false))) return
     const sourceObject = modelObjectsRef.current[cadFileUrl]
     if (!sourceObject || !rootGroupRef.current) { setCadMessage("Model ještě není připravený."); return }
+    const labelOnly=cadStage==='text'
+    const labelBase=builderTextSurfaceRef.current
+    if(labelOnly && !labelBase){setCadMessage('Nejprve vytvořte bázi modelu.');return}
     setCadBusy(true)
     setCadBaseReveal(null)
     const nextOptions = { ...builderOptions, cutHoles: builderOptions.hollow && builderOptions.drainsEnabled!==false && (typeof request.cutHoles === "boolean" ? request.cutHoles : builderOptions.cutHoles),
@@ -14001,12 +14015,13 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
     setBuilderDirty(true)
     const pending = { terminate() {} }
     builderWorkerRef.current = pending
-    setCadMessage("Připravuji nový model…")
+    setCadMessage(labelOnly?"Připravuji popisek…":"Připravuji nový model…")
     try {
       await repairWaitForBusyPaint()
-      const positions = new Float32Array(await runStepsAsync(collectTrianglesInRootSteps(sourceObject, rootGroupRef.current)))
+      const positions = labelOnly ? Float32Array.from(labelBase.attributes.position.array) : new Float32Array(await runStepsAsync(collectTrianglesInRootSteps(sourceObject, rootGroupRef.current)))
+      const indices=labelOnly?Uint32Array.from(labelBase.index.array):null
       if (builderWorkerRef.current !== pending) return
-      const fontResponse = await fetch("/wasm/model-builder/font.json")
+      const fontResponse = await fetch("/wasm/model-builder/inter-font.json")
       if (!fontResponse.ok) throw new Error("Nepodařilo se načíst místní písmo.")
       const font = await fontResponse.json()
       if (builderWorkerRef.current !== pending) return
@@ -14026,8 +14041,16 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         if(result.revealStarts)geometry.setAttribute("baseRevealStart",new THREE.BufferAttribute(result.revealStarts,1))
         geometry.computeVertexNormals()
         geometry.computeBoundingBox()
-        if(cadStage === "base"){builderTextSurfaceRef.current?.dispose();builderTextSurfaceRef.current=geometry.clone()}
-        if (!nextOptions.cutHoles) {
+        if(!labelOnly){
+          builderTextSurfaceRef.current?.dispose();builderTextSurfaceRef.current=geometry.clone()
+          builderTextBaseRef.current={stats:result.stats,placement:result.placement,holes:result.holes,warnings:result.warnings}
+          builderTextResultRef.current?.geometry.dispose();builderTextResultRef.current=null;builderTextAppliedRef.current=false
+        }else{
+          builderTextResultRef.current?.geometry.dispose()
+          builderTextResultRef.current={geometry:geometry.clone(),stats:result.stats,signature:builderTextSignature(nextOptions)}
+          builderTextAppliedRef.current=true
+        }
+        if (!labelOnly && !nextOptions.cutHoles) {
           builderUncutRef.current?.dispose()
           builderUncutRef.current = geometry.clone()
         }
@@ -14042,26 +14065,34 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         setCadPreviewActive(true)
         setBuilderDirty(false)
         const repairNotice=result.stats.boundaryRepair?.closedMicroHoles ? `Drobné otvory opraveny: ${result.stats.boundaryRepair.closedMicroHoles}. ` : result.stats.boundaryRepair ? "Hranice opravena a vyhlazena. " : ""
-        setCadMessage(repairNotice+(result.warnings?.length ? result.warnings.join(" ") : !nextOptions.hollow || nextOptions.drainsEnabled===false ? "Model je připravený bez odtokových otvorů. Můžete ho dokončit." : nextOptions.cutHoles ? "Otvory jsou vyříznuté. Zkontrolujte výsledek a dokončete model." : "Základna je připravena bez otvorů. Posuňte modré válce, nastavte průměr a hloubku, potom potvrďte vyříznutí otvorů."))
+        setCadMessage(labelOnly?"Popisek je připravený.":repairNotice+(result.warnings?.length ? result.warnings.join(" ") : !nextOptions.hollow || nextOptions.drainsEnabled===false ? "Model je připravený bez odtokových otvorů. Můžete ho dokončit." : nextOptions.cutHoles ? "Otvory jsou vyříznuté. Zkontrolujte výsledek a dokončete model." : "Základna je připravena bez otvorů. Posuňte modré válce, nastavte průměr a hloubku, potom potvrďte vyříznutí otvorů."))
       }
       worker.onerror = (event) => {
         if (builderWorkerRef.current !== worker) return
         worker.terminate(); builderWorkerRef.current = null; setCadBusy(false); setBuilderDirty(true)
         setCadMessage(event.message || "Výpočet selhal. Zkuste menší model nebo upravte ořez.")
       }
-      worker.postMessage({ positions, options: { ...builderGeometryOptions(nextOptions,cadStage), revealBase:!!request.repairBoundary, followContour: true, totalHeight: cadTotalHeight, arch: cadActiveArch }, font }, [positions.buffer])
+      const options={...builderGeometryOptions(nextOptions,cadStage),revealBase:!!request.repairBoundary,followContour:true,totalHeight:cadTotalHeight,arch:cadActiveArch}
+      if(labelOnly)worker.postMessage({operation:'text',base:{...builderTextBaseRef.current,positions,indices},options,font},[positions.buffer,indices.buffer])
+      else worker.postMessage({positions,options,font},[positions.buffer])
     } catch (error) { if (builderWorkerRef.current !== pending) return; builderWorkerRef.current = null; setCadBusy(false); setBuilderDirty(true); setCadMessage(error.message) }
   }, [cadStage, cadBusy, cadFileUrl, cadTotalHeight, cadActiveArch, builderOptions, cadHeightGuide])
 
   const applyCadBase = useCallback(() => {
     if (cadStage !== "base" || !cadPreviewActive || !cadPreviewGeometry || cadBusy || builderDirty) return
     setBuilderSelected("text");setBuilderPlacing(false)
-    if(builderOptions.text.trim())setBuilderDirty(true)
+    const cached=builderTextResultRef.current
+    const applied=cached?.signature===builderTextSignature(builderOptions)
+    const geometry=applied?cached.geometry:builderTextSurfaceRef.current
+    if(geometry){const copy=geometry.clone();setCadPreviewGeometry(previous=>{previous?.dispose();return copy})}
+    setCadPreviewStats(applied?cached.stats:builderTextBaseRef.current?.stats)
+    builderTextAppliedRef.current=!!applied
+    setBuilderDirty(!applied&&!!builderOptions.text.trim())
     setCadStage(nextBuilderStage("base"))
     setCadMessage(cadPreviewStats?.openBoundaryLoops === 0
       ? "Přidejte popisek na model, nebo pokračujte bez textu."
       : "Model je vytvořený. Před výrobním použitím doporučujeme zkontrolovat zbývající otevřené hrany.")
-  }, [cadStage, cadPreviewActive, cadPreviewGeometry, cadBusy, cadPreviewStats, builderDirty, builderOptions.text])
+  }, [cadStage, cadPreviewActive, cadPreviewGeometry, cadBusy, cadPreviewStats, builderDirty, builderOptions])
 
   const downloadCadModel = useCallback(() => {
     if (!cadPreviewGeometry || builderDirty || cadBusy) return
@@ -18398,7 +18429,11 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
         )}
 
         {cadStage === "text" && <div className={cadWorkspaceStyles.stageActions} style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
-          <button disabled={cadBusy} onClick={()=>{setBuilderPlacing(false);setBuilderSelected(null);setCadStage("base")}}>Zpět k bázi</button>
+          <button disabled={cadBusy} onClick={()=>{
+            setBuilderPlacing(false);setBuilderSelected(null)
+            if(builderTextSurfaceRef.current){const geometry=builderTextSurfaceRef.current.clone();setCadPreviewGeometry(previous=>{previous?.dispose();return geometry});setCadPreviewStats(builderTextBaseRef.current?.stats)}
+            builderTextAppliedRef.current=false;setBuilderDirty(false);setCadStage("base")
+          }}>Zpět k bázi</button>
           {builderDirty && <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={!canApplyBuilderText(builderOptions,builderTextStatus,cadBusy)} onClick={()=>toggleCadPreview()}>Použít změny</button>}
           <button className={`artheticCadPrimary ${repairToolbarStyles.primary}`} disabled={cadBusy||builderDirty} onClick={()=>{setBuilderPlacing(false);setBuilderSelected(null);setCadStage(nextBuilderStage("text"))}}>Dokončit model</button>
         </div>}
@@ -18428,7 +18463,7 @@ export default function ClientPage({ forceCadMode = false, forceAlignmentDemo = 
       </aside>}
 
       {cadStage === "base" && <BuilderControls height={cadTotalHeight} minHeight={cadMinHeight} maxHeight={cadMaxHeight} onHeightChange={handleCadTotalHeightChange} heightDraft={cadHeightDraft} onHeightDraft={setCadHeightDraft} onCommitHeight={commitCadHeightInput} options={builderOptions} change={changeBuilderOptions} textStatus={builderTextStatus} selected={builderSelected} select={setBuilderSelected} placing={builderPlacing} setPlacing={setBuilderPlacing} dirty={builderDirty} busy={cadBusy} locked={!!cadBaseReveal} cancel={cancelBuilder} hasPreview={cadPreviewActive} cutHoles={() => toggleCadPreview({ cutHoles: true })} />}
-      {cadStage === "text" && <BuilderTextControls options={builderOptions} change={changeBuilderOptions} busy={cadBusy} cancel={cancelBuilder} placing={builderPlacing} setPlacing={setBuilderPlacing} select={setBuilderSelected} textStatus={builderTextStatus}/>}
+      {cadStage === "text" && <BuilderTextControls options={builderOptions} change={changeBuilderOptions} busy={cadBusy} cancel={cancelBuilder} placing={builderPlacing} setPlacing={value=>{if(value&&builderTextAppliedRef.current)changeBuilderOptions({});setBuilderPlacing(value)}} select={setBuilderSelected} textStatus={builderTextStatus}/>}
       {cadStage === "result" && <button type="button" className={cadWorkspaceStyles.returnButton} onClick={() => setCadStage("text")}>Zpět k nastavení textu</button>}
       {cadStage === "scan" && !cadEmbedded && (
         <div style={{ position:"absolute", inset:0, zIndex:6, display:"grid", placeItems:"center", pointerEvents:"none", fontFamily:"Inter,ui-sans-serif,system-ui,sans-serif" }}>

@@ -65,7 +65,7 @@ test('the base generator repairs microholes only with the reversible surface-rep
   const {default:fs}=await import('node:fs')
   const {buildModel}=await import('../app/model-builder/engine.mjs')
   const M=await Module();M.setup()
-  const font=JSON.parse(fs.readFileSync(new URL('../public/wasm/model-builder/font.json',import.meta.url)))
+  const font=JSON.parse(fs.readFileSync(new URL('../public/wasm/model-builder/inter-font.json',import.meta.url)))
   const {vertices,faces}=microSurface(),positions=new Float32Array(faces.flatMap(id=>vertices.slice(id*3,id*3+3))),before=positions.slice()
   const options={arch:'upper',totalHeight:5,wall:1,bevel:.5,smoothing:0,rounding:0,holes:[{enabled:false},{enabled:false}]}
   await assert.rejects(buildModel(M,positions,options,font),/Opravit hranici a drobné otvory/)

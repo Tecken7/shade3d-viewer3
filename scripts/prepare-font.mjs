@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import opentype from 'opentype.js'
-const base='node_modules/@fontsource/noto-sans/'
-const fonts=['latin','latin-ext'].map(sub=>{const b=fs.readFileSync(base+`files/noto-sans-${sub}-400-normal.woff`);return opentype.parse(b.buffer.slice(b.byteOffset,b.byteOffset+b.byteLength))})
+const base='node_modules/@fontsource/inter/'
+const fonts=['latin','latin-ext'].map(sub=>{const b=fs.readFileSync(base+`files/inter-${sub}-400-normal.woff`);return opentype.parse(b.buffer.slice(b.byteOffset,b.byteOffset+b.byteLength))})
 const glyphs={};const r=n=>Math.round(n*1000)/1000
 for(let code=32;code<384;code++){
  const char=String.fromCharCode(code);const font=fonts.find(f=>f.charToGlyphIndex(char)!==0);if(!font)continue
@@ -13,6 +13,6 @@ for(let code=32;code<384;code++){
  }
  glyphs[char]={ha:r(glyph.advanceWidth*1000/font.unitsPerEm),x_min:0,x_max:1000,o:out.join(' ')}
 }
-fs.writeFileSync('public/wasm/model-builder/font.json',JSON.stringify({glyphs,familyName:'Noto Sans',ascender:1069,descender:-293,underlinePosition:-100,underlineThickness:50,boundingBox:{yMin:-293,yMax:1069,xMin:-100,xMax:1200},resolution:1000,original_font_information:{license:'SIL Open Font License 1.1'}}))
-fs.copyFileSync(base+'LICENSE','public/wasm/model-builder/FONT-LICENSE.txt')
-console.log('Generated Noto Sans typeface:',Object.keys(glyphs).length,'glyphs, Czech:',[...'Příliš žluťoučký kůň'].every(c=>glyphs[c]))
+fs.writeFileSync('public/wasm/model-builder/inter-font.json',JSON.stringify({glyphs,familyName:'Inter',ascender:1069,descender:-293,underlinePosition:-100,underlineThickness:50,boundingBox:{yMin:-293,yMax:1069,xMin:-100,xMax:1200},resolution:1000,original_font_information:{license:'SIL Open Font License 1.1'}}))
+fs.copyFileSync(base+'LICENSE','public/wasm/model-builder/INTER-FONT-LICENSE.txt')
+console.log('Generated Inter typeface:',Object.keys(glyphs).length,'glyphs, Czech:',[...'Příliš žluťoučký kůň'].every(c=>glyphs[c]))

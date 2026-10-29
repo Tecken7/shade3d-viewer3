@@ -12,7 +12,7 @@ surface.boundsTree=new MeshBVH(surface)
 const rayAt=angle=>new THREE.Ray(new THREE.Vector3(Math.sin(angle)*20,0,Math.cos(angle)*20),new THREE.Vector3(-Math.sin(angle),0,-Math.cos(angle)))
 const anchor=surface.boundsTree.raycastFirst(rayAt(0),THREE.DoubleSide)
 const placement={position:anchor.point.toArray(),normal:anchor.face.normal.toArray()}
-const font=new FontLoader().parse(JSON.parse(fs.readFileSync(new URL('../public/wasm/model-builder/font.json',import.meta.url))))
+const font=new FontLoader().parse(JSON.parse(fs.readFileSync(new URL('../public/wasm/model-builder/inter-font.json',import.meta.url))))
 
 test('off-centre grab does not move the label before the pointer moves',()=>{
  const ray=rayAt(.35),gesture=beginSurfaceTextDrag(surface,ray,placement),next=moveSurfaceTextDrag(surface,ray,gesture)

@@ -214,10 +214,67 @@ export function stitch(v, f, top, bottom) {
 }
 
 
+// Shared by full model construction and label-only edits of a finished base.
+function addSurfaceLabel(M,result,p,fontData,direction,own){
+ if(!p.text.trim())return result
+ let textSurfaceGeometry
+ try{
+  if (!p.textPosition || !p.textNormal) throw new Error('Nejprve umístěte popisek kliknutím na povrch modelu.')
+  if (!(p.textDepth > 0 && p.textDepth <= 3)) throw new Error('Hloubka textu musí být větší než 0 a nejvýše 3 mm.')
+  const font = new FontLoader().parse(fontData)
+  for (const char of p.text) if (!font.data.glyphs[char]) throw new Error(`Písmo nepodporuje znak „${char}“. Použijte podporované písmeno nebo číslici.`)
+  if (!(p.textSize >= 1 && p.textSize <= 12)) throw new Error('Velikost textu musí být 1–12 mm.')
+  const shell = fromManifold(result)
+  const textSurface = bufferGeometry(shell.vertices, shell.faces)
+  // Match preview normals: keep the real bevel/cap creases, smooth only
+  // gradual curvature. Letter dimensions must not depend on shading setup.
+  try { textSurfaceGeometry = toCreasedNormals(textSurface,Math.PI/6) }
+  finally { textSurface.dispose() }
+  textSurfaceGeometry.boundsTree = new MeshBVH(textSurfaceGeometry)
+  const projected = projectSurfaceText(font,{...p,baseDirection:direction},{position:p.textPosition,normal:p.textNormal},textSurfaceGeometry)
+  const text = projected.geometry
+  try {
+    if(!projected.valid)throw new Error(projected.error || 'Popisek nelze na tento povrch umístit.')
+    const expanded = text.index ? text.toNonIndexed() : text
+    const t = indexed(expanded.attributes.position.array)
+    if (expanded !== text) expanded.dispose()
+    const textSolid = asSolid(M, t.vertices, t.faces, own)
+    const overlap = own(result.intersect(textSolid))
+    if (overlap.isEmpty()) throw new Error('Popisek není spojený s povrchem. Umístěte jej znovu na povrch.')
+    result = own(p.textMode === 'engrave' ? result.subtract(textSolid) : result.add(textSolid))
+  } finally { text?.dispose() }
+
+  return result
+ }finally{textSurfaceGeometry?.dispose()}
+}
+
+export async function applyModelText(M,base,options,fontData,progress=()=>{}){
+ const p={...DEFAULTS,...options},allocated=[],own=value=>{allocated.push(value);return value}
+ if(!p.text.trim())return {...base,positions:base.positions.slice(),indices:base.indices.slice()}
+ try{
+  progress('Připravuji popisek…')
+  let result=asSolid(M,Array.from(base.positions),Array.from(base.indices),own)
+  progress('Spojuji text s povrchem…')
+  result=addSurfaceLabel(M,result,p,fontData,p.baseDirection??base.placement.direction,own)
+  if(result.status()!=='NoError'||result.isEmpty())throw Error('Text se nepodařilo spojit s povrchem.')
+  result=own(result.simplify(.0001))
+  const parts=result.decompose().map(own)
+  if(parts.length!==1||parts[0].volume()<=0)throw Error('Popisek vytváří oddělenou část. Upravte jeho polohu.')
+  const output=fromManifold(parts[0]),check=meshTopology(output.vertices,output.faces)
+  if(check.openEdges||check.nonManifold)throw Error('Po vložení textu není síť uzavřená.')
+  const expanded=new Float32Array(output.faces.length*3)
+  output.faces.forEach((id,i)=>expanded.set(output.vertices.slice(id*3,id*3+3),i*3))
+  const stl=indexed(expanded),stlCheck=meshTopology(stl.vertices,stl.faces)
+  if(stlCheck.openEdges||stlCheck.nonManifold)throw Error('Text nelze bezpečně převést do STL. Upravte jeho polohu nebo velikost.')
+  progress('Kontroluji hotový popisek…')
+  return {...base,positions:new Float32Array(output.vertices),indices:new Uint32Array(output.faces),stats:{...base.stats,triangles:output.faces.length/3,volume:signedVolume(output.vertices,output.faces),openBoundaryLoops:0,components:1}}
+ }finally{for(const item of allocated.reverse())item.delete()}
+}
+
 export async function buildModel(M, input, options, fontData, progress = () => {}) {
   const p = { ...DEFAULTS, ...options }, allocated = []
   const own = x => { allocated.push(x); return x }
-  let surfaceGeometry, closedGeometry, textSurfaceGeometry, drainGeometry
+  let surfaceGeometry, closedGeometry, drainGeometry
   try {
     // Worker input already contains shared Float32 coordinates. Do not round
     // nearby, distinct cut vertices into a pinched/branching boundary.
@@ -366,32 +423,9 @@ export async function buildModel(M, input, options, fontData, progress = () => {
       }
     }
     progress({ preparedHoles: holes })
-    progress('Přidávám popisek na stěnu modelu…')
-    if (p.text.trim()) {
-      if (!p.textPosition || !p.textNormal) throw new Error('Nejprve umístěte popisek kliknutím na povrch modelu.')
-      if (!(p.textDepth > 0 && p.textDepth <= 3)) throw new Error('Hloubka textu musí být větší než 0 a nejvýše 3 mm.')
-      const font = new FontLoader().parse(fontData)
-      for (const char of p.text) if (!font.data.glyphs[char]) throw new Error(`Písmo nepodporuje znak „${char}“. Použijte podporované písmeno nebo číslici.`)
-      if (!(p.textSize >= 1 && p.textSize <= 12)) throw new Error('Velikost textu musí být 1–12 mm.')
-      const shell = fromManifold(result)
-      const textSurface = bufferGeometry(shell.vertices, shell.faces)
-      // Match preview normals: keep the real bevel/cap creases, smooth only
-      // gradual curvature. Letter dimensions must not depend on shading setup.
-      try { textSurfaceGeometry = toCreasedNormals(textSurface,Math.PI/6) }
-      finally { textSurface.dispose() }
-      textSurfaceGeometry.boundsTree = new MeshBVH(textSurfaceGeometry)
-      const projected = projectSurfaceText(font,{...p,baseDirection:direction},{position:p.textPosition,normal:p.textNormal},textSurfaceGeometry)
-      const text = projected.geometry
-      try {
-        if(!projected.valid)throw new Error(projected.error || 'Popisek nelze na tento povrch umístit.')
-        const expanded = text.index ? text.toNonIndexed() : text
-        const t = indexed(expanded.attributes.position.array)
-        if (expanded !== text) expanded.dispose()
-        const textSolid = asSolid(M, t.vertices, t.faces, own)
-        const overlap = own(result.intersect(textSolid))
-        if (overlap.isEmpty()) throw new Error('Popisek není spojený s povrchem. Umístěte jej znovu na povrch.')
-        result = own(p.textMode === 'engrave' ? result.subtract(textSolid) : result.add(textSolid))
-      } finally { text?.dispose() }
+    if(p.text.trim()){
+      progress('Přidávám popisek na stěnu modelu…')
+      result=addSurfaceLabel(M,result,p,fontData,direction,own)
     }
     if (p.hollow && p.cutHoles !== false && holes.some(hole=>hole.enabled)) {
     progress('Vyřezávám odtokové otvory přes spodní bevel…')
@@ -489,7 +523,7 @@ export async function buildModel(M, input, options, fontData, progress = () => {
       stats: { triangles: output.faces.length / 3, totalHeight: p.totalHeight, wall: p.wall, openBoundaryLoops: 0, volume: signedVolume(output.vertices, output.faces), components, sealedPockets, separatedContacts,
         boundaryRepair: boundaryRepair ? {removedDegenerate:boundaryRepair.removedDegenerate,removedFans:boundaryRepair.removedFans,removedArea:boundaryRepair.removedArea,closedMicroHoles:microRepair?.closedMicroHoles || 0,microHoleArea:microRepair?.microHoleArea || 0} : null } }
   } finally {
-    surfaceGeometry?.dispose(); closedGeometry?.dispose(); textSurfaceGeometry?.dispose(); drainGeometry?.dispose()
+    surfaceGeometry?.dispose(); closedGeometry?.dispose(); drainGeometry?.dispose()
     for (const obj of allocated.reverse()) obj.delete()
   }
 }

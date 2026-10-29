@@ -1,5 +1,5 @@
 'use client'
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useThree, useFrame } from '@react-three/fiber'
 import {advanceBaseReveal,BASE_REVEAL_MS,installBaseRevealShader} from './base-reveal.mjs'
 import * as THREE from 'three'
@@ -10,7 +10,9 @@ import { Html, useCursor } from '@react-three/drei'
 import { useBuilderGestureGuard } from './useBuilderGestureGuard'
 import { projectSurfaceText } from './surface-text.mjs'
 import { beginSurfaceTextDrag,moveSurfaceTextDrag } from './text-drag.mjs'
-import { createTextPreviewCache,createTextFrameQueue } from './text-preview-cache.mjs'
+import { createTextPreviewCache } from './text-preview-cache.mjs'
+
+import {textPreviewTransform} from './text-preview-motion.mjs'
 
 let fontRequest
 function TextShape({result,handlers,hovered}){
@@ -30,7 +32,7 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
  const {camera,gl}=useThree()
  useEffect(()=>{
   let live=true
-  fontRequest??=fetch('/wasm/model-builder/font.json').then(r=>{if(!r.ok)throw new Error('font');return r.json()}).then(data=>new FontLoader().parse(data)).catch(()=>{fontRequest=null;return null})
+  fontRequest??=fetch('/wasm/model-builder/inter-font.json').then(r=>{if(!r.ok)throw new Error('font');return r.json()}).then(data=>new FontLoader().parse(data)).catch(()=>{fontRequest=null;return null})
   fontRequest.then(value=>{if(live)setFont(value)})
   return()=>{live=false}
  },[])
@@ -56,21 +58,30 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
  },[geometry])
  useEffect(()=>()=>{display?.dispose();if(display)display.boundsTree=null},[display])
  // Keep label projection on the unlabelled base when a committed label is edited again.
- const textSurface=useMemo(()=>{
-  if(!textSurfaceGeometry)return display
-  const result=textSurfaceGeometry.clone();result.boundsTree=new MeshBVH(result);return result
- },[textSurfaceGeometry,display])
- useEffect(()=>()=>{if(textSurface!==display){textSurface?.dispose();if(textSurface)textSurface.boundsTree=null}},[textSurface,display])
+ const labelProjection=useMemo(()=>{
+  if(!textSurfaceGeometry)return null
+  const result=toCreasedNormals(textSurfaceGeometry,Math.PI/6);result.boundsTree=new MeshBVH(result);return result
+ },[textSurfaceGeometry])
+ useEffect(()=>()=>{labelProjection?.dispose();if(labelProjection)labelProjection.boundsTree=null},[labelProjection])
+ const textSurface=labelProjection||display
  const committed=useMemo(()=>options?.textPosition&&options?.textNormal?{position:options.textPosition,normal:options.textNormal}:null,[options?.textPosition,options?.textNormal])
  const placement=candidate||(placing?null:committed)
  const previewCache=useMemo(()=>createTextPreviewCache(point=>projectSurfaceText(font,options,point,textSurface,{preview:true})),[font,options?.text,options?.textSize,options?.textDepth,options?.textRotation,options?.textMode,options?.baseDirection,textSurface])
  const project=useCallback(point=>previewCache.get(point),[previewCache])
  useEffect(()=>()=>previewCache.dispose(),[previewCache])
  const result=useMemo(()=>project(placement),[project,placement])
+ const motionOrigin=useRef(null)
+ useLayoutEffect(()=>{
+  motionOrigin.current=placement
+  if(textRoot.current){textRoot.current.matrixAutoUpdate=false;textRoot.current.matrix.identity();textRoot.current.matrixWorldNeedsUpdate=true}
+ },[placement,result])
+ const movePreview=useCallback(point=>{
+  if(motionOrigin.current&&textRoot.current){textRoot.current.matrix.copy(textPreviewTransform(motionOrigin.current,point));textRoot.current.matrixWorldNeedsUpdate=true}
+ },[])
  const hasCandidate=!!candidate
  const previous=useMemo(()=>hasCandidate&&!result.valid&&committed?project(committed):null,[hasCandidate,result.valid,committed,project])
  const error=notice||result.error
- useEffect(()=>{onTextStatus?.({valid:!!result.valid&&!notice,error})},[result.valid,notice,error,onTextStatus])
+ useEffect(()=>{onTextStatus?.({valid:!!result.valid,error})},[result.valid,notice,error,onTextStatus])
  useEffect(()=>{if(overlayDragging&&!textDrag.current)setTextHovered(false)},[overlayDragging])
  useEffect(()=>setNotice(''),[options?.text,options?.textSize,options?.textDepth,options?.textRotation,options?.textMode,font])
  useEffect(()=>{if(!placing&&!textDrag.current)setCandidate(null)},[placing])
@@ -79,21 +90,18 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
   const check=project(point);setNotice(check.error)
   return check.valid
  },[font,project])
- const dragQueue=useMemo(()=>createTextFrameQueue(point=>{
-  setCandidate(point)
-  if(validate(point))change?.({textPosition:point.position,textNormal:point.normal})
- },callback=>requestAnimationFrame(callback),id=>cancelAnimationFrame(id)),[validate,change])
  const finishText=useCallback(()=>{
   const gesture=textDrag.current;if(!gesture)return
-  dragQueue.flush()
+  if(gesture.nextPoint&&validate(gesture.nextPoint))change?.({textPosition:gesture.nextPoint.position,textNormal:gesture.nextPoint.normal})
+  if(textRoot.current){textRoot.current.matrix.identity();textRoot.current.matrixWorldNeedsUpdate=true}
   textDrag.current=null;setTextHovered(false);setCandidate(null)
   try{gesture.target.releasePointerCapture?.(gesture.pointerId)}catch{}
   if(controlsRef?.current)controlsRef.current.enabled=false
   dragging?.(false);onDragEnd?.()
- },[controlsRef,dragging,onDragEnd,dragQueue])
+ },[controlsRef,dragging,onDragEnd,validate,change])
  useEffect(()=>{
   window.addEventListener('pointerup',finishText,true);window.addEventListener('pointercancel',finishText,true);window.addEventListener('blur',finishText,true)
-  return()=>{window.removeEventListener('pointerup',finishText,true);window.removeEventListener('pointercancel',finishText,true);window.removeEventListener('blur',finishText,true);dragQueue.clear();finishText()}
+  return()=>{window.removeEventListener('pointerup',finishText,true);window.removeEventListener('pointercancel',finishText,true);window.removeEventListener('blur',finishText,true);finishText()}
  },[finishText])
  const textHandlers={
   onPointerOver:event=>{event.stopPropagation();if(!textDrag.current&&!overlayDragging)setTextHovered(true)},
@@ -112,15 +120,15 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
    const gesture=textDrag.current;if(!gesture)return
    event.stopPropagation();mesh.current.updateWorldMatrix(true,false)
    const ray=event.ray.clone().applyMatrix4(mesh.current.matrixWorld.clone().invert()),point=moveSurfaceTextDrag(textSurface,ray,gesture)
-   if(!point){dragQueue.clear();setNotice('Kurzor je mimo souvislý povrch. Poslední platná poloha textu zůstala zachovaná.');return}
-   dragQueue.push(point)
+   if(!point){gesture.nextPoint=null;setNotice('Kurzor je mimo souvislý povrch. Poslední platná poloha textu zůstala zachovaná.');return}
+   gesture.nextPoint=point;movePreview(point)
   },
   onPointerUp:finishText,onPointerCancel:finishText,
  }
  useEffect(()=>{
   if(!editable||!placing||!display)return
   const raycaster=new THREE.Raycaster(),pointer=new THREE.Vector2();raycaster.firstHitOnly=true
-  let frame=0
+  let frame=0,settle=0
   const hitAt=event=>{
    if(!mesh.current)return null
    const rect=gl.domElement.getBoundingClientRect()
@@ -131,20 +139,26 @@ export function BuilderPreview({textSurfaceGeometry=null,showTextPreview=true,ro
   const pointAt=hit=>({position:mesh.current.worldToLocal(hit.point.clone()).toArray(),normal:hit.face.normal.toArray()})
   const move=event=>{
    if(event.buttons)return
-   cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>{const hit=hitAt(event);setNotice('');setCandidate(hit?pointAt(hit):null)})
+   cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>{
+    const hit=hitAt(event);clearTimeout(settle)
+    if(!hit){setCandidate(null);return}
+    const point=pointAt(hit)
+    if(!motionOrigin.current)setCandidate(point)
+    else{movePreview(point);settle=setTimeout(()=>{setNotice('');setCandidate(point)},100)}
+   })
   }
-  const leave=()=>setCandidate(null)
+  const leave=()=>{clearTimeout(settle);setCandidate(null)}
   const pick=event=>{
    if(event.button!==0)return
-   const hit=hitAt(event);if(!hit)return
+   clearTimeout(settle);cancelAnimationFrame(frame);const hit=hitAt(event);if(!hit)return
    event.preventDefault();event.stopPropagation()
    const point=pointAt(hit);setCandidate(point)
    if(!validate(point))return
    onSurfaceClick?.({...hit,stopPropagation(){}});setCandidate(null)
   }
   gl.domElement.addEventListener('pointerdown',pick,true);gl.domElement.addEventListener('pointermove',move,true);gl.domElement.addEventListener('pointerleave',leave)
-  return()=>{cancelAnimationFrame(frame);gl.domElement.removeEventListener('pointerdown',pick,true);gl.domElement.removeEventListener('pointermove',move,true);gl.domElement.removeEventListener('pointerleave',leave)}
- },[editable,placing,display,gl,camera,onSurfaceClick,validate])
+  return()=>{clearTimeout(settle);cancelAnimationFrame(frame);gl.domElement.removeEventListener('pointerdown',pick,true);gl.domElement.removeEventListener('pointermove',move,true);gl.domElement.removeEventListener('pointerleave',leave)}
+ },[editable,placing,display,gl,camera,onSurfaceClick,validate,movePreview])
  if(!display)return null
  const blockHidden=event=>{if(!overlayDragging)event.stopPropagation()}
  const badge=placement?new THREE.Vector3(...placement.position).addScaledVector(new THREE.Vector3(...placement.normal),1.5).toArray():null

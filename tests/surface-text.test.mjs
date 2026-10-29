@@ -6,7 +6,7 @@ import {MeshBVH} from 'three-mesh-bvh'
 import {FontLoader} from 'three/examples/jsm/loaders/FontLoader.js'
 import {mergeGeometries} from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import {projectSurfaceText} from '../app/model-builder/surface-text.mjs'
-const font=new FontLoader().parse(JSON.parse(fs.readFileSync(new URL('../public/wasm/model-builder/font.json',import.meta.url),'utf8')))
+const font=new FontLoader().parse(JSON.parse(fs.readFileSync(new URL('../public/wasm/model-builder/inter-font.json',import.meta.url),'utf8')))
 const options={text:'A',textSize:2,textDepth:.5,textMode:'emboss',textRotation:0,baseDirection:1}
 const tree=geometry=>{geometry.boundsTree=new MeshBVH(geometry);return geometry}
 

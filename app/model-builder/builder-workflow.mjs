@@ -9,3 +9,7 @@ export function canApplyBuilderText(options,status,busy=false){
 export function builderGeometryOptions(options,stage){
  return stage==='base'?{...options,text:'',textPosition:null,textNormal:null}:options
 }
+
+export function builderTextSignature(options){
+ return JSON.stringify([options.text,options.textSize,options.textDepth,options.textMode,options.textRotation,options.textPosition,options.textNormal])
+}

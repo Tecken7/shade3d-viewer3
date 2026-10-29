@@ -15,7 +15,7 @@ import { orientRepairPatch } from '../app/model-builder/repair-orientation.mjs'
 import { buildModel, meshTopology, indexed } from '../app/model-builder/engine.mjs'
 import { holeDirection } from '../app/model-builder/hole-placement.mjs'
 const M=await Module();M.setup()
-const font=JSON.parse(fs.readFileSync(new URL('../public/wasm/model-builder/font.json',import.meta.url)))
+const font=JSON.parse(fs.readFileSync(new URL('../public/wasm/model-builder/inter-font.json',import.meta.url)))
 const contour=[[-20,-15],[-8,-15],[-8,4],[-5,9],[5,9],[8,4],[8,-15],[20,-15],[20,6],[13,18],[-13,18],[-20,6]].map(p=>new THREE.Vector2(...p))
 const scan=[]
 for(const tri of THREE.ShapeUtils.triangulateShape(contour,[])){
