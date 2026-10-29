@@ -21,6 +21,8 @@ function fixture({ fail = false } = {}) {
       if (fail) throw new Error('Preparation failed')
       return context
     },
+    prepareRepairVerticesAsync: async value => {assert.equal(value,object);events.push('weld');return {backup:[]}},
+    prepareTrimCleanupAsync: async value => {assert.equal(value,object);events.push('cleanup');return {backup:[]}},
     runStepsAsync: iterator => runStepsAsync(iterator, {budget: 0}),
     console: {error() {}},
   }
@@ -66,4 +68,13 @@ test('camera stays enabled during preparation but retains the boundary-drag and 
   assert.equal(enabled({trimBusy:false, trimStage:'boundary'}), true)
   assert.equal(enabled({trimDraggingPoint:0}), false)
   assert.equal(enabled({sliceOverlayInteracting:true}), false)
+})
+
+
+test('builder checks seams and microholes before making the trim surface available for drawing',async()=>{
+ const {select,states,events}=fixture()
+ await select('scan.obj',{preparing:true})
+ assert.deepEqual(events,['paint','weld','cleanup','prepare'])
+ assert.equal(states.setTrimStage,'boundary')
+ assert.equal(states.setTrimBusy,false)
 })

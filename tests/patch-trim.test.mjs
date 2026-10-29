@@ -124,3 +124,34 @@ test('curved horseshoe scan trims to a regular arch with a single boundary',()=>
  for(const id of topology.loops[0]){const p=new THREE.Vector3().fromArray(welded.vertices,id*3);let nearest=Infinity;for(const q of reference)nearest=Math.min(nearest,p.distanceToSquared(q));worst=Math.max(worst,Math.sqrt(nearest))}
  assert.ok(worst<.035,'maximum curved border deviation '+worst+' mm')
 })
+
+
+test('a cutting-plane detour over a folded surface falls back to a connected surface route',()=>{
+ const positions=[],n=24
+ const point=(x,y)=>[x/n,y/4-.5,.8*Math.sin(Math.PI*x/n)]
+ for(let y=0;y<4;y++)for(let x=0;x<n;x++){
+  const a=point(x,y),b=point(x+1,y),c=point(x,y+1),d=point(x+1,y+1)
+  positions.push(...a,...b,...c,...b,...d,...c)
+ }
+ const geometry=new THREE.BufferGeometry().setAttribute('position',new THREE.Float32BufferAttribute(positions,3)),context=helpers.buildTrimMeshContext(new THREE.Mesh(geometry))
+ const a=helpers.projectTrimPointToSurface(context,[.08,.037,.8*Math.sin(Math.PI*.08)]),b=helpers.projectTrimPointToSurface(context,[.92,.037,.8*Math.sin(Math.PI*.92)])
+ assert.equal(trimPlaneSurfacePath(context,a,b),null,'a long planar excursion must not be used as a short spline connection')
+ const path=helpers.trimTriangleSurfacePath(context,a,b)
+ assert.ok(path?.pieces.length>1,'the general surface path still connects both samples')
+ assert.deepEqual(path.points[0],a.point);assert.deepEqual(path.points.at(-1),b.point)
+ for(let i=1;i<path.pieces.length;i++)assert.deepEqual(path.pieces[i-1].b,path.pieces[i].a)
+})
+
+
+test('surface routes keep a control sample exactly on a shared edge without microscopic return segments',()=>{
+ const positions=[0,0,0,1,0,0,1,1,0,0,0,0,1,1,0,0,1,0]
+ const geometry=new THREE.BufferGeometry().setAttribute('position',new THREE.Float32BufferAttribute(positions,3)),context=helpers.buildTrimMeshContext(new THREE.Mesh(geometry))
+ const edge=[.25,.25,0]
+ const from={point:edge,triangleIndex:0},to={point:[.2,.8,0],triangleIndex:1}
+ const path=helpers.trimTriangleSurfacePath(context,from,to)
+ assert.deepEqual(path.pieces[0].a,edge)
+ assert.deepEqual(path.pieces[0].b,edge,'the first portal is the exact control point, rather than a tiny excursion')
+ const reverse=helpers.trimTriangleSurfacePath(context,{point:[.8,.2,0],triangleIndex:0},{point:edge,triangleIndex:1})
+ assert.deepEqual(reverse.pieces.at(-1).a,edge)
+ assert.deepEqual(reverse.pieces.at(-1).b,edge)
+})

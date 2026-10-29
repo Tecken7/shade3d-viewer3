@@ -711,7 +711,21 @@ function trimTriangleSurfacePath(context, startHit, endHit) {
       if (evaluate(t1) <= evaluate(t2)) hi = t2
       else lo = t1
     }
-    return portal.a.clone().lerp(portal.b, (lo + hi) * 0.5)
+    // Ternary search alone never reaches an exact endpoint. If a spline
+    // sample lies on the shared edge, that leaves a microscopic out-and-back
+    // segment which Earcut can turn into an overlapping sliver.
+    const edge = new THREE.Line3(portal.a, portal.b)
+    const candidates = [previousPoint, nextPoint].map(point => {
+      const projected = edge.closestPointToPoint(point, true, new THREE.Vector3())
+      return projected.distanceToSquared(point) < 1e-18 ? point.clone() : projected
+    })
+    candidates.push(portal.a, portal.b, portal.a.clone().lerp(portal.b, (lo + hi) * 0.5))
+    let best = candidates[0], bestCost = previousPoint.distanceTo(best) + best.distanceTo(nextPoint)
+    for (const point of candidates.slice(1)) {
+      const cost = previousPoint.distanceTo(point) + point.distanceTo(nextPoint)
+      if (cost < bestCost - 1e-12) { best = point; bestCost = cost }
+    }
+    return best.clone()
   }
   for (let pass = 0; pass < 32; pass++) {
     let movement=0

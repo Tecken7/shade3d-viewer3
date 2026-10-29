@@ -31,6 +31,10 @@ export function trimPlaneSurfacePath(context,startHit,endHit){
  const faces=[];let id=endHit.triangleIndex
  while(id!==null){faces.push(id);id=previous.get(id)}faces.reverse()
  const points=[start,...faces.slice(1).map(id=>portals.get(id)),end],distance=points.slice(1).reduce((sum,p,i)=>sum+p.distanceTo(points[i]),0)
- if(distance>length*2+1)return null
+ // On a locally folded surface the cutting plane can run around a crease,
+ // then return across the next spline span. This is not a hole in the scan.
+ // Prefer the general shortest surface route when the plane takes a detour;
+ // its former +1 mm allowance was especially large for sub-mm spline samples.
+ if(distance>length*1.3+1e-6)return null
  return {points:points.map(p=>p.toArray()),pieces:faces.map((triangleIndex,i)=>({triangleIndex,a:points[i].toArray(),b:points[i+1].toArray()}))}
 }
