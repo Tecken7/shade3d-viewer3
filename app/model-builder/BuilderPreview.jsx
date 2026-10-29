@@ -15,12 +15,13 @@ import {useTextProjection} from './useTextProjection'
 
 
 const fontRequests=new Map()
+const ignoreTextRaycast=()=>null
 function TextShape({result,handlers,hovered}){
  const geometry=result?.geometry
  if(!geometry)return null
  const center=geometry.boundingBox.getCenter(new THREE.Vector3()),size=geometry.boundingBox.getSize(new THREE.Vector3()).addScalar(.15)
  return <group {...handlers}>
-  <mesh geometry={geometry} dispose={null} raycast={handlers?undefined:()=>null}><meshBasicMaterial color={!result.valid?'#f87171':hovered?'#93c5fd':'#60a5fa'} depthTest depthWrite/></mesh>
+  <mesh geometry={geometry} dispose={null} raycast={handlers?THREE.Mesh.prototype.raycast:ignoreTextRaycast}><meshBasicMaterial color={!result.valid?'#f87171':hovered?'#93c5fd':'#60a5fa'} depthTest depthWrite/></mesh>
   {handlers&&<mesh position={center}><boxGeometry args={size.toArray()}/><meshBasicMaterial colorWrite={false} depthWrite={false} depthTest/></mesh>}
  </group>
 }
