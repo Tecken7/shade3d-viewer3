@@ -2,6 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import Module from 'manifold-3d'
+import * as THREE from 'three'
+import {MeshBVH} from 'three-mesh-bvh'
+import {isCavityWall} from '../app/model-builder/lab-logo-placement.mjs'
 import {indexed,meshTopology} from '../app/model-builder/engine.mjs'
 import {decorateFinishedModel,contactArea} from '../app/model-builder/finished-model-tags.mjs'
 import {readBinarySTL,encodeClosedSTL} from '../scripts/lib/finished-model-stl.mjs'
@@ -18,7 +21,7 @@ test('finished hollow models receive an outer Inter tag and an inner mixed-weigh
  assert.equal(result.status,'ready',result.message);assert.deepEqual(base.positions,before)
  assert.equal(result.items.length,2);assert.equal(result.items[1].weight,'ART 800 / HETIC 400')
  assert.ok(Math.abs(result.contactAreaAfter-contactArea(base))<.001)
- for(const label of result.items){const inward=-label.position[0]*label.normal[0]-label.position[2]*label.normal[2];assert.ok(label.side==='inner'?inward>0:inward<0)}
+ for(const label of result.items){const inward=-label.position[0]*label.normal[0]-label.position[2]*label.normal[2];assert.ok(label.side==='cavity'?inward>0:inward<0)}
  const topology=meshTopology(Array.from(result.output.positions),Array.from(result.output.indices));assert.equal(topology.openEdges,0);assert.equal(topology.nonManifold,0)
  const exported=encodeClosedSTL(result.output.positions,result.output.indices),roundtrip=indexed(readBinarySTL(exported.bytes),{exact:true}),check=meshTopology(roundtrip.vertices,roundtrip.faces)
  assert.equal(check.openEdges,0);assert.equal(check.nonManifold,0)
@@ -41,4 +44,23 @@ test('several tags reserve their footprint and can coexist with the interior log
  assert.equal(result.status,'ready',result.message);assert.equal(result.items.length,3)
  const unique=new Set(result.items.map(label=>JSON.stringify(label.position)));assert.equal(unique.size,3)
  assert.ok(Math.abs(result.contactAreaBefore-result.contactAreaAfter)<.001)
+})
+
+test('cavity classification rejects a lingual wall facing an open arch',()=>{
+ const geometry=new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(base.positions,3)).setIndex(new THREE.BufferAttribute(base.indices,1))
+ geometry.boundsTree=new MeshBVH(geometry)
+ assert.equal(isCavityWall(geometry,new THREE.Vector3(27.5,6,0),new THREE.Vector3(-1,0,0),base.placement),true)
+ geometry.dispose()
+ // An inward-facing U wall is not a hollow-model cavity: its airspace has no roof.
+ const outer=M.Manifold.cube([60,16,35],true).translate([0,8,0]),cut=M.Manifold.cube([40,20,30],true).translate([0,8,-5]),u=outer.subtract(cut),m=u.getMesh()
+ const g=new THREE.BufferGeometry().setAttribute('position',new THREE.Float32BufferAttribute(m.vertProperties,3)).setIndex(Array.from(m.triVerts));g.boundsTree=new MeshBVH(g)
+ assert.equal(isCavityWall(g,new THREE.Vector3(20,6,0),new THREE.Vector3(-1,0,0),base.placement),false)
+ g.dispose();u.delete();cut.delete();outer.delete()
+})
+
+test('signature size is explicit and invalid values cannot alter a model',async()=>{
+ await assert.rejects(()=>decorateFinishedModel(M,base,{logo:true,logoSize:NaN},fonts),/Velikost/)
+ const result=await decorateFinishedModel(M,base,{logo:true,logoSize:1.6},fonts)
+ assert.equal(result.status,'ready',result.message);assert.equal(result.items[0].size,1.6)
+ assert.equal(result.items[0].name,'Designed by ARTHETIC');assert.equal(result.items[0].side,'cavity')
 })

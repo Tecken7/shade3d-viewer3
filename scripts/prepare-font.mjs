@@ -20,5 +20,5 @@ console.log('Generated Inter',weight,Object.keys(glyphs).length,'glyphs, Czech:'
 }
 
 const regular=JSON.parse(fs.readFileSync('public/wasm/model-builder/inter-font.json')),bold=JSON.parse(fs.readFileSync('public/wasm/model-builder/inter-800-font.json'))
-const brand={...regular,familyName:'ARTHETIC',glyphs:{...Object.fromEntries([...'HETIC '].map(char=>[char,regular.glyphs[char]])),...Object.fromEntries([...'ART'].map((char,i)=>[String.fromCharCode(0xe000+i),bold.glyphs[char]]))}}
+const brand={...regular,familyName:'ARTHETIC',glyphs:{...Object.fromEntries([...'Designed by HETIC '].map(char=>[char,regular.glyphs[char]])),...Object.fromEntries([...'ART'].map((char,i)=>[String.fromCharCode(0xe000+i),bold.glyphs[char]]))}}
 fs.writeFileSync('public/wasm/model-builder/arthetic-logo-font.json',JSON.stringify(brand))

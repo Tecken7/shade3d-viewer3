@@ -8,11 +8,12 @@ import {readBinarySTL,encodeClosedSTL} from './lib/finished-model-stl.mjs'
 const args=process.argv.slice(2),files=[],config={logo:true,tags:[]};let directory='',tag='',weight=500,size=4,mode='emboss',depth=.4,holesFile=''
 for(let i=0;i<args.length;i++){
  const key=args[i]
- if(key==='--help'){console.log('node scripts/tag-finished-model.mjs model.stl [další.stl] --out složka [--tag "MODEL 04"] [--no-logo] [--weight 500] [--size 4] [--engrave] [--depth 0.4] [--holes-report report.json]\nVstup: hotové 3Shape STL, spodek v ose Z. Logo Inter je výchozí, souřadnice exportu zůstanou zachované. {name} v tagu se nahradí názvem souboru.');process.exit(0)}
+ if(key==='--help'){console.log('node scripts/tag-finished-model.mjs model.stl [další.stl] --out složka [--tag "MODEL 04"] [--no-logo] [--logo-size 1.8] [--weight 500] [--size 4] [--engrave] [--depth 0.4] [--holes-report report.json]\nVstup: hotové 3Shape STL, spodek v ose Z. Logo Inter je výchozí, souřadnice exportu zůstanou zachované. {name} v tagu se nahradí názvem souboru.');process.exit(0)}
  if(key==='--out')directory=args[++i]
  else if(key==='--tag')tag=args[++i]
  else if(key==='--weight')weight=Number(args[++i])
  else if(key==='--size')size=Number(args[++i])
+ else if(key==='--logo-size')config.logoSize=Number(args[++i])
  else if(key==='--depth')depth=Number(args[++i])
  else if(key==='--holes-report')holesFile=args[++i]
  else if(key==='--no-logo')config.logo=false

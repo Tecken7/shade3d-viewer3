@@ -70,7 +70,7 @@ test('Inter Extra Light and Extra Bold survive the actual label boolean with the
 
 test('lab logo preserves mixed weights, finds an interior wall and merges without rebuilding the base',async()=>{
  const brandFont=JSON.parse(fs.readFileSync(new URL('../public/wasm/model-builder/arthetic-logo-font.json',import.meta.url))),bold=JSON.parse(fs.readFileSync(new URL('../public/wasm/model-builder/inter-800-font.json',import.meta.url)))
- assert.equal(brandFont.glyphs[LAB_LOGO_TEXT[2]].o,bold.glyphs.T.o)
+ assert.equal(brandFont.glyphs['\ue002'].o,bold.glyphs.T.o)
  assert.equal(brandFont.glyphs.T.o,font.glyphs.T.o)
  const base=await getBase(),before=base.positions.slice(),geometry=new THREE.BufferGeometry()
  geometry.setAttribute('position',new THREE.BufferAttribute(base.positions,3));geometry.setIndex(new THREE.BufferAttribute(base.indices,1))

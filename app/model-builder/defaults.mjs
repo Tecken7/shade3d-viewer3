@@ -3,5 +3,5 @@ export const DEFAULTS = {
   repairBoundary: false, drainsEnabled: true,
   holes: [], text: '', textDepth: 0.5, textSize: 4, textWeight: 400, textMode: 'emboss',
   textPosition: null, textNormal: null, textRotation: 0,
-  textLogoEnabled: false, textLogoPosition: null, textLogoNormal: null, textLogoSize: 2.6, textLogoRotation: 0, textLogoSearchNonce: 0,
+  textLogoEnabled: false, textLogoPosition: null, textLogoNormal: null, textLogoSize: 1.8, textLogoRotation: 0, textLogoSearchNonce: 0,
 }

@@ -4,7 +4,26 @@ import {projectSurfaceText} from './surface-text.mjs'
 import {LAB_LOGO_TEXT} from './lab-logo.mjs'
 
 export function findLabLogoPlacement(surface,font,options,placement){
- return findSurfaceLabelPlacement(surface,font,options,placement,{rotation:options.textLogoRotation??0})
+ return findSurfaceLabelPlacement(surface,font,options,placement,{side:'cavity',sizes:[options.textLogoSize??1.8],rotation:options.textLogoRotation??0})
+}
+
+// A lingual exterior also faces the arch centre. A true cavity must instead
+// have a roof, an open route to the printing plane and walls across its airspace.
+export function isCavityWall(surface,point,normal,placement){
+ const p=point.clone().addScaledVector(normal,1.3),direction=placement.direction??1
+ const cast=axis=>{
+  const geometry=surface.boundsTree.geometry,normals=geometry.attributes.normal
+  geometry.deleteAttribute('normal')
+  try{return surface.boundsTree.raycastFirst(new THREE.Ray(p,axis),THREE.DoubleSide)}finally{if(normals)geometry.setAttribute('normal',normals)}
+ }
+ const roof=cast(new THREE.Vector3(0,-direction,0))
+ if(!roof||roof.face.normal.y*direction<.15)return false
+ const floorDistance=(placement.baseY-p.y)*direction,floor=cast(new THREE.Vector3(0,direction,0))
+ if(floorDistance<=0||floor&&floor.distance<floorDistance-.15)return false
+ const across=new THREE.Vector3(normal.x,0,normal.z).normalize(),tangent=new THREE.Vector3(-across.z,0,across.x)
+ if(!surface.boundingBox)surface.computeBoundingBox()
+ const span=surface.boundingBox.getSize(new THREE.Vector3()).length()
+ return [across,tangent,tangent.clone().negate()].every(axis=>{const hit=cast(axis);return hit&&hit.distance<span&&hit.face.normal.dot(axis)<-.15})
 }
 
 // Reuse the same physical footprint and exact wrap checks for ordinary tags.
@@ -25,12 +44,12 @@ export function findSurfaceLabelPlacement(surface,font,options,placement,layout=
  const count=index?index.count:position.count
  for(let i=0;i<count;i+=3){
   for(const [corner,key]of [[0,'a'],[1,'b'],[2,'c']])triangle[key].fromBufferAttribute(position,index?index.getX(i+corner):i+corner)
-  triangle.getNormal(normal);if(Math.abs(normal.y)>.12)continue
+  triangle.getNormal(normal);if(Math.abs(normal.y)>(layout.side==='cavity'?.35:.12))continue
   triangle.getMidpoint(point)
   const depth=direction*(baseY-point.y)
   if(depth<1||depth>Math.min(9,options.totalHeight*.7))continue
   const inward=new THREE.Vector3(center.x-point.x,0,center.z-point.z).normalize().dot(normal)*(layout.side==='outer'?-1:1)
-  if(inward<.35)continue
+  if(layout.side==='cavity'){if(!isCavityWall(surface,point,normal,placement))continue}else if(inward<.35)continue
   const key=`${Math.round(point.x)}:${Math.round(point.z)}`
   if(!cells.has(key))cells.set(key,{point:point.clone(),normal:normal.clone(),inward})
  }
@@ -38,9 +57,9 @@ export function findSurfaceLabelPlacement(surface,font,options,placement,layout=
   const text=new TextGeometry(layout.text??LAB_LOGO_TEXT,{font,size,depth:layout.depth??.4,curveSegments:4,bevelEnabled:false});text.computeBoundingBox()
   const width=text.boundingBox.max.x-text.boundingBox.min.x,height=text.boundingBox.max.y-text.boundingBox.min.y;text.dispose()
   const candidates=[]
-  for(const cell of cells.values())for(const depth of [3.2,4.6,2.5]){
+  for(const cell of cells.values())for(const depth of layout.side==='cavity'?[4.6,6,3.2,2.5]:[3.2,4.6,2.5]){
    const proposal=cell.point.clone();proposal.y=baseY-direction*depth
-   const hit=project(proposal,cell.normal,.7);if(!hit||Math.abs(hit.face.normal.y)>.2)continue
+   const hit=project(proposal,cell.normal,.7);if(!hit||Math.abs(hit.face.normal.y)>(layout.side==='cavity'?.35:.2))continue
    const n=hit.face.normal.clone().normalize(),right=new THREE.Vector3().crossVectors(new THREE.Vector3(0,-direction,0),n).normalize()
    if(options.textPosition&&options.textNormal&&n.dot(new THREE.Vector3(...options.textNormal))>.65){
     const offset=hit.point.clone().sub(new THREE.Vector3(...options.textPosition)),userWidth=(options.text?.length||0)*(options.textSize||4)*.6
@@ -52,7 +71,7 @@ export function findSurfaceLabelPlacement(surface,font,options,placement,layout=
    for(const x of [-width/2-.4,0,width/2+.4])for(const y of [-height/2-.4,0,height/2+.4]){
     const sample=hit.point.clone().addScaledVector(right,x);sample.y+=y
     const check=project(sample,n)
-    if(!check||Math.abs(check.face.normal.y)>.45){valid=false;break}
+    if(!check||Math.abs(check.face.normal.y)>.45||layout.side==='cavity'&&!isCavityWall(surface,check.point,check.face.normal,placement)){valid=false;break}
     quality+=check.face.normal.dot(n)
    }
    if(valid)candidates.push({position:hit.point.toArray(),normal:n.toArray(),size,score:quality+cell.inward*3-Math.abs(depth-3.2)*.15})

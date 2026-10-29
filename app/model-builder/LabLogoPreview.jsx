@@ -22,7 +22,7 @@ export default function LabLogoPreview({geometry,placement,options,change,onStat
    worker.postMessage({positions,index,placement,options,font},[positions.buffer,index?.buffer].filter(Boolean))
   }).catch(error=>{if(live){setSearching(false);setSearchError(error.message)}})
   return()=>{live=false;worker?.terminate()}
- },[geometry,placement,options.textLogoEnabled,options.textLogoPosition,options.textLogoSearchNonce,change])
+ },[geometry,placement,options.textLogoEnabled,options.textLogoPosition,options.textLogoSearchNonce,options.textLogoSize,change])
  const status=useCallback(value=>onStatus({...value,searching,placing:placing&&selected==='logo',valid:!searching&&!!options.textLogoPosition&&value.valid,error:searching?'Hledám vhodnou vnitřní stěnu…':!options.textLogoPosition&&searchError?searchError:value.error}),[onStatus,searching,searchError,placing,selected,options.textLogoPosition])
  const patch=useCallback(value=>change(labLogoPatch(value)),[change]),choose=useCallback(()=>select('logo'),[select])
  const config=useMemo(()=>labLogoOptions(options),[options])
