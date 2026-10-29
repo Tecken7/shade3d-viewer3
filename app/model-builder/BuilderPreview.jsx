@@ -67,6 +67,9 @@ export function BuilderPreview({overlayOnly=false,fontUrlOverride=null,interacti
  useEffect(()=>()=>{labelProjection?.dispose();if(labelProjection)labelProjection.boundsTree=null},[labelProjection])
  const textSurface=labelProjection||display
  const committed=useMemo(()=>options?.textPosition&&options?.textNormal?{position:options.textPosition,normal:options.textNormal}:null,[options?.textPosition,options?.textNormal])
+ // A committed position can normalize the picked normal. Its exact refresh
+ // must not leave an older live-motion completion keeping the UI busy.
+ useEffect(()=>{if(!placing&&!textDrag.current){clearTimeout(liveTimer.current);livePoint.current=null;setMoving(false);setFastValid(null)}},[placing,committed])
  const placement=candidate||(placing?null:committed)
  const {result,pending,project}=useTextProjection(editable&&showTextPreview&&options?.text?.trim()?textSurface:null,font,options)
  useEffect(()=>{project(placement)},[project,placement,font,textSurface,options?.text,options?.textSize,options?.textDepth,options?.textRotation,options?.textMode,options?.textWeight,options?.baseDirection,editable,showTextPreview])
