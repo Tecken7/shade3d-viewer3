@@ -13,11 +13,11 @@ import AnimatedSceneLoader,{useLoaderPresence} from '../AnimatedSceneLoader'
 import '../SceneLoader.css'
 import styles from './models.module.css'
 
-const initial={convertBase:true,autoHeight:true,preserveOriginal:true,autoHollow:true,wall:2.5,replaceHeight:2.5,bevel:1,holes:true,diameter:4.5,logo:true,logoSize:1.8,tag:'',tagSize:4}
-function Model({data}){
+const initial={convertBase:true,autoHeight:true,preserveOriginal:true,extendBase:false,autoHollow:true,wall:2.5,replaceHeight:2.5,bevel:1,holes:true,diameter:6,logo:true,logoSize:1.8,tag:'',tagSize:4}
+function Model({data,onProtect}){
  const geometry=useMemo(()=>{const raw=new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(data.positions,3)).setIndex(new THREE.BufferAttribute(data.indices,1));const g=toCreasedNormals(raw,Math.PI/6);raw.dispose();return g},[data])
- useEffect(()=>()=>geometry.dispose(),[geometry])
- return <mesh geometry={geometry}><meshStandardMaterial color="#AAA08E" roughness={.42} metalness={.51} side={THREE.DoubleSide}/></mesh>
+ useEffect(()=>()=>geometry?.dispose(),[geometry])
+ return <mesh geometry={geometry} onClick={onProtect?e=>{if(e.delta<=4){e.stopPropagation();onProtect(e.point)}}:undefined}><meshStandardMaterial color="#AAA08E" roughness={.42} metalness={.51} side={THREE.DoubleSide}/></mesh>
 }
 function save(bytes,name){const url=URL.createObjectURL(new Blob([bytes],{type:name.endsWith('.zip')?'application/zip':'application/octet-stream'})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),10000)}
 const safeName=name=>name.replace(/\.stl$/i,'').replace(/[<>:"/\\|?*\x00-\x1f]/g,'_')+'-ARTHETIC.stl'
@@ -25,12 +25,14 @@ const statusText={waiting:'Připraveno',working:'Zpracovávám',ready:'Hotovo',e
 export default function ModelsTool(){
  const [items,setItems]=useState([]),[settings,setSettings]=useState(initial),[active,setActive]=useState(null),[busy,setBusy]=useState(false),[reading,setReading]=useState(false),[message,setMessage]=useState(''),[progress,setProgress]=useState(0),[error,setError]=useState(''),[drag,setDrag]=useState(false),[view,setView]=useState('result')
  const input=useRef(),worker=useRef(),pendingReject=useRef(),runId=useRef(0),cancelled=useRef(false),alive=useRef(true),dragCount=useRef(0)
+ const [protecting,setProtecting]=useState(false),[protectionRadius,setProtectionRadius]=useState(3)
  const [pending,setPending]=useState([]),[labelIndex,setLabelIndex]=useState(0),[placing,setPlacing]=useState(false),[textStatus,setTextStatus]=useState({valid:false})
  const presence=useLoaderPresence(busy),selected=items.find(item=>item.id===active),result=selected?.result
  useEffect(()=>{setPending(result?.manual?.pending?.map(tag=>({...tag}))||[]);setLabelIndex(0);setPlacing(false)},[result])
  const editLabel=useCallback(patch=>setPending(current=>current.map((tag,i)=>i===labelIndex?{...tag,...patch}:tag)),[labelIndex])
  const pickLabel=useCallback(hit=>{editLabel({position:hit.point.toArray(),normal:hit.face.normal.toArray()});setPlacing(false)},[editLabel])
  useEffect(()=>{alive.current=true;return()=>{alive.current=false;worker.current?.terminate();pendingReject.current?.(Error('Zrušeno'))}},[])
+ useEffect(()=>setProtecting(false),[active])
  const update=(id,patch)=>setItems(current=>current.map(item=>item.id===id?{...item,...patch}:item))
  const change=(key,value)=>setSettings(current=>({...current,[key]:value}))
  async function addFiles(files){
@@ -53,9 +55,9 @@ export default function ModelsTool(){
   }catch(err){setError(err.message)}finally{setReading(false);if(input.current)input.current.value=''}
  }
  function stop(){runId.current++;cancelled.current=true;worker.current?.terminate();worker.current=null;pendingReject.current?.(Error('Zrušeno'));pendingReject.current=null;setItems(current=>current.map(item=>item.status==='working'?{...item,status:'cancelled',error:'Převod byl zrušen.'}:item));setBusy(false)}
- async function run(){
+ async function run(onlyId){
   if(busy||!items.length)return
-  const ticket=++runId.current;cancelled.current=false;setBusy(true);setError('');const batch=items.slice(),config={...settings}
+  const ticket=++runId.current;cancelled.current=false;setBusy(true);setError('');const batch=typeof onlyId==='string'?items.filter(item=>item.id===onlyId):items.slice(),config={...settings}
   for(let i=0;i<batch.length;i++){
    if(ticket!==runId.current||cancelled.current||!alive.current)break
    const item=batch[i];update(item.id,{status:'working',result:null,error:null});setActive(item.id);setMessage('Připravuji model…');setProgress(i/batch.length*100)
@@ -64,7 +66,7 @@ export default function ModelsTool(){
      pendingReject.current=reject;const w=new Worker(new URL('./models.worker.js',import.meta.url));worker.current=w
      w.onmessage=({data})=>{if(data.progress){setMessage(data.progress);return}w.terminate();worker.current=null;data.error?reject(Error(data.error)):resolve(data.result)}
      w.onerror=()=>{w.terminate();worker.current=null;reject(Error('Výpočet se přerušil. Zkuste menší dávku.'))}
-     const copy=item.buffer.slice(0);w.postMessage({buffer:copy,settings:{...config,tag:config.tag.replaceAll('{name}',item.name.replace(/\.stl$/i,''))}},[copy])
+     const copy=item.buffer.slice(0);w.postMessage({buffer:copy,settings:{...config,protectedZones:item.protectedZones||[],tag:config.tag.replaceAll('{name}',item.name.replace(/\.stl$/i,''))}},[copy])
     })
     if(ticket===runId.current&&!cancelled.current&&alive.current)update(item.id,{status:value.status||'ready',result:value})
    }catch(err){if(ticket===runId.current&&!cancelled.current&&alive.current)update(item.id,{status:'error',error:err.message})}
@@ -102,14 +104,16 @@ export default function ModelsTool(){
    {items.some(item=>item.result?.stl)&&<button type="button" disabled={busy} onClick={downloadAll}>Stáhnout ZIP ({items.filter(item=>item.result?.stl).length})</button>}
   </aside>
   <section className={styles.scene} aria-label="Náhled modelu">
-   {result?<><div className={styles.viewButtons}><button type="button" aria-pressed={view==='result'} onClick={()=>setView('result')}>Výsledek</button><button type="button" aria-pressed={view==='original'} onClick={()=>setView('original')}>Původní model</button></div><Preview key={`${active}-${view}`} result={result} original={view==='original'?selected.buffer:null} manual={view==='result'&&result.manual?pending[labelIndex]:null} placing={placing} onPick={pickLabel} onChange={editLabel} onStatus={setTextStatus}/></>:<div className={styles.empty}><svg width="68" height="68" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.2"><path d="M8 34V21C8 5 40 5 40 21v13h-7V22c0-9-18-9-18 0v12Z"/><path d="M8 38h32" strokeDasharray="3 3"/></svg><p>{selected?.error||'Nahrajte modely a spusťte úpravu.'}</p>{selected?.error&&<small>Model nebyl exportován. Změňte nastavení a spusťte převod znovu.</small>}</div>}
-   {result?.stl&&!busy&&<div className={styles.review}><p>Uzavřený model · dosedací plocha {result.report.contactAfter.toFixed(1)} mm²</p><button type="button" className={styles.primary} onClick={()=>save(result.stl,safeName(selected.name))}>Stáhnout STL</button></div>}
+   {result||selected?.buffer?<><div className={styles.viewButtons}><button type="button" disabled={!result} aria-pressed={view==='result'} onClick={()=>setView('result')}>Výsledek</button><button type="button" aria-pressed={view==='original'} onClick={()=>setView('original')}>Původní model</button></div><Preview key={`${active}-${view}`} result={result} original={!result||view==='original'?selected.buffer:null} manual={view==='result'&&result?.manual?pending[labelIndex]:null} placing={placing} onPick={pickLabel} onChange={editLabel} onStatus={setTextStatus} protecting={protecting} zones={selected?.protectedZones||[]} onProtect={point=>{update(active,{protectedZones:[...(selected.protectedZones||[]),{center:[point.x,-point.z],radius:protectionRadius,kind:'manual'}]});setProtecting(false)}}/></>:<div className={styles.empty}><svg width="68" height="68" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.2"><path d="M8 34V21C8 5 40 5 40 21v13h-7V22c0-9-18-9-18 0v12Z"/><path d="M8 38h32" strokeDasharray="3 3"/></svg><p>{selected?.error||'Nahrajte modely a spusťte úpravu.'}</p>{selected?.error&&<small>Model nebyl exportován. Změňte nastavení a spusťte převod znovu.</small>}</div>}
+   {selected?.error&&!busy&&<div className={styles.review}><p style={{whiteSpace:'normal'}}>{selected.error}</p><button type="button" onClick={()=>run(selected.id)}>Zpracovat znovu</button></div>}
+   {result?.stl&&!busy&&<div className={styles.review}>{result.report.warnings?.map(message=><p key={message} role="status" style={{whiteSpace:'normal'}}>{message}</p>)}<p>Uzavřený model · dosedací plocha {result.report.contactAfter.toFixed(1)} mm²</p><button type="button" className={styles.primary} onClick={()=>save(result.stl,safeName(selected.name))}>Stáhnout STL</button></div>}
    <AnimatedSceneLoader visible={presence.visible} exiting={presence.exiting} status={message} progress={progress} progressLabel="Zpracování dávky"/>
   </section>
   <aside className={styles.right}>
    {result?.manual&&<><h2>Dokončení podpisu</h2><p className={styles.note}>Báze je připravená. Automatické umístění podpisu se nepodařilo; otočte model a vyberte místo ručně.</p><label className={styles.field}>Popisek<select disabled={busy} value={labelIndex} onChange={e=>{setLabelIndex(Number(e.target.value));setPlacing(false)}}>{pending.map((tag,i)=><option key={i} value={i}>{tag.name||tag.text}</option>)}</select></label>{pending[labelIndex]&&!pending[labelIndex].brand&&<label className={styles.field}>Text<input disabled={busy} value={pending[labelIndex].text} maxLength={60} onChange={e=>editLabel({text:e.target.value})}/></label>}{pending[labelIndex]&&<label className={styles.field}>Velikost (mm)<input disabled={busy} type="number" min="1" max={pending[labelIndex].brand?6:12} step="0.1" value={pending[labelIndex].size} onChange={e=>{if(Number.isFinite(e.target.valueAsNumber))editLabel({size:e.target.valueAsNumber})}}/></label>}<button type="button" disabled={busy} aria-pressed={placing} onClick={()=>{setView('result');setPlacing(!placing)}}>Umístit na model</button><small>Kliknutím umístíte text. Tažením za text jej posunete; tažením mimo text otáčíte model.</small><small>{textStatus.error}</small><button type="button" className={styles.primary} disabled={busy||placing||!textStatus.valid||pending.some(t=>!t.position)} onClick={applyLabels}>Použít podpis</button><div className={styles.divider}/></>}
    <h2>Nastavení úpravy</h2>{toggle('Upravit spodek báze','convertBase')}
-   {settings.convertBase&&<>{number('Prodloužení báze (mm)','replaceHeight',1,6)}<small>Původní model a jméno zůstávají zachované. Nový lem se přidá pod původní spodek.</small>{toggle('Plné modely automaticky vydutit','autoHollow')}{settings.autoHollow&&number('Tloušťka stěny (mm)','wall',1.5,5)}{number('Bevel a dosedací lem (mm)','bevel',0,1.5)}{toggle('Odtokové otvory','holes')}{settings.holes&&number('Průměr otvorů (mm)','diameter',2,6)}</>}
+   {settings.convertBase&&<>{toggle('Prodloužit bázi','extendBase')}{settings.extendBase?<>{number('Prodloužení báze (mm)','replaceHeight',1,6)}<small>Prodloužení mění vzdálenost od pinu ke spodní ploše.</small></>:<small>Původní výška a dosednutí pinu zůstávají zachované. Bevel vynechá chráněné detaily.</small>}{toggle('Plné modely automaticky vydutit','autoHollow')}{settings.autoHollow&&number('Tloušťka stěny (mm)','wall',1.5,5)}{number('Bevel a dosedací lem (mm)','bevel',0,1.5)}{toggle('Odtokové otvory','holes')}{settings.holes&&number('Průměr otvorů (mm)','diameter',2,settings.extendBase?6:8)}</>}
+   {settings.convertBase&&!settings.extendBase&&selected&&<><div className={styles.divider}/><h2>Ochrana původních detailů</h2><small>Tagy a uložení pinů chrání automat. Kliknutím můžete přidat další místo, kde se nebude řezat ani doplňovat lem.</small><label className={styles.field}>Poloměr ochrany (mm)<input type="number" min="1" max="8" step=".5" value={protectionRadius} disabled={busy} onChange={e=>{if(Number.isFinite(e.target.valueAsNumber))setProtectionRadius(Math.max(1,Math.min(8,e.target.valueAsNumber)))}}/></label><button type="button" disabled={busy||!!result?.manual} aria-pressed={protecting} onClick={()=>{setProtecting(!protecting);setPlacing(false)}}>{protecting?'Klikněte na chráněné místo':'Přidat ochranu v náhledu'}</button>{!!selected.protectedZones?.length&&<><small>Ruční oblasti: {selected.protectedZones.length}. Použijí se při dalším převodu.</small><button type="button" disabled={busy} onClick={()=>update(active,{protectedZones:[]})}>Smazat ruční ochranu</button><button type="button" className={styles.primary} disabled={busy} onClick={()=>run(selected.id)}>Použít ochranu</button></>}</>}
    <div className={styles.divider}/>{toggle('Designed by ARTHETIC','logo')}{settings.logo&&<>{number('Velikost podpisu (mm)','logoSize',1,6)}<small>Automaticky na skutečnou vnitřní stěnu dutiny.</small></>}
    <div className={styles.divider}/><label className={styles.field}>Vnější tag<input value={settings.tag} maxLength={60} placeholder="Volitelné · např. {name}" disabled={busy} onChange={e=>change('tag',e.target.value)}/></label>{settings.tag&&number('Velikost tagu (mm)','tagSize',1,12)}
    <p className={styles.note}>Nastavení se použije při dalším zpracování. Před tiskem zkontrolujte náhled i výsledek ve sliceru.</p>
@@ -117,13 +121,13 @@ export default function ModelsTool(){
   {error&&<div role="alert" className={styles.toast}><span>{error}</span><button type="button" aria-label="Zavřít upozornění" onClick={()=>setError('')}>×</button></div>}
  </main>
 }
-function Preview({result,original,manual,placing,onPick,onChange,onStatus}){
+function Preview({result,original,manual,placing,onPick,onChange,onStatus,protecting,zones,onProtect}){
  const [data,setData]=useState(result),controls=useRef()
- const geometry=useMemo(()=>new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(result.positions,3)).setIndex(new THREE.BufferAttribute(result.indices,1)),[result])
- useEffect(()=>()=>geometry.dispose(),[geometry])
+ const geometry=useMemo(()=>result?new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(result.positions,3)).setIndex(new THREE.BufferAttribute(result.indices,1)):null,[result])
+ useEffect(()=>()=>geometry?.dispose(),[geometry])
  const options=useMemo(()=>manual?{...DEFAULTS,text:manual.text,textSize:manual.size,textDepth:manual.depth,textMode:manual.mode,textWeight:manual.weight??500,textRotation:manual.rotation??0,textPosition:manual.position,textNormal:manual.normal,baseDirection:-1}:null,[manual])
  const changeText=useCallback(patch=>onChange({position:patch.textPosition,normal:patch.textNormal}),[onChange])
  const restoreControls=useCallback(()=>{if(controls.current)controls.current.enabled=true},[])
- useEffect(()=>{let live=true;if(original)import('./stl.mjs').then(async({readSTL})=>{const p=readSTL(original),{indexed}=await import('../model-builder/engine.mjs');let base=Infinity;for(let i=2;i<p.length;i+=3)base=Math.min(base,p[i]);const local=p.slice();for(let i=0;i<p.length;i+=3){local[i+1]=p[i+2]-base;local[i+2]=-p[i+1]}const mesh=indexed(local,{exact:true});if(live)setData({positions:Float32Array.from(mesh.vertices),indices:Uint32Array.from(mesh.faces)})});return()=>{live=false}},[original])
- return <Canvas camera={{position:[0,45,90],fov:35}} dpr={[1,1.5]}><SceneLighting/><Bounds fit clip observe margin={1.35}>{manual?<BuilderPreview geometry={geometry} fontUrlOverride={manual.brand?'/wasm/model-builder/arthetic-logo-font.json':undefined} options={options} placing={placing} onSurfaceClick={onPick} change={changeText} select={()=>{}} controlsRef={controls} onDragEnd={restoreControls} onTextStatus={onStatus}/>:<Model data={data}/>}</Bounds><OrbitControls ref={controls} makeDefault enableDamping dampingFactor={.12}/></Canvas>
+ useEffect(()=>{let live=true;if(!original)setData(result);else import('./stl.mjs').then(async({readSTL})=>{const p=readSTL(original),{indexed}=await import('../model-builder/engine.mjs');let base=Infinity;for(let i=2;i<p.length;i+=3)base=Math.min(base,p[i]);const local=p.slice();for(let i=0;i<p.length;i+=3){local[i+1]=p[i+2]-base;local[i+2]=-p[i+1]}const mesh=indexed(local,{exact:true});if(live)setData({positions:Float32Array.from(mesh.vertices),indices:Uint32Array.from(mesh.faces)})}).catch(()=>{if(live)setData(null)});return()=>{live=false}},[original,result])
+ return <Canvas camera={{position:[0,45,90],fov:35}} dpr={[1,1.5]} style={{cursor:protecting?'crosshair':undefined}}><SceneLighting/><Bounds key={data===result&&data?'result':data?'source':'empty'} fit clip observe margin={1.35}>{manual?<BuilderPreview geometry={geometry} fontUrlOverride={manual.brand?'/wasm/model-builder/arthetic-logo-font.json':undefined} options={options} placing={placing} onSurfaceClick={onPick} change={changeText} select={()=>{}} controlsRef={controls} onDragEnd={restoreControls} onTextStatus={onStatus}/>:data?<Model data={data} onProtect={protecting?onProtect:undefined}/>:null}</Bounds>{zones?.map((zone,i)=><mesh key={i} position={[zone.center[0],2,-zone.center[1]]} raycast={()=>null}><cylinderGeometry args={[zone.radius,zone.radius,4,32,1,true]}/><meshBasicMaterial color="#87baff" transparent opacity={.25} side={THREE.DoubleSide} depthWrite={false}/></mesh>)}<OrbitControls ref={controls} makeDefault enableDamping dampingFactor={.12}/></Canvas>
 }

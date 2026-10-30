@@ -31,6 +31,6 @@ export function hollowFinishedModel(M,raw,settings={},progress=()=>{}){
   if(original.volume()-output.volume()<10)throw Error('Nevznikla použitelná dutina. Model nebyl změněn.')
   const result=fromManifold(output),expanded=new Float32Array(result.faces.length*3)
   for(let i=0;i<result.faces.length;i++)expanded.set(result.vertices.slice(result.faces[i]*3,result.faces[i]*3+3),i*3)
-  return {raw:expanded,hollowed:true,wall,removedVolume:original.volume()-output.volume()}
+  return {raw:expanded,hollowed:true,functionalContours:polygons.filter(p=>area(p)<0&&-area(p)<=100).map(points=>({points,kind:'socket'})),wall,removedVolume:original.volume()-output.volume()}
  }finally{geometry?.dispose();allocated.reverse().forEach(o=>o.delete())}
 }

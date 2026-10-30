@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import {reshapeOriginalBase} from './reshape-original-base.mjs'
 import {indexed,stitch,meshTopology,fromManifold} from '../model-builder/engine.mjs'
 import {prepareBevelRings} from '../model-builder/base-profile.mjs'
 import {distalHolePositions,holeDirection} from '../model-builder/hole-placement.mjs'
@@ -6,6 +7,7 @@ import {contactArea} from '../model-builder/finished-model-tags.mjs'
 import {separateFloat32Contacts} from './float32-contacts.mjs'
 import {finishedModelEnds} from './distal-ends.mjs'
 export async function convertFinishedBase(M,positions,settings={},progress=()=>{}){
+ if(settings.extendBase!==true)return reshapeOriginalBase(M,positions,settings,progress)
  const allocated=[],own=o=>{allocated.push(o);return o}
  let replaceHeight=Number(settings.replaceHeight??2.5);const bevel=Number(settings.bevel??1),diameter=Number(settings.diameter??4.5)
  if(!Number.isFinite(replaceHeight)||replaceHeight<1||replaceHeight>6||!Number.isFinite(bevel)||bevel<0||bevel>Math.min(1.5,replaceHeight-.1)||!Number.isFinite(diameter)||diameter<2||diameter>6)throw Error('Zkontrolujte výšku úpravy, bevel a průměr otvorů.')

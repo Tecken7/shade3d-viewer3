@@ -18,7 +18,7 @@ test('extension preserves low embossed names and an isolated annular implant foo
  try{
   const outer=own(M.Manifold.cube([60,35,18]).translate([-30,-17.5,0])),inner=own(M.Manifold.cube([54,29,18]).translate([-27,-14.5,-3])),shell=own(outer.subtract(inner))
   const boss=own(M.Manifold.cylinder(16,4,4,64).translate([0,0,0])),bore=own(M.Manifold.cylinder(25,1,1,64).translate([0,0,-1])),name=own(M.Manifold.cube([10,1,1]).translate([-5,17,1]))
-  const original=own(own(own(shell.add(boss)).add(name)).subtract(bore)),result=await processFinishedModel(M,bytes(original),{convertBase:true,holes:false,bevel:1,logo:false},{})
+  const original=own(own(own(shell.add(boss)).add(name)).subtract(bore)),result=await processFinishedModel(M,bytes(original),{convertBase:true,extendBase:true,holes:false,bevel:1,logo:false},{})
   const output=own(solid(result.stl)),protectedBefore=own(original.trimByPlane([0,0,1],.02)),protectedAfter=own(output.trimByPlane([0,0,1],.02))
   assert.ok(Math.abs(own(protectedBefore.subtract(protectedAfter)).volume())<.01)
   const excess=Math.abs(own(protectedAfter.subtract(protectedBefore)).volume());assert.ok(excess<.01,`added ${excess} ${JSON.stringify(own(protectedAfter.subtract(protectedBefore)).boundingBox())}`)
@@ -61,7 +61,7 @@ test('drain crowns fit completely inside short extensions instead of being cut f
  const section=new M.CrossSection([contour],'EvenOdd'),inside=section.offset(-2.5,'Round',2,32),outer=section.extrude(18),cavity=inside.extrude(15),shape=outer.subtract(cavity)
  try{
   for(const [height,bevel] of [[1.5,1],[2.5,1],[5,1],[2.5,0]]){
-   const result=await convertFinishedBase(M,readSTL(bytes(shape)),{replaceHeight:height,bevel,holes:true,diameter:4.5})
+   const result=await convertFinishedBase(M,readSTL(bytes(shape)),{extendBase:true,replaceHeight:height,bevel,holes:true,diameter:4.5})
    assert.equal(result.holes.length,2)
    assert.ok(contactArea(result)>=section.area()-inside.area()-.05)
    for(const hole of result.holes){assert.ok(hole.removedVolume>0);assert.ok(hole.position[1]+hole.diameter/2<=result.extendedBy-.09);assert.ok(hole.position[1]-hole.diameter/2<0)}
