@@ -260,7 +260,9 @@ export async function applyModelText(M,base,options,fontData,progress=()=>{}){
   if(p.textLogoEnabled){if(!fontData.brandFont)throw Error('Nepodařilo se načíst písmo loga.');progress('Spojuji logo s vnitřní stěnou…');result=addSurfaceLabel(M,result,labLogoOptions(p),fontData.brandFont,p.baseDirection??base.placement.direction,own)}
   if(result.status()!=='NoError'||result.isEmpty())throw Error('Text se nepodařilo spojit s povrchem.')
   result=own(result.simplify(.0001))
-  const parts=result.decompose().map(own)
+  // Simplification can detach numerical sheets far below printable size.
+  // Keep rejecting real detached glyphs while dropping only <0.00001 mm³ residue.
+  const parts=result.decompose().map(own).filter(part=>Math.abs(part.volume())>1e-5)
   if(parts.length!==1||parts[0].volume()<=0)throw Error('Popisek vytváří oddělenou část. Upravte jeho polohu.')
   const output=fromManifold(parts[0]),check=meshTopology(output.vertices,output.faces)
   if(check.openEdges||check.nonManifold)throw Error('Po vložení textu není síť uzavřená.')

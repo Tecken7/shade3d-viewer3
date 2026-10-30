@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import Module from 'manifold-3d'
 import * as THREE from 'three'
-import {buildModel,applyModelText,meshTopology} from '../app/model-builder/engine.mjs'
+import {buildModel,applyModelText,meshTopology,fromManifold} from '../app/model-builder/engine.mjs'
 import {DEFAULTS} from '../app/model-builder/defaults.mjs'
 import {findLabLogoPlacement} from '../app/model-builder/lab-logo-placement.mjs'
 import {LAB_LOGO_TEXT,labLogoOptions} from '../app/model-builder/lab-logo.mjs'
@@ -99,4 +99,10 @@ test('logo approval requires valid placement and is stripped from base generatio
  assert.equal(builderGeometryOptions(placed,'base').textLogoEnabled,false)
  assert.notEqual(builderTextSignature(options),builderTextSignature(placed))
  assert.equal(labLogoOptions(placed).text,LAB_LOGO_TEXT)
+})
+
+test('label joining ignores numerical sheets but still rejects a detached printable component',async()=>{
+ const base=await getBase(),mesh=new M.Mesh({numProp:3,vertProperties:base.positions,triVerts:base.indices});mesh.merge();const source=new M.Manifold(mesh)
+ async function withPart(size){const tiny=M.Manifold.cube([size,size,size]).translate([100,100,100]),combined=source.add(tiny);try{const d=fromManifold(combined);return await applyModelText(M,{...base,positions:Float32Array.from(d.vertices),indices:Uint32Array.from(d.faces)},label,font)}finally{combined.delete();tiny.delete()}}
+ try{const result=await withPart(.001);assert.ok(result.stats.volume>base.stats.volume);assert.equal(result.stats.components,1);await assert.rejects(withPart(1),/oddělenou část/)}finally{source.delete()}
 })

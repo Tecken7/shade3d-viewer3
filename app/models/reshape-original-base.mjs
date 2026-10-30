@@ -5,7 +5,7 @@ import {prepareBevelRings} from '../model-builder/base-profile.mjs'
 import {sampleContour} from '../model-builder/transition.mjs'
 import {holeDirection,nearestContourPosition,contourPosition} from '../model-builder/hole-placement.mjs'
 import {finishedModelEnds} from './distal-ends.mjs'
-import {polygonArea,pointInPolygon,detectBaseRelief} from './base-protection.mjs'
+import {polygonArea,pointInPolygon,detectBaseRelief,socketSupportRegion} from './base-protection.mjs'
 import {separateFloat32Contacts} from './float32-contacts.mjs'
 
 // Work in the original STL Z-up coordinates. Neither the printing plane nor
@@ -28,12 +28,14 @@ export async function reshapeOriginalBase(M,positions,settings={},progress=()=>{
   if(!flowVoids.length)throw Error('Nenašel jsem hlavní otevřenou dutinu. Zkontrolujte vydutění modelu.')
   surface=new THREE.BufferGeometry().setAttribute('position',new THREE.Float32BufferAttribute(d.vertices,3)).setIndex(d.faces);surface.boundsTree=new MeshBVH(surface)
   progress('Vyhledávám reliéf původních tagů…')
-  const relief=detectBaseRelief(surface,outers[0],bevel),guards=[]
-  for(const p of settings.sourceFunctionalContours?settings.sourceFunctionalContours.map(c=>c.points):voids.filter(p=>Math.abs(polygonArea(p))<=100)){const guard=own(own(new M.CrossSection([p],'EvenOdd')).offset(3,'Round',2,48));guards.push(guard)}
+  const relief=detectBaseRelief(surface,outers[0],bevel),guards=[],supportRegions=[]
+  for(const p of functional??voids.filter(p=>Math.abs(polygonArea(p))<=100)){const guard=own(own(new M.CrossSection([p],'EvenOdd')).offset(3,'Round',2,48));guards.push(guard);supportRegions.push(socketSupportRegion(p,flowVoids))}
   for(const p of outers.slice(1)){const guard=own(own(new M.CrossSection([p],'EvenOdd')).offset(.8,'Round',2,48));guards.push(guard)}
   for(const zone of [...relief,...zones]){const guard=own(own(M.CrossSection.circle(zone.radius,32)).translate(zone.center));guards.push(guard)}
   const seed=own(M.CrossSection.circle(1,12));let guard=own(seed.subtract(seed))
   for(const part of guards)guard=own(guard.add(part))
+  let supportGuard=guard
+  for(const region of supportRegions){const area=own(own(M.CrossSection.circle(region.radius,64)).translate(region.center));supportGuard=own(supportGuard.add(area))}
   const emptySolid=own(M.Manifold.cube([1,1,1]));const guardSolid=guard.area()>1e-8?own(own(guard.extrude(Math.max(bevel+2,diameter+3))).translate([0,0,-.1])):own(emptySolid.subtract(emptySolid))
   let result=original,wedge=null
   if(bevel>0){
@@ -77,7 +79,7 @@ export async function reshapeOriginalBase(M,positions,settings={},progress=()=>{
   // and every protected region are excluded from both addition and subtraction.
   const mainVoid=own(new M.CrossSection(flowVoids,'EvenOdd')),cutSections=cutters.map(c=>own(c.slice(.001))),beveledFloor=own(result.slice(.001)),target=floor.area()+1
   const footprint=inset=>{
-   const inner=own(mainVoid.offset(-inset,'Round',2,48)),band=own(own(mainVoid.subtract(inner)).subtract(guard));let shape=own(beveledFloor.add(band))
+   const inner=own(mainVoid.offset(-inset,'Round',2,48)),band=own(own(mainVoid.subtract(inner)).subtract(supportGuard));let shape=own(beveledFloor.add(band))
    for(const cut of cutSections)shape=own(shape.subtract(cut))
    return shape.area()
   }
@@ -85,16 +87,18 @@ export async function reshapeOriginalBase(M,positions,settings={},progress=()=>{
   if(footprint(0)<target){let lo=0,hi=4;if(footprint(hi)<target){const error=Error('Nelze zachovat dosedací plochu bez zásahu do chráněných míst. Zmenšete bevel nebo otvory.');error.details={floor:floor.area(),beveled:beveledFloor.area(),max:footprint(hi),void:mainVoid.area(),guard:guard.area()};throw error}
    for(let i=0;i<16;i++){const mid=(lo+hi)/2;if(footprint(mid)<target)lo=mid;else hi=mid}inset=hi
   }
-  const resinCore=own(mainVoid.offset(-inset,'Round',2,48)).toPolygons()
+  const resinCore=own(mainVoid.offset(-inset,'Round',2,48))
+  // A round drain may enter a curved cavity off its centre line. Test the
+  // complete cutter against actual free space beyond the new support lip.
   for(let i=0;i<cutters.length;i++){
-   const hole=holes[i],x=hole.position[0],y=-hole.position[2],nx=hole.normal[0],ny=-hole.normal[2];let connected=false
-   for(let distance=3.2;distance<hole.length-.1;distance+=.15){const p=[x+nx*(3-distance),y+ny*(3-distance)];if(resinCore.some(poly=>pointInPolygon(p,poly))){connected=true;break}}
-   if(!connected)throw Error('Odtok by nedosáhl do hlavní dutiny po doplnění lemu. Zmenšete bevel nebo upravte umístění ochrany.')
+   const volume=drainCavityVolume(M,cutters[i],original,resinCore,cutHeight)
+   if(volume<Math.min(5,diameter))throw Error('Odtok by nedosáhl do hlavní dutiny po doplnění lemu. Zmenšete bevel nebo upravte umístění ochrany.')
+   holes[i].cavityOverlapVolume=volume
   }
   if(inset>.001){
    progress('Doplňuji vnitřní dosedací lem mimo funkční detaily…')
    const layers=[],height=Math.max(1.2,bevel+.2),steps=32,dy=height/steps,bond=own(own(mainVoid.offset(.3,'Round',2,48)).intersect(outline))
-   for(let i=0;i<steps;i++){const t=1-i/steps,amount=inset*t*t*(3-2*t),inner=own(mainVoid.offset(-amount,'Round',2,48)),band=own(own(bond.subtract(inner)).subtract(guard));if(band.area()>.001)layers.push(own(own(band.extrude(dy+.001)).translate([0,0,i*dy])))}
+   for(let i=0;i<steps;i++){const t=1-i/steps,amount=inset*t*t*(3-2*t),inner=own(mainVoid.offset(-amount,'Round',2,48)),band=own(own(bond.subtract(inner)).subtract(supportGuard));if(band.area()>.001)layers.push(own(own(band.extrude(dy+.001)).translate([0,0,i*dy])))}
    if(layers.length)result=own(result.add(own(M.Manifold.union(layers))))
   }
   for(const cutter of cutters)result=own(result.subtract(cutter))
@@ -108,4 +112,9 @@ export async function reshapeOriginalBase(M,positions,settings={},progress=()=>{
   result=parts[0];const canonical=fromManifold(result),output=Float32Array.from(canonical.vertices);for(let i=0;i<output.length;i+=3){const y=output[i+1];output[i+1]=output[i+2];output[i+2]=-y}
   return {positions:separateFloat32Contacts(output,Uint32Array.from(canonical.faces)),indices:Uint32Array.from(canonical.faces),placement:{baseY:0,direction:-1},holes,warnings,stats:{volume:result.volume()},baseZ,replaceHeight:bevel,extendedBy:0,baseMode:'original-height',protectedRegions:guards.length,protectedZones:[...relief,...zones],supportInset:inset,protectedHeight:upper}
  }finally{surface?.dispose();allocated.reverse().forEach(o=>o.delete())}
+}
+
+export function drainCavityVolume(M,cutter,original,resinCore,height){
+ const column=resinCore.extrude(height),free=column.subtract(original),overlap=cutter.intersect(free)
+ try{return Math.max(0,overlap.volume())}finally{overlap.delete();free.delete();column.delete()}
 }

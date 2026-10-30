@@ -48,3 +48,14 @@ test('STL verification cleans only numerical micro-fragments and still rejects s
  async function finish(part){const combined=main.add(part);try{const d=fromManifold(combined),p=Float32Array.from(d.vertices);for(let i=0;i<p.length;i+=3){const y=p[i+1];p[i+1]=p[i+2];p[i+2]=-y}return await finalizeFinishedModel(M,{positions:p,indices:Uint32Array.from(d.faces),placement:{baseY:0,direction:-1}},{baseZ:0,before:400,settings:{convertBase:false},labels:[]})}finally{combined.delete()}}
  try{const result=await finish(tiny),out=manifold(result.stl),parts=out.decompose();try{assert.equal(parts.length,1);assert.equal(out.status(),'NoError')}finally{parts.forEach(p=>p.delete());out.delete()}await assert.rejects(finish(separate),/jeden uzavřený celek/)}finally{main.delete();tiny.delete();separate.delete()}
 })
+
+test('contact compensation never adds a ring around an implant boss attached to the inner wall',async()=>{
+ const allocated=[],own=s=>{allocated.push(s);return s}
+ try{
+  const outer=own(M.Manifold.cube([60,35,18]).translate([-30,-17.5,0])),inner=own(M.Manifold.cube([54,29,15]).translate([-27,-14.5,0])),shell=own(outer.subtract(inner)),boss=own(M.Manifold.cylinder(16,4.5,4.5,64).translate([0,-12,0])),bore=own(M.Manifold.cylinder(25,1.5,1.5,64).translate([0,-12,-1])),original=own(own(shell.add(boss)).subtract(bore))
+  const result=await processFinishedModel(M,bytes(original),{convertBase:true,bevel:1.5,holes:false,logo:false,autoHollow:false},{})
+  const output=own(manifold(result.stl)),region=own(M.Manifold.cylinder(2,7.5,7.5,96).translate([0,-12,0])),before=own(original.intersect(region)),after=own(output.intersect(region))
+  assert.ok(own(after.subtract(before)).volume()<.01,'a new contact ring must not enlarge the original implant shoulder')
+  assert.ok(result.report.contactAfter>=result.report.contactBefore-.05)
+ }finally{allocated.reverse().forEach(p=>p.delete())}
+})

@@ -34,3 +34,18 @@ export function detectBaseRelief(surface,contour,bevel){
  for(const start of groups){let i=start,count=0;while(expanded.has(i)&&count<points.length){if(count%3===0)zones.push({center:points[i],radius:1.35,kind:'relief'});i=(i+1)%points.length;count++}}
  return zones
 }
+
+// The cavity edge wraps around implant bosses. A contact lip along that edge
+// would enlarge the boss into a ring. Preserve its shoulder plus the entire
+// possible 4 mm support band, rather than protecting only the central bore.
+export function socketSupportRegion(bore,resinVoids){
+ const xs=bore.map(p=>p[0]),ys=bore.map(p=>p[1]),center=[(Math.min(...xs)+Math.max(...xs))/2,(Math.min(...ys)+Math.max(...ys))/2]
+ const boreRadius=Math.max(...bore.map(p=>Math.hypot(p[0]-center[0],p[1]-center[1]))),distances=[]
+ for(let i=0;i<48;i++){
+  const angle=i*Math.PI/24,dx=Math.cos(angle),dy=Math.sin(angle)
+  for(let d=boreRadius+.1;d<=boreRadius+12;d+=.2){if(resinVoids.some(p=>pointInPolygon([center[0]+dx*d,center[1]+dy*d],p))){distances.push(d);break}}
+ }
+ distances.sort((a,b)=>a-b)
+ const shoulder=distances.length>=8?distances[Math.floor(distances.length*.6)]:boreRadius+3
+ return {center,radius:shoulder+4.5,kind:'socket-support'}
+}
