@@ -9,7 +9,7 @@ const clamp=value=>Math.round(Math.max(.5,Math.min(50,value))*100)/100
 export function HolePreview({ options, selected, select, change, dragging, controlsRef, onDragEnd, interactionLocked=false }) {
   const root=useRef(),active=useRef(null)
   const [hovered,setHovered]=useState(null)
-  useBuilderGestureGuard(root,controlsRef,!options.cutHoles)
+  useBuilderGestureGuard(root,controlsRef,!options.cutHoles&&!interactionLocked)
   useCursor(hovered!==null,'grab')
   const hover=(event,key)=>{event.stopPropagation();if(!active.current&&!interactionLocked)setHovered(key)}
   const unhover=(event,key)=>{event.stopPropagation();if(!active.current)setHovered(previous=>previous===key?null:previous)}
@@ -40,7 +40,7 @@ export function HolePreview({ options, selected, select, change, dragging, contr
     return event.ray.clone().applyMatrix4(root.current.matrixWorld.clone().invert())
   }
   const begin=(event,index,side,hole,normal,pivot=null)=>{
-    if(event.button!==0||active.current)return
+    if(interactionLocked||event.button!==0||active.current)return
     event.stopPropagation();event.nativeEvent?.preventDefault?.();event.nativeEvent?.stopImmediatePropagation?.()
     const ray=localRay(event),anchor=pivot||new THREE.Vector3().fromArray(hole.position)
     const axis=side==='height'?new THREE.Vector3(0,1,0):normal

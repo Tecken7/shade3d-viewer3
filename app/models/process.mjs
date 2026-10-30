@@ -11,12 +11,23 @@ export async function processFinishedModel(M,buffer,settings,fonts,progress=()=>
  const before=contactArea(original)
  if(before<10)throw Error('Model nemá rovnou dosedací plochu dole v ose Z. Nejprve jej orientujte jako pro tisk.')
  let base=settings.convertBase?await convertFinishedBase(M,raw,{...settings,repairCoincident:hollow.hollowed,sourceFunctionalContours:hollow.functionalContours},progress):original
- const result=await decorateFinishedModel(M,base,{allowManual:true,logo:settings.logo,logoSize:settings.logoSize,tags:settings.tag?.trim()?[{text:settings.tag,size:settings.tagSize,weight:500,depth:.4}]:[]},fonts,progress)
- const origin=base.baseZ??baseZ
- if(result.status!=='ready')return {status:'needs-placement',positions:base.positions,indices:base.indices,manual:{base,baseZ:origin,before,hollowed:hollow.hollowed,settings,pending:result.pending,items:result.items},message:result.message,report:{contactBefore:before,contactAfter:contactArea(base)}}
- base=result.output
- return finalizeFinishedModel(M,base,{baseZ:origin,before,hollowed:hollow.hollowed,settings,labels:result.items},progress)
+ const context={baseZ:base.baseZ??baseZ,before,hollowed:hollow.hollowed,settings}
+ if(base.drainReview)return {status:'needs-drains',positions:base.positions,indices:base.indices,drainReview:base.drainReview,drainManual:{...context,raw,sourceFunctionalContours:hollow.functionalContours},message:base.drainReview.message,report:{contactBefore:before}}
+ return finishPreparedModel(M,base,context,fonts,progress)
 }
+
+async function finishPreparedModel(M,base,context,fonts,progress){
+ const {settings}=context,result=await decorateFinishedModel(M,base,{allowManual:true,logo:settings.logo,logoSize:settings.logoSize,tags:settings.tag?.trim()?[{text:settings.tag,size:settings.tagSize,weight:500,depth:.4}]:[]},fonts,progress)
+ if(result.status!=='ready')return {status:'needs-placement',positions:base.positions,indices:base.indices,manual:{base,...context,pending:result.pending,items:result.items},message:result.message,report:{contactBefore:context.before,contactAfter:contactArea(base)}}
+ return finalizeFinishedModel(M,result.output,{...context,labels:result.items},progress)
+}
+
+export async function finishManualDrains(M,manual,holes,fonts,progress=()=>{}){
+ const settings={...manual.settings,reviewDrains:false,reviewHoles:undefined,manualHoles:holes,sourceFunctionalContours:manual.sourceFunctionalContours},base=await convertFinishedBase(M,manual.raw,settings,progress)
+ if(base.drainReview)throw Error('Potvrďte prosím polohu odtokových válců.')
+ return finishPreparedModel(M,base,{baseZ:manual.baseZ,before:manual.before,hollowed:manual.hollowed,settings:manual.settings},fonts,progress)
+}
+
 export async function finalizeFinishedModel(M,base,{baseZ,before,hollowed=false,settings,labels},progress=()=>{}){
  const after=contactArea(base)
  if(settings.convertBase&&after+.05<before)throw Error('Úprava by zmenšila dosedací plochu. Zkuste menší bevel nebo jinou výšku úpravy.')
@@ -38,7 +49,7 @@ export async function finalizeFinishedModel(M,base,{baseZ,before,hollowed=false,
    const clean=fromManifold(retained[0]);stl=encodeSTL(Float32Array.from(clean.vertices),Uint32Array.from(clean.faces))
   }finally{parts.forEach(p=>p.delete());solid.delete()}
  }
- return {status:'ready',stl,positions:base.positions,indices:base.indices,report:{contactBefore:before,contactAfter:after,hollowed,extendedBy:base.extendedBy??0,baseMode:base.baseMode??'extended',protectedRegions:base.protectedRegions??0,drains:base.holes||[],warnings:base.warnings||[],labels,components:1,openEdges:0,nonManifold:0,replaceHeight:settings.convertBase?base.replaceHeight??settings.replaceHeight:0}}
+ return {status:'ready',stl,positions:base.positions,indices:base.indices,drainDrafts:base.drainDrafts,report:{contactBefore:before,contactAfter:after,hollowed,extendedBy:base.extendedBy??0,baseMode:base.baseMode??'extended',protectedRegions:base.protectedRegions??0,drains:base.holes||[],warnings:base.warnings||[],labels,components:1,openEdges:0,nonManifold:0,replaceHeight:settings.convertBase?base.replaceHeight??settings.replaceHeight:0}}
 }
 
 export async function finishManualLabels(M,manual,pending,fonts,progress=()=>{}){
