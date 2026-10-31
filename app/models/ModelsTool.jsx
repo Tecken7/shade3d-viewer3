@@ -13,8 +13,9 @@ import ViewerBackButton from '../ViewerBackButton'
 import AnimatedSceneLoader,{useLoaderPresence} from '../AnimatedSceneLoader'
 import '../SceneLoader.css'
 import styles from './models.module.css'
+import {resolveModelSettings} from './model-settings.mjs'
 
-const initial={convertBase:true,autoHeight:true,preserveOriginal:true,extendBase:false,autoHollow:true,wall:2.5,replaceHeight:2.5,bevel:1,bevelHeight:1,holes:true,diameter:6,logo:true,logoSize:1.8,tag:'',tagSize:4}
+const initial={convertBase:true,autoHeight:true,preserveOriginal:true,extendBase:false,autoHollow:true,wall:2.5,replaceHeight:2.5,bevel:1,bevelHeight:1.7,holes:true,diameter:6,logo:true,logoSize:1.8,tag:'',tagSize:4}
 function Model({data,onProtect}){
  const geometry=useMemo(()=>{const raw=new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(data.positions,3)).setIndex(new THREE.BufferAttribute(data.indices,1));const g=toCreasedNormals(raw,Math.PI/6);raw.dispose();return g},[data])
  useEffect(()=>()=>geometry?.dispose(),[geometry])
@@ -40,6 +41,13 @@ export default function ModelsTool(){
  useEffect(()=>setProtecting(false),[active])
  const update=(id,patch)=>setItems(current=>current.map(item=>item.id===id?{...item,...patch}:item))
  const change=(key,value)=>setSettings(current=>({...current,[key]:value}))
+ const ownSettings=(item,patch)=>setItems(current=>current.map(entry=>{
+  if(entry.id!==item.id)return entry
+  const own={enabled:false,extendBase:true,replaceHeight:settings.replaceHeight,bevelHeight:Math.max(.2,Math.min(settings.bevelHeight,settings.replaceHeight-.1)),...entry.baseSettings,...patch}
+  own.replaceHeight=Math.max(1,Math.min(6,own.replaceHeight));own.bevelHeight=Math.max(.2,Math.min(own.extendBase?Math.min(4,own.replaceHeight-.1):4,own.bevelHeight))
+  return {...entry,baseSettings:own,settingsDirty:!!entry.result?.stl||entry.settingsDirty}
+ }))
+ const ownNumber=(item,label,key,min,max)=><label className={styles.ownField}>{label}<input type="number" min={min} max={max} step="0.1" value={item.baseSettings[key]} disabled={busy||!!item.savedResult||!!item.result?.manual||!!item.result?.drainReview} aria-label={`${label}: ${item.name}`} onChange={e=>{if(Number.isFinite(e.target.valueAsNumber))ownSettings(item,{[key]:e.target.valueAsNumber})}}/></label>
  async function addFiles(files){
   if(busy||reading)return
   setReading(true);setError('')
@@ -71,16 +79,16 @@ export default function ModelsTool(){
      pendingReject.current=reject;const w=new Worker(new URL('./models.worker.js',import.meta.url));worker.current=w
      w.onmessage=({data})=>{if(data.progress){setMessage(data.progress);return}w.terminate();worker.current=null;data.error?reject(Error(data.error)):resolve(data.result)}
      w.onerror=()=>{w.terminate();worker.current=null;reject(Error('Výpočet se přerušil. Zkuste menší dávku.'))}
-     const copy=item.buffer.slice(0);w.postMessage({buffer:copy,settings:{...config,reviewHoles:forceReview===true?item.result?.drainDrafts:undefined,protectedZones:item.protectedZones||[],tag:config.tag.replaceAll('{name}',item.name.replace(/\.stl$/i,''))}},[copy])
+     const modelConfig=resolveModelSettings(config,item.baseSettings),copy=item.buffer.slice(0);w.postMessage({buffer:copy,settings:{...modelConfig,reviewHoles:forceReview===true?item.result?.drainDrafts:undefined,protectedZones:item.protectedZones||[],tag:config.tag.replaceAll('{name}',item.name.replace(/\.stl$/i,''))}},[copy])
     })
-    if(ticket===runId.current&&!cancelled.current&&alive.current)update(item.id,{status:value.status||'ready',result:value})
+    if(ticket===runId.current&&!cancelled.current&&alive.current)update(item.id,{status:value.status||'ready',result:value,settingsDirty:false})
    }catch(err){if(ticket===runId.current&&!cancelled.current&&alive.current)update(item.id,{status:'error',error:err.message})}
    if(ticket===runId.current)setProgress((i+1)/batch.length*100)
   }
   if(ticket===runId.current&&alive.current&&!cancelled.current){setBusy(false);setMessage('Dávka zpracována')}
  }
  async function downloadAll(){
-  const ready=items.filter(item=>item.result?.stl);if(!ready.length)return
+  const ready=items.filter(item=>item.result?.stl&&!item.settingsDirty);if(!ready.length)return
   const files={},report=[]
   ready.forEach((item,i)=>{const name=`${String(i+1).padStart(2,'0')}-${safeName(item.name)}`;files[name]=new Uint8Array(item.result.stl);report.push({file:name,...item.result.report})})
   files['kontrola-modelu.json']=strToU8(JSON.stringify(report,null,2))
@@ -127,16 +135,16 @@ export default function ModelsTool(){
    <div className={styles.sectionHead}><h2>MODELY</h2><button type="button" disabled={busy||reading} aria-label="Přidat modely" onClick={()=>input.current?.click()}>+</button></div>
    <input ref={input} type="file" accept=".stl,.zip" multiple hidden onChange={e=>addFiles([...e.target.files])}/>
    <button type="button" className={`${styles.drop} ${drag?styles.drag:''}`} disabled={busy||reading} onClick={()=>input.current?.click()} onDragEnter={e=>{e.preventDefault();dragCount.current++;setDrag(true)}} onDragOver={e=>e.preventDefault()} onDragLeave={()=>{if(--dragCount.current<=0)setDrag(false)}} onDrop={e=>{e.preventDefault();dragCount.current=0;setDrag(false);addFiles([...e.dataTransfer.files])}}>{reading?'Připravuji soubory…':'Přetáhněte STL nebo ZIP'}<small>Hotové modely, dosedací plochou dolů · mm</small></button>
-   <div className={styles.list}>{items.map(item=><div key={item.id} className={`${styles.item} ${active===item.id?styles.selected:''}`}><button type="button" className={styles.itemSelect} onClick={()=>{setActive(item.id);setView('result')}}><span>{item.name}</span><small className={item.status==='error'?styles.error:''}>{statusText[item.status]}</small></button>{item.result?.stl&&<div className={styles.itemActions}>{item.result.drainEdit&&<button type="button" disabled={busy} aria-label={`Upravit otvory: ${item.name}`} onClick={()=>editDrains(item)}>Upravit otvory</button>}{item.result.labelEdit&&<button type="button" disabled={busy} aria-label={`Upravit logo / tag: ${item.name}`} onClick={()=>editLabels(item)}>Upravit logo / tag</button>}</div>}</div>)}</div>
+   <div className={styles.list}>{items.map(item=><div key={item.id} className={`${styles.item} ${active===item.id?styles.selected:''}`}><button type="button" className={styles.itemSelect} onClick={()=>{setActive(item.id);setView('result')}}><span>{item.name}</span><small className={item.status==='error'?styles.error:''}>{item.settingsDirty?'Čeká na přepočítání':statusText[item.status]}</small></button><button type="button" className={styles.ownToggle} role="switch" aria-checked={!!item.baseSettings?.enabled} aria-label={`Vlastní nastavení báze: ${item.name}`} disabled={busy||!!item.savedResult||!!item.result?.manual||!!item.result?.drainReview} onClick={()=>ownSettings(item,{enabled:!item.baseSettings?.enabled})}><span>Vlastní nastavení báze</span><i/></button>{item.baseSettings?.enabled?<div className={styles.ownControls}><label className={styles.ownCheck}><input type="checkbox" checked={item.baseSettings.extendBase} disabled={busy||!!item.savedResult||!!item.result?.manual||!!item.result?.drainReview} aria-label={`Prodloužit bázi: ${item.name}`} onChange={e=>ownSettings(item,{extendBase:e.target.checked})}/>Prodloužit bázi</label>{item.baseSettings.extendBase&&ownNumber(item,'Prodloužení (mm)','replaceHeight',1,6)}{ownNumber(item,'Výška bevelu (mm)','bevelHeight',.2,item.baseSettings.extendBase?Math.min(4,item.baseSettings.replaceHeight-.1):4)}</div>:<small>Používá hlavní nastavení</small>}{item.settingsDirty&&<button type="button" disabled={busy||!!item.savedResult} onClick={()=>run(item.id)}>Přepočítat model</button>}{item.result?.stl&&<div className={styles.itemActions}>{item.result.drainEdit&&<button type="button" disabled={busy||item.settingsDirty} aria-label={`Upravit otvory: ${item.name}`} onClick={()=>editDrains(item)}>Upravit otvory</button>}{item.result.labelEdit&&<button type="button" disabled={busy||item.settingsDirty} aria-label={`Upravit logo / tag: ${item.name}`} onClick={()=>editLabels(item)}>Upravit logo / tag</button>}</div>}</div>)}</div>
    {!busy&&items.length>0&&<button type="button" className={styles.secondary} onClick={()=>{setItems([]);setActive(null)}}>Vyprázdnit seznam</button>}
    <button type="button" className={styles.primary} disabled={!items.length||busy||reading} onClick={run}>Zpracovat {items.length?`modely (${items.length})`: 'modely'}</button>
    {busy&&<button type="button" onClick={stop}>Zrušit převod</button>}
-   {items.some(item=>item.result?.stl)&&<button type="button" disabled={busy} onClick={downloadAll}>Stáhnout ZIP ({items.filter(item=>item.result?.stl).length})</button>}
+   {items.some(item=>item.result?.stl&&!item.settingsDirty)&&<button type="button" disabled={busy} onClick={downloadAll}>Stáhnout ZIP ({items.filter(item=>item.result?.stl&&!item.settingsDirty).length})</button>}
   </aside>
   <section className={styles.scene} aria-label="Náhled modelu">
    {result||selected?.buffer?<><div className={styles.viewButtons}><button type="button" disabled={!result} aria-pressed={view==='result'} onClick={()=>setView('result')}>Výsledek</button><button type="button" aria-pressed={view==='original'} onClick={()=>setView('original')}>Původní model</button></div><Preview key={`${active}-${view}`} result={result} original={!result||view==='original'?selected.buffer:null} manual={view==='result'&&result?.manual?pending[labelIndex]:null} placing={placing} onPick={pickLabel} onChange={editLabel} onStatus={setTextStatus} drainReview={view==='result'?result?.drainReview:null} draftHoles={pendingHoles} selectedHole={selectedHole} selectHole={setSelectedHole} changeHoles={changeHoles} busy={busy} protecting={protecting} zones={selected?.protectedZones||[]} onProtect={point=>{update(active,{protectedZones:[...(selected.protectedZones||[]),{center:[point.x,-point.z],radius:protectionRadius,kind:'manual'}]});setProtecting(false)}}/></>:<div className={styles.empty}><svg width="68" height="68" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.2"><path d="M8 34V21C8 5 40 5 40 21v13h-7V22c0-9-18-9-18 0v12Z"/><path d="M8 38h32" strokeDasharray="3 3"/></svg><p>{selected?.error||'Nahrajte modely a spusťte úpravu.'}</p>{selected?.error&&<small>Model nebyl exportován. Změňte nastavení a spusťte převod znovu.</small>}</div>}
    {selected?.error&&!busy&&<div className={styles.review}><p style={{whiteSpace:'normal'}}>{selected.error}</p><button type="button" onClick={()=>run(selected.id)}>Zpracovat znovu</button></div>}
-   {result?.stl&&!busy&&<div className={styles.review}>{result.report.warnings?.map(message=><p key={message} role="status" style={{whiteSpace:'normal'}}>{message}</p>)}<p>Uzavřený model · dosedací plocha {result.report.contactAfter.toFixed(1)} mm²</p><button type="button" className={styles.primary} onClick={()=>save(result.stl,safeName(selected.name))}>Stáhnout STL</button></div>}
+   {result?.stl&&!busy&&<div className={styles.review}>{result.report.warnings?.map(message=><p key={message} role="status" style={{whiteSpace:'normal'}}>{message}</p>)}<p>{selected.settingsDirty?'Změnili jste nastavení. Přepočítejte tento model vlevo.':`Uzavřený model · dosedací plocha ${result.report.contactAfter.toFixed(1)} mm²`}</p><button type="button" className={styles.primary} disabled={selected.settingsDirty} onClick={()=>save(result.stl,safeName(selected.name))}>Stáhnout STL</button></div>}
    <AnimatedSceneLoader visible={presence.visible} exiting={presence.exiting} status={message} progress={progress} progressLabel="Zpracování dávky"/>
   </section>
   <aside ref={rightPanel} className={styles.right}>

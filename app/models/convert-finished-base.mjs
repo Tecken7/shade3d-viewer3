@@ -10,7 +10,7 @@ export async function convertFinishedBase(M,positions,settings={},progress=()=>{
  if(settings.extendBase!==true)return reshapeOriginalBase(M,positions,settings,progress)
  const allocated=[],own=o=>{allocated.push(o);return o}
  let replaceHeight=Number(settings.replaceHeight??2.5);const bevel=Number(settings.bevel??1),bevelHeight=Number(settings.bevelHeight??bevel),diameter=Number(settings.diameter??4.5)
- if(!Number.isFinite(replaceHeight)||replaceHeight<1||replaceHeight>6||!Number.isFinite(bevel)||bevel<0||bevel>Math.min(1.5,replaceHeight-.1)||!Number.isFinite(diameter)||diameter<2||diameter>6)throw Error('Zkontrolujte výšku úpravy, bevel a průměr otvorů.')
+ if(!Number.isFinite(replaceHeight)||replaceHeight<1||replaceHeight>6||!Number.isFinite(bevel)||bevel<0||bevel>1.5||!Number.isFinite(diameter)||diameter<2||diameter>6)throw Error('Zkontrolujte výšku úpravy, bevel a průměr otvorů.')
  if(!Number.isFinite(bevelHeight)||bevelHeight<0||bevelHeight>4||bevel>0&&(bevelHeight<.2||bevelHeight>replaceHeight-.1))throw Error('Výška bevelu musí být 0,2–4 mm a menší než výška prodloužení báze.')
  let baseZ=Infinity,maxZ=-Infinity
  for(let i=2;i<positions.length;i+=3){baseZ=Math.min(baseZ,positions[i]);maxZ=Math.max(maxZ,positions[i])}
