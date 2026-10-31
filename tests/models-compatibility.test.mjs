@@ -54,17 +54,20 @@ test('touching cavity sheets remain printable after Float32 welding and the prin
   parts.forEach(p=>p.delete());roundtrip.delete()
  }finally{shape.delete();roof.delete();b.delete();a.delete()}
 })
-test('drain crowns fit completely inside short extensions instead of being cut flat at the original base',async()=>{
+test('drains retain their full crown above short extensions and open into the main cavity',async()=>{
  const contour=[]
  for(let i=0;i<=64;i++){const t=i*Math.PI/64;contour.push([33*Math.cos(t),28*Math.sin(t)])}
  for(let i=64;i>=0;i--){const t=i*Math.PI/64;contour.push([23*Math.cos(t),18*Math.sin(t)])}
  const section=new M.CrossSection([contour],'EvenOdd'),inside=section.offset(-2.5,'Round',2,32),outer=section.extrude(18),cavity=inside.extrude(15),shape=outer.subtract(cavity)
  try{
-  for(const [height,bevel] of [[1.5,1],[2.5,1],[5,1],[2.5,0]]){
-   const result=await convertFinishedBase(M,readSTL(bytes(shape)),{extendBase:true,replaceHeight:height,bevel,holes:true,diameter:4.5})
+  for(const [height,bevel] of [[1.5,1],[2,1],[2.5,1],[5,1],[2.5,0]]){
+   const result=await convertFinishedBase(M,readSTL(bytes(shape)),{extendBase:true,replaceHeight:height,bevel,holes:true,diameter:6})
    assert.equal(result.holes.length,2)
    assert.ok(contactArea(result)>=section.area()-inside.area()-.05)
-   for(const hole of result.holes){assert.ok(hole.removedVolume>0);assert.ok(hole.position[1]+hole.diameter/2<=result.extendedBy-.09);assert.ok(hole.position[1]-hole.diameter/2<0)}
+   for(const hole of result.holes){assert.ok(hole.removedVolume>0);assert.equal(hole.position[1],1.5);assert.equal(hole.openingHeight,4.5);assert.equal(hole.through,true);assert.ok(hole.cavityOverlapVolume>=5);assert.ok(hole.position[1]-hole.diameter/2<0)}
+   const local=result.positions.slice();for(let i=0;i<local.length;i+=3){const y=local[i+1];local[i+1]=-local[i+2];local[i+2]=y}
+   const m=new M.Mesh({numProp:3,vertProperties:local,triVerts:result.indices});m.merge();const out=new M.Manifold(m),shifted=shape.translate([0,0,height-.001]),probeZ=4.2,a=shifted.slice(probeZ),b=out.slice(probeZ),missing=a.subtract(b),aboveBefore=shifted.trimByPlane([0,0,1],5.1),aboveAfter=out.trimByPlane([0,0,1],5.1),lostAbove=aboveBefore.subtract(aboveAfter),addedAbove=aboveAfter.subtract(aboveBefore)
+   try{assert.equal(out.status(),'NoError');if(height<probeZ)assert.ok(missing.area()>.1,'the crown must actually cut original material above the extension');assert.ok(lostAbove.volume()<.01);assert.ok(addedAbove.volume()<.01)}finally{addedAbove.delete();lostAbove.delete();aboveAfter.delete();aboveBefore.delete();missing.delete();b.delete();a.delete();shifted.delete();out.delete()}
    const p=result.positions.slice();for(let i=0;i<p.length;i+=3){const y=p[i+1];p[i+1]=-p[i+2];p[i+2]=y+result.baseZ}assert.ok(encodeSTL(p,result.indices).byteLength>84)
   }
  }finally{shape.delete();cavity.delete();outer.delete();inside.delete();section.delete()}

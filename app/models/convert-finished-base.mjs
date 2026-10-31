@@ -85,13 +85,14 @@ if(preserve)for(const boss of outers.slice(1)){
 const upper=preserve?own(original.translate([0,0,extension-.001])):own(original.trimByPlane([0,0,1],replaceHeight))
 let result=own(upper.add(rim));if(result.status()!=='NoError')throw Error('Failed joint '+result.status())
 const contourBottom=previous.map(i=>vertices.slice(i*3,i*3+3)),ends=settings.holes===false?[]:finishedModelEnds(contourBottom),holes=[]
-// Keep the complete circular crown below the untouched original surface.
-// A short extension needs a lower centre, not a horizontally cropped cylinder.
-const drainHeight=preserve?Math.min(1.5,extension-diameter/2-.1):1.5
+// Measure the drain from the new printing plane, independently of extension.
+// Its crown must continue into the original base when the added band is short.
+const drainHeight=1.5
 progress('Umísťuji otvory na konce oblouku…')
 for(const end of settings.holes===false?[]:ends){if(!end)throw Error('Missing arch end');const local=[end[0],drainHeight,end[2]],normal=holeDirection(contourBottom,end),point=new THREE.Vector3(local[0],-local[2],local[1]),axis=new THREE.Vector3(normal[0],-normal[2],normal[1]).normalize(),q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1),axis.clone().negate()),matrix=new THREE.Matrix4().compose(point.clone().addScaledVector(axis,3),q,new THREE.Vector3(1,1,1)),cutter=own(own(M.Manifold.cylinder(14,diameter/2,diameter/2,96,false)).transform(matrix.toArray()))
- const safeCutter=preserve?own(cutter.trimByPlane([0,0,-1],-extension+.002)):cutter
- const removed=own(result.intersect(safeCutter)).volume();result=own(result.subtract(safeCutter));holes.push({position:point.toArray(),normal:axis.toArray(),diameter,removedVolume:removed})}
+ const overlap=own(cutter.intersect(cavity)).volume();if(overlap<Math.min(5,diameter))throw Error('Odtok nedosahuje do hlavní dutiny. Upravte průměr otvoru nebo prodloužení báze.')
+ const removed=own(result.intersect(cutter)).volume();if(removed<.1)throw Error('Odtok neprotíná koncovou stěnu modelu.')
+ result=own(result.subtract(cutter));holes.push({position:point.toArray(),normal:axis.toArray(),diameter,openingHeight:drainHeight+diameter/2,through:true,cavityOverlapVolume:overlap,removedVolume:removed})}
 
 progress('Kontroluji spojení a dosedací plochu…')
 const protectedHeight=Math.max(replaceHeight,1.5+diameter/2)+.3
