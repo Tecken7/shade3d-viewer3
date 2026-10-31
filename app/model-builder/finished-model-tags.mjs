@@ -67,6 +67,6 @@ export async function decorateFinishedModel(M,base,config,fonts,progress=()=>{})
   }
   const before=contactArea(base),after=contactArea(output)
   if(after+.01<before)throw Error('Popisek zmenšil dosedací plochu. Změňte jeho umístění.')
-  return {status:'ready',output,items:planned.map(item=>item.report),contactAreaBefore:before,contactAreaAfter:after}
+  return {status:'ready',output,items:planned.map(item=>item.report),drafts:planned.map(({tag,report})=>({...tag,position:report.position,normal:report.normal,size:report.size})),contactAreaBefore:before,contactAreaAfter:after}
  }catch(error){if(config.allowManual)return {status:'needs-placement',output:base,pending:tags,items:planned.map(item=>item.report),message:error.message};throw error}finally{surface.dispose();raw.dispose()}
 }

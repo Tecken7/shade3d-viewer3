@@ -11,21 +11,31 @@ export async function processFinishedModel(M,buffer,settings,fonts,progress=()=>
  const before=contactArea(original)
  if(before<10)throw Error('Model nemá rovnou dosedací plochu dole v ose Z. Nejprve jej orientujte jako pro tisk.')
  let base=settings.convertBase?await convertFinishedBase(M,raw,{...settings,repairCoincident:hollow.hollowed,sourceFunctionalContours:hollow.functionalContours},progress):original
- const context={baseZ:base.baseZ??baseZ,before,hollowed:hollow.hollowed,settings}
+ const context={baseZ:base.baseZ??baseZ,before,hollowed:hollow.hollowed,settings,drainSource:settings.convertBase&&settings.holes!==false?{raw,sourceFunctionalContours:hollow.functionalContours}:undefined}
  if(base.drainReview)return {status:'needs-drains',positions:base.positions,indices:base.indices,drainReview:base.drainReview,drainManual:{...context,raw,sourceFunctionalContours:hollow.functionalContours},message:base.drainReview.message,report:{contactBefore:before}}
  return finishPreparedModel(M,base,context,fonts,progress)
 }
 
 async function finishPreparedModel(M,base,context,fonts,progress){
- const {settings}=context,result=await decorateFinishedModel(M,base,{allowManual:true,logo:settings.logo,logoSize:settings.logoSize,tags:settings.tag?.trim()?[{text:settings.tag,size:settings.tagSize,weight:500,depth:.4}]:[]},fonts,progress)
- if(result.status!=='ready')return {status:'needs-placement',positions:base.positions,indices:base.indices,manual:{base,...context,pending:result.pending,items:result.items},message:result.message,report:{contactBefore:context.before,contactAfter:contactArea(base)}}
- return finalizeFinishedModel(M,result.output,{...context,labels:result.items},progress)
+ const {settings,labelDrafts}=context,logo=labelDrafts?.find(t=>t.brand)
+ const config=labelDrafts?{tags:labelDrafts.filter(t=>!t.brand),logo:!!logo,logoSize:logo?.size,logoPlacement:logo}:{logo:settings.logo,logoSize:settings.logoSize,tags:settings.tag?.trim()?[{text:settings.tag,size:settings.tagSize,weight:500,depth:.4}]:[]}
+ const result=await decorateFinishedModel(M,base,{allowManual:true,...config},fonts,progress)
+ const manual={base,...context,pending:result.drafts??result.pending??[],items:result.items}
+ if(result.status!=='ready')return {status:'needs-placement',positions:base.positions,indices:base.indices,manual,message:result.message,report:{contactBefore:context.before,contactAfter:contactArea(base)}}
+ const ready=await finalizeFinishedModel(M,result.output,{...context,labels:result.items},progress)
+ return {...ready,labelEdit:manual.pending.length?manual:undefined,drainEdit:context.drainSource&&base.drainDrafts?{...context,...context.drainSource,labelDrafts:manual.pending}:undefined}
+}
+
+export async function reviewManualDrains(M,manual,holes,progress=()=>{}){
+ const settings={...manual.settings,reviewDrains:true,manualHoles:undefined,reviewHoles:holes,sourceFunctionalContours:manual.sourceFunctionalContours,repairCoincident:manual.hollowed},base=await convertFinishedBase(M,manual.raw,settings,progress)
+ if(!base.drainReview)throw Error('Náhled otvorů se nepodařilo připravit.')
+ return {status:'needs-drains',positions:base.positions,indices:base.indices,drainReview:base.drainReview,drainManual:manual,message:base.drainReview.message,report:{contactBefore:manual.before}}
 }
 
 export async function finishManualDrains(M,manual,holes,fonts,progress=()=>{}){
- const settings={...manual.settings,reviewDrains:false,reviewHoles:undefined,manualHoles:holes,sourceFunctionalContours:manual.sourceFunctionalContours},base=await convertFinishedBase(M,manual.raw,settings,progress)
+ const settings={...manual.settings,reviewDrains:false,reviewHoles:undefined,manualHoles:holes,sourceFunctionalContours:manual.sourceFunctionalContours,repairCoincident:manual.hollowed},base=await convertFinishedBase(M,manual.raw,settings,progress)
  if(base.drainReview)throw Error('Potvrďte prosím polohu odtokových válců.')
- return finishPreparedModel(M,base,{baseZ:manual.baseZ,before:manual.before,hollowed:manual.hollowed,settings:manual.settings},fonts,progress)
+ return finishPreparedModel(M,base,{baseZ:manual.baseZ,before:manual.before,hollowed:manual.hollowed,settings:manual.settings,drainSource:manual.drainSource??{raw:manual.raw,sourceFunctionalContours:manual.sourceFunctionalContours},labelDrafts:manual.labelDrafts},fonts,progress)
 }
 
 export async function finalizeFinishedModel(M,base,{baseZ,before,hollowed=false,settings,labels},progress=()=>{}){
@@ -53,7 +63,5 @@ export async function finalizeFinishedModel(M,base,{baseZ,before,hollowed=false,
 }
 
 export async function finishManualLabels(M,manual,pending,fonts,progress=()=>{}){
- const tags=pending.filter(p=>!p.brand),logo=pending.find(p=>p.brand),result=await decorateFinishedModel(M,manual.base,{allowManual:true,tags,logo:!!logo,logoSize:logo?.size,logoPlacement:logo},fonts,progress)
- if(result.status!=='ready')return {status:'needs-placement',positions:manual.base.positions,indices:manual.base.indices,manual:{...manual,pending,items:result.items},message:result.message,report:{contactBefore:manual.before,contactAfter:contactArea(manual.base)}}
- return finalizeFinishedModel(M,result.output,{...manual,labels:result.items},progress)
+ return finishPreparedModel(M,manual.base,{baseZ:manual.baseZ,before:manual.before,hollowed:manual.hollowed,settings:manual.settings,drainSource:manual.drainSource,labelDrafts:pending},fonts,progress)
 }

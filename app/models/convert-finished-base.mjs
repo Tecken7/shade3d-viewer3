@@ -84,18 +84,25 @@ if(preserve)for(const boss of outers.slice(1)){
 }
 const upper=preserve?own(original.translate([0,0,extension-.001])):own(original.trimByPlane([0,0,1],replaceHeight))
 let result=own(upper.add(rim));if(result.status()!=='NoError')throw Error('Failed joint '+result.status())
-const contourBottom=previous.map(i=>vertices.slice(i*3,i*3+3)),ends=settings.holes===false?[]:finishedModelEnds(contourBottom),holes=[]
-// Measure the drain from the new printing plane, independently of extension.
-// Its crown must continue into the original base when the added band is short.
-const drainHeight=1.5
+const contourBottom=previous.map(i=>vertices.slice(i*3,i*3+3)),holes=[]
+const drainHeight=1.5,manual=settings.manualHoles,proposal=settings.reviewHoles
+const drafts=(manual??proposal??(settings.holes===false?[]:finishedModelEnds(contourBottom).map(end=>({enabled:true,position:[end[0],drainHeight,end[2]],heightOffset:drainHeight,baseDirection:-1,yaw:0,diameter,length:11,outerLength:3,autoPosition:false,autoDepth:false})))).map(h=>({...h}))
+if(drafts.length>2)throw Error('Lze umístit nejvýše dva odtoky.')
+if(settings.holes!==false&&!manual&&(settings.reviewDrains||proposal)){
+ const preview=await convertFinishedBase(M,positions,{...settings,holes:false,reviewDrains:false,reviewHoles:undefined,manualHoles:undefined},progress)
+ return {...preview,drainReview:{bottomContour:contourBottom,holes:drafts,message:'Posuňte válce, otočte je nebo upravte jejich délku. Otvory se vyříznou až po potvrzení.'}}
+}
 progress('Umísťuji otvory na konce oblouku…')
-for(const end of settings.holes===false?[]:ends){if(!end)throw Error('Missing arch end');const local=[end[0],drainHeight,end[2]],normal=holeDirection(contourBottom,end),point=new THREE.Vector3(local[0],-local[2],local[1]),axis=new THREE.Vector3(normal[0],-normal[2],normal[1]).normalize(),q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1),axis.clone().negate()),matrix=new THREE.Matrix4().compose(point.clone().addScaledVector(axis,3),q,new THREE.Vector3(1,1,1)),cutter=own(own(M.Manifold.cylinder(14,diameter/2,diameter/2,96,false)).transform(matrix.toArray()))
- const overlap=own(cutter.intersect(cavity)).volume();if(overlap<Math.min(5,diameter))throw Error('Odtok nedosahuje do hlavní dutiny. Upravte průměr otvoru nebo prodloužení báze.')
+for(const hole of settings.holes===false?[]:drafts.filter(h=>h.enabled!==false)){
+ if(!Array.isArray(hole.position)||hole.position.length!==3||hole.position.some(v=>!Number.isFinite(v))||![hole.length,hole.outerLength,hole.diameter,hole.yaw??0].every(Number.isFinite)||hole.diameter<2||hole.diameter>8||hole.length<.5||hole.length>30||hole.outerLength<.5||hole.outerLength>20||hole.position[1]<0||hole.position[1]>4)throw Error('Zkontrolujte polohu a rozměry odtokového válce.')
+ const local=hole.position,normal=holeDirection(contourBottom,local,hole.yaw??0),point=new THREE.Vector3(local[0],-local[2],local[1]),axis=new THREE.Vector3(normal[0],-normal[2],normal[1]).normalize(),q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1),axis.clone().negate()),matrix=new THREE.Matrix4().compose(point.clone().addScaledVector(axis,hole.outerLength),q,new THREE.Vector3(1,1,1)),cutter=own(own(M.Manifold.cylinder(hole.length+hole.outerLength,hole.diameter/2,hole.diameter/2,96,false)).transform(matrix.toArray()))
+ const overlap=own(cutter.intersect(cavity)).volume();if(overlap<Math.min(5,hole.diameter))throw Error('Odtok nedosahuje do hlavní dutiny. Posuňte válec nebo prodlužte jeho vnitřní konec.')
  const removed=own(result.intersect(cutter)).volume();if(removed<.1)throw Error('Odtok neprotíná koncovou stěnu modelu.')
- result=own(result.subtract(cutter));holes.push({position:point.toArray(),normal:axis.toArray(),diameter,openingHeight:drainHeight+diameter/2,through:true,cavityOverlapVolume:overlap,removedVolume:removed})}
+ result=own(result.subtract(cutter));holes.push({...hole,position:point.toArray(),normal:axis.toArray(),openingHeight:point.z+hole.diameter/2,through:true,cavityOverlapVolume:overlap,removedVolume:removed})
+}
 
 progress('Kontroluji spojení a dosedací plochu…')
-const protectedHeight=Math.max(replaceHeight,1.5+diameter/2)+.3
+const protectedHeight=Math.max(replaceHeight,...holes.map(h=>h.openingHeight))+.3
 const beforeProtected=own((preserve?upper:original).trimByPlane([0,0,1],protectedHeight)),afterProtected=own(result.trimByPlane([0,0,1],protectedHeight))
 if(Math.abs(own(beforeProtected.subtract(afterProtected)).volume())>.01||Math.abs(own(afterProtected.subtract(beforeProtected)).volume())>.01)throw Error('Úprava zasahuje nad povolený spodní pás. Export byl zastaven.')
 progress('Ověřuji souvislost povrchu…')
@@ -112,7 +119,7 @@ for(let i=0;i<canonical.vertices.length;i+=3){const key=canonical.vertices.slice
 for(const group of groups.values())if(group.length>1){const active=group.filter(o=>new THREE.Vector3().fromArray(normals,o).lengthSq()>1e-16);if(active.length<2)continue;if(preserve&&!settings.repairCoincident)continue;for(const o of active){const floor=Math.abs(canonical.vertices[o+2])<.001,n=new THREE.Vector3().fromArray(normals,o).normalize();for(let k=0;k<3;k++)canonical.vertices[o+k]+=n.getComponent(k)*.002;if(floor)canonical.vertices[o+2]=0}}
 const outPositions=Float32Array.from(canonical.vertices)
 for(let i=0;i<outPositions.length;i+=3){const y=outPositions[i+1];outPositions[i+1]=outPositions[i+2];outPositions[i+2]=-y}
-const output={positions:settings.repairCoincident?separateFloat32Contacts(outPositions,Uint32Array.from(canonical.faces)):outPositions,indices:Uint32Array.from(canonical.faces),placement:{baseY:0,direction:-1},holes:holes.map(h=>({...h,position:[h.position[0],h.position[2],-h.position[1]],normal:[h.normal[0],h.normal[2],-h.normal[1]]})),stats:{volume:result.volume()},baseZ:baseZ-extension+.001*(preserve?1:0),replaceHeight,extendedBy:extension,protectedHeight}
+const output={positions:settings.repairCoincident?separateFloat32Contacts(outPositions,Uint32Array.from(canonical.faces)):outPositions,indices:Uint32Array.from(canonical.faces),drainDrafts:drafts,placement:{baseY:0,direction:-1},holes:holes.map(h=>({...h,position:[h.position[0],h.position[2],-h.position[1]],normal:[h.normal[0],h.normal[2],-h.normal[1]]})),stats:{volume:result.volume()},baseZ:baseZ-extension+.001*(preserve?1:0),replaceHeight,extendedBy:extension,protectedHeight}
 // Use the actual cut footprint rather than assuming the same wall thickness
 // at both arch ends. Widen only the internal support lip if drainage took more
 // contact area than predicted, without enlarging implant bosses or the outside.

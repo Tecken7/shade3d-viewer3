@@ -3,3 +3,10 @@
 .field select option{background:#161616;color:#eee}
 
 .app button[aria-pressed=true]{border-color:#aaa;background:#ffffff12;box-shadow:0 0 10px #ffffff12}
+
+.app .item{border:1px solid #303030;border-radius:10px;background:#151515;flex-shrink:0}
+.app .item.selected{border-color:#aaa;background:#ffffff0a}
+.app .itemSelect{display:flex;flex-direction:column;gap:7px;text-align:left;background:none;border:0;padding:0;width:100%;min-width:0;box-shadow:none}
+.app .itemSelect:hover:enabled{background:none;transform:none;border:0}
+.itemActions{display:flex;flex-wrap:wrap;gap:6px;margin-top:3px}
+.app .itemActions button{font-size:10px;padding:7px 8px;flex:1;white-space:nowrap}
