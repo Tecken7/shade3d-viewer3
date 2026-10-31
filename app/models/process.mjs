@@ -21,9 +21,10 @@ async function finishPreparedModel(M,base,context,fonts,progress){
  const config=labelDrafts?{tags:labelDrafts.filter(t=>!t.brand),logo:!!logo,logoSize:logo?.size,logoPlacement:logo}:{logo:settings.logo,logoSize:settings.logoSize,tags:settings.tag?.trim()?[{text:settings.tag,size:settings.tagSize,weight:500,depth:.4}]:[]}
  const result=await decorateFinishedModel(M,base,{allowManual:true,...config},fonts,progress)
  const manual={base,...context,pending:result.drafts??result.pending??[],items:result.items}
- if(result.status!=='ready')return {status:'needs-placement',positions:base.positions,indices:base.indices,manual,message:result.message,report:{contactBefore:context.before,contactAfter:contactArea(base)}}
+ const drainEdit=context.drainSource&&base.drainDrafts?{...context,...context.drainSource,labelDrafts:manual.pending}:undefined
+ if(result.status!=='ready')return {status:'needs-placement',positions:base.positions,indices:base.indices,manual,drainEdit,drainDrafts:base.drainDrafts,message:result.message,report:{contactBefore:context.before,contactAfter:contactArea(base)}}
  const ready=await finalizeFinishedModel(M,result.output,{...context,labels:result.items},progress)
- return {...ready,labelEdit:manual.pending.length?manual:undefined,drainEdit:context.drainSource&&base.drainDrafts?{...context,...context.drainSource,labelDrafts:manual.pending}:undefined}
+ return {...ready,labelEdit:manual.pending.length?manual:undefined,drainEdit}
 }
 
 export async function reviewManualDrains(M,manual,holes,progress=()=>{}){

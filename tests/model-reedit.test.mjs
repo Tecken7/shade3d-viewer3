@@ -31,3 +31,16 @@ test('automatically merged logo and tag reopen on a clean base, and repeated app
  const again=await finishManualLabels(M,changed.labelEdit,changed.labelEdit.pending,fonts)
  assert.equal(again.status,'ready',again.message);assert.deepEqual(new Uint8Array(again.stl),new Uint8Array(changed.stl));assert.deepEqual(ready.labelEdit.base.positions,clean)
 })
+
+
+test('individual base awaiting manual text placement retains editable drains and the unfinished label',async()=>{
+ const shape=arch(),input=bytes(shape);shape.delete()
+ const fonts={logo:JSON.parse(fs.readFileSync(new URL('../public/wasm/model-builder/arthetic-logo-font.json',import.meta.url)))}
+ const result=await processFinishedModel(M,input,{convertBase:true,extendBase:true,replaceHeight:1.8,bevel:1,bevelHeight:1.7,holes:true,diameter:6,logo:true,logoSize:6},fonts)
+ assert.equal(result.status,'needs-placement');assert.ok(result.manual);assert.ok(result.drainEdit);assert.equal(result.drainDrafts.length,2)
+ assert.equal(result.drainEdit.settings.replaceHeight,1.8);assert.equal(result.drainEdit.settings.bevelHeight,1.7)
+ const review=await reviewManualDrains(M,result.drainEdit,result.drainDrafts)
+ assert.equal(review.status,'needs-drains');assert.deepEqual(review.drainManual.labelDrafts,result.manual.pending)
+ const updated=await finishManualDrains(M,review.drainManual,review.drainReview.holes,fonts)
+ assert.equal(updated.status,'needs-placement');assert.ok(updated.drainEdit);assert.ok(updated.manual.pending.some(t=>t.brand));assert.equal(updated.manual.settings.replaceHeight,1.8)
+})
