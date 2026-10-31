@@ -56,16 +56,16 @@ export function prepareBaseContour(M,vertices,boundary,smoothing,own){
   return sampleContour(polygons[0])
 }
 
-export function prepareBevelRings(M,contour,bevel,own){
+export function prepareBevelRings(M,contour,bevel,own,height=bevel){
   if(!(bevel>0))return []
   const section=own(new M.CrossSection([contour],'EvenOdd')),rings=[]
-  const levels=Math.ceil(bevel/.125)
+  const levels=Math.ceil(Math.max(bevel,height)/.125)
   for(let level=1;level<=levels;level++){
     const amount=bevel*level/levels
     const inset=own(section.offset(-amount,'Round',2,48))
     const polygons=own(inset.simplify(.002)).toPolygons()
     if(polygons.length!==1)throw new Error('Bevel rozděluje obrys báze. Zmenšete bevel nebo upravte ořez.')
-    rings.push({points:polygons[0],y:-(bevel-amount)})
+    rings.push({points:polygons[0],y:-height*(1-level/levels)})
   }
   return rings
 }

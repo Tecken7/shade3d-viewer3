@@ -9,8 +9,9 @@ import {finishedModelEnds} from './distal-ends.mjs'
 export async function convertFinishedBase(M,positions,settings={},progress=()=>{}){
  if(settings.extendBase!==true)return reshapeOriginalBase(M,positions,settings,progress)
  const allocated=[],own=o=>{allocated.push(o);return o}
- let replaceHeight=Number(settings.replaceHeight??2.5);const bevel=Number(settings.bevel??1),diameter=Number(settings.diameter??4.5)
+ let replaceHeight=Number(settings.replaceHeight??2.5);const bevel=Number(settings.bevel??1),bevelHeight=Number(settings.bevelHeight??bevel),diameter=Number(settings.diameter??4.5)
  if(!Number.isFinite(replaceHeight)||replaceHeight<1||replaceHeight>6||!Number.isFinite(bevel)||bevel<0||bevel>Math.min(1.5,replaceHeight-.1)||!Number.isFinite(diameter)||diameter<2||diameter>6)throw Error('Zkontrolujte výšku úpravy, bevel a průměr otvorů.')
+ if(!Number.isFinite(bevelHeight)||bevelHeight<0||bevelHeight>4||bevel>0&&(bevelHeight<.2||bevelHeight>replaceHeight-.1))throw Error('Výška bevelu musí být 0,2–4 mm a menší než výška prodloužení báze.')
  let baseZ=Infinity,maxZ=-Infinity
  for(let i=2;i<positions.length;i+=3){baseZ=Math.min(baseZ,positions[i]);maxZ=Math.max(maxZ,positions[i])}
  const p=positions.slice();for(let i=2;i<p.length;i+=3)p[i]-=baseZ
@@ -34,8 +35,8 @@ progress('Vytvářím bevel a dosedací lem…')
 const contour=outers[0].map(([x,y])=>[x,-y]),vertices=[],faces=[]
 function ring(points,y){return points.map(([x,z])=>{const id=vertices.length/3;vertices.push(x,y,z);return id})}
 const top=ring(contour,replaceHeight);let previous=top
-const shoulder=ring(contour,bevel);stitch(vertices,faces,previous,shoulder);previous=shoulder
-for(const profile of prepareBevelRings(M,contour,bevel,own)){const next=ring(profile.points,-profile.y);stitch(vertices,faces,previous,next);previous=next}
+const shoulder=ring(contour,bevelHeight);stitch(vertices,faces,previous,shoulder);previous=shoulder
+for(const profile of prepareBevelRings(M,contour,bevel,own,bevelHeight)){const next=ring(profile.points,-profile.y);stitch(vertices,faces,previous,next);previous=next}
 function cap(ids,desired){const poly=ids.map(i=>new THREE.Vector2(vertices[i*3],vertices[i*3+2]));for(const t of THREE.ShapeUtils.triangulateShape(poly,[])){let [a,b,c]=t.map(i=>ids[i]);const va=new THREE.Vector3().fromArray(vertices,a*3),vb=new THREE.Vector3().fromArray(vertices,b*3),vc=new THREE.Vector3().fromArray(vertices,c*3);if(vb.sub(va).cross(vc.sub(va)).y*desired<0)[b,c]=[c,b];faces.push(a,b,c)}}
 cap(top,1);cap(previous,-1)
 // Return to the original 3Shape coordinate system without moving the teeth.

@@ -12,8 +12,9 @@ import {separateFloat32Contacts} from './float32-contacts.mjs'
 // Work in the original STL Z-up coordinates. Neither the printing plane nor
 // the die/pin seating depth moves. Only a protected outside wedge is removed.
 export async function reshapeOriginalBase(M,positions,settings={},progress=()=>{}){
- const allocated=[],own=o=>{allocated.push(o);return o},bevel=Number(settings.bevel??1),diameter=Number(settings.diameter??6)
- if(!Number.isFinite(bevel)||bevel<0||bevel>1.5||!Number.isFinite(diameter)||diameter<2||diameter>8)throw Error('Bevel musí být 0–1,5 mm a průměr otvorů 2–8 mm.')
+ const allocated=[],own=o=>{allocated.push(o);return o},bevel=Number(settings.bevel??1),bevelHeight=Number(settings.bevelHeight??bevel),diameter=Number(settings.diameter??6)
+ if(!Number.isFinite(bevel)||bevel<0||bevel>1.5||!Number.isFinite(diameter)||diameter<2||diameter>8)throw Error('Šířka bevelu musí být 0–1,5 mm a průměr otvorů 2–8 mm.')
+ if(!Number.isFinite(bevelHeight)||bevelHeight<0||bevelHeight>4||bevel>0&&bevelHeight<.2)throw Error('Výška zapnutého bevelu musí být 0,2–4 mm.')
  const zones=settings.protectedZones||[]
  if(zones.length>50||zones.some(z=>!Array.isArray(z.center)||z.center.length!==2||z.center.some(v=>!Number.isFinite(v))||!Number.isFinite(z.radius)||z.radius<.5||z.radius>10))throw Error('Neplatná ochranná oblast.')
  let surface,baseZ=Infinity
@@ -29,7 +30,7 @@ export async function reshapeOriginalBase(M,positions,settings={},progress=()=>{
   if(!flowVoids.length)throw Error('Nenašel jsem hlavní otevřenou dutinu. Zkontrolujte vydutění modelu.')
   surface=new THREE.BufferGeometry().setAttribute('position',new THREE.Float32BufferAttribute(d.vertices,3)).setIndex(d.faces);surface.boundsTree=new MeshBVH(surface)
   progress('Vyhledávám reliéf původních tagů…')
-  const relief=detectBaseRelief(surface,outers[0],bevel),guards=[],supportRegions=[]
+  const relief=detectBaseRelief(surface,outers[0],bevel>0?bevelHeight:0),guards=[],supportRegions=[]
   for(const p of functional??voids.filter(p=>Math.abs(polygonArea(p))<=100)){const guard=own(own(new M.CrossSection([p],'EvenOdd')).offset(3,'Round',2,48));guards.push(guard);supportRegions.push(socketSupportRegion(p,flowVoids))}
   for(const p of outers.slice(1)){const guard=own(own(new M.CrossSection([p],'EvenOdd')).offset(.8,'Round',2,48));guards.push(guard)}
   for(const zone of [...relief,...zones]){const guard=own(own(M.CrossSection.circle(zone.radius,32)).translate(zone.center));guards.push(guard)}
@@ -37,18 +38,18 @@ export async function reshapeOriginalBase(M,positions,settings={},progress=()=>{
   for(const part of guards)guard=own(guard.add(part))
   let supportGuard=guard
   for(const region of supportRegions){const area=own(own(M.CrossSection.circle(region.radius,64)).translate(region.center));supportGuard=own(supportGuard.add(area))}
-  const emptySolid=own(M.Manifold.cube([1,1,1]));const guardSolid=guard.area()>1e-8?own(own(guard.extrude(Math.max(bevel+2,diameter+3))).translate([0,0,-.1])):own(emptySolid.subtract(emptySolid))
+  const emptySolid=own(M.Manifold.cube([1,1,1]));const guardSolid=guard.area()>1e-8?own(own(guard.extrude(Math.max(bevelHeight+2,diameter+3))).translate([0,0,-.1])):own(emptySolid.subtract(emptySolid))
   let result=original,wedge=null
   if(bevel>0){
    progress('Vytvářím lokální bevel v původní výšce…')
-   const vertices=[],faces=[],ring=(p,z)=>p.map(([x,y])=>{const id=vertices.length/3;vertices.push(x,y,z);return id}),top=ring(outers[0],bevel);let previous=top
-   for(const profile of prepareBevelRings(M,outers[0],bevel,own)){const next=ring(profile.points,-profile.y);const vertical=vertices.map((v,i)=>i%3===0?v:i%3===1?vertices[i+1]:-vertices[i-1]);stitch(vertical,faces,previous,next);previous=next}
+   const vertices=[],faces=[],ring=(p,z)=>p.map(([x,y])=>{const id=vertices.length/3;vertices.push(x,y,z);return id}),top=ring(outers[0],bevelHeight);let previous=top
+   for(const profile of prepareBevelRings(M,outers[0],bevel,own,bevelHeight)){const next=ring(profile.points,-profile.y);const vertical=vertices.map((v,i)=>i%3===0?v:i%3===1?vertices[i+1]:-vertices[i-1]);stitch(vertical,faces,previous,next);previous=next}
    const cap=(ids,up)=>{const poly=ids.map(id=>new THREE.Vector2(vertices[id*3],vertices[id*3+1]));for(const tri of THREE.ShapeUtils.triangulateShape(poly,[])){let [a,b,c]=tri.map(i=>ids[i]);const va=new THREE.Vector3().fromArray(vertices,a*3),vb=new THREE.Vector3().fromArray(vertices,b*3),vc=new THREE.Vector3().fromArray(vertices,c*3);if(vb.sub(va).cross(vc.sub(va)).z*up<0)[b,c]=[c,b];faces.push(a,b,c)}}
    cap(top,1);cap(previous,-1)
    let volume=0;for(let i=0;i<faces.length;i+=3){const [a,b,c]=faces.slice(i,i+3).map(id=>new THREE.Vector3().fromArray(vertices,id*3));volume+=a.dot(b.cross(c))/6}if(volume<0)for(let i=0;i<faces.length;i+=3)[faces[i+1],faces[i+2]]=[faces[i+2],faces[i+1]]
    const keep=own(new M.Manifold(new M.Mesh({numProp:3,vertProperties:Float32Array.from(vertices),triVerts:Uint32Array.from(faces)})))
    if(keep.status()!=='NoError')throw Error('Obrys není vhodný pro automatický bevel. Zmenšete bevel.')
-   wedge=own(own(own(outline.extrude(bevel)).subtract(keep)).subtract(guardSolid));result=own(original.subtract(wedge))
+   wedge=own(own(own(outline.extrude(bevelHeight)).subtract(keep)).subtract(guardSolid));result=own(original.subtract(wedge))
   }
   const contour=sampleContour(outers[0],.4).map(([x,y])=>[x,0,-y]),perimeter=contour.reduce((n,p,i)=>n+Math.hypot(p[0]-contour[(i+1)%contour.length][0],p[2]-contour[(i+1)%contour.length][2]),0),holes=[],cutters=[]
   const proposalOnly=!Array.isArray(settings.manualHoles)&&Array.isArray(settings.reviewHoles),manual=Array.isArray(settings.manualHoles)||proposalOnly,manualHoles=settings.manualHoles??settings.reviewHoles,depth=1.5,flowSection=own(original.slice(depth)),cavityPolys=flowSection.toPolygons().filter(p=>polygonArea(p)<0&&isResinVoid(p))
@@ -96,7 +97,7 @@ export async function reshapeOriginalBase(M,positions,settings={},progress=()=>{
    }
   }
   const warnings=[]
-  const review=()=>nativeBaseOutput(result,{baseZ,holes,replaceHeight:bevel,extendedBy:0,baseMode:'original-height',protectedRegions:guards.length,protectedZones:[...relief,...zones],drainReview:{bottomContour:contour,holes:proposalOnly?manualHoles:holes.map(h=>({...h,length:Math.max(.5,h.length-h.outerLength),autoPosition:false,autoDepth:false})),message:'Zkontrolujte navržené odtoky. Válce můžete posunout, otočit nebo zkrátit; otvor vznikne až po potvrzení.'}})
+  const review=()=>nativeBaseOutput(result,{baseZ,holes,bevelWidth:bevel,bevelHeight,replaceHeight:bevelHeight,extendedBy:0,baseMode:'original-height',protectedRegions:guards.length,protectedZones:[...relief,...zones],drainReview:{bottomContour:contour,holes:proposalOnly?manualHoles:holes.map(h=>({...h,length:Math.max(.5,h.length-h.outerLength),autoPosition:false,autoDepth:false})),message:'Zkontrolujte navržené odtoky. Válce můžete posunout, otočit nebo zkrátit; otvor vznikne až po potvrzení.'}})
   if(settings.holes!==false&&(proposalOnly||!manual&&(uncertain||settings.reviewDrains)))return review()
   // Compensate contact only inside the large resin cavities. Pin/sleeve seating
   // and every protected region are excluded from both addition and subtraction.
@@ -112,7 +113,7 @@ export async function reshapeOriginalBase(M,positions,settings={},progress=()=>{
   }
   if(inset>.001){
    progress('Doplňuji vnitřní dosedací lem mimo funkční detaily…')
-   const layers=[],height=Math.max(1.2,bevel+.2),steps=32,dy=height/steps,bond=own(own(mainVoid.offset(.3,'Round',2,48)).intersect(outline))
+   const layers=[],height=Math.max(1.2,bevelHeight+.2),steps=32,dy=height/steps,bond=own(own(mainVoid.offset(.3,'Round',2,48)).intersect(outline))
    for(let i=0;i<steps;i++){const t=1-i/steps,amount=inset*t*t*(3-2*t),inner=own(mainVoid.offset(-amount,'Round',2,48)),band=own(own(bond.subtract(inner)).subtract(supportGuard));if(band.area()>.001)layers.push(own(own(band.extrude(dy+.001)).translate([0,0,i*dy])))}
    if(layers.length)result=own(result.add(own(M.Manifold.union(layers))))
   }
@@ -128,11 +129,11 @@ export async function reshapeOriginalBase(M,positions,settings={},progress=()=>{
   progress('Ověřuji původní dosednutí, chráněná místa a průchodnost…')
   const protectedBefore=own(original.intersect(guardSolid)),protectedAfter=own(result.intersect(guardSolid))
   if(own(protectedBefore.subtract(protectedAfter)).volume()>.02||own(protectedAfter.subtract(protectedBefore)).volume()>.02)throw Error('Úprava zasáhla do chráněného detailu. Model nebyl exportován.')
-  const upper=Math.max(bevel+.3,cutHeight+.3),beforeUpper=own(original.trimByPlane([0,0,1],upper)),afterUpper=own(result.trimByPlane([0,0,1],upper))
+  const upper=Math.max(bevelHeight+.3,cutHeight+.3),beforeUpper=own(original.trimByPlane([0,0,1],upper)),afterUpper=own(result.trimByPlane([0,0,1],upper))
   if(own(beforeUpper.subtract(afterUpper)).volume()>.01||own(afterUpper.subtract(beforeUpper)).volume()>.01)throw Error('Úprava zasahuje nad spodní pás modelu.')
   // Discard only sub-microscopic Boolean slivers (under 0.00001 mm³).
   const parts=result.decompose().map(own).filter(p=>Math.abs(p.volume())>1e-5);if(result.status()!=='NoError'||parts.length!==1){const error=Error('Úprava by rozdělila model.');error.details=parts.map(p=>({volume:p.volume(),bounds:p.boundingBox()}));throw error}
-  return nativeBaseOutput(parts[0],{holes,warnings,drainDrafts:manual?manualHoles:holes.map(h=>({...h,length:Math.max(.5,h.length-h.outerLength),autoPosition:false,autoDepth:false})),baseZ,replaceHeight:bevel,extendedBy:0,baseMode:'original-height',protectedRegions:guards.length,protectedZones:[...relief,...zones],supportInset:inset,protectedHeight:upper})
+  return nativeBaseOutput(parts[0],{holes,warnings,drainDrafts:manual?manualHoles:holes.map(h=>({...h,length:Math.max(.5,h.length-h.outerLength),autoPosition:false,autoDepth:false})),baseZ,bevelWidth:bevel,bevelHeight,replaceHeight:bevelHeight,extendedBy:0,baseMode:'original-height',protectedRegions:guards.length,protectedZones:[...relief,...zones],supportInset:inset,protectedHeight:upper})
  }finally{surface?.dispose();allocated.reverse().forEach(o=>o.delete())}
 }
 

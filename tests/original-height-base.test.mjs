@@ -59,3 +59,20 @@ test('contact compensation never adds a ring around an implant boss attached to 
   assert.ok(result.report.contactAfter>=result.report.contactBefore-.05)
  }finally{allocated.reverse().forEach(p=>p.delete())}
 })
+
+
+test('bevel height changes the vertical profile independently of width without moving the printing plane or losing contact',async()=>{
+ const outer=M.Manifold.cube([60,35,18]),inner=M.Manifold.cube([54,29,15]).translate([3,3,0]),original=outer.subtract(inner),allocated=[],own=s=>{allocated.push(s);return s}
+ const convert=async settings=>{const result=await processFinishedModel(M,bytes(original),{convertBase:true,bevel:1,holes:false,logo:false,...settings},{});assert.equal(result.status,'ready');assert.ok(result.report.contactAfter>=result.report.contactBefore-.05);const solid=own(manifold(result.stl));assert.equal(solid.status(),'NoError');assert.deepEqual(solid.boundingBox(),original.boundingBox());return solid}
+ const minX=(s,z)=>{const section=s.slice(z);try{return Math.min(...section.toPolygons().flat().map(p=>p[0]))}finally{section.delete()}}
+ try{
+  const legacy=await convert({}),same=await convert({bevelHeight:1}),tall=await convert({bevelHeight:2.5}),narrow=await convert({bevelHeight:2.5,bevel:.5})
+  const difference=own(legacy.subtract(same));assert.ok(difference.volume()<.001,'omitting height must preserve the old 45 degree profile')
+  assert.ok(Math.abs(minX(legacy,.001)-minX(tall,.001))<.002,'height must not increase bottom inset')
+  assert.ok(Math.abs(minX(tall,1)-.6)<.015,'1 mm wide / 2.5 mm tall bevel must still be sloped at z=1')
+  assert.ok(Math.abs(minX(legacy,1.1))<.001,'old 1 mm high bevel has already ended')
+  assert.ok(Math.abs(minX(narrow,1)-.3)<.015,'width must remain independently adjustable')
+  const protectedRegion=own(M.Manifold.cube([65,40,15]).translate([-2,-2,3])),before=own(original.intersect(protectedRegion)),after=own(tall.intersect(protectedRegion));assert.ok(own(before.subtract(after)).volume()<.001);assert.ok(own(after.subtract(before)).volume()<.001)
+  for(const bevelHeight of [NaN,-1,0,5])await assert.rejects(convert({bevelHeight}),/Výška/)
+ }finally{allocated.reverse().forEach(s=>s.delete());original.delete();inner.delete();outer.delete()}
+})
